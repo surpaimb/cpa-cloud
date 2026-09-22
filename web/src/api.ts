@@ -59,10 +59,12 @@ export type EmployeeKey = {
 export type Upstream = {
   id: string
   name: string
-  provider_kind: 'openai-compatible'
+  provider_kind: 'openai-compatible' | 'codex-membership'
   endpoint: string
   enabled: boolean
   revision: number
+  credential_state: 'imported_unverified' | 'verified' | 'reauth_required' | null
+  verified_at: string | null
 }
 export type ModelRoute = {
   id: string
@@ -76,6 +78,9 @@ export type SystemStatus = {
   ready: boolean
   storage: string
   limitations: string[]
+  features?: {
+    codex_membership_import: boolean
+  }
 }
 
 export const api = {
@@ -104,6 +109,10 @@ export const api = {
   upstreams: () => request<{ items: Upstream[] }>('/upstreams'),
   createUpstream: (body: Record<string, unknown>, csrf: string) =>
     request<Upstream>('/upstreams', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  importCodexMembership: (body: { name: string; auth_json: string; operation_id: string }, csrf: string) =>
+    request<Upstream>('/upstreams/codex-import', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  replaceCodexMembershipAuth: (id: string, body: { expected_revision: number; auth_json: string }, csrf: string) =>
+    request<Upstream>(`/upstreams/${encodeURIComponent(id)}/codex-auth`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
   updateUpstream: (id: string, body: Record<string, unknown>, csrf: string) =>
     request<Upstream>(`/upstreams/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
   discoverUpstreamModels: (id: string, csrf: string) =>

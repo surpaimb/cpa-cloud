@@ -1,6 +1,6 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useState, type ChangeEvent } from 'react'
 import { api, type Upstream } from '../api'
-import { messageFor, useResource } from '../hooks'
+import { membershipMessageFor, messageFor, useResource } from '../hooks'
 import { ModelDiscovery } from '../ModelDiscovery'
 import { presetForEndpoint, providerPreset, providerPresets, type ProviderChoice, type ProviderPresetId } from '../providerPresets'
 import { Button, Dialog, EmptyState, Field, FormError, Icon, PageState } from '../ui'
@@ -9,15 +9,23 @@ import { PageHeader } from './EmployeesPage'
 export function UpstreamsPage({ csrf }: { csrf: string }) {
   const load = useCallback(() => api.upstreams(), [])
   const { data, loading, error, reload } = useResource(load)
+  const loadStatus = useCallback(() => api.status(), [])
+  const { data: status, loading: statusLoading, error: statusError, reload: reloadStatus } = useResource(loadStatus)
   const [creating, setCreating] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [reimporting, setReimporting] = useState<Upstream | null>(null)
   const [syncing, setSyncing] = useState<Upstream | null>(null)
+  const membershipEnabled = status?.features?.codex_membership_import === true
   return <>
     <PageHeader title="上游连接" description="连接兼容 OpenAI 协议的上游服务。密钥加密保存且不会再次显示。"><Button onClick={() => setCreating(true)}><Icon name="plus" />添加上游</Button></PageHeader>
+    <MembershipFeaturePanel enabled={membershipEnabled} loading={statusLoading} error={statusError} onRetry={() => void reloadStatus()} onImport={() => setImporting(true)} />
     <div className="content-panel"><PageState loading={loading} error={error} onRetry={() => void reload()} />
       {!loading && !error && data?.items.length === 0 ? <EmptyState title="还没有上游连接" body="添加一个兼容 OpenAI 协议的上游，再配置模型路由。" action={<Button onClick={() => setCreating(true)}>添加上游</Button>} /> : null}
-      {data?.items.length ? <div className="table-scroll"><table><thead><tr><th>名称</th><th>类型</th><th>端点</th><th>状态</th><th>操作</th></tr></thead><tbody>{data.items.map((item) => <UpstreamRow key={item.id} item={item} csrf={csrf} onSync={() => setSyncing(item)} onDone={() => void reload()} />)}</tbody></table></div> : null}
+      {data?.items.length ? <div className="table-scroll"><table className="upstreams-table"><thead><tr><th>名称</th><th>提供商</th><th>端点</th><th>凭据</th><th>状态</th><th>操作</th></tr></thead><tbody>{data.items.map((item) => <UpstreamRow key={item.id} item={item} csrf={csrf} membershipEnabled={membershipEnabled} onSync={() => setSyncing(item)} onReimport={() => setReimporting(item)} onDone={() => void reload()} />)}</tbody></table></div> : null}
     </div>
     {creating ? <CreateUpstream csrf={csrf} onClose={() => setCreating(false)} onSaved={() => void reload()} /> : null}
+    {importing ? <CodexAuthImport csrf={csrf} onClose={() => setImporting(false)} onSaved={() => { setImporting(false); void reload() }} /> : null}
+    {reimporting ? <CodexAuthImport csrf={csrf} upstream={reimporting} onClose={() => setReimporting(null)} onSaved={() => { setReimporting(null); void reload() }} /> : null}
     {syncing ? <Dialog title={`同步 ${syncing.name} 的模型`} description="仅读取上游返回的模型列表；选择后才会创建路由。" onClose={() => setSyncing(null)} wide>
       <ModelDiscovery upstream={syncing} csrf={csrf} />
       <div className="dialog__actions"><Button type="button" variant="secondary" onClick={() => setSyncing(null)}>完成</Button></div>
@@ -25,14 +33,96 @@ export function UpstreamsPage({ csrf }: { csrf: string }) {
   </>
 }
 
-function UpstreamRow({ item, csrf, onSync, onDone }: { item: Upstream; csrf: string; onSync: () => void; onDone: () => void }) {
+function MembershipFeaturePanel({ enabled, loading, error, onRetry, onImport }: { enabled: boolean; loading: boolean; error: string | null; onRetry: () => void; onImport: () => void }) {
+  return <section className={`membership-panel ${enabled ? 'membership-panel--enabled' : ''}`} aria-labelledby="membership-title">
+    <div><h2 id="membership-title">Codex 会员文件导入（实验）</h2>
+      {loading ? <p>正在读取实验开关…</p> : error ? <p>无法确认实验开关状态；为安全起见，导入入口已隐藏。</p> : enabled
+        ? <p>仅导入管理员主动选择的 <code>auth.json</code>，导入只校验结构，不代表授权成功。模型路由需要手动创建。</p>
+        : <p>此实例未启用文件导入。启动服务时添加 <code>--experimental-codex-membership</code>；这里不会显示虚假的授权入口。</p>}
+      <p className="membership-panel__limits">不提供网页登录或自动刷新；凭据过期后需重新导入；不支持 Claude/Gemini。员工仍使用普通 CPA Cloud Key。</p>
+    </div>
+    {enabled ? <Button type="button" onClick={onImport}>导入 Codex auth.json</Button> : error ? <Button type="button" variant="secondary" onClick={onRetry}>重试读取开关</Button> : null}
+  </section>
+}
+
+const credentialStateCopy = {
+  imported_unverified: { label: '已导入，未验证', tone: 'warning' },
+  verified: { label: '已验证', tone: 'active' },
+  reauth_required: { label: '需要重新导入', tone: 'danger' },
+} as const
+
+function UpstreamRow({ item, csrf, membershipEnabled, onSync, onReimport, onDone }: { item: Upstream; csrf: string; membershipEnabled: boolean; onSync: () => void; onReimport: () => void; onDone: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  return <tr><td><strong>{item.name}</strong></td><td>OpenAI 兼容</td><td><code className="endpoint">{item.endpoint}</code></td><td><span className={`status status--${item.enabled ? 'active' : 'disabled'}`}><i />{item.enabled ? '启用' : '已停用'}</span></td><td><div className="row-actions"><button className="link-button" disabled={busy} onClick={onSync}>同步模型</button><span className="inline-action"><button className="link-button" disabled={busy} onClick={async () => {
+  const membership = item.provider_kind === 'codex-membership'
+  const credential = item.credential_state ? credentialStateCopy[item.credential_state] : null
+  return <tr><td><strong>{item.name}</strong></td><td>{membership ? 'Codex 会员' : 'OpenAI 兼容 API'}</td><td>{membership ? <span className="muted-copy">服务端固定</span> : <code className="endpoint">{item.endpoint}</code>}</td><td>{membership && credential ? <span className={`status status--${credential.tone}`}><i />{credential.label}</span> : <span className="muted-copy">API Key</span>}</td><td><span className={`status status--${item.enabled ? 'active' : 'disabled'}`}><i />{item.enabled ? '启用' : '已停用'}</span></td><td><div className="row-actions">{membership ? <><span className="manual-route-note">模型需手动配置</span><button className="link-button" disabled={busy || !membershipEnabled} title={membershipEnabled ? undefined : '需先启用 --experimental-codex-membership'} onClick={onReimport}>重新导入</button></> : <button className="link-button" disabled={busy} onClick={onSync}>同步模型</button>}<span className="inline-action"><button className="link-button" disabled={busy} onClick={async () => {
     setBusy(true); setError(null)
     try { await api.updateUpstream(item.id, { expected_revision: item.revision, enabled: !item.enabled }, csrf); onDone() }
     catch (caught) { setError(messageFor(caught)); setBusy(false) }
   }}>{busy ? '处理中…' : item.enabled ? '停用' : '启用'}</button>{error ? <span className="action-error">{error}</span> : null}</span></div></td></tr>
+}
+
+const MAX_CODEX_AUTH_BYTES = 1024 * 1024
+
+function readFileText(file: File) {
+  if (typeof file.text === 'function') return file.text()
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.addEventListener('load', () => resolve(String(reader.result ?? '')))
+    reader.addEventListener('error', () => reject(new Error('file_read_failed')))
+    reader.readAsText(file)
+  })
+}
+
+export function CodexAuthImport({ csrf, upstream, onClose, onSaved }: { csrf: string; upstream?: Upstream; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState('Codex 会员')
+  const [file, setFile] = useState<File | null>(null)
+  const [operationID] = useState(() => crypto.randomUUID())
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const replacing = upstream?.provider_kind === 'codex-membership'
+
+  function chooseFile(event: ChangeEvent<HTMLInputElement>) {
+    const next = event.currentTarget.files?.[0] ?? null
+    setError(null)
+    if (next && next.size > MAX_CODEX_AUTH_BYTES) {
+      setFile(null)
+      event.currentTarget.value = ''
+      setError('授权文件不能超过 1 MiB。')
+      return
+    }
+    setFile(next)
+  }
+
+  return <Dialog title={replacing ? `重新导入 ${upstream.name}` : '导入 Codex 授权文件'} description={replacing ? '只有成功替换后才会更新记录；失败时旧凭据保持不变。' : '这是文件导入实验，不是网页授权登录。'} onClose={onClose}>
+    <div className="membership-limitations"><strong>导入前请确认</strong><ul>
+      <li>只接受你主动选择的 Codex <code>auth.json</code>，最大 1 MiB。</li>
+      <li>导入只验证文件结构；不会显示文件正文、Token 或账号内容，也不代表授权成功。</li>
+      <li>当前不提供网页登录、自动刷新、Claude/Gemini 或模型发现；凭据过期后需重新导入。</li>
+    </ul></div>
+    <form onSubmit={async (event) => {
+      event.preventDefault()
+      if (!file) { setError('请选择 Codex auth.json。'); return }
+      setBusy(true); setError(null)
+      try {
+        const authJSON = await readFileText(file)
+        if (replacing) await api.replaceCodexMembershipAuth(upstream.id, { expected_revision: upstream.revision, auth_json: authJSON }, csrf)
+        else await api.importCodexMembership({ name: name.trim(), auth_json: authJSON, operation_id: operationID }, csrf)
+        onSaved()
+      } catch (caught) {
+        setError(membershipMessageFor(caught))
+        setBusy(false)
+      }
+    }}>
+      <div className="form-grid">
+        {!replacing ? <Field label="显示名称" hint="仅用于后台识别此会员上游。"><input name="name" value={name} onChange={(event) => setName(event.target.value)} required autoFocus maxLength={120} /></Field> : null}
+        <Field label="Codex auth.json" hint="文件内容只会随本次加密导入请求发送，不会在页面中显示。"><input name="auth_json_file" type="file" accept=".json,application/json" autoFocus={replacing} onChange={chooseFile} /></Field>
+      </div>
+      <FormError error={error} />
+      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button><Button type="submit" disabled={busy}>{busy ? '正在导入…' : replacing ? '重新导入文件' : '导入文件'}</Button></div>
+    </form>
+  </Dialog>
 }
 
 export function CreateUpstream({ csrf, onClose, onSaved }: { csrf: string; onClose: () => void; onSaved: () => void }) {

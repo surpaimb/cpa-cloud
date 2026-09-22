@@ -31,6 +31,8 @@ export function CreateModel({ csrf, onClose, onCreated }: { csrf: string; onClos
   const [saveError, setSaveError] = useState<string | null>(null)
   const requestVersion = useRef(0)
   const enabled = useMemo(() => data?.items.filter((item) => item.enabled) ?? [], [data])
+  const selectedUpstream = useMemo(() => enabled.find((item) => item.id === upstreamID), [enabled, upstreamID])
+  const canDiscover = selectedUpstream?.provider_kind === 'openai-compatible'
 
   useEffect(() => {
     if (enabled.length === 0) {
@@ -41,7 +43,7 @@ export function CreateModel({ csrf, onClose, onCreated }: { csrf: string; onClos
   }, [enabled, upstreamID])
 
   const discover = useCallback(async () => {
-    if (!upstreamID) return
+    if (!upstreamID || !canDiscover) return
     const version = ++requestVersion.current
     setDiscovering(true)
     setDiscoverError(null)
@@ -60,12 +62,12 @@ export function CreateModel({ csrf, onClose, onCreated }: { csrf: string; onClos
     } finally {
       if (requestVersion.current === version) setDiscovering(false)
     }
-  }, [csrf, upstreamID])
+  }, [canDiscover, csrf, upstreamID])
 
   useEffect(() => {
-    if (upstreamID) void discover()
+    if (upstreamID && canDiscover) void discover()
     return () => { requestVersion.current += 1 }
-  }, [discover, upstreamID])
+  }, [canDiscover, discover, upstreamID])
 
   function chooseUpstream(next: string) {
     requestVersion.current += 1
@@ -91,15 +93,16 @@ export function CreateModel({ csrf, onClose, onCreated }: { csrf: string; onClos
       }
     }}><div className="form-grid">
       <Field label="上游连接"><select name="upstream_id" value={upstreamID} onChange={(event) => chooseUpstream(event.target.value)} required autoFocus>{enabled.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>
-      <Field label="上游模型名称" hint="可从同步结果选择，也可以手动输入上游支持的模型 ID。"><input name="upstream_model" list="discovered-models" value={upstreamModel} placeholder="例如：gpt-4.1" required onChange={(event) => {
+      <Field label="上游模型名称" hint={canDiscover ? '可从同步结果选择，也可以手动输入上游支持的模型 ID。' : 'Codex 会员上游当前不提供模型发现，请手动输入已确认可用的模型 ID。'}><input name="upstream_model" list={canDiscover ? 'discovered-models' : undefined} value={upstreamModel} placeholder="例如：gpt-4.1" required onChange={(event) => {
         const value = event.target.value
         setUpstreamModel(value)
         if (discovered.some((item) => item.id === value)) setExternalID(value)
       }} /></Field>
       <datalist id="discovered-models">{discovered.map((item) => <option key={item.id} value={item.id} />)}</datalist>
-      {discovering ? <div className="field-note" role="status">正在同步模型列表…</div> : null}
-      {discoverError ? <div className="model-discovery-error" role="alert"><span>模型同步失败：{discoverError}</span><button type="button" className="link-button" onClick={() => void discover()}>重试同步</button></div> : null}
-      {!discovering && !discoverError ? <div className="field-note" role="status">已同步 {discovered.length} 个模型；请选择或手动输入。</div> : null}
+      {!canDiscover ? <div className="field-note membership-manual-route" role="status">文件导入实验不会发现模型；保存本页填写的名称后才会创建路由。</div> : null}
+      {canDiscover && discovering ? <div className="field-note" role="status">正在同步模型列表…</div> : null}
+      {canDiscover && discoverError ? <div className="model-discovery-error" role="alert"><span>模型同步失败：{discoverError}</span><button type="button" className="link-button" onClick={() => void discover()}>重试同步</button></div> : null}
+      {canDiscover && !discovering && !discoverError ? <div className="field-note" role="status">已同步 {discovered.length} 个模型；请选择或手动输入。</div> : null}
       <Field label="对外模型 ID" hint="默认使用所选上游模型 ID，你可以在保存前修改。"><input name="id" value={externalID} placeholder="例如：gpt-4.1" required onChange={(event) => setExternalID(event.target.value)} /></Field>
     </div><FormError error={saveError} /><div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button><Button type="submit" disabled={busy || discovering}>{busy ? '正在添加…' : '添加路由'}</Button></div></form> : null}
   </Dialog>

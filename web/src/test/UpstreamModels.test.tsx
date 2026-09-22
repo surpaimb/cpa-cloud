@@ -133,4 +133,27 @@ describe('upstream and model discovery flows', () => {
     await userEvent.type(screen.getByLabelText('对外模型 ID'), 'public-beta')
     expect(screen.getByLabelText('上游模型名称')).toHaveValue('beta-model')
   })
+
+  it('requires manual model entry for membership upstreams without calling discovery', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/upstreams') && !init?.method) return response({ body: { items: [
+        { id: 'codex-1', name: 'Codex 会员', provider_kind: 'codex-membership', endpoint: 'https://chatgpt.com/backend-api/codex', enabled: true, revision: 1, credential_state: 'imported_unverified', verified_at: null },
+      ] } })
+      if (url.endsWith('/models') && init?.method === 'POST') return response({ body: { id: 'codex-model', upstream_id: 'codex-1', upstream_model: 'codex-model', enabled: true } })
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onCreated = vi.fn()
+    render(<CreateModel csrf="csrf" onClose={() => undefined} onCreated={onCreated} />)
+
+    expect(await screen.findByText('文件导入实验不会发现模型；保存本页填写的名称后才会创建路由。')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/discover-models'))).toBe(false)
+    await userEvent.type(screen.getByLabelText('上游模型名称'), 'codex-model')
+    await userEvent.type(screen.getByLabelText('对外模型 ID'), 'codex-model')
+    await userEvent.click(screen.getByRole('button', { name: '添加路由' }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1))
+    const create = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/models') && (init as RequestInit)?.method === 'POST')
+    expect(JSON.parse(String((create?.[1] as RequestInit).body))).toEqual({ id: 'codex-model', upstream_id: 'codex-1', upstream_model: 'codex-model' })
+  })
 })
