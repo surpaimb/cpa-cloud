@@ -111,7 +111,11 @@ func requestID(ctx context.Context) string {
 }
 
 func (a *App) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	response := map[string]string{"status": "ok"}
+	if a.cfg.InstanceID != "" {
+		response["instance_id"] = a.cfg.InstanceID
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSession) {

@@ -3,10 +3,14 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -198,6 +202,33 @@ func TestNetworkSafetyValidation(t *testing.T) {
 	}
 }
 
+func TestHealthInstanceIDIsOptIn(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		instanceID string
+		wantFields int
+	}{
+		{name: "default response unchanged", wantFields: 1},
+		{name: "launcher instance", instanceID: "23959b45-a481-4f01-b82c-43ab7eab892e", wantFields: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := &App{cfg: Config{InstanceID: test.instanceID}}
+			response := httptest.NewRecorder()
+			app.health(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+			var body map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != http.StatusOK || body["status"] != "ok" || len(body) != test.wantFields {
+				t.Fatalf("health response: status=%d body=%v", response.Code, body)
+			}
+			if test.instanceID != "" && body["instance_id"] != test.instanceID {
+				t.Fatalf("instance id=%q", body["instance_id"])
+			}
+		})
+	}
+}
+
 func TestAdministratorPasswordLengthBoundaries(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -251,6 +282,102 @@ func TestAdministratorPasswordLengthBoundaries(t *testing.T) {
 			t.Fatal("login error exposed the supplied password")
 		}
 	}
+}
+
+func TestCheckInitializedIsStrictlyReadOnly(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	initialized, err := CheckInitialized(context.Background(), missing)
+	if err != nil || initialized {
+		t.Fatalf("missing directory: initialized=%v err=%v", initialized, err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("check created missing directory: %v", err)
+	}
+
+	partial := t.TempDir()
+	if err := Initialize(context.Background(), partial, strings.NewReader("too-short\n")); err == nil {
+		t.Fatal("short password unexpectedly initialized data directory")
+	}
+	before := snapshotDirectory(t, partial)
+	initialized, err = CheckInitialized(context.Background(), partial)
+	if err != nil || initialized {
+		t.Fatalf("partial initialization: initialized=%v err=%v", initialized, err)
+	}
+	after := snapshotDirectory(t, partial)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("read-only check changed partial data directory\nbefore=%v\nafter=%v", before, after)
+	}
+
+	complete := t.TempDir()
+	if err := Initialize(context.Background(), complete, strings.NewReader("a-valid-admin-password\n")); err != nil {
+		t.Fatal(err)
+	}
+	before = snapshotDirectory(t, complete)
+	initialized, err = CheckInitialized(context.Background(), complete)
+	if err != nil || !initialized {
+		t.Fatalf("complete initialization: initialized=%v err=%v", initialized, err)
+	}
+	after = snapshotDirectory(t, complete)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("read-only check changed initialized data directory\nbefore=%v\nafter=%v", before, after)
+	}
+	if err := os.Remove(filepath.Join(complete, rootKeyFilename)); err != nil {
+		t.Fatal(err)
+	}
+	if initialized, err = CheckInitialized(context.Background(), complete); err == nil || initialized {
+		t.Fatalf("missing master key: initialized=%v err=%v", initialized, err)
+	}
+
+	corrupt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(corrupt, "cpa-cloud.db"), []byte("not a sqlite database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before = snapshotDirectory(t, corrupt)
+	if initialized, err = CheckInitialized(context.Background(), corrupt); err == nil || initialized {
+		t.Fatalf("corrupt database: initialized=%v err=%v", initialized, err)
+	}
+	after = snapshotDirectory(t, corrupt)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("read-only check changed corrupt data directory\nbefore=%v\nafter=%v", before, after)
+	}
+}
+
+type fileSnapshot struct {
+	Size    int64
+	Mode    os.FileMode
+	ModTime int64
+	Digest  [32]byte
+}
+
+func snapshotDirectory(t *testing.T, root string) map[string]fileSnapshot {
+	t.Helper()
+	result := make(map[string]fileSnapshot)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		result[relative] = fileSnapshot{Size: info.Size(), Mode: info.Mode(), ModTime: info.ModTime().UnixNano(), Digest: sha256.Sum256(content)}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func openTestApp(t *testing.T, dataDir string) *App {
