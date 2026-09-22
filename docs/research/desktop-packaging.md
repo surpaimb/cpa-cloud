@@ -133,7 +133,12 @@ payload removal, non-payload-file preservation, and user-data preservation.
 Refusal message boxes have explicit silent defaults so the test cannot wait for
 UI input. The acceptance script refuses to run outside a GitHub-hosted Actions
 runner and cleans only paths that it first proved were absent and then created
-itself.
+itself. For reliable exit codes it mirrors NSIS's documented bootstrap process:
+the installed uninstaller is copied to the runner's temporary directory, and
+that copy is invoked with the final, unquoted `_?=install-directory` parameter.
+The harness therefore waits for the real uninstall process while the uninstall
+section can still delete the original executable, then removes its temporary
+test copy.
 
 These checks do not replace installation tests on clean end-user machines.
 Before promoting beyond preview, test install, upgrade, already-running refusal,
