@@ -112,3 +112,5 @@
 - 主任务对最新网页运行 TypeScript 检查和 Vite 构建通过，并用 Playwright + headless Chrome 连接上述真实 Go 服务：管理员登录、浏览器文件上传导入、同一行重新导入 revision 增加、会员模型手动创建路由均 PASS。浏览器只访问隔离测试实例；没有真实会员调用。无 JavaScript 异常、无框架错误覆盖层；控制台仅首次未登录 session 的预期 HTTP 401。
 - 主任务查看 1440×1000 桌面与 390×844 手机截图，导入按钮、文件选择及操作区域可见。截图等待响应式动画稳定后获取。证据在仓库外 `C:/Users/apple/Documents/Codex/cpa-membership-real-desktop.png`、`cpa-membership-real-mobile.png`，验收脚本 `cpa-membership-real-qa.mjs`。测试只使用合成文件，结束清理临时数据库。
 - 功能默认关闭，需 `--experimental-codex-membership`。导入不代表在线认证；只支持短期凭据文件导入与 user/assistant 纯文本 Chat Completions/SSE 子集。到期重新导入；没有网页登录/自动刷新、会员模型发现、Claude/Gemini 会员、员工 Responses/Messages 协议或真实账号兼容性验证。
+
+- 迁移与列表迭代错误处理修复 `01823c9`：主任务核实 `foreign_key_check` 在 Close 前检查迭代错误，`tableColumns` 保留 defer 确保早退释放；上游和员工模型列表读取失败不会返回部分成功列表。服务任务重新运行迁移回滚/重试/重启定向测试、`go test ./internal/service -count=1` 与 `go vet ./internal/service` 均通过。
