@@ -74,6 +74,8 @@ LangString UnownedDirectory ${LANG_ENGLISH} "The fixed CPA Cloud installation fo
 LangString UnownedDirectory ${LANG_SIMPCHINESE} "固定的 CPA Cloud 安装目录已存在，但没有本程序的所有权标记。安装程序不会覆盖或删除其中的文件。请将该目录移走后重试。"
 LangString UnsafeReparse ${LANG_ENGLISH} "Setup found a filesystem reparse point in an installation target or its ancestor and will not write or remove files through it:"
 LangString UnsafeReparse ${LANG_SIMPCHINESE} "安装目标或其上级目录中存在文件系统重解析点。安装程序不会通过该路径写入或删除文件："
+LangString SetupMutexFailed ${LANG_ENGLISH} "CPA Cloud Setup could not create its per-user coordination lock. Close other setup processes and try again."
+LangString SetupMutexFailed ${LANG_SIMPCHINESE} "CPA Cloud 安装程序无法创建当前用户的协调锁。请关闭其他安装进程后重试。"
 
 Var SetupMutexHandle
 
@@ -149,14 +151,21 @@ Function .onInit
   !insertmacro MUI_LANGDLL_DISPLAY
   SetShellVarContext current
   Call CheckArchitecture
-  System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${SETUP_MUTEX}") p.r0'
-  StrCpy $SetupMutexHandle $0
-  System::Call 'kernel32::GetLastError() i.r1'
+  ; Capture GetLastError before any subsequent API or plug-in call can replace it.
+  System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${SETUP_MUTEX}") p.r0?e'
+  Pop $1
+  ${If} $0 = 0
+    SetErrorLevel 15
+    MessageBox MB_OK|MB_ICONSTOP "$(SetupMutexFailed)" /SD IDOK
+    Abort
+  ${EndIf}
   ${If} $1 = 183
+    System::Call 'kernel32::CloseHandle(p r0)'
     SetErrorLevel 11
     MessageBox MB_OK|MB_ICONEXCLAMATION "$(SetupRunning)" /SD IDOK
     Abort
   ${EndIf}
+  StrCpy $SetupMutexHandle $0
   Call CheckLauncherNotRunning
   Call CheckInstallOwnership
 FunctionEnd
@@ -173,14 +182,21 @@ FunctionEnd
 Function un.onInit
   !insertmacro MUI_UNGETLANGUAGE
   SetShellVarContext current
-  System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${SETUP_MUTEX}") p.r0'
-  StrCpy $SetupMutexHandle $0
-  System::Call 'kernel32::GetLastError() i.r1'
+  ; Capture GetLastError before any subsequent API or plug-in call can replace it.
+  System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${SETUP_MUTEX}") p.r0?e'
+  Pop $1
+  ${If} $0 = 0
+    SetErrorLevel 15
+    MessageBox MB_OK|MB_ICONSTOP "$(SetupMutexFailed)" /SD IDOK
+    Abort
+  ${EndIf}
   ${If} $1 = 183
+    System::Call 'kernel32::CloseHandle(p r0)'
     SetErrorLevel 11
     MessageBox MB_OK|MB_ICONEXCLAMATION "$(SetupRunning)" /SD IDOK
     Abort
   ${EndIf}
+  StrCpy $SetupMutexHandle $0
   Call un.CheckLauncherNotRunning
   Call un.CheckInstallOwnership
 FunctionEnd
