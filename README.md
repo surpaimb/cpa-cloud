@@ -60,31 +60,50 @@ Windows 托盘或 macOS 菜单栏提供打开后台、启动、停止和退出�
 
 压缩包内 README 随发布源码固定，可能仍使用“下一预览版”的发布前措辞；最新下载状态以本页和 Release 附件为准。
 
-## 2. 首次初始化（便携包）
+## 2. 命令行首次初始化
 
 初始用户名固定为 `admin`。密码通过 stdin 输入，长度为 **12–72 个 UTF-8 字节**（不是中文字符数）。初始化成功后程序退出，只需执行一次。
 
-以下使用 `../cpa-cloud-data`，在程序目录旁创建独立数据目录。实际部署建议使用固定绝对路径；初始化与启动必须指向同一个目录。
+安装版通常通过首次启动窗口初始化。需要使用命令行时，必须沿用安装版数据目录。便携包示例使用程序目录旁的 `../cpa-cloud-data`；初始化与启动始终指向同一个目录。
 
 ### Windows PowerShell
 
-交互读取密码，不把真实密码直接写进命令历史：
+**Windows 安装版（Setup.exe）**：下面整段可从任意 PowerShell 目录运行。先关闭初始化窗口；不要复制终端提示符或 Markdown 围栏。程序不存在时会在询问密码前停止。
 
 ```powershell
-$securePassword = Read-Host 'Administrator password (12-72 UTF-8 bytes)' -AsSecureString
-$passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-$previousOutputEncoding = $OutputEncoding
-try {
-    $OutputEncoding = [Text.UTF8Encoding]::new($false)
-    [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer) |
-        & .\cpa-cloud.exe --data-dir ..\cpa-cloud-data --init
-    if ($LASTEXITCODE -ne 0) { throw 'Initialization failed' }
-} finally {
-    $OutputEncoding = $previousOutputEncoding
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
-    $securePassword.Dispose()
+& {
+    $exe = "$env:LOCALAPPDATA\Programs\CPA Cloud\cpa-cloud.exe"
+    $data = "$env:LOCALAPPDATA\CPACloud\data"
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw "CPA Cloud executable not found: $exe. Check the installation or portable path."
+    }
+    $secret = Read-Host 'Administrator password (12-72 UTF-8 bytes)' -AsSecureString
+    $ptr = [IntPtr]::Zero
+    $savedEncoding = $OutputEncoding
+    try {
+        $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
+        $OutputEncoding = [Text.UTF8Encoding]::new($false)
+        [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) |
+            & $exe --data-dir $data --init
+        if ($LASTEXITCODE -ne 0) { throw 'Initialization failed; see the message above.' }
+    } finally {
+        $OutputEncoding = $savedEncoding
+        if ($ptr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+        }
+        if ($null -ne $secret) { $secret.Dispose() }
+    }
 }
 ```
+
+**Windows 便携包（ZIP）**：将上面代码中的 `$exe` 和 `$data` 两行替换为下面示例，并将程序路径改为你实际解压的位置，然后执行修改后的整段代码。不会自动搜索或切换到其他数据目录。
+
+```powershell
+$exe = "C:\Tools\CPACloud\cpa-cloud.exe"
+$data = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $exe) "..\cpa-cloud-data"))
+```
+
+成功后，安装版从开始菜单重新打开 CPA Cloud；便携版按第 3 节启动。安装版的数据目录是 `%LOCALAPPDATA%\CPACloud\data`，不要使用便携包的相对目录。
 
 ### Linux / macOS Bash
 

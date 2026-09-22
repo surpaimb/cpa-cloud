@@ -60,31 +60,50 @@ The installer preview has no publisher code signing or Apple notarization; the o
 
 READMEs inside portable archives are fixed to the release source and may retain prepublication “next preview” wording. This page and the Release assets provide the current download status.
 
-## 2. First-time initialization (portable packages)
+## 2. First-time initialization from the command line
 
 The initial username is always `admin`. The password is supplied through stdin and must be **12–72 UTF-8 bytes** long (not 12–72 Chinese characters). After successful initialization, the process exits. Initialization is required only once.
 
-The examples below use `../cpa-cloud-data`, creating a separate data directory next to the application directory. For a real deployment, use a fixed absolute path. Initialization and normal startup must point to the same directory.
+Installers normally initialize through the first-run dialog. Command-line initialization must use the same data directory as the launcher. Portable examples use `../cpa-cloud-data` next to the executable directory; always use the same directory for initialization and startup.
 
 ### Windows PowerShell
 
-Read the password interactively so the real password is not written directly into command history:
+**Windows installer (Setup.exe)**: run the complete block below from any PowerShell directory. Close the initialization dialog first. Copy only the code, without terminal prompts or Markdown fences. A missing executable is detected before asking for a password.
 
 ```powershell
-$securePassword = Read-Host 'Administrator password (12-72 UTF-8 bytes)' -AsSecureString
-$passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-$previousOutputEncoding = $OutputEncoding
-try {
-    $OutputEncoding = [Text.UTF8Encoding]::new($false)
-    [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer) |
-        & .\cpa-cloud.exe --data-dir ..\cpa-cloud-data --init
-    if ($LASTEXITCODE -ne 0) { throw 'Initialization failed' }
-} finally {
-    $OutputEncoding = $previousOutputEncoding
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
-    $securePassword.Dispose()
+& {
+    $exe = "$env:LOCALAPPDATA\Programs\CPA Cloud\cpa-cloud.exe"
+    $data = "$env:LOCALAPPDATA\CPACloud\data"
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw "CPA Cloud executable not found: $exe. Check the installation or portable path."
+    }
+    $secret = Read-Host 'Administrator password (12-72 UTF-8 bytes)' -AsSecureString
+    $ptr = [IntPtr]::Zero
+    $savedEncoding = $OutputEncoding
+    try {
+        $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
+        $OutputEncoding = [Text.UTF8Encoding]::new($false)
+        [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) |
+            & $exe --data-dir $data --init
+        if ($LASTEXITCODE -ne 0) { throw 'Initialization failed; see the message above.' }
+    } finally {
+        $OutputEncoding = $savedEncoding
+        if ($ptr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+        }
+        if ($null -ne $secret) { $secret.Dispose() }
+    }
 }
 ```
+
+**Windows portable package (ZIP)**: replace the `$exe` and `$data` lines above with the example below, edit the executable path to your actual extracted location, then run the complete modified block. No other data directory is selected automatically.
+
+```powershell
+$exe = "C:\Tools\CPACloud\cpa-cloud.exe"
+$data = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $exe) "..\cpa-cloud-data"))
+```
+
+After success, installer users reopen CPA Cloud from the Start menu; portable users continue with section 3. Installer data is in `%LOCALAPPDATA%\CPACloud\data`; do not substitute the portable relative directory.
 
 ### Linux / macOS Bash
 
