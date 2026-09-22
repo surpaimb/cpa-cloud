@@ -5,7 +5,8 @@
 ## 对外接口
 
 - 新增 `POST /v1/responses`：同一 Go 进程完成员工 Key 鉴权、撤销/权限检查、模型映射和上游请求；不新增代理进程。输入需合法对象、model 字符串、stream 严格布尔（若提供）。请求体沿用 4 MiB 上限。
-- API Key 上游转发同协议 `/responses`，仅替换模型，不静默删除 tools、instructions 等语义字段。复用 SSRF/DNS/TLS/重定向规则与凭据加密；员工头、Cookie 和 Key 不转发。此阶段不实现资源 GET/DELETE、background、WebSocket、跨协议降级或自动重试。
+- API Key 上游转发同协议 `/responses`，替换模型且缺省 `store=false`，不静默删除 tools、instructions 等语义字段。复用 SSRF/DNS/TLS/重定向规则与凭据加密；员工头、Cookie 和 Key 不转发。此阶段不实现资源 GET/DELETE、background、WebSocket、跨协议降级或自动重试。
+- 两种上游都尚未建立 Responses 资源的员工所有权映射，须拒绝 `store=true`、`background=true`、非空 `previous_response_id` 和 `conversation`；布尔字段不接受 null。不能让共享上游凭据成为跨员工引用历史上下文的渠道。后续新增有状态会话须先落实所有权验证。
 - 非流式必须是合法 Responses response 对象，失败/未完成不能记成功。SSE 按完整事件解析，支持拆包、多行 data、CRLF；仅 `response.completed` 成功。失败、incomplete、error、提前 EOF、超限、取消分别结束，不能使用 Chat Completions 的 `[DONE]` 作为成功依据。所有上游错误正文使用固定脱敏错误替代。工具名称/参数/输出属于模型内容，只交给调用者，不进入日志。
 - 成功内容保留原生输出 items、function_call 与 function_call_output 的语义、call_id 和 usage；缺失 usage 不伪造 0。失败换号、用量账单和会话资源持久化仍是后续独立模块。
 

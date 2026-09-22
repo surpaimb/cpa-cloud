@@ -1,5 +1,20 @@
 # 开发任务记录
 
+## 2026-09-23 完整功能对齐首批
+
+用户将 Sub2API 的完整产品能力纳入 CPA Cloud。分期与验收见 [功能矩阵](feature-parity-plan.md)，本批接口以 [Responses 契约](responses-preview-contract.md) 为准。原有三个独立任务已完成上一批；本次使用主任务内的 GPT-5.6 Sol 协作 agent，未创建重复侧栏任务。
+
+| 协作任务 | 文件所有权 | 当前交付目标 |
+| --- | --- | --- |
+| codex_responses | internal/membership、对应实现说明 | 原生 Responses 文本/函数工具/结果回传、事件与错误处理 |
+| responses_service | internal/service、必要 cmd | 员工入口、API Key 同协议、会员执行器接线、权限与请求状态 |
+| parity_inventory | docs/feature-parity-plan.md | 固定参考快照的功能需求、依赖、阶段与验收矩阵 |
+| 主任务 | 顶层规格/README、scripts | 范围更新、独立进程假上游验收、代码审阅与集成证据 |
+
+agent 执行状态不等于功能通过验收；后续阶段列表不代表持续运行的后台任务。当前不建立自动监控、不重新打包、不访问本机真实账号或更改当前用户服务数据。仅在相关测试完成后推送本仓库代码，下载版仍保持 preview.3。
+
+## 首轮任务（历史记录）
+
 2026-09-22 启动，三个任务均使用 GPT-5.6 Sol / high。主任务负责集成。
 
 | 任务 | Codex task ID | 文件范围 |
