@@ -78,3 +78,10 @@
 - Release 包含六便携包、四安装包、十个 sidecar 和汇总 SHA256SUMS.txt，共 21 附件。主任务实际下载全部十个主要附件，与下载的汇总清单逐项核对 SHA256，全部 PASS；文件保存在忽略目录 `dist/preview2-download-verify`。
 - main 中英文 README 更新为真实 preview.2 下载链接与安装说明；归档内 README 保留发布源码当时措辞，main 已明确此差异，不替换已发布附件。
 - 本轮桌面安装预览交付完成。会员账号、其他原生协议及生产运维仍属于后续产品工作。
+
+## 2026-09-22：上游模型发现服务端独立验收
+
+- 服务端提交 `7863c74`，管理接口 `POST /admin/api/v1/upstreams/{id}/discover-models` 已实现；服务任务报告全量 Go 测试与 vet 通过。
+- 主任务使用 Go 1.26.6 独立构建 `dist/cpa-cloud-discovery-verify.exe`，实际运行 `node scripts/smoke-preview.mjs C:/workspace/cpa-cloud/dist/cpa-cloud-discovery-verify.exe C:/workspace/cpa-cloud/web/dist --discover-models`，退出 0，PASS。
+- 新增验收覆盖模拟上游模型发现、准确使用上游凭据、模型 ID 去重排序、无秘密返回、不自动创建路由；原有初始化、网页入口、管理 API、永久员工 Key、非流式/SSE、重启和撤销持久化同时通过。
+- 本次网页入口检查使用已有 `web/dist`，不代表新的服务商选择及保存后自动同步界面已通过浏览器验收。新功能尚未发布，会员授权/导入也不属于本次已验证范围。
