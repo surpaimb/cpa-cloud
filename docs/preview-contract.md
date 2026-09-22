@@ -24,6 +24,14 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 | /system/status | GET | {version,ready,storage,limitations:[]} |
 
 普通 upstream 对象 {id,name,provider_kind,endpoint,enabled,revision}。
+
+### 上游模型同步（新增）
+
+`POST /admin/api/v1/upstreams/{id}/discover-models` 使用管理员会话及写请求的 CSRF/Origin 校验，返回 `{items:[{id:string}]}`。服务端使用已保存的上游凭据读取 OpenAI-compatible models 接口，复用模型请求的安全连接与地址校验，不向浏览器回传上游 Key 或原始错误响应。发现操作有超时、响应大小与条目数量上限；停用上游不能发现模型。
+
+网页添加上游成功后自动调用一次，已有上游可手动重新同步。失败不回滚已保存上游，也不能因重试重复创建上游。同步结果只作为配置候选列表，不自动创建员工可访问的路由；管理员选择模型后沿用现有模型创建 API。列表可为空，失败时保留手动填写入口。切换上游时忽略旧请求结果。
+
+服务商预设仅辅助填写名称和端点，后端仍为 `openai-compatible`。自定义地址继续支持；切换服务商或目标地址时清空未保存 Key，避免将凭据发送给错误目标。不得通过携带 Key 的试探请求猜测服务商地址。
 GET /healthz 只返回 {status}，不暴露员工或上游详情。
 模型入口 GET /v1/models 和 POST /v1/chat/completions 使用 Bearer 员工 Key。
 默认不自动重试；鉴权和上游执行同进程，员工秘密不向上游传递。

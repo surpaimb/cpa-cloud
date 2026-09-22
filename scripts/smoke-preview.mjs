@@ -18,8 +18,17 @@ const directory = await mkdtemp(path.join(os.tmpdir(), 'cpac-smoke-'));
 const password = randomBytes(24).toString('hex');
 const upstreamSecret = randomBytes(24).toString('hex');
 let calls = 0, upstreamValid = true, child;
+let discoveryCalls = 0;
+const checkDiscovery = process.argv.includes('--discover-models');
 let cookie = '', csrf = '';
 const mock = http.createServer(async (req, res) => {
+  if (req.method === 'GET' && req.url === '/v1/models') {
+    discoveryCalls++;
+    upstreamValid &&= req.headers.authorization === `Bearer ${upstreamSecret}`;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ data: [{ id: 'mock-upstream' }, { id: 'another-model' }, { id: 'mock-upstream' }] }));
+    return;
+  }
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   let body;
@@ -86,6 +95,13 @@ try {
   csrf = (await admin('/sessions', 'POST', { username: 'admin', password })).csrf_token;
   assert.ok(csrf);
   const upstream = await admin('/upstreams', 'POST', { name: 'smoke', provider_kind: 'openai-compatible', endpoint: `http://127.0.0.1:${mock.address().port}`, api_key: upstreamSecret });
+  if (checkDiscovery) {
+    const models = await admin(`/upstreams/${upstream.id}/discover-models`, 'POST', {});
+    assert.deepEqual(models, { items: [{ id: 'another-model' }, { id: 'mock-upstream' }] });
+    assert.equal(discoveryCalls, 1);
+    assert.ok(!JSON.stringify(models).includes(upstreamSecret));
+    assert.deepEqual((await admin('/models')).items, [], 'Discovery must not publish employee routes');
+  }
   await admin('/models', 'POST', { id: 'smoke-model', upstream_id: upstream.id, upstream_model: 'mock-upstream' });
   const employee = await admin('/employees', 'POST', { name: 'Smoke employee' });
   const issued = await admin(`/employees/${employee.id}/keys`, 'POST', { name: 'smoke', operation_id: randomUUID() });
