@@ -34,3 +34,7 @@
 - 网页任务本轮负责macOS启动器：仅desktop/macos/ 与相关测试说明；不要改web/、服务端、Windows或workflow。
 - 研究任务本轮负责安装打包：仅scripts/release*、.github/workflows/、packaging/、docs/research/desktop-packaging.md，协调原文声明；不改服务端或启动器实现。
 - 主任务：本契约、顶层中英文README、整体验收/协调。所有任务保持gpt-5.6-sol，明确尚未实测的UI/平台行为。仅提交自有路径，不提交其他并行目录。
+
+## 就绪确认补充
+
+为避免端口检查与启动之间的竞争导致打开其他本地服务，启动器每次启动生成新的UUID，通过 --instance-id UUID 传给自己创建的服务。配置该参数时 /healthz 额外返回 instance_id，启动器同时确认子进程存活与该值匹配后才能打开网页；默认CLI未设置时维持原来的仅status响应。instance_id是公开、短期的进程标识，不是密码或访问凭据，不影响员工鉴权。参数必须校验为UUID格式。重复启动只通过可信的同用户现有启动器实例打开网页，不根据匿名healthz成功擅自接管未知服务。
