@@ -1,0 +1,179 @@
+name: Preview release
+
+on:
+  push:
+    tags:
+      - "v*-preview.*"
+
+concurrency:
+  group: preview-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: Build and review web payload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Validate preview tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: go run ./scripts/release-package.go validate-tag
+
+      - name: Install locked web dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Test and build web console
+        working-directory: web
+        run: |
+          bun run typecheck
+          bun run test
+          bun run build
+
+      - name: Collect web payload and runtime license texts
+        run: go run ./scripts/release-package.go web-assets --source . --output release-web
+
+      - name: Upload validated web payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-web-assets
+          path: release-web
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    name: Package ${{ matrix.asset_os }} ${{ matrix.goarch }}
+    needs: web
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            goos: windows
+            asset_os: windows
+            goarch: amd64
+          - runner: windows-11-arm
+            goos: windows
+            asset_os: windows
+            goarch: arm64
+          - runner: ubuntu-24.04
+            goos: linux
+            asset_os: linux
+            goarch: amd64
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            asset_os: linux
+            goarch: arm64
+          - runner: macos-15-intel
+            goos: darwin
+            asset_os: macos
+            goarch: amd64
+          - runner: macos-15
+            goos: darwin
+            asset_os: macos
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Download validated web payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-web-assets
+          path: release-web
+
+      - name: Run native Go tests
+        run: go test ./... -count=1 -timeout=2m
+
+      - name: Build native package and collect license texts
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: go run ./scripts/release-package.go package --source . --web-assets release-web --output release-out --target-os "${{ matrix.goos }}" --target-arch "${{ matrix.goarch }}" --asset-os "${{ matrix.asset_os }}"
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-${{ matrix.asset_os }}-${{ matrix.goarch }}
+          path: release-out/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub prerelease
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download all native packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: package-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify package sidecars and create aggregate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+          archives=(cpa-cloud_*.zip cpa-cloud_*.tar.gz)
+          sidecars=(cpa-cloud_*.sha256)
+          test "${#archives[@]}" -eq 6
+          test "${#sidecars[@]}" -eq 6
+          for sidecar in "${sidecars[@]}"; do sha256sum -c "$sidecar"; done
+          sha256sum "${archives[@]}" > SHA256SUMS.txt
+
+      - name: Create or update GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          ## 开发预览 / Development preview
+
+          本 Release 提供六个由对应架构 GitHub 托管 runner 原生构建的便携包：Windows、Linux、macOS 的 amd64 与 arm64。每个包包含服务程序、`web/` 管理界面、中英文 README、文档、第三方声明与包内 SHA-256 清单。请先核对 `SHA256SUMS.txt`，解压后在包目录按 README 执行管理员初始化。
+
+          当前仅实现 OpenAI-compatible API Key 上游和 Chat Completions。会员账号、Responses、Messages、账号池与生产级运维尚未实现。工作流在对应架构 runner 上执行 Go 测试、构建和二进制 `--help` 检查；这不等同于真实目标机器上的完整部署验收。Windows/macOS 二进制未签名，macOS 包未经 notarization。
+
+          This prerelease provides six portable packages built natively on matching GitHub-hosted runner architectures: amd64 and arm64 for Windows, Linux, and macOS. Each package contains the server, the `web/` console, bilingual READMEs, documentation, third-party notices, and an internal SHA-256 manifest. Verify `SHA256SUMS.txt`, extract the package, and follow the README from the extracted directory to initialize the administrator.
+
+          The implemented scope is limited to OpenAI-compatible API-key upstreams and Chat Completions. Membership accounts, Responses, Messages, account pools, and production operations are not implemented. The workflow runs Go tests, builds, and a binary `--help` check on matching architecture runners; this is not a claim of complete deployment validation on end-user machines. Windows and macOS binaries are unsigned, and macOS packages are not notarized.
+          EOF
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            gh release edit "$RELEASE_TAG" --prerelease --title "CPA Cloud $RELEASE_TAG" --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" release-assets/* --verify-tag --prerelease --notes-file release-notes.md --title "CPA Cloud $RELEASE_TAG"
+          fi
