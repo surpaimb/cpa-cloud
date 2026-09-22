@@ -25,6 +25,7 @@ final class ServerProcessController {
     private var process: Process?
     private var standardInput: Pipe?
     private var activeInstanceID: UUID?
+    private var stopCompletions: [() -> Void] = []
 
     init(
         paths: LauncherPaths,
@@ -48,7 +49,11 @@ final class ServerProcessController {
     }
 
     func start(onReady: @escaping () -> Void) throws {
-        guard !ownsRunningService else { return }
+        if isReady {
+            onReady()
+            return
+        }
+        guard process == nil else { return }
         guard portProbe.isAvailable(port: 8787) else {
             throw ServiceLaunchError.portInUse(8787)
         }
@@ -91,6 +96,10 @@ final class ServerProcessController {
     }
 
     func stop(completion: @escaping () -> Void) {
+        if state == .stopping {
+            stopCompletions.append(completion)
+            return
+        }
         guard let child = process else {
             state = .stopped
             completion()
@@ -104,12 +113,15 @@ final class ServerProcessController {
         }
 
         state = .stopping
+        stopCompletions.append(completion)
         try? standardInput?.fileHandleForWriting.close()
         let processID = child.processIdentifier
 
         DispatchQueue.global(qos: .utility).async { [weak self, weak child] in
             guard let child else {
-                DispatchQueue.main.async { completion() }
+                DispatchQueue.main.async { [weak self] in
+                    self?.completeStop()
+                }
                 return
             }
 
@@ -132,7 +144,7 @@ final class ServerProcessController {
                     self.releaseProcess()
                     self.state = .stopped
                 }
-                completion()
+                self.completeStop()
             }
         }
     }
@@ -193,5 +205,11 @@ final class ServerProcessController {
         standardInput = nil
         activeInstanceID = nil
         process = nil
+    }
+
+    private func completeStop() {
+        let completions = stopCompletions
+        stopCompletions.removeAll()
+        completions.forEach { $0() }
     }
 }

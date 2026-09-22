@@ -2,6 +2,12 @@ import AppKit
 import CPACloudLauncherCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private enum LauncherOperation: Equatable {
+        case idle
+        case checkingInitialization
+        case initializing
+    }
+
     private static let bundleIdentifier = "com.surpaimb.cpa-cloud.launcher"
     private static let openDashboardNotification = Notification.Name("com.surpaimb.cpa-cloud.launcher.open-dashboard")
 
@@ -15,6 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let openMenuItem = NSMenuItem(title: "打开后台", action: nil, keyEquivalent: "o")
     private let startMenuItem = NSMenuItem(title: "启动服务", action: nil, keyEquivalent: "s")
     private let stopMenuItem = NSMenuItem(title: "停止服务", action: nil, keyEquivalent: "")
+    private var launcherOperation: LauncherOperation = .idle
+    private var displayedServiceState: ServiceState = .stopped
     private var terminationPending = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -68,13 +76,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if terminationPending {
             return .terminateLater
         }
+        if launcherOperation != .idle {
+            terminationPending = true
+            refreshMenu()
+            return .terminateLater
+        }
         guard serviceController?.ownsRunningService == true else {
             return .terminateNow
         }
         terminationPending = true
-        serviceController?.stop {
-            sender.reply(toApplicationShouldTerminate: true)
-        }
+        stopServiceForTermination(sender)
         return .terminateLater
     }
 
@@ -88,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.toolTip = "CPA Cloud"
 
         let menu = NSMenu()
+        menu.autoenablesItems = false
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
         menu.addItem(.separator())
@@ -112,13 +124,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func checkInitialization(thenStart: Bool) {
-        guard let cli = serverCLI else { return }
-        statusMenuItem.title = "状态：正在检查"
-        startMenuItem.isEnabled = false
+        guard launcherOperation == .idle,
+              let cli = serverCLI,
+              let serviceController
+        else { return }
+
+        if serviceController.isReady {
+            if thenStart { openDashboardWhenReady() }
+            return
+        }
+        guard canBeginServiceOperation(serviceController.state) else { return }
+
+        launcherOperation = .checkingInitialization
+        refreshMenu()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result { try cli.checkInitialization() }
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.launcherOperation = .idle
+                if self.continuePendingTerminationIfNeeded() { return }
                 switch result {
                 case .success(.initialized):
                     self.updateStatus(.stopped)
@@ -145,7 +169,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func initialize(password: String) {
-        guard let cli = serverCLI, let paths else { return }
+        guard launcherOperation == .idle,
+              let cli = serverCLI,
+              let paths,
+              let serviceController,
+              canBeginServiceOperation(serviceController.state)
+        else {
+            setupWindowController?.setBusy(false, error: "另一项启动器操作正在进行。")
+            return
+        }
+        launcherOperation = .initializing
+        refreshMenu()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result {
                 try SecureDirectory.ensure(paths.dataDirectory)
@@ -153,6 +187,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.launcherOperation = .idle
+                if self.continuePendingTerminationIfNeeded() { return }
                 switch result {
                 case .success:
                     self.setupWindowController?.completeAndClose()
@@ -165,7 +201,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startServiceAndOpenDashboard() {
-        guard let serviceController else { return }
+        guard launcherOperation == .idle, let serviceController else { return }
+        if serviceController.isReady {
+            openDashboardWhenReady()
+            return
+        }
+        guard canBeginServiceOperation(serviceController.state) else { return }
         do {
             try serviceController.start { [weak self] in self?.openDashboardWhenReady() }
         } catch {
@@ -180,8 +221,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatus(_ state: ServiceState) {
+        displayedServiceState = state
+        refreshMenu()
+    }
+
+    private func refreshMenu() {
         statusMenuItem.toolTip = nil
-        switch state {
+        if terminationPending {
+            statusMenuItem.title = "状态：正在退出"
+            openMenuItem.isEnabled = false
+            startMenuItem.isEnabled = false
+            stopMenuItem.isEnabled = false
+            return
+        }
+        switch launcherOperation {
+        case .checkingInitialization:
+            statusMenuItem.title = "状态：正在检查"
+            openMenuItem.isEnabled = false
+            startMenuItem.isEnabled = false
+            stopMenuItem.isEnabled = false
+            return
+        case .initializing:
+            statusMenuItem.title = "状态：正在初始化"
+            openMenuItem.isEnabled = false
+            startMenuItem.isEnabled = false
+            stopMenuItem.isEnabled = false
+            return
+        case .idle:
+            break
+        }
+
+        switch displayedServiceState {
         case .stopped:
             statusMenuItem.title = "状态：已停止"
             openMenuItem.isEnabled = false
@@ -220,10 +290,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startServiceFromMenu() {
+        if serviceController?.isReady == true {
+            openDashboardWhenReady()
+            return
+        }
         checkInitialization(thenStart: true)
     }
 
     @objc private func stopServiceFromMenu() {
+        guard launcherOperation == .idle else { return }
         serviceController?.stop {}
     }
 
@@ -237,8 +312,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setupWindowController?.window?.makeKeyAndOrderFront(nil)
         } else if serviceController?.isReady == true {
             openDashboardWhenReady()
-        } else {
+        } else if launcherOperation == .idle,
+                  let serviceController,
+                  canBeginServiceOperation(serviceController.state) {
             startServiceFromMenu()
+        }
+    }
+
+    private func canBeginServiceOperation(_ state: ServiceState) -> Bool {
+        switch state {
+        case .stopped, .failed:
+            return true
+        case .starting, .running, .stopping:
+            return false
+        }
+    }
+
+    @discardableResult
+    private func continuePendingTerminationIfNeeded() -> Bool {
+        guard terminationPending else {
+            refreshMenu()
+            return false
+        }
+        stopServiceForTermination(NSApp)
+        return true
+    }
+
+    private func stopServiceForTermination(_ application: NSApplication) {
+        guard serviceController?.ownsRunningService == true else {
+            application.reply(toApplicationShouldTerminate: true)
+            return
+        }
+        serviceController?.stop {
+            application.reply(toApplicationShouldTerminate: true)
         }
     }
 
