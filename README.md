@@ -16,6 +16,9 @@
 ## 开发入口
 
 - [第一版功能与架构](docs/product-plan.md)
+- [四个核心模块详细设计](docs/core-design.md)
+- [验收矩阵](docs/acceptance-matrix.md)
+- [协议来源记录](docs/protocol-sources.md)
 - [独立实现与来源规则](docs/independent-implementation.md)
 - [第三方声明](THIRD_PARTY_NOTICES.md)
 - [贡献规则](CONTRIBUTING.md)
