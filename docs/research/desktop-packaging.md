@@ -117,7 +117,9 @@ The desktop entry uses a terminal-hosted Bash launcher because CPA Cloud does
 not yet have a native Linux GUI launcher. It serializes instances with `flock`,
 performs first-run password initialization without command-line secrets, starts
 the loopback-only service with a fresh instance identifier, waits for matching
-health when `curl` is available, and hands the console URL to `xdg-open`.
+health through required `curl`, and hands the console URL to `xdg-open` only
+after that identifier is confirmed. A lock conflict stops without opening an
+unverified localhost endpoint.
 Closing the terminal or pressing Ctrl+C terminates only the child it started.
 
 AppImages are produced with pinned appimagetool 1.9.1 binaries and a separately

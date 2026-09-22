@@ -283,6 +283,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends rpm
 
+      - name: Test Linux launcher ownership checks
+        run: ./scripts/test-linux-launcher.sh
+
       - name: Download and verify AppImage tooling
         shell: bash
         run: |
