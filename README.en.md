@@ -151,7 +151,15 @@ Linux / macOS:
 ./cpa-cloud --data-dir ../cpa-cloud-data --listen 127.0.0.1:8787 --web-dir ./web
 ```
 
-Open **http://127.0.0.1:8787** and sign in as `admin`. The `/healthz` health check returns `{"status":"ok"}`. The process runs in the foreground; press Ctrl+C to stop it. Closing the terminal will usually stop the service as well.
+After the service starts successfully, click [Open the local admin console](http://127.0.0.1:8787/) and sign in as `admin`.
+
+Alternatively, copy this address into your browser's address bar:
+
+```text
+http://127.0.0.1:8787/
+```
+
+This address points to the current computer. Open it on the computer running CPA Cloud and keep the service running. The `/healthz` health check returns `{"status":"ok"}`. In command-line mode, the process runs in the foreground; press Ctrl+C to stop it. Closing the terminal will usually stop the service as well.
 
 ## 4. Web-console configuration
 
