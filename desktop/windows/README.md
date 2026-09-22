@@ -41,3 +41,8 @@ The built-in non-UI self-test covers bundle/data path derivation, UTF-8 password
 - Unexpected exits are shown as an error and are not restarted automatically.
 
 This preview launcher is unsigned, has no auto-update behavior, and does not add a startup/login entry.
+
+The first-run dialog sizes itself to its content, including validation messages.
+The self-test exercises enlarged fonts and 100–200% layout scaling with a
+constrained initial client area, checking that both actions remain inside all
+ancestor containers. The previous fixed-height dialog fails this regression.

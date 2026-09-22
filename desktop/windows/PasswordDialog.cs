@@ -19,12 +19,14 @@ internal sealed class PasswordDialog : Form
         MinimizeBox = false;
         MaximizeBox = false;
         ShowInTaskbar = true;
-        ClientSize = new Size(430, 215);
+        AutoScaleDimensions = new SizeF(96, 96);
         AutoScaleMode = AutoScaleMode.Dpi;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
         var description = new Label
         {
-            Text = "请设置首位管理员密码。密码仅通过本机子进程标准输入传递，不会写入启动器日志。",
+            Text = "设置管理员密码（12–72 个 UTF-8 字节），并再次输入以确认。",
             AutoSize = true,
             MaximumSize = new Size(400, 0),
             Dock = DockStyle.Fill,
@@ -39,13 +41,17 @@ internal sealed class PasswordDialog : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
             AutoSize = true,
+            WrapContents = false,
         };
         buttons.Controls.Add(cancel);
         buttons.Controls.Add(ok);
 
         var layout = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.None,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(430, 0),
             Padding = new Padding(14),
             ColumnCount = 2,
             RowCount = 5,
@@ -55,7 +61,7 @@ internal sealed class PasswordDialog : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         layout.Controls.Add(description, 0, 0);

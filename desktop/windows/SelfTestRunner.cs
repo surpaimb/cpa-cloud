@@ -14,6 +14,7 @@ internal static class SelfTestRunner
     {
         try
         {
+            TestPasswordDialogLayout();
             TestPaths();
             TestPasswords();
             TestCommands();
@@ -31,6 +32,7 @@ internal static class SelfTestRunner
         catch (Exception ex)
         {
             Debug.WriteLine(ex);
+            Console.Error.WriteLine(ex.Message);
             return 1;
         }
     }
@@ -69,6 +71,7 @@ internal static class SelfTestRunner
         catch (Exception ex)
         {
             Debug.WriteLine(ex);
+            Console.Error.WriteLine(ex.Message);
             return 1;
         }
         finally
@@ -77,6 +80,42 @@ internal static class SelfTestRunner
             {
                 Directory.Delete(testRoot, recursive: true);
             }
+        }
+    }
+
+    private static void TestPasswordDialogLayout()
+    {
+        ApplicationConfiguration.Initialize();
+        foreach (var factor in new[] { 1f, 1.25f, 1.5f, 2f })
+        {
+            using var dialog = new PasswordDialog { Opacity = 0, ShowInTaskbar = false };
+            dialog.Font = new Font(dialog.Font.FontFamily, 12f * factor);
+            dialog.Show();
+            dialog.Scale(new SizeF(factor, factor));
+            dialog.ClientSize = new Size(430, 215);
+            dialog.PerformLayout();
+            Application.DoEvents();
+            var ok = (Button)dialog.AcceptButton!;
+            var cancel = (Button)dialog.CancelButton!;
+            foreach (var button in new[] { ok, cancel })
+            {
+                var bounds = dialog.RectangleToClient(button.RectangleToScreen(button.ClientRectangle));
+                Assert(dialog.ClientRectangle.Contains(bounds), $"password button clipped at scale {factor}");
+                Assert(button.Visible && button.Enabled, "password button inaccessible");
+                for (Control? ancestor = button.Parent; ancestor is not null; ancestor = ancestor.Parent)
+                {
+                    var local = ancestor.RectangleToClient(button.RectangleToScreen(button.ClientRectangle));
+                    Assert(ancestor.ClientRectangle.Contains(local), $"password button clipped by {ancestor.GetType().Name} at {factor}");
+                }
+            }
+            // Invalid input must leave a readable error and accessible actions.
+            ok.PerformClick();
+            dialog.PerformLayout();
+            Application.DoEvents();
+            Assert(dialog.DialogResult != DialogResult.OK, "empty password accepted");
+            Assert(dialog.ClientRectangle.Contains(dialog.RectangleToClient(ok.RectangleToScreen(ok.ClientRectangle))),
+                "validation hides initialization button");
+            dialog.Close();
         }
     }
 
