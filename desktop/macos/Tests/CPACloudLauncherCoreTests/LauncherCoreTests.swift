@@ -97,7 +97,7 @@ final class FilesystemSafetyTests: XCTestCase {
     func testSingleInstanceLockRejectsSecondOwner() throws {
         let lockFile = temporaryDirectory.appendingPathComponent("launcher.lock")
         let first = try SingleInstanceLock(lockFile: lockFile)
-        withExtendedLifetime(first) {
+        try withExtendedLifetime(first) {
             XCTAssertThrowsError(try SingleInstanceLock(lockFile: lockFile)) { error in
                 XCTAssertEqual(error as? SingleInstanceError, .alreadyRunning)
             }
