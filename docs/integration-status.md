@@ -41,3 +41,11 @@
 - 主任务连续执行两次 Windows 完整构建，均通过；确认 `dist/windows-amd64/web/index.html` 存在且无嵌套 dist。
 - `smoke-preview.mjs` 支持显式网页目录；使用打包后的 exe 与 web 目录执行，完整进程验收 PASS。
 - 网页任务已经结束；依赖声明盘点仍在运行，不将未提交草稿当作最终交付。
+
+## 2026-09-22：双语安装文档与发布准备
+
+- 中英文 README 已完成安装、初始化、上游/模型/员工 Key 配置、HTTPS、维护、源码构建与故障排查；初稿已推送 GitHub。
+- 主任务检查两份 README 本地链接与代码围栏通过；PowerShell 示例语法解析通过，用生成密码验证 stdin 初始化通过。
+- 自动审批检查拒绝删除 `.git/doc-init-d4f4c05f74584cc39ec83a4760bf5754`，该目录保留随机测试数据，不在 Git 跟踪范围内。
+- 用户要求参考 CC Switch 多平台 Release；首批范围为 Windows/Linux/macOS 各 amd64/arm64 便携包，不包含桌面安装器或自动更新。
+- 发布打包工作由服务端任务负责，主任务审阅发现的 GitHub CLI 仓库上下文及中间网页产物误下载问题已反馈并修正。尚未推送预览 tag，不声称附件已可下载。
