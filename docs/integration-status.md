@@ -63,3 +63,10 @@
 - 服务接口提交 `a74d314`；主任务独立运行 `scripts/smoke-launcher-cli.mjs`，只读初始化检查、参数冲突、初始化、实例 UUID 就绪校验、stdin EOF 优雅退出及重启全部 PASS。
 - 验收程序为 `dist/launcher-cli/cpa-cloud.exe`；同一程序配合 `web/dist` 运行原有 `scripts/smoke-preview.mjs`，网页入口、管理 API、永久员工 Key、非流式/SSE、凭据隔离、重启与撤销持久化全部 PASS。
 - Windows/macOS 原生启动器与安装脚本仍在实现，以上结果仅证明服务接口和现有 API 回归通过，不代表安装器或桌面界面已经验收。
+
+## 2026-09-22：桌面安装包进入原生 CI 验证
+
+- Windows 启动器 `e999fe8` / `09c0ea6`，macOS 启动器 `fe1dbb2` / `c20537f`，安装流程 `690ace0` 已提交并推送 main。
+- 主任务独立执行 Windows self-contained x64 启动器 `--self-test` 和 `--integration-test`，均退出 0；未进行桌面界面点击验收。
+- 安装任务报告两种 Windows Setup 已成功编译，NSIS 文件清单卸载、目录所有权与重解析点检查已加入；这不等同于实际安装/升级/卸载验证。
+- GitHub Actions 原生验证：https://github.com/surpaimb/cpa-cloud/actions/runs/35720289355 。启动时状态 in_progress，尚不能认定 Mac 构建或整轮验证通过。main 构建仅上传工作流附件，不发布 Release。
