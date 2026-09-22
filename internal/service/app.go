@@ -77,6 +77,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/api/v1/upstreams", a.requireAdmin(a.listUpstreams, false))
 	mux.HandleFunc("POST /admin/api/v1/upstreams", a.requireAdmin(a.createUpstream, true))
 	mux.HandleFunc("PATCH /admin/api/v1/upstreams/{id}", a.requireAdmin(a.updateUpstream, true))
+	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/discover-models", a.requireAdmin(a.discoverUpstreamModels, true))
 	mux.HandleFunc("GET /admin/api/v1/models", a.requireAdmin(a.listAdminModels, false))
 	mux.HandleFunc("POST /admin/api/v1/models", a.requireAdmin(a.createModel, true))
 	mux.HandleFunc("GET /admin/api/v1/system/status", a.requireAdmin(a.systemStatus, false))
