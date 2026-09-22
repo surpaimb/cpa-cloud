@@ -40,6 +40,19 @@ describe('CPA Cloud admin flow', () => {
     expect(JSON.parse(String((loginCall?.[1] as RequestInit).body))).toEqual({ username: 'admin', password: 'test-password' })
   })
 
+  it('translates a server credential error into concise Chinese', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return response({ status: 401, body: { error: { code: 'session_expired', message: 'Administrator session has expired.' } } })
+      if (url.endsWith('/sessions')) return response({ status: 401, body: { error: { code: 'invalid_credentials', message: 'Invalid username or password.' } } })
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<App />)
+    await userEvent.type(await screen.findByLabelText('密码'), 'wrong-password')
+    await userEvent.click(screen.getByRole('button', { name: '登录' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('用户名或密码不正确。')
+  })
+
   it('creates a one-time permanent key, copies it, then clears it from the DOM', async () => {
     const employee = { id: 'emp-1', name: '张三', department: '研发部', note: '', status: 'active', model_mode: 'all', models: [], revision: 1 }
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {

@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, FormEvent, ReactNode } from 'react'
+import { cloneElement, useId, type ButtonHTMLAttributes, type FormEvent, type ReactElement, type ReactNode } from 'react'
 
 export function Icon({ name }: { name: 'people' | 'link' | 'route' | 'status' | 'logout' | 'plus' | 'key' | 'copy' | 'close' | 'menu' }) {
   const paths: Record<string, ReactNode> = {
@@ -32,8 +32,15 @@ export function Dialog({ title, description, children, onClose, wide = false }: 
   </div>
 }
 
-export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
-  return <label className="field"><span>{label}</span>{children}{hint ? <small>{hint}</small> : null}</label>
+export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactElement<{ id?: string; 'aria-describedby'?: string }> }) {
+  const generatedId = useId()
+  const inputId = children.props.id ?? generatedId
+  const hintId = hint ? `${inputId}-hint` : undefined
+  return <div className="field">
+    <label htmlFor={inputId}>{label}</label>
+    {cloneElement(children, { id: inputId, 'aria-describedby': hintId ?? children.props['aria-describedby'] })}
+    {hint ? <small id={hintId}>{hint}</small> : null}
+  </div>
 }
 
 export function FormError({ error }: { error: string | null }) {
