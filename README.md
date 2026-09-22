@@ -268,4 +268,4 @@ node scripts/smoke-preview.mjs <absolute-executable-path> <absolute-web-director
 - [独立实现说明](docs/independent-implementation.md) · [贡献规则](CONTRIBUTING.md)
 - [第三方声明](THIRD_PARTY_NOTICES.md) · [依赖盘点](docs/research/dependency-notices.md)
 
-本项目依据公开协议独立编写，不包含 CLIProxyAPI、Sub2API 或归档 CPA 的实现。此前接触过参考源码，不宣称严格洁净室开发。自有代码暂拟 MIT，但尚未加入正式 LICENSE，当前不声明已授予 MIT 许可。第三方依赖适用各自许可证，分发时保留相应声明。
+本项目依据公开协议独立编写。此前接触过参考源码，不宣称严格洁净室开发。自有代码暂拟 MIT，但尚未加入正式 LICENSE，当前不声明已授予 MIT 许可。第三方依赖适用各自许可证，分发时保留相应声明。
