@@ -76,6 +76,8 @@ LangString UnsafeReparse ${LANG_ENGLISH} "Setup found a filesystem reparse point
 LangString UnsafeReparse ${LANG_SIMPCHINESE} "安装目标或其上级目录中存在文件系统重解析点。安装程序不会通过该路径写入或删除文件："
 LangString SetupMutexFailed ${LANG_ENGLISH} "CPA Cloud Setup could not create its per-user coordination lock. Close other setup processes and try again."
 LangString SetupMutexFailed ${LANG_SIMPCHINESE} "CPA Cloud 安装程序无法创建当前用户的协调锁。请关闭其他安装进程后重试。"
+LangString MsiInstalled ${LANG_ENGLISH} "CPA Cloud is already managed by Windows Installer (MSI). Uninstall that package before using Setup.exe."
+LangString MsiInstalled ${LANG_SIMPCHINESE} "CPA Cloud 已由 Windows Installer（MSI）管理。请先卸载 MSI 软件包，再使用 Setup.exe。"
 
 Var SetupMutexHandle
 
@@ -108,6 +110,14 @@ Function CheckArchitecture
 FunctionEnd
 
 Function CheckInstallOwnership
+  ClearErrors
+  ReadRegDWORD $0 HKCU "Software\CPACloud" "MsiInstalled"
+  ${IfNot} ${Errors}
+  ${AndIf} $0 = 1
+    SetErrorLevel 16
+    MessageBox MB_OK|MB_ICONSTOP "$(MsiInstalled)" /SD IDOK
+    Abort
+  ${EndIf}
   IfFileExists "$INSTDIR\*" 0 ownership_ok
   ClearErrors
   FileOpen $0 "$INSTDIR\.cpa-cloud-install" r

@@ -85,3 +85,11 @@
 - 主任务使用 Go 1.26.6 独立构建 `dist/cpa-cloud-discovery-verify.exe`，实际运行 `node scripts/smoke-preview.mjs C:/workspace/cpa-cloud/dist/cpa-cloud-discovery-verify.exe C:/workspace/cpa-cloud/web/dist --discover-models`，退出 0，PASS。
 - 新增验收覆盖模拟上游模型发现、准确使用上游凭据、模型 ID 去重排序、无秘密返回、不自动创建路由；原有初始化、网页入口、管理 API、永久员工 Key、非流式/SSE、重启和撤销持久化同时通过。
 - 本次网页入口检查使用已有 `web/dist`，不代表新的服务商选择及保存后自动同步界面已通过浏览器验收。新功能尚未发布，会员授权/导入也不属于本次已验证范围。
+
+## 2026-09-22：模型同步网页真实服务集成验收
+
+- 网页提交 `7a0b493`，网页任务报告 typecheck、16 项测试、构建通过。主任务复核源码并用新网页产物连接真实 Go 服务及本地模拟上游，全部使用临时目录、随机生成凭据和随机端口，不接触用户实例。
+- Browser plugin 不可用，使用现有 Playwright + headless Chrome。页面 `http://127.0.0.1:52305` 的登录、服务商自动填 URL、切换服务商清 Key、保存后自动同步、首次 429 后重试、上游记录仍只有一条、去重显示两模型、只创建勾选的一条重命名路由均 PASS。测试结束已停止服务并清理测试数据。
+- 页面身份、非空内容、无框架错误覆盖层通过；无 JavaScript 页面异常。控制台仅两个预期的 HTTP 资源错误（未登录 session 401 和模拟上游 429），没有其他告警或错误。
+- 主任务查看 1440×1000 与 390×844 截图，弹窗模型行和操作按钮可见。证据位于仓库外 `C:/Users/apple/Documents/Codex/cpa-discovery-real-desktop.png`、`cpa-discovery-real-mobile.png`，临时验收脚本为同目录 `cpa-discovery-real-qa.mjs`。
+- 这验证了当前源码的真实网页/服务衔接，不代表真实供应商账号验收或已发布下载包；会员授权/导入仍未实现。

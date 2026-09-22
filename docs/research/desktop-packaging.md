@@ -6,18 +6,19 @@ claim.
 
 ## Release artifact matrix
 
-The release workflow keeps the six existing portable archives and adds four
-desktop installers. Every primary artifact has a same-name `.sha256` sidecar,
-and a tag release also publishes one aggregate `SHA256SUMS.txt`.
+The release workflow keeps the six existing portable archives and publishes
+twelve additional desktop/package-manager artifacts. Every primary artifact
+has a same-name `.sha256` sidecar, and a tag release also publishes one
+aggregate `SHA256SUMS.txt`.
 
-| Operating system | Architecture | Portable | Desktop installer |
+| Operating system | Architecture | Portable | Additional distributables |
 | --- | --- | --- | --- |
-| Windows | amd64 | `.zip` | per-user `_Setup.exe` |
-| Windows | arm64 | `.zip` | per-user `_Setup.exe` |
-| Linux | amd64 | `.tar.gz` | future work only |
-| Linux | arm64 | `.tar.gz` | future work only |
-| macOS | amd64 | `.tar.gz` | drag-and-drop `.dmg` |
-| macOS | arm64 | `.tar.gz` | drag-and-drop `.dmg` |
+| Windows | amd64 | `.zip` | per-user `_Setup.exe` and `.msi` |
+| Windows | arm64 | `.zip` | per-user `_Setup.exe` and `.msi` |
+| Linux | amd64 | `.tar.gz` | `.AppImage`, `.deb`, and `.rpm` |
+| Linux | arm64 | `.tar.gz` | `.AppImage`, `.deb`, and `.rpm` |
+| macOS | amd64 | `.tar.gz` | one shared Universal `.dmg` and `.zip` |
+| macOS | arm64 | `.tar.gz` | one shared Universal `.dmg` and `.zip` |
 
 The packages are built on matching native GitHub-hosted runners. A push to
 `main` builds, tests, and uploads workflow artifacts using the legal preview
@@ -50,6 +51,29 @@ release builds. Inno Setup 7 is mature, but its
 [current official download page](https://jrsoftware.org/isdl.php) states that
 commercial users must purchase a license, so it is not used here.
 
+The workflow also builds an MSI with the pinned WiX Toolset 4.0.6 .NET tool.
+WiX 4.0.6 stays inside the reviewed Microsoft Reciprocal License boundary
+recorded in `packaging/windows/WIX-LICENSE.txt`. The MSI is per-user and
+installs to the same `%LOCALAPPDATA%\Programs\CPA Cloud` location. Its stable,
+architecture-specific upgrade code provides major-upgrade and downgrade
+protection; the preview tag is mapped monotonically into Windows Installer's
+three-field product-version range. It creates Start menu launch and uninstall
+shortcuts and intentionally does not create a desktop shortcut.
+
+The two Windows formats are alternatives, not co-installable owners of one
+directory. MSI installation searches the current user's 32-bit uninstall
+registry view for the NSIS product and stops if it is present. Setup performs
+the reciprocal check against the MSI ownership marker. CI exercises both
+refusal directions before accepting the MSI lifecycle.
+
+The MSI is an additional package-manager-native option, not a replacement for
+the hardened NSIS path. Its CI acceptance covers checksum verification,
+cross-format refusal, same-package reinstall, managed-file and shortcut presence,
+uninstall, non-payload preservation, and user-data preservation. The MSI does not yet
+duplicate the NSIS custom launcher/setup mutex protocol or the NSIS explicit
+reparse-point refusal. Users who need those additional refusal guarantees
+should use `_Setup.exe` during the preview.
+
 Installation is current-user only (`RequestExecutionLevel user`) at
 `%LOCALAPPDATA%\Programs\CPA Cloud`. It always creates Start menu launch and
 uninstall shortcuts; the desktop shortcut is an optional component. amd64 and
@@ -80,10 +104,36 @@ runtime inventory from `dotnet --info` in `DESKTOP-BUILD-INFO.txt`. These notice
 are derived from the SDK that produced the artifact rather than from a presumed
 runtime version.
 
-## macOS app and DMG
+## Linux packages
 
-The macOS job builds the SwiftPM executable product `CPACloudLauncher` for the
-runner's native architecture and assembles this bundle:
+The Linux job converts each previously tested native portable archive into an
+AppImage, deb, and rpm without rebuilding the Go server. System packages place
+the immutable application payload under `/usr/lib/cpa-cloud`, a CLI wrapper at
+`/usr/bin/cpa-cloud`, and desktop metadata under `/usr/share`. User data remains
+under `${XDG_CONFIG_HOME:-$HOME/.config}/cpa-cloud`, outside every package-owned
+path, so package upgrades and removals do not delete it.
+
+The desktop entry uses a terminal-hosted Bash launcher because CPA Cloud does
+not yet have a native Linux GUI launcher. It serializes instances with `flock`,
+performs first-run password initialization without command-line secrets, starts
+the loopback-only service with a fresh instance identifier, waits for matching
+health when `curl` is available, and hands the console URL to `xdg-open`.
+Closing the terminal or pressing Ctrl+C terminates only the child it started.
+
+AppImages are produced with pinned appimagetool 1.9.1 binaries and a separately
+downloaded AppImage type-2 runtime whose SHA-256 is pinned per architecture.
+The runtime's license notice is embedded in the AppImage. The output is
+extracted and inspected before publication. deb and rpm are built with the
+runner's native `dpkg-deb` and `rpmbuild`, then queried to confirm the server
+path. These packages are unsigned and do not implement in-app updates; users
+update through their package manager or replace the AppImage manually.
+
+## macOS Universal app, DMG, and ZIP
+
+The macOS job downloads both native portable packages, requires their web and
+notice trees to match, builds `CPACloudLauncher` for x86_64 and arm64, and uses
+`lipo` to create Universal launcher and Go server executables. It assembles this
+single bundle:
 
 ```text
 CPA Cloud.app/
@@ -107,10 +157,11 @@ describes the Swift runtime shipped with Apple operating systems. Rather than
 assuming the dependency set, each produced app records the launcher's actual
 `otool -L` output in `SWIFT-RUNTIME-DEPENDENCIES.txt`; packaging fails if that
 output points into Xcode, a toolchain directory, or the Swift build directory.
-Both launcher and server architectures are checked with `lipo`, and the DMG is
-verified, mounted read-only, and inspected before its checksum is written.
+Both launcher and server must contain x86_64 and arm64 slices. The ZIP is
+expanded and inspected; the DMG is verified, mounted read-only, and inspected
+before checksums are written.
 
-The preview app and DMG are neither code-signed nor notarized. No workflow step
+The preview app, ZIP, and DMG are neither code-signed nor notarized. No workflow step
 or release note claims otherwise, and first launch may be blocked or warned by
 macOS security policy. Signing, hardened runtime, notarization, stapling, and a
 clean-machine Gatekeeper test are separate future release work.
@@ -119,10 +170,11 @@ clean-machine Gatekeeper test are separate future release work.
 
 The workflow validates locked web dependencies, web tests/build, native Go
 tests, launcher unit tests, native architecture, package contents, license
-notices, portable checksums, installer readback, and the final ten artifact
-sidecars. Windows setup compilation is performed on the corresponding Windows
-runner; Swift app/DMG construction is performed on the corresponding macOS
-runner.
+notices, portable checksums, installer readback, and the final eighteen artifact
+sidecars. Windows setup/MSI compilation is performed on the corresponding
+Windows runner; Linux formats are constructed on matching Linux runners; the
+Universal app is assembled and read back on Apple Silicon macOS after both
+native inputs have completed.
 
 Each ephemeral GitHub-hosted Windows runner also performs a bounded silent
 lifecycle test. Starting from clean product paths and registry keys, it checks
@@ -143,5 +195,6 @@ test copy.
 These checks do not replace installation tests on clean end-user machines.
 Before promoting beyond preview, test install, upgrade, already-running refusal,
 uninstall/data preservation, OS security prompts, and first-run initialization
-on clean amd64 and arm64 systems. Linux `.deb` and `.rpm` packages are explicitly
-future work and are not produced by this workflow.
+on clean amd64 and arm64 systems. Signing, notarization, and an authenticated
+update manifest remain future production-release work; `.sig` files are not
+emitted until an application verification path and protected signing key exist.

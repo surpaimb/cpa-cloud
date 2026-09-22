@@ -139,8 +139,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  installer:
-    name: Build ${{ matrix.asset_os }} ${{ matrix.arch }} installer
+  windows-installer:
+    name: Build Windows ${{ matrix.arch }} installers
     needs: package
     timeout-minutes: 30
     strategy:
@@ -157,14 +157,6 @@ jobs:
             arch: arm64
             dotnet_arch: arm64
             portable_glob: "*.zip"
-          - runner: macos-15-intel
-            asset_os: macos
-            arch: amd64
-            portable_glob: "*.tar.gz"
-          - runner: macos-15
-            asset_os: macos
-            arch: arm64
-            portable_glob: "*.tar.gz"
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -177,19 +169,16 @@ jobs:
           path: installer-input
 
       - name: Set up .NET 10 SDK
-        if: runner.os == 'Windows'
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
           dotnet-version: 10.0.x
           architecture: ${{ matrix.dotnet_arch }}
 
       - name: Test Windows launcher
-        if: runner.os == 'Windows'
         shell: pwsh
         run: dotnet run --project desktop/windows/CPACloud.Launcher.csproj -c Release -- --self-test
 
       - name: Download and verify NSIS 3.12
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP 'nsis-3.12.zip'
@@ -215,17 +204,27 @@ jobs:
           }
           "NSIS_ROOT=$nsisRoot" >> $env:GITHUB_ENV
 
-      - name: Build per-user Windows setup
-        if: runner.os == 'Windows'
+      - name: Install pinned WiX Toolset 4.0.6
+        shell: pwsh
+        run: |
+          $toolRoot = Join-Path $env:RUNNER_TEMP 'wix-4.0.6'
+          dotnet tool install wix --tool-path $toolRoot --version 4.0.6
+          $wix = Join-Path $toolRoot 'wix.exe'
+          $reported = (& $wix --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $reported.StartsWith('4.0.6')) {
+            throw "Unexpected WiX version: $reported"
+          }
+          "WIX_EXE=$wix" >> $env:GITHUB_ENV
+
+      - name: Build per-user Windows Setup and MSI
         shell: pwsh
         run: |
           $archives = @(Get-ChildItem -LiteralPath installer-input -Filter '${{ matrix.portable_glob }}' -File)
           $checksums = @(Get-ChildItem -LiteralPath installer-input -Filter '*.sha256' -File)
           if ($archives.Count -ne 1 -or $checksums.Count -ne 1) { throw 'Expected one portable archive and one checksum.' }
-          ./scripts/release-windows-installer.ps1 -Source . -PortableArchive $archives[0].FullName -PortableChecksum $checksums[0].FullName -Output installer-out -Version $env:RELEASE_TAG -Arch '${{ matrix.arch }}' -NSISRoot $env:NSIS_ROOT
+          ./scripts/release-windows-installer.ps1 -Source . -PortableArchive $archives[0].FullName -PortableChecksum $checksums[0].FullName -Output installer-out -Version $env:RELEASE_TAG -Arch '${{ matrix.arch }}' -NSISRoot $env:NSIS_ROOT -WixExecutable $env:WIX_EXE
 
       - name: Test Windows install, upgrade, refusal, and uninstall lifecycle
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $installers = @(Get-ChildItem -LiteralPath installer-out -Filter '*_Setup.exe' -File)
@@ -233,25 +232,131 @@ jobs:
           if ($installers.Count -ne 1 -or $checksums.Count -ne 1) { throw 'Expected one installer and one checksum.' }
           ./scripts/release-windows-installer-acceptance.ps1 -Installer $installers[0].FullName -InstallerChecksum $checksums[0].FullName -Version $env:RELEASE_TAG
 
-      - name: Test macOS launcher
-        if: runner.os == 'macOS'
-        run: swift test --package-path desktop/macos
+      - name: Test Windows MSI install, reinstall, and uninstall lifecycle
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -LiteralPath installer-out -Filter '*.msi' -File)
+          $checksums = @(Get-ChildItem -LiteralPath installer-out -Filter '*.msi.sha256' -File)
+          $setups = @(Get-ChildItem -LiteralPath installer-out -Filter '*_Setup.exe' -File)
+          if ($installers.Count -ne 1 -or $checksums.Count -ne 1 -or $setups.Count -ne 1) { throw 'Expected one MSI, one MSI checksum, and one Setup installer.' }
+          ./scripts/release-windows-msi-acceptance.ps1 -Installer $installers[0].FullName -InstallerChecksum $checksums[0].FullName -SetupInstaller $setups[0].FullName
 
-      - name: Build macOS app DMG
-        if: runner.os == 'macOS'
+      - name: Upload Windows installer assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: installer-windows-${{ matrix.arch }}
+          path: installer-out/*
+          if-no-files-found: error
+          retention-days: 1
+
+  linux-installer:
+    name: Build Linux ${{ matrix.arch }} installers
+    needs: package
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            tool_arch: x86_64
+            tool_sha256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+            runtime_sha256: 1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            tool_arch: aarch64
+            tool_sha256: f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
+            runtime_sha256: 7d5d772b7c32f0c84caf0a452a3072a5709027d7eac5856feb89a7a7a8881372
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download matching portable package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: package-linux-${{ matrix.arch }}
+          path: installer-input
+
+      - name: Install native package inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm
+
+      - name: Download and verify AppImage tooling
         shell: bash
         run: |
           set -euo pipefail
-          archives=(installer-input/${{ matrix.portable_glob }})
+          tool="$RUNNER_TEMP/appimagetool-${{ matrix.tool_arch }}.AppImage"
+          runtime="$RUNNER_TEMP/runtime-${{ matrix.tool_arch }}"
+          curl --fail --location --retry 3 --output "$tool" "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${{ matrix.tool_arch }}.AppImage"
+          curl --fail --location --retry 3 --output "$runtime" "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${{ matrix.tool_arch }}"
+          echo "${{ matrix.tool_sha256 }}  $tool" | sha256sum -c -
+          echo "${{ matrix.runtime_sha256 }}  $runtime" | sha256sum -c -
+          chmod 755 "$tool" "$runtime"
+          echo "APPIMAGETOOL=$tool" >> "$GITHUB_ENV"
+          echo "APPIMAGE_RUNTIME=$runtime" >> "$GITHUB_ENV"
+
+      - name: Build and inspect AppImage, deb, and rpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          archives=(installer-input/*.tar.gz)
           checksums=(installer-input/*.sha256)
           test "${#archives[@]}" -eq 1
           test "${#checksums[@]}" -eq 1
-          ./scripts/release-macos-dmg.sh --source . --portable-archive "${archives[0]}" --portable-checksum "${checksums[0]}" --output installer-out --version "$RELEASE_TAG" --arch "${{ matrix.arch }}"
+          ./scripts/release-linux-installers.sh --source . --portable-archive "${archives[0]}" --portable-checksum "${checksums[0]}" --output installer-out --version "$RELEASE_TAG" --arch "${{ matrix.arch }}" --appimagetool "$APPIMAGETOOL" --appimage-runtime "$APPIMAGE_RUNTIME"
 
-      - name: Upload installer asset
+      - name: Upload Linux installer assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: installer-${{ matrix.asset_os }}-${{ matrix.arch }}
+          name: installer-linux-${{ matrix.arch }}
+          path: installer-out/*
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-installer:
+    name: Build macOS Universal installers
+    needs: package
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download amd64 portable package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: package-macos-amd64
+          path: installer-input/amd64
+
+      - name: Download arm64 portable package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: package-macos-arm64
+          path: installer-input/arm64
+
+      - name: Test macOS launcher
+        run: swift test --package-path desktop/macos
+
+      - name: Build and inspect Universal app DMG and ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          amd64_archives=(installer-input/amd64/*.tar.gz)
+          amd64_checksums=(installer-input/amd64/*.sha256)
+          arm64_archives=(installer-input/arm64/*.tar.gz)
+          arm64_checksums=(installer-input/arm64/*.sha256)
+          test "${#amd64_archives[@]}" -eq 1
+          test "${#amd64_checksums[@]}" -eq 1
+          test "${#arm64_archives[@]}" -eq 1
+          test "${#arm64_checksums[@]}" -eq 1
+          ./scripts/release-macos-universal.sh --source . --portable-amd64-archive "${amd64_archives[0]}" --portable-amd64-checksum "${amd64_checksums[0]}" --portable-arm64-archive "${arm64_archives[0]}" --portable-arm64-checksum "${arm64_checksums[0]}" --output installer-out --version "$RELEASE_TAG"
+
+      - name: Upload macOS installer assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: installer-macos-universal
           path: installer-out/*
           if-no-files-found: error
           retention-days: 1
@@ -259,7 +364,7 @@ jobs:
   publish:
     name: Publish GitHub prerelease
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-preview.')
-    needs: [package, installer]
+    needs: [package, windows-installer, linux-installer, macos-installer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -285,12 +390,32 @@ jobs:
           set -euo pipefail
           cd release-assets
           shopt -s nullglob
-          portables=(cpa-cloud_*.zip cpa-cloud_*.tar.gz)
-          installers=(cpa-cloud_*_Setup.exe cpa-cloud_*.dmg)
+          portables=(
+            cpa-cloud_*_windows_amd64.zip
+            cpa-cloud_*_windows_arm64.zip
+            cpa-cloud_*_linux_amd64.tar.gz
+            cpa-cloud_*_linux_arm64.tar.gz
+            cpa-cloud_*_macos_amd64.tar.gz
+            cpa-cloud_*_macos_arm64.tar.gz
+          )
+          installers=(
+            cpa-cloud_*_windows_amd64_Setup.exe
+            cpa-cloud_*_windows_arm64_Setup.exe
+            cpa-cloud_*_windows_amd64.msi
+            cpa-cloud_*_windows_arm64.msi
+            cpa-cloud_*_linux_amd64.AppImage
+            cpa-cloud_*_linux_arm64.AppImage
+            cpa-cloud_*_linux_amd64.deb
+            cpa-cloud_*_linux_arm64.deb
+            cpa-cloud_*_linux_amd64.rpm
+            cpa-cloud_*_linux_arm64.rpm
+            cpa-cloud_*_macos_universal.dmg
+            cpa-cloud_*_macos_universal.zip
+          )
           sidecars=(cpa-cloud_*.sha256)
           test "${#portables[@]}" -eq 6
-          test "${#installers[@]}" -eq 4
-          test "${#sidecars[@]}" -eq 10
+          test "${#installers[@]}" -eq 12
+          test "${#sidecars[@]}" -eq 18
           for sidecar in "${sidecars[@]}"; do sha256sum -c "$sidecar"; done
           sha256sum "${portables[@]}" "${installers[@]}" > SHA256SUMS.txt
 
@@ -304,13 +429,13 @@ jobs:
           cat > release-notes.md <<'EOF'
           ## 开发预览 / Development preview
 
-          本 Release 提供十个由对应架构 GitHub 托管 runner 原生构建的产物：Windows、Linux、macOS 的 amd64 与 arm64 共六个便携包，另有 Windows amd64/arm64 当前用户安装程序和 macOS amd64/arm64 拖放安装 DMG。Windows 安装程序包含自包含 .NET 启动器，提供开始菜单快捷方式与可选桌面快捷方式；升级与卸载不会删除用户数据。macOS DMG 内含标准 `CPA Cloud.app` 和 Applications 链接。便携包继续保留，内容包括服务程序、`web/` 管理界面、中英文 README、文档、第三方声明与包内 SHA-256 清单。请先核对 `SHA256SUMS.txt`。
+          本 Release 提供十八个产物：保留 Windows、Linux、macOS 的 amd64/arm64 六个便携包；Windows amd64/arm64 同时提供经过完整生命周期验收的 NSIS `Setup.exe` 和经过安装/重装/卸载验收的 MSI；Linux amd64/arm64 提供 AppImage、deb 和 rpm；macOS 提供同时包含 Intel 与 Apple Silicon 代码的 Universal DMG 和 ZIP。Windows 安装包包含自包含 .NET 启动器。Linux 桌面入口在终端中管理本机服务并打开浏览器。macOS DMG 内含标准 `CPA Cloud.app` 和 Applications 链接。升级与卸载不删除用户数据。所有主产物均带独立 SHA-256 sidecar，并汇总到 `SHA256SUMS.txt`。
 
-          当前仅实现 OpenAI-compatible API Key 上游和 Chat Completions。会员账号、Responses、Messages、账号池与生产级运维尚未实现。工作流在对应架构 runner 上执行 Go 测试、启动器测试、构建、包结构检查和二进制检查；这不等同于真实目标机器上的完整部署验收。Windows 安装程序与 macOS App 均未签名，macOS App/DMG 未经 notarization；首次运行可能触发系统安全提示。
+          当前仅实现 OpenAI-compatible API Key 上游和 Chat Completions。会员账号、Responses、Messages、账号池与生产级运维尚未实现。工作流在对应架构 runner 上执行 Go 测试、启动器测试、构建、包结构检查和二进制检查；这不等同于真实目标机器上的完整部署验收。Windows 安装程序、Linux 包和 macOS App 均未签名，macOS App/DMG 未经 notarization；首次运行可能触发系统安全提示。应用内自动更新尚未实现，`.sig` 不会在缺少验证链路时生成。
 
-          This prerelease provides ten artifacts built natively on matching GitHub-hosted runner architectures: six portable packages for Windows, Linux, and macOS on amd64 and arm64, plus per-user Windows Setup executables and drag-and-drop macOS DMGs for both architectures. Windows Setup includes a self-contained .NET launcher, a Start menu shortcut, and an optional desktop shortcut; upgrades and uninstall do not delete user data. Each macOS DMG contains `CPA Cloud.app` and an Applications link. The portable packages remain available and contain the server, `web/` console, bilingual READMEs, documentation, third-party notices, and an internal SHA-256 manifest. Verify `SHA256SUMS.txt` before use.
+          This prerelease provides eighteen artifacts. It retains six amd64/arm64 portable packages for Windows, Linux, and macOS. Windows amd64/arm64 each receive a fully lifecycle-tested NSIS `Setup.exe` and an install/reinstall/uninstall-tested MSI. Linux amd64/arm64 receive AppImage, deb, and rpm packages. macOS receives Universal DMG and ZIP packages containing both Intel and Apple Silicon code. Windows packages contain the self-contained .NET launcher. The Linux desktop entry hosts the local service in a terminal and opens a browser. The DMG contains `CPA Cloud.app` and an Applications link. Upgrade and uninstall preserve user data. Every primary artifact has a SHA-256 sidecar and is included in `SHA256SUMS.txt`.
 
-          The implemented scope is limited to OpenAI-compatible API-key upstreams and Chat Completions. Membership accounts, Responses, Messages, account pools, and production operations are not implemented. The workflow runs Go and launcher tests, builds, package-structure validation, and binary checks on matching architecture runners; this is not a claim of complete deployment validation on end-user machines. Windows Setup and the macOS app are unsigned, and the macOS app/DMG is not notarized; first launch may trigger platform security warnings.
+          The implemented scope is limited to OpenAI-compatible API-key upstreams and Chat Completions. Membership accounts, Responses, Messages, account pools, and production operations are not implemented. The workflow runs Go and launcher tests, builds, package-structure validation, and binary checks on matching architecture runners; this is not a claim of complete deployment validation on end-user machines. Windows installers, Linux packages, and the macOS app are unsigned, and the macOS app/DMG is not notarized; first launch may trigger platform security warnings. In-app updates are not implemented, so `.sig` files are not emitted without a real verification path.
           EOF
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" release-assets/* --clobber

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=CPA Cloud
+Comment=Run the local CPA Cloud administration console
+Comment[zh_CN]=运行本机 CPA Cloud 管理控制台
+Exec=/usr/lib/cpa-cloud/cpa-cloud-launcher
+Icon=cpa-cloud
+Terminal=true
+Categories=Development;Network;
+StartupNotify=false

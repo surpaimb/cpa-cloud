@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" rx="24" fill="#173b57"/>
+  <path d="M35 78c-13 0-23-9-23-21s10-21 23-21c5-14 18-24 34-24 20 0 36 15 38 34 11 2 19 11 19 22 0 13-11 23-25 23H35z" fill="#e6f2f8"/>
+  <text x="64" y="75" text-anchor="middle" font-family="Arial, sans-serif" font-size="31" font-weight="700" fill="#173b57">CPA</text>
+</svg>

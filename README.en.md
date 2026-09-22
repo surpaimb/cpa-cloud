@@ -165,6 +165,10 @@ This address points to the current computer. Open it on the computer running CPA
 
 ### Add an upstream
 
+**New in source, not yet included in the preview.2 downloads above:** choose DeepSeek, OpenAI, Groq, Mistral, or OpenRouter to fill the official API URL and display name, or choose a custom service. The name remains editable. Changing the provider or URL clears the API Key field, so enter the appropriate key again.
+
+“Save and sync models” saves the upstream first, then fetches its model list. If discovery fails, the upstream remains saved: retry synchronization instead of adding it again. Existing upstream rows also have a sync action. Authentication failures, rate limits, unsupported model discovery, and timeouts have separate messages. If discovery is unavailable, enter model IDs manually on the model routes page.
+
 | Field | Example / description |
 | --- | --- |
 | Name | `Company API`, or another recognizable name |
@@ -182,7 +186,7 @@ Do not enter a full `/chat/completions` URL. An Endpoint ending in `/v1` has `/c
 2. Select the upstream you just added.
 3. Enter an upstream model ID that the provider actually supports and that the current provider key is authorized to use.
 
-The model catalog is configured by an administrator and is not synchronized automatically from a provider. Each model currently maps to one route.
+The preview.2 downloads require the manual steps above. Current source automatically discovers candidate models: select the models you want, optionally edit their default public IDs, then create the selected routes. The add-model dialog also supports discovered suggestions and manual input. Discovery does not automatically expose every model to employees; access still depends on configured routes and employee permissions. Each public model ID currently maps to one route.
 
 ### Create employees and keys
 

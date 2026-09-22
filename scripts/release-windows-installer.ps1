@@ -7,6 +7,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][ValidateSet('amd64', 'arm64')][string]$Arch,
     [Parameter(Mandatory = $true)][string]$NSISRoot,
+    [string]$WixExecutable = '',
     [string]$DotNetExecutable = 'dotnet'
 )
 
@@ -68,9 +69,181 @@ function Get-PeMachine([string]$Path) {
     }
 }
 
+function Get-StableWixId([string]$Prefix, [string]$Value) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Value.ToLowerInvariant())
+    $hash = [Security.Cryptography.SHA256]::HashData($bytes)
+    return $Prefix + ([Convert]::ToHexString($hash).Substring(0, 24))
+}
+
+function Write-WixDirectoryTree([Xml.XmlWriter]$Writer, [string]$PayloadRoot, [string]$RelativeDirectory, [hashtable]$DirectoryIds) {
+    $directoryPath = if ([string]::IsNullOrEmpty($RelativeDirectory)) { $PayloadRoot } else { Join-Path $PayloadRoot $RelativeDirectory }
+    foreach ($directory in @(Get-ChildItem -LiteralPath $directoryPath -Directory -Force | Sort-Object Name)) {
+        $childRelative = if ([string]::IsNullOrEmpty($RelativeDirectory)) { $directory.Name } else { Join-Path $RelativeDirectory $directory.Name }
+        $directoryId = Get-StableWixId 'dir_' $childRelative
+        $DirectoryIds[$childRelative] = $directoryId
+        $Writer.WriteStartElement('Directory')
+        $Writer.WriteAttributeString('Id', $directoryId)
+        $Writer.WriteAttributeString('Name', $directory.Name)
+        Write-WixDirectoryTree $Writer $PayloadRoot $childRelative $DirectoryIds
+        $Writer.WriteEndElement()
+    }
+}
+
+function Write-WixSource([string]$Path, [string]$PayloadRoot, [string]$MsiVersion, [string]$UpgradeCode, [string]$Platform) {
+    $settings = [Xml.XmlWriterSettings]::new()
+    $settings.Encoding = [Text.UTF8Encoding]::new($false)
+    $settings.Indent = $true
+    $writer = [Xml.XmlWriter]::Create($Path, $settings)
+    $namespace = 'http://wixtoolset.org/schemas/v4/wxs'
+    $directoryIds = @{ '' = 'INSTALLFOLDER' }
+    try {
+        $writer.WriteStartDocument()
+        $writer.WriteStartElement('Wix', $namespace)
+        $writer.WriteStartElement('Package')
+        $writer.WriteAttributeString('Name', 'CPA Cloud')
+        $writer.WriteAttributeString('Manufacturer', 'CPA Cloud Contributors')
+        $writer.WriteAttributeString('Version', $MsiVersion)
+        $writer.WriteAttributeString('UpgradeCode', $UpgradeCode)
+        $writer.WriteAttributeString('Scope', 'perUser')
+        $writer.WriteAttributeString('InstallerVersion', '500')
+        $writer.WriteAttributeString('Compressed', 'yes')
+
+        $writer.WriteStartElement('MajorUpgrade')
+        $writer.WriteAttributeString('AllowSameVersionUpgrades', 'yes')
+        $writer.WriteAttributeString('DowngradeErrorMessage', 'A newer version of CPA Cloud is already installed.')
+        $writer.WriteAttributeString('Schedule', 'afterInstallInitialize')
+        $writer.WriteEndElement()
+        $writer.WriteStartElement('MediaTemplate')
+        $writer.WriteAttributeString('EmbedCab', 'yes')
+        $writer.WriteEndElement()
+        foreach ($property in @('ARPNOMODIFY', 'ARPNOREPAIR')) {
+            $writer.WriteStartElement('Property')
+            $writer.WriteAttributeString('Id', $property)
+            $writer.WriteAttributeString('Value', '1')
+            $writer.WriteEndElement()
+        }
+        $writer.WriteStartElement('Property')
+        $writer.WriteAttributeString('Id', 'NSISINSTALLDETECTED')
+        $writer.WriteStartElement('RegistrySearch')
+        $writer.WriteAttributeString('Id', 'FindNsisInstall')
+        $writer.WriteAttributeString('Root', 'HKCU')
+        $writer.WriteAttributeString('Key', 'Software\Microsoft\Windows\CurrentVersion\Uninstall\CPACloud.Launcher')
+        $writer.WriteAttributeString('Name', 'InstallLocation')
+        $writer.WriteAttributeString('Type', 'raw')
+        $writer.WriteAttributeString('Bitness', 'always32')
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+        $writer.WriteStartElement('Launch')
+        $writer.WriteAttributeString('Condition', 'Installed OR NOT NSISINSTALLDETECTED')
+        $writer.WriteAttributeString('Message', 'CPA Cloud is already managed by Setup.exe. Uninstall that package before installing the MSI.')
+        $writer.WriteEndElement()
+
+        $writer.WriteStartElement('StandardDirectory')
+        $writer.WriteAttributeString('Id', 'LocalAppDataFolder')
+        $writer.WriteStartElement('Directory')
+        $writer.WriteAttributeString('Id', 'LocalProgramsFolder')
+        $writer.WriteAttributeString('Name', 'Programs')
+        $writer.WriteStartElement('Directory')
+        $writer.WriteAttributeString('Id', 'INSTALLFOLDER')
+        $writer.WriteAttributeString('Name', 'CPA Cloud')
+        Write-WixDirectoryTree $writer $PayloadRoot '' $directoryIds
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+
+        $writer.WriteStartElement('StandardDirectory')
+        $writer.WriteAttributeString('Id', 'ProgramMenuFolder')
+        $writer.WriteStartElement('Directory')
+        $writer.WriteAttributeString('Id', 'ApplicationProgramsFolder')
+        $writer.WriteAttributeString('Name', 'CPA Cloud')
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+
+        $writer.WriteStartElement('ComponentGroup')
+        $writer.WriteAttributeString('Id', 'PayloadComponents')
+        $payloadPrefix = $PayloadRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        foreach ($file in @(Get-ChildItem -LiteralPath $PayloadRoot -File -Recurse -Force | Sort-Object FullName)) {
+            $relative = $file.FullName.Substring($payloadPrefix.Length)
+            $relativeDirectory = Split-Path -Parent $relative
+            if ($relativeDirectory -eq '.') { $relativeDirectory = '' }
+            $componentId = Get-StableWixId 'cmp_' $relative
+            $fileId = Get-StableWixId 'fil_' $relative
+            $writer.WriteStartElement('Component')
+            $writer.WriteAttributeString('Id', $componentId)
+            $writer.WriteAttributeString('Directory', $directoryIds[$relativeDirectory])
+            $writer.WriteAttributeString('Guid', '*')
+            $writer.WriteStartElement('File')
+            $writer.WriteAttributeString('Id', $fileId)
+            $writer.WriteAttributeString('Source', $file.FullName)
+            $writer.WriteAttributeString('KeyPath', 'yes')
+            $writer.WriteEndElement()
+            $writer.WriteEndElement()
+        }
+        $writer.WriteEndElement()
+
+        $writer.WriteStartElement('Component')
+        $writer.WriteAttributeString('Id', 'StartMenuShortcuts')
+        $writer.WriteAttributeString('Directory', 'ApplicationProgramsFolder')
+        $writer.WriteAttributeString('Guid', '*')
+        $writer.WriteAttributeString('Bitness', 'always32')
+        foreach ($shortcut in @(
+            @{ Id = 'StartMenuLaunch'; Name = 'CPA Cloud'; Target = '[INSTALLFOLDER]CPACloud.Launcher.exe' },
+            @{ Id = 'StartMenuUninstall'; Name = 'Uninstall CPA Cloud'; Target = '[SystemFolder]msiexec.exe'; Arguments = '/x [ProductCode]' }
+        )) {
+            $writer.WriteStartElement('Shortcut')
+            $writer.WriteAttributeString('Id', $shortcut.Id)
+            $writer.WriteAttributeString('Name', $shortcut.Name)
+            $writer.WriteAttributeString('Target', $shortcut.Target)
+            if ($shortcut.ContainsKey('Arguments')) { $writer.WriteAttributeString('Arguments', $shortcut.Arguments) }
+            $writer.WriteAttributeString('WorkingDirectory', 'INSTALLFOLDER')
+            $writer.WriteEndElement()
+        }
+        $writer.WriteStartElement('RemoveFolder')
+        $writer.WriteAttributeString('Id', 'RemoveApplicationProgramsFolder')
+        $writer.WriteAttributeString('On', 'uninstall')
+        $writer.WriteEndElement()
+        $writer.WriteStartElement('RegistryValue')
+        $writer.WriteAttributeString('Root', 'HKCU')
+        $writer.WriteAttributeString('Key', 'Software\CPACloud')
+        $writer.WriteAttributeString('Name', 'MsiInstalled')
+        $writer.WriteAttributeString('Type', 'integer')
+        $writer.WriteAttributeString('Value', '1')
+        $writer.WriteAttributeString('KeyPath', 'yes')
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+
+        $writer.WriteStartElement('Feature')
+        $writer.WriteAttributeString('Id', 'MainFeature')
+        $writer.WriteAttributeString('Title', 'CPA Cloud')
+        $writer.WriteAttributeString('Level', '1')
+        $writer.WriteStartElement('ComponentGroupRef')
+        $writer.WriteAttributeString('Id', 'PayloadComponents')
+        $writer.WriteEndElement()
+        $writer.WriteStartElement('ComponentRef')
+        $writer.WriteAttributeString('Id', 'StartMenuShortcuts')
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+        $writer.WriteEndDocument()
+    } finally {
+        $writer.Dispose()
+    }
+}
+
 if ($Version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$') {
     throw "Version '$Version' must match vMAJOR.MINOR.PATCH-preview.N"
 }
+$versionMatch = [regex]::Match($Version, '^v([0-9]+)\.([0-9]+)\.([0-9]+)-preview\.([0-9]+)$')
+$major = [int]$versionMatch.Groups[1].Value
+$minor = [int]$versionMatch.Groups[2].Value
+$patch = [int]$versionMatch.Groups[3].Value
+$preview = [int]$versionMatch.Groups[4].Value
+if ($major -gt 255 -or $minor -gt 255 -or $patch -gt 65 -or $preview -gt 999) {
+    throw "Version '$Version' cannot be represented safely as a Windows Installer product version."
+}
+$msiVersion = "$major.$minor.$(($patch * 1000) + $preview)"
 
 $root = Resolve-ExistingDirectory $Source 'Source root'
 $archive = Resolve-ExistingFile $PortableArchive 'Portable archive'
@@ -161,6 +334,9 @@ try {
     Copy-RequiredFile (Join-Path $windowsDesktopSDK 'LICENSE.TXT') (Join-Path $dotnetNoticeRoot 'WindowsDesktop-SDK-LICENSE.TXT')
     Copy-RequiredFile (Join-Path $windowsDesktopSDK 'THIRD-PARTY-NOTICES.TXT') (Join-Path $dotnetNoticeRoot 'WindowsDesktop-SDK-THIRD-PARTY-NOTICES.TXT')
     Copy-RequiredFile (Join-Path $nsis 'COPYING') (Join-Path $payload 'THIRD-PARTY-LICENSES/installer-tooling/NSIS-COPYING.txt')
+    if (-not [string]::IsNullOrWhiteSpace($WixExecutable)) {
+        Copy-RequiredFile (Join-Path $root 'packaging/windows/WIX-LICENSE.txt') (Join-Path $payload 'THIRD-PARTY-LICENSES/installer-tooling/WIX-LICENSE.txt')
+    }
 
     $dotnetInfo = & $DotNetExecutable --info | Out-String
     $buildInfo = @(
@@ -168,7 +344,7 @@ try {
         "Target: windows/$Arch ($rid)"
         "Launcher: self-contained .NET Windows Desktop"
         "Dotnet SDK: $sdkVersion"
-        'Installer compiler: NSIS 3.12'
+        $(if ([string]::IsNullOrWhiteSpace($WixExecutable)) { 'Installer compiler: NSIS 3.12' } else { 'Installer compilers: NSIS 3.12 and WiX Toolset 4.0.6' })
         'Installer scope: current user; no elevation requested'
         'Code signing: not performed'
         'Runtime UI validation: requires the matching GitHub-hosted runner and end-user test machine'
@@ -240,6 +416,31 @@ try {
     $null = Resolve-ExistingFile $expectedInstaller 'Compiled installer'
     $installerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $expectedInstaller).Hash.ToLowerInvariant()
     Set-Content -LiteralPath ($expectedInstaller + '.sha256') -Value "$installerHash  $([IO.Path]::GetFileName($expectedInstaller))" -Encoding ASCII
+
+    if (-not [string]::IsNullOrWhiteSpace($WixExecutable)) {
+        $wixCommand = Get-Command $WixExecutable -ErrorAction Stop
+        $wix = $wixCommand.Source
+        $wixSource = Join-Path $stageRoot 'CPACloud.wxs'
+        $upgradeCode = if ($Arch -eq 'amd64') { '1D7FCA5F-8D7E-4C66-8B79-7EF60BF64321' } else { 'A1252A49-8690-44DB-9BB0-6AB93BA74472' }
+        $wixPlatform = if ($Arch -eq 'amd64') { 'x64' } else { 'arm64' }
+        Write-WixSource $wixSource $payload $msiVersion $upgradeCode $wixPlatform
+        $expectedMsi = Join-Path $out "cpa-cloud_${Version}_windows_${Arch}.msi"
+        if (Test-Path -LiteralPath $expectedMsi) {
+            throw "Refusing to overwrite existing MSI: $expectedMsi"
+        }
+        & $wix build -arch $wixPlatform -pdbtype none -o $expectedMsi $wixSource
+        if ($LASTEXITCODE -ne 0) {
+            throw 'WiX MSI compilation failed.'
+        }
+        $null = Resolve-ExistingFile $expectedMsi 'Compiled MSI'
+        $msiSignature = Get-AuthenticodeSignature -LiteralPath $expectedMsi
+        if ($msiSignature.Status -ne [Management.Automation.SignatureStatus]::NotSigned) {
+            throw "Unexpected MSI signature state: $($msiSignature.Status)"
+        }
+        $msiHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $expectedMsi).Hash.ToLowerInvariant()
+        Set-Content -LiteralPath ($expectedMsi + '.sha256') -Value "$msiHash  $([IO.Path]::GetFileName($expectedMsi))" -Encoding ASCII
+        Write-Output "Windows MSI: $expectedMsi"
+    }
 
     Write-Output "Windows installer: $expectedInstaller"
     Write-Output "Launcher payload: $launcher"
