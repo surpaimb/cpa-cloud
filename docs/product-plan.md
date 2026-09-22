@@ -62,4 +62,3 @@ React 网页作为构建产物嵌入服务；SQLite 用于第一版单机持久�
 ## 员工接入决策
 
 员工直接使用 CC Switch，CPA Cloud 专注服务端和网页后台。详见[接入规格](employee-access.md)。
-

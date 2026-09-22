@@ -147,4 +147,3 @@ P1 可靠性方案：发往上游前持久化 started，失败则 503 不出站�
 
 TLS、Cookie Secure/HttpOnly/SameSite、管理员初始化和登录限流必须在公网部署前完成。
 模型 API 不因第一版缺少完整运维就默认绑定公网并明文运行。
-
