@@ -89,14 +89,14 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: adminCookieName, Value: token, Path: "/admin/", MaxAge: int((12 * time.Hour).Seconds()),
-		HttpOnly: true, Secure: a.cfg.TLSCert != "", SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: a.cfg.TLSCert != "", SameSite: http.SameSiteLaxMode,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"csrf_token": csrf})
 }
 
 func (a *App) logout(w http.ResponseWriter, r *http.Request, session adminSession) {
 	_, _ = a.store.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE id=?`, session.SessionID)
-	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/admin/", MaxAge: -1, HttpOnly: true, Secure: a.cfg.TLSCert != "", SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/admin/", MaxAge: -1, HttpOnly: true, Secure: a.cfg.TLSCert != "", SameSite: http.SameSiteLaxMode})
 	w.WriteHeader(http.StatusNoContent)
 }
 

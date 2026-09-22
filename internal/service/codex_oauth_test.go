@@ -1,0 +1,453 @@
+package service
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"cpacloud.local/server/internal/membership"
+)
+
+const (
+	testOAuthClientID    = "cpa-registered-client"
+	testOAuthRedirectURI = "http://127.0.0.1/admin/api/v1/codex/oauth/callback"
+)
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+func TestCodexOAuthConfigurationValidation(t *testing.T) {
+	valid := Config{CodexOAuthClientID: testOAuthClientID, CodexOAuthRedirectURI: testOAuthRedirectURI}
+	if err := ValidateCodexOAuthConfig(valid); err != nil {
+		t.Fatal(err)
+	}
+	for _, cfg := range []Config{
+		{CodexOAuthClientID: " padded ", CodexOAuthRedirectURI: testOAuthRedirectURI},
+		{CodexOAuthClientID: "client\nother", CodexOAuthRedirectURI: testOAuthRedirectURI},
+		{CodexOAuthClientID: testOAuthClientID, CodexOAuthRedirectURI: "http://example.com" + codexOAuthCallbackPath},
+		{CodexOAuthClientID: testOAuthClientID, CodexOAuthRedirectURI: "https://example.com/wrong"},
+		{CodexOAuthClientID: testOAuthClientID, CodexOAuthRedirectURI: "https://example.com" + codexOAuthCallbackPath + "?target=other"},
+	} {
+		if err := ValidateCodexOAuthConfig(cfg); err == nil {
+			t.Fatalf("invalid OAuth config accepted: %+v", cfg)
+		}
+	}
+}
+
+func TestCodexOAuthFeatureRequiresExperimentAndExplicitClientConfiguration(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := Initialize(context.Background(), dataDir, strings.NewReader("a-strong-preview-password\n")); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name     string
+		config   Config
+		wantCode string
+	}{
+		{name: "experiment disabled", config: Config{}, wantCode: "feature_disabled"},
+		{name: "client not configured", config: Config{ExperimentalCodexMembership: true}, wantCode: "codex_oauth_not_configured"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := test.config
+			cfg.DataDir = dataDir
+			cfg.Listen = "127.0.0.1:0"
+			app, err := Open(context.Background(), cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer app.Close()
+			server := httptest.NewServer(app.Handler())
+			defer server.Close()
+			cookie, csrf := loginTestAdmin(t, server.URL)
+			response := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+				"name": "not configured", "operation_id": "6509f36a-0230-4f02-8b76-2ffdf755183e",
+			}, cookie, csrf, server.URL)
+			assertCodexAdminError(t, response, map[string]int{"feature_disabled": http.StatusForbidden, "codex_oauth_not_configured": http.StatusConflict}[test.wantCode], test.wantCode)
+		})
+	}
+}
+
+func TestCodexOAuthAuthorizationSessionCallbackAndReplay(t *testing.T) {
+	dataDir := t.TempDir()
+	app := openOAuthTestApp(t, dataDir)
+	defer app.Close()
+
+	accessToken := oauthTestJWT(t, map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+	idToken := oauthTestJWT(t, map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-oauth-test"}})
+	var tokenCalls atomic.Int32
+	var captured codexOAuthTokenRequest
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		tokenCalls.Add(1)
+		if request.URL.String() != codexOAuthTokenURL || request.Method != http.MethodPost || request.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("unexpected token request method=%s url=%s headers=%v", request.Method, request.URL, request.Header)
+		}
+		if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
+			t.Errorf("decode token request: %v", err)
+		}
+		return oauthHTTPResponse(http.StatusOK, map[string]string{
+			"access_token": accessToken, "id_token": idToken, "refresh_token": "oauth-rotated-refresh-secret",
+		}), nil
+	})}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	cookie, csrf := loginTestAdmin(t, server.URL)
+
+	missingOrigin := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "OAuth account", "operation_id": "51a09f73-0432-4450-8888-d540a85aee1e",
+	}, cookie, csrf, "")
+	assertCodexAdminError(t, missingOrigin, http.StatusForbidden, "origin_rejected")
+
+	operationID := "75ee0360-2df6-4d73-8d9b-26c5d8553cd2"
+	createdResponse := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "OAuth account", "operation_id": operationID,
+	}, cookie, csrf, server.URL)
+	if createdResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create OAuth session status=%d body=%s", createdResponse.StatusCode, readBody(createdResponse))
+	}
+	var created codexOAuthSessionResponse
+	decodeResponse(t, createdResponse, &created)
+	authorize, err := url.Parse(created.AuthorizationURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := authorize.Query()
+	if authorize.Scheme != "https" || authorize.Host != "auth.openai.com" || authorize.Path != "/oauth/authorize" ||
+		query.Get("client_id") != testOAuthClientID || query.Get("redirect_uri") != testOAuthRedirectURI || query.Get("scope") != codexOAuthScopes ||
+		query.Get("response_type") != "code" || query.Get("code_challenge_method") != "S256" || query.Get("state") == "" || query.Get("code_challenge") == "" {
+		t.Fatalf("unexpected authorization URL: %s", created.AuthorizationURL)
+	}
+
+	retry := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "ignored", "operation_id": operationID,
+	}, cookie, csrf, server.URL)
+	if retry.StatusCode != http.StatusOK {
+		t.Fatalf("OAuth session retry status=%d body=%s", retry.StatusCode, readBody(retry))
+	}
+	var retried codexOAuthSessionResponse
+	decodeResponse(t, retry, &retried)
+	if retried != created {
+		t.Fatalf("idempotent OAuth session changed: first=%+v second=%+v", created, retried)
+	}
+
+	var sessionID string
+	var encrypted []byte
+	if err := app.store.db.QueryRow(`SELECT id,secret_ciphertext FROM codex_oauth_sessions WHERE operation_id=?`, operationID).Scan(&sessionID, &encrypted); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := app.secrets.decryptCodexOAuthSession(sessionID, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secret codexOAuthSessionSecret
+	if json.Unmarshal(plain, &secret) != nil {
+		t.Fatal("stored OAuth session secret is invalid")
+	}
+	clear(plain)
+	challenge := sha256String(secret.Verifier)
+	if secret.State != query.Get("state") || challenge != query.Get("code_challenge") || bytes.Contains(encrypted, []byte(secret.State)) || bytes.Contains(encrypted, []byte(secret.Verifier)) {
+		t.Fatal("OAuth state/PKCE persistence did not match the encrypted contract")
+	}
+
+	otherCookie, _ := loginTestAdmin(t, server.URL)
+	wrongSession := requestJSON(t, http.MethodGet, server.URL+codexOAuthCallbackPath+"?state="+url.QueryEscape(secret.State)+"&code=private-code", "", otherCookie, "", "")
+	wrongSessionBody := readBody(wrongSession)
+	if wrongSession.StatusCode != http.StatusBadRequest || tokenCalls.Load() != 0 || strings.Contains(wrongSessionBody, "private-code") {
+		t.Fatalf("wrong-session callback status=%d calls=%d body=%s", wrongSession.StatusCode, tokenCalls.Load(), wrongSessionBody)
+	}
+
+	callback := requestJSON(t, http.MethodGet, server.URL+codexOAuthCallbackPath+"?state="+url.QueryEscape(secret.State)+"&code=private-code", "", cookie, "", "")
+	callbackBody := readBody(callback)
+	if callback.StatusCode != http.StatusOK || tokenCalls.Load() != 1 || strings.Contains(callbackBody, "private-code") || strings.Contains(callbackBody, "oauth-rotated-refresh-secret") {
+		t.Fatalf("callback status=%d calls=%d body=%s", callback.StatusCode, tokenCalls.Load(), callbackBody)
+	}
+	if captured.GrantType != "authorization_code" || captured.ClientID != testOAuthClientID || captured.Code != "private-code" || captured.RedirectURI != testOAuthRedirectURI || captured.CodeVerifier != secret.Verifier || captured.RefreshToken != "" {
+		t.Fatalf("authorization exchange payload=%+v", captured)
+	}
+
+	replay := requestJSON(t, http.MethodGet, server.URL+codexOAuthCallbackPath+"?state="+url.QueryEscape(secret.State)+"&code=replayed-code", "", cookie, "", "")
+	if replay.StatusCode != http.StatusBadRequest || tokenCalls.Load() != 1 {
+		t.Fatalf("callback replay status=%d calls=%d", replay.StatusCode, tokenCalls.Load())
+	}
+	replay.Body.Close()
+
+	var upstreamID, state string
+	var storedCiphertext []byte
+	var revision int64
+	if err := app.store.db.QueryRow(`SELECT id,credential_ciphertext,credential_state,revision FROM upstreams WHERE operation_id=?`, operationID).
+		Scan(&upstreamID, &storedCiphertext, &state, &revision); err != nil {
+		t.Fatal(err)
+	}
+	if state != codexStateImported || revision != 1 || bytes.Contains(storedCiphertext, []byte("oauth-rotated-refresh-secret")) {
+		t.Fatalf("OAuth upstream state=%q revision=%d", state, revision)
+	}
+	storedAuth, err := app.secrets.decryptCodexAuth(upstreamID, storedCiphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(storedAuth)
+	credential, err := membership.ParseCodexAuthJSON(storedAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer credential.Destroy()
+	if credential.AccountIDSecret() != "acct-oauth-test" || credential.RefreshTokenSecret() != "oauth-rotated-refresh-secret" {
+		t.Fatal("OAuth-created credential did not preserve the normalized account and rotated token")
+	}
+
+	expiredResponse := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "Expired OAuth", "operation_id": "ce338738-8c3d-418c-af04-1ea9a9232c8a",
+	}, cookie, csrf, server.URL)
+	var expiredSession codexOAuthSessionResponse
+	decodeResponse(t, expiredResponse, &expiredSession)
+	expiredURL, _ := url.Parse(expiredSession.AuthorizationURL)
+	if _, err := app.store.db.Exec(`UPDATE codex_oauth_sessions SET expires_at=? WHERE operation_id=?`, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano), "ce338738-8c3d-418c-af04-1ea9a9232c8a"); err != nil {
+		t.Fatal(err)
+	}
+	expiredCallback := requestJSON(t, http.MethodGet, server.URL+codexOAuthCallbackPath+"?state="+url.QueryEscape(expiredURL.Query().Get("state"))+"&code=expired-code", "", cookie, "", "")
+	if expiredCallback.StatusCode != http.StatusBadRequest || tokenCalls.Load() != 1 {
+		t.Fatalf("expired callback status=%d calls=%d", expiredCallback.StatusCode, tokenCalls.Load())
+	}
+	expiredCallback.Body.Close()
+
+	deniedResponse := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "Denied OAuth", "operation_id": "b427005d-4c22-47f8-94fb-17d26578aad0",
+	}, cookie, csrf, server.URL)
+	var deniedSession codexOAuthSessionResponse
+	decodeResponse(t, deniedResponse, &deniedSession)
+	deniedURL, _ := url.Parse(deniedSession.AuthorizationURL)
+	deniedCallback := requestJSON(t, http.MethodGet, server.URL+codexOAuthCallbackPath+"?state="+url.QueryEscape(deniedURL.Query().Get("state"))+"&error=access_denied&error_description=private-provider-detail", "", cookie, "", "")
+	deniedBody := readBody(deniedCallback)
+	if deniedCallback.StatusCode != http.StatusBadRequest || tokenCalls.Load() != 1 || strings.Contains(deniedBody, "private-provider-detail") {
+		t.Fatalf("denied callback status=%d calls=%d body=%s", deniedCallback.StatusCode, tokenCalls.Load(), deniedBody)
+	}
+}
+
+func TestCodexOAuthAuthorizationSessionSurvivesRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	app := openOAuthTestApp(t, dataDir)
+	server := httptest.NewServer(app.Handler())
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	operationID := "41769f59-05e9-48dd-ac17-695025d1acf2"
+	createdResponse := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "Restart OAuth", "operation_id": operationID,
+	}, cookie, csrf, server.URL)
+	var created codexOAuthSessionResponse
+	decodeResponse(t, createdResponse, &created)
+	server.Close()
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var err error
+	app, err = Open(context.Background(), Config{
+		DataDir: dataDir, Listen: "127.0.0.1:0", ExperimentalCodexMembership: true,
+		CodexOAuthClientID: testOAuthClientID, CodexOAuthRedirectURI: testOAuthRedirectURI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	server = httptest.NewServer(app.Handler())
+	defer server.Close()
+	retry := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "ignored after restart", "operation_id": operationID,
+	}, cookie, csrf, server.URL)
+	if retry.StatusCode != http.StatusOK {
+		t.Fatalf("restart retry status=%d body=%s", retry.StatusCode, readBody(retry))
+	}
+	var reopened codexOAuthSessionResponse
+	decodeResponse(t, retry, &reopened)
+	if reopened != created {
+		t.Fatalf("authorization session changed across restart: before=%+v after=%+v", created, reopened)
+	}
+}
+
+func TestCodexOAuthRefreshRotationRetriesAndReauthorization(t *testing.T) {
+	dataDir := t.TempDir()
+	app := openOAuthTestApp(t, dataDir)
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	cookie, csrf := loginTestAdmin(t, server.URL)
+
+	oldAuth := codexAdminAuthJSON(t, time.Now().Add(time.Hour), "acct-refresh", "old-refresh-secret")
+	upstream := importTestCodexUpstream(t, server.URL, cookie, csrf, "1fd133dd-d6b4-4493-9aca-9fed016e4bc9", oldAuth)
+	newAccess := oauthTestJWT(t, map[string]any{"exp": time.Now().Add(2 * time.Hour).Unix()})
+	newID := oauthTestJWT(t, map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-refresh"}})
+	var calls atomic.Int32
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		call := calls.Add(1)
+		var payload codexOAuthTokenRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		if payload.GrantType != "refresh_token" || payload.ClientID != testOAuthClientID || payload.RefreshToken != "old-refresh-secret" || payload.Code != "" {
+			t.Errorf("refresh payload=%+v", payload)
+		}
+		if call < 3 {
+			return oauthHTTPResponse(http.StatusTooManyRequests, map[string]string{"error": "temporarily_unavailable"}), nil
+		}
+		return oauthHTTPResponse(http.StatusOK, map[string]string{"access_token": newAccess, "id_token": newID, "refresh_token": "rotated-refresh-secret"}), nil
+	})}
+	refresh := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 1}, cookie, csrf, server.URL)
+	if refresh.StatusCode != http.StatusOK {
+		t.Fatalf("refresh status=%d body=%s", refresh.StatusCode, readBody(refresh))
+	}
+	var refreshed upstreamView
+	decodeResponse(t, refresh, &refreshed)
+	if refreshed.Revision != 2 || refreshed.CredentialState == nil || *refreshed.CredentialState != codexStateImported || calls.Load() != 3 {
+		t.Fatalf("refreshed=%+v calls=%d", refreshed, calls.Load())
+	}
+	assertRefreshTokenStored(t, app, upstream.ID, "rotated-refresh-secret")
+
+	var before []byte
+	if err := app.store.db.QueryRow(`SELECT credential_ciphertext FROM upstreams WHERE id=?`, upstream.ID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return oauthHTTPResponse(http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "do-not-expose-private-provider-detail"}), nil
+	})}
+	invalid := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 2}, cookie, csrf, server.URL)
+	invalidBody := readBody(invalid)
+	if invalid.StatusCode != http.StatusConflict || !strings.Contains(invalidBody, "codex_reauthorization_required") || strings.Contains(invalidBody, "do-not-expose") {
+		t.Fatalf("invalid grant status=%d body=%s", invalid.StatusCode, invalidBody)
+	}
+	var after []byte
+	var revision int64
+	var state string
+	if err := app.store.db.QueryRow(`SELECT credential_ciphertext,revision,credential_state FROM upstreams WHERE id=?`, upstream.ID).Scan(&after, &revision, &state); err != nil {
+		t.Fatal(err)
+	}
+	if revision != 2 || state != codexStateReauth || !bytes.Equal(before, after) {
+		t.Fatal("invalid_grant partially updated the stored credential")
+	}
+}
+
+func TestCodexOAuthConcurrentRefreshAndAdministratorReplacement(t *testing.T) {
+	dataDir := t.TempDir()
+	app := openOAuthTestApp(t, dataDir)
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	oldAuth := codexAdminAuthJSON(t, time.Now().Add(time.Hour), "acct-race", "race-old-refresh")
+	upstream := importTestCodexUpstream(t, server.URL, cookie, csrf, "d408f811-3cb1-4701-821b-fe85de09c3f1", oldAuth)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	newAccess := oauthTestJWT(t, map[string]any{"exp": time.Now().Add(2 * time.Hour).Unix()})
+	newID := oauthTestJWT(t, map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-race"}})
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		close(started)
+		<-release
+		return oauthHTTPResponse(http.StatusOK, map[string]string{"access_token": newAccess, "id_token": newID, "refresh_token": "stale-network-refresh"}), nil
+	})}
+
+	refreshResult := make(chan *http.Response, 1)
+	go func() {
+		refreshResult <- codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 1}, cookie, csrf, server.URL)
+	}()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("refresh request did not reach token transport")
+	}
+	replacementAuth := codexAdminAuthJSON(t, time.Now().Add(3*time.Hour), "acct-race", "administrator-reimport-wins")
+	replaced := codexAdminRequest(t, http.MethodPut, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-auth", map[string]any{
+		"expected_revision": 1, "auth_json": replacementAuth,
+	}, cookie, csrf, server.URL)
+	if replaced.StatusCode != http.StatusOK {
+		t.Fatalf("administrator replacement status=%d body=%s", replaced.StatusCode, readBody(replaced))
+	}
+	replaced.Body.Close()
+	close(release)
+	result := <-refreshResult
+	if result.StatusCode != http.StatusConflict {
+		t.Fatalf("stale refresh status=%d body=%s", result.StatusCode, readBody(result))
+	}
+	result.Body.Close()
+	assertRefreshTokenStored(t, app, upstream.ID, "administrator-reimport-wins")
+}
+
+func TestCodexOAuthRefreshNetworkRetriesAreBounded(t *testing.T) {
+	app := &App{cfg: Config{CodexOAuthClientID: testOAuthClientID}, oauthHTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("synthetic network failure with secret marker")
+	})}}
+	started := time.Now()
+	_, err := app.requestCodexOAuthTokens(context.Background(), codexOAuthTokenRequest{GrantType: "refresh_token", ClientID: testOAuthClientID, RefreshToken: "bounded-secret"})
+	if err == nil || !err.Retryable || time.Since(started) > 3*time.Second {
+		t.Fatalf("bounded network retry err=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
+func openOAuthTestApp(t *testing.T, dataDir string) *App {
+	t.Helper()
+	if err := Initialize(context.Background(), dataDir, strings.NewReader("a-strong-preview-password\n")); err != nil {
+		t.Fatal(err)
+	}
+	app, err := Open(context.Background(), Config{
+		DataDir: dataDir, Listen: "127.0.0.1:0", AllowLoopbackUpstream: true, Version: "test",
+		ExperimentalCodexMembership: true, CodexOAuthClientID: testOAuthClientID, CodexOAuthRedirectURI: testOAuthRedirectURI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+func oauthHTTPResponse(status int, body any) *http.Response {
+	encoded, _ := json.Marshal(body)
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(encoded)),
+	}
+}
+
+func oauthTestJWT(t *testing.T, claims any) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".synthetic-signature"
+}
+
+func sha256String(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+func assertRefreshTokenStored(t *testing.T, app *App, upstreamID, expected string) {
+	t.Helper()
+	var ciphertext []byte
+	if err := app.store.db.QueryRow(`SELECT credential_ciphertext FROM upstreams WHERE id=?`, upstreamID).Scan(&ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := app.secrets.decryptCodexAuth(upstreamID, ciphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(plaintext)
+	credential, err := membership.ParseCodexAuthJSON(plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer credential.Destroy()
+	if credential.RefreshTokenSecret() != expected {
+		t.Fatalf("stored refresh token did not match expected rotation")
+	}
+}

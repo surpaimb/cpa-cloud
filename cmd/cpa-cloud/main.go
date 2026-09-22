@@ -45,6 +45,8 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.StringVar(&cfg.InstanceID, "instance-id", "", "public UUID identifying this service process in /healthz")
 	flags.BoolVar(&cfg.AllowLoopbackUpstream, "allow-loopback-upstream", false, "allow loopback upstream endpoints for local development tests")
 	flags.BoolVar(&cfg.ExperimentalCodexMembership, "experimental-codex-membership", false, "enable experimental Codex membership credential import and routing")
+	flags.StringVar(&cfg.CodexOAuthClientID, "codex-oauth-client-id", "", "registered OAuth client ID for the experimental Codex membership lifecycle")
+	flags.StringVar(&cfg.CodexOAuthRedirectURI, "codex-oauth-redirect-uri", "", "registered OAuth callback URI ending in /admin/api/v1/codex/oauth/callback")
 	flags.BoolVar(&initialize, "init", false, "initialize the data directory using an administrator password from stdin, then exit")
 	flags.BoolVar(&checkInitialized, "check-initialized", false, "check initialization without modifying the data directory; exits 0 if initialized or 3 if not")
 	flags.BoolVar(&shutdownOnStdinEOF, "shutdown-on-stdin-eof", false, "gracefully stop the running service when stdin reaches EOF")
@@ -100,6 +102,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 		return 0, nil
 	}
 	if err := service.ValidateListenConfig(cfg); err != nil {
+		return 1, err
+	}
+	if err := service.ValidateCodexOAuthConfig(cfg); err != nil {
 		return 1, err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

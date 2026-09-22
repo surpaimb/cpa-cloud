@@ -58,6 +58,19 @@ func (s *store) initialize(ctx context.Context) error {
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS codex_oauth_sessions (
+			id TEXT PRIMARY KEY,
+			operation_id TEXT NOT NULL UNIQUE,
+			admin_id TEXT NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+			admin_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			state_digest BLOB NOT NULL UNIQUE,
+			secret_ciphertext BLOB NOT NULL,
+			name TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			used_at TEXT,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS codex_oauth_sessions_expiry_idx ON codex_oauth_sessions(expires_at)`,
 		`CREATE TABLE IF NOT EXISTS employees (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,

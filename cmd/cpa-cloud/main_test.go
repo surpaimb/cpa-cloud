@@ -135,10 +135,26 @@ func TestHelpDoesNotStartOrWriteData(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("help: code=%d err=%v", code, err)
 	}
-	if !strings.Contains(output.String(), "check-initialized") || !strings.Contains(output.String(), "shutdown-on-stdin-eof") {
+	if !strings.Contains(output.String(), "check-initialized") || !strings.Contains(output.String(), "shutdown-on-stdin-eof") || !strings.Contains(output.String(), "codex-oauth-client-id") {
 		t.Fatalf("help omitted launcher flags: %s", output.String())
 	}
 	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
 		t.Fatalf("help wrote data directory: %v", err)
+	}
+}
+
+func TestInvalidCodexOAuthConfigurationDoesNotStartOrWriteData(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "unused")
+	code, err := runCLI([]string{
+		"--data-dir", dataDir,
+		"--experimental-codex-membership",
+		"--codex-oauth-client-id", "registered-client",
+		"--codex-oauth-redirect-uri", "http://example.com/admin/api/v1/codex/oauth/callback",
+	}, strings.NewReader(""), io.Discard)
+	if err == nil || code != 1 {
+		t.Fatalf("invalid OAuth configuration: code=%d err=%v", code, err)
+	}
+	if _, statErr := os.Stat(dataDir); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid OAuth configuration wrote data: %v", statErr)
 	}
 }

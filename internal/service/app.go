@@ -29,7 +29,10 @@ type App struct {
 	http      *http.Client
 	codex     codexExecutor
 	responses codexResponsesExecutor
+	oauthHTTP *http.Client
 	admission sync.RWMutex
+	refreshMu sync.Mutex
+	refreshes map[string]*sync.Mutex
 	loginMu   sync.Mutex
 	logins    map[string]*loginAttempt
 }
@@ -44,6 +47,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if cfg.Version == "" {
 		cfg.Version = "dev"
 	}
+	if err := ValidateCodexOAuthConfig(cfg); err != nil {
+		return nil, err
+	}
 	sec, err := loadSecrets(cfg.DataDir)
 	if err != nil {
 		return nil, err
@@ -57,8 +63,13 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 	client := newUpstreamClient(cfg.AllowLoopbackUpstream)
-	app := &App{cfg: cfg, store: s, secrets: sec, http: client, codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(), logins: make(map[string]*loginAttempt)}
+	app := &App{
+		cfg: cfg, store: s, secrets: sec, http: client,
+		oauthHTTP: newCodexOAuthHTTPClient(), codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(),
+		refreshes: make(map[string]*sync.Mutex), logins: make(map[string]*loginAttempt),
+	}
 	trimExpiredSessions(ctx, s.db)
+	trimCodexOAuthSessions(ctx, s.db)
 	return app, nil
 }
 
@@ -82,6 +93,9 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/v1/upstreams/codex-import", a.requireAdmin(a.importCodexUpstream, true))
 	mux.HandleFunc("PATCH /admin/api/v1/upstreams/{id}", a.requireAdmin(a.updateUpstream, true))
 	mux.HandleFunc("PUT /admin/api/v1/upstreams/{id}/codex-auth", a.requireAdmin(a.replaceCodexCredential, true))
+	mux.HandleFunc("POST /admin/api/v1/upstreams/codex-oauth-sessions", a.requireAdmin(a.createCodexOAuthSession, true))
+	mux.HandleFunc("GET /admin/api/v1/codex/oauth/callback", a.requireAdmin(a.completeCodexOAuth, false))
+	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/codex-refresh", a.requireAdmin(a.refreshCodexCredential, true))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/discover-models", a.requireAdmin(a.discoverUpstreamModels, true))
 	mux.HandleFunc("GET /admin/api/v1/models", a.requireAdmin(a.listAdminModels, false))
 	mux.HandleFunc("POST /admin/api/v1/models", a.requireAdmin(a.createModel, true))
@@ -134,7 +148,10 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"single process and single SQLite database only",
 	}
 	if a.cfg.ExperimentalCodexMembership {
-		limitations = append(limitations, "Codex membership support is experimental, import-only, and does not refresh credentials or discover models")
+		limitations = append(limitations, "Codex membership support is experimental, uses a fixed observed protocol, and has not been verified with a real account")
+		if !a.codexOAuthConfigured() {
+			limitations = append(limitations, "Codex OAuth requires explicit --codex-oauth-client-id and --codex-oauth-redirect-uri configuration")
+		}
 	} else {
 		limitations = append(limitations, "only OpenAI-compatible API-key upstreams are enabled")
 	}
@@ -146,6 +163,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"codex_membership_import": a.cfg.ExperimentalCodexMembership,
 			"responses_api":           true,
 			"responses_streaming":     true,
+			"codex_membership_oauth":  a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
 		},
 		"limitations": limitations,
 	})

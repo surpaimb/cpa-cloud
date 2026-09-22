@@ -132,6 +132,28 @@ func (s *secrets) decryptCodexAuth(upstreamID string, encoded []byte) ([]byte, e
 	return plaintext, nil
 }
 
+func (s *secrets) encryptCodexOAuthSession(sessionID string, plaintext []byte) ([]byte, error) {
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generate OAuth session nonce: %w", err)
+	}
+	aad := []byte("cpacloud/codex-oauth-session/v1\x00" + sessionID)
+	sealed := s.aead.Seal(nil, nonce, plaintext, aad)
+	return append(nonce, sealed...), nil
+}
+
+func (s *secrets) decryptCodexOAuthSession(sessionID string, encoded []byte) ([]byte, error) {
+	if len(encoded) < s.aead.NonceSize()+s.aead.Overhead() {
+		return nil, errors.New("OAuth session ciphertext is invalid")
+	}
+	nonce := encoded[:s.aead.NonceSize()]
+	plaintext, err := s.aead.Open(nil, nonce, encoded[s.aead.NonceSize():], []byte("cpacloud/codex-oauth-session/v1\x00"+sessionID))
+	if err != nil {
+		return nil, errors.New("OAuth session decryption failed")
+	}
+	return plaintext, nil
+}
+
 func randomToken(bytes int) (string, error) {
 	b := make([]byte, bytes)
 	if _, err := rand.Read(b); err != nil {

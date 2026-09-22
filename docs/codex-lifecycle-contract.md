@@ -47,8 +47,9 @@ Creates an authorization session and returns only:
 ```
 
 The URL carries an unpredictable state and an S256 PKCE challenge. The state
-digest, encrypted verifier, initiating administrator session, name and expiry
-are persisted; plaintext state and verifier are never returned by later APIs.
+digest, an encrypted session secret containing state and verifier, initiating
+administrator session, name and expiry are persisted; plaintext state and
+verifier are never exposed by a separate read API.
 The operation ID is idempotent for the same active administrator session. An
 authorization session expires after ten minutes.
 
@@ -120,8 +121,9 @@ button and callback status view in a later batch.
 ## Persistence and recovery
 
 A transactionally created `codex_oauth_sessions` table stores only state
-digests, AEAD ciphertext for PKCE verifiers, administrator/session bindings,
-expiry, use time and non-secret metadata. Startup deletes expired/used sessions.
+digests, AEAD ciphertext for state/PKCE verifier, administrator/session
+bindings, expiry, use time and non-secret metadata. Startup deletes expired or
+used sessions.
 Schema initialization and migration are idempotent; any failing statement rolls
 back without modifying existing upstream credentials, routes, employees, keys,
 or request history.

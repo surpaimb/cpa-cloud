@@ -25,6 +25,8 @@ type Config struct {
 	TLSKey                      string
 	AllowLoopbackUpstream       bool
 	ExperimentalCodexMembership bool
+	CodexOAuthClientID          string
+	CodexOAuthRedirectURI       string
 	InstanceID                  string
 	Version                     string
 }
