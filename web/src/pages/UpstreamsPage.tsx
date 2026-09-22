@@ -38,7 +38,7 @@ function MembershipFeaturePanel({ enabled, loading, error, onRetry, onImport }: 
     <div><h2 id="membership-title">Codex 会员文件导入（实验）</h2>
       {loading ? <p>正在读取实验开关…</p> : error ? <p>无法确认实验开关状态；为安全起见，导入入口已隐藏。</p> : enabled
         ? <p>仅导入管理员主动选择的 <code>auth.json</code>，导入只校验结构，不代表授权成功。模型路由需要手动创建。</p>
-        : <p>此实例未启用文件导入。启动服务时添加 <code>--experimental-codex-membership</code>；这里不会显示虚假的授权入口。</p>}
+        : <p>此实例未启用文件导入。请使用 <code>--experimental-codex-membership</code> 启动服务后重试。</p>}
       <p className="membership-panel__limits">不提供网页登录或自动刷新；凭据过期后需重新导入；不支持 Claude/Gemini。员工仍使用普通 CPA Cloud Key。</p>
     </div>
     {enabled ? <Button type="button" onClick={onImport}>导入 Codex auth.json</Button> : error ? <Button type="button" variant="secondary" onClick={onRetry}>重试读取开关</Button> : null}
@@ -95,7 +95,7 @@ export function CodexAuthImport({ csrf, upstream, onClose, onSaved }: { csrf: st
     setFile(next)
   }
 
-  return <Dialog title={replacing ? `重新导入 ${upstream.name}` : '导入 Codex 授权文件'} description={replacing ? '只有成功替换后才会更新记录；失败时旧凭据保持不变。' : '这是文件导入实验，不是网页授权登录。'} onClose={onClose}>
+  return <Dialog title={replacing ? `重新导入 ${upstream.name}` : '导入 Codex 授权文件'} description={replacing ? '服务端确认替换成功后记录才会更新；结果不明时请刷新列表核对。' : '这是文件导入实验，不是网页授权登录。'} onClose={onClose}>
     <div className="membership-limitations"><strong>导入前请确认</strong><ul>
       <li>只接受你主动选择的 Codex <code>auth.json</code>，最大 1 MiB。</li>
       <li>导入只验证文件结构；不会显示文件正文、Token 或账号内容，也不代表授权成功。</li>
@@ -117,7 +117,7 @@ export function CodexAuthImport({ csrf, upstream, onClose, onSaved }: { csrf: st
     }}>
       <div className="form-grid">
         {!replacing ? <Field label="显示名称" hint="仅用于后台识别此会员上游。"><input name="name" value={name} onChange={(event) => setName(event.target.value)} required autoFocus maxLength={120} /></Field> : null}
-        <Field label="Codex auth.json" hint="文件内容只会随本次加密导入请求发送，不会在页面中显示。"><input name="auth_json_file" type="file" accept=".json,application/json" autoFocus={replacing} onChange={chooseFile} /></Field>
+        <Field label="Codex auth.json" hint="文件内容仅发送至当前 CPA Cloud 服务，由服务端加密保存；不会在页面中显示。"><input name="auth_json_file" type="file" accept=".json,application/json" autoFocus={replacing} onChange={chooseFile} /></Field>
       </div>
       <FormError error={error} />
       <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button><Button type="submit" disabled={busy}>{busy ? '正在导入…' : replacing ? '重新导入文件' : '导入文件'}</Button></div>

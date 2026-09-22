@@ -1,6 +1,7 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { membershipMessageFor } from '../hooks'
 import { UpstreamsPage } from '../pages/UpstreamsPage'
 
 type Route = { status?: number; body?: unknown }
@@ -29,6 +30,7 @@ describe('Codex membership file import', () => {
 
     render(<UpstreamsPage csrf="csrf" />)
     expect(await screen.findByText(/--experimental-codex-membership/)).toBeInTheDocument()
+    expect(screen.queryByText(/虚假/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '导入 Codex auth.json' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '添加上游' })).toBeEnabled()
     expect(screen.getByRole('button', { name: '同步模型' })).toBeEnabled()
@@ -75,6 +77,10 @@ describe('Codex membership file import', () => {
     expect(document.body).not.toHaveTextContent(secret)
   })
 
+  it('requires a list refresh when a network failure makes the import result unknown', () => {
+    expect(membershipMessageFor(new TypeError('connection reset'))).toBe('未能确认导入结果，请刷新列表核对后重试。')
+  })
+
   it('rejects files over 1 MiB before making an import request', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
@@ -92,7 +98,7 @@ describe('Codex membership file import', () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/upstreams/codex-import'))).toBe(false)
   })
 
-  it('shows membership provider states and keeps the old record after a failed revision-safe reimport', async () => {
+  it('shows membership provider states and does not overwrite after a revision conflict', async () => {
     const secret = 'replacement-secret-not-for-dom'
     const items = [
       membershipUpstream,
@@ -123,7 +129,7 @@ describe('Codex membership file import', () => {
     await userEvent.upload(within(dialog).getByLabelText('Codex auth.json'), new File([authJSON], 'auth.json', { type: 'application/json' }))
     await userEvent.click(within(dialog).getByRole('button', { name: '重新导入文件' }))
 
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('旧凭据保持不变')
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('本次重新导入未覆盖该更新')
     expect(dialog).not.toHaveTextContent(secret)
     expect(within(firstRow!).getByText('已导入，未验证')).toBeInTheDocument()
     const put = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/upstreams/codex-1/codex-auth') && (init as RequestInit)?.method === 'PUT')

@@ -32,7 +32,7 @@ const membershipErrorMessages: Record<string, string> = {
   codex_auth_missing_refresh_token: '授权文件缺少刷新凭据，请从已登录的 Codex 客户端重新获取。',
   codex_auth_missing_account_id: '授权文件缺少账号信息，请从已登录的 Codex 客户端重新获取。',
   codex_auth_expiring: '授权文件已过期或即将过期，请先在 Codex 客户端重新登录。',
-  revision_conflict: '这条会员记录已被更新。旧凭据保持不变，请刷新后重试。',
+  revision_conflict: '这条会员记录已被其他操作更新；本次重新导入未覆盖该更新。请刷新列表后重试。',
 }
 
 export function messageFor(error: unknown) {
@@ -50,12 +50,12 @@ export function messageFor(error: unknown) {
 export function membershipMessageFor(error: unknown) {
   if (error instanceof ApiError) {
     if (membershipErrorMessages[error.code]) return membershipErrorMessages[error.code]
-    if (error.status === 409) return '导入发生冲突；现有凭据保持不变，请刷新后重试。'
+    if (error.status === 409) return '导入发生冲突；本次请求未覆盖现有记录，请刷新列表后重试。'
     if (error.status === 413) return '授权文件超过服务允许的大小。'
     if (error.status === 403) return '当前会话无权导入授权文件，请重新登录。'
     return '无法导入授权文件。文件内容未显示，请检查文件后重试。'
   }
-  return '网络连接失败。现有凭据保持不变，请检查服务后重试。'
+  return '未能确认导入结果，请刷新列表核对后重试。'
 }
 
 export function useResource<T>(loader: () => Promise<T>) {
