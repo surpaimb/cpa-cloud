@@ -22,14 +22,14 @@ Employee keys remain valid across normal restarts. Revocation, employee disablem
 
 See preview versions and their attachments on [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases). A file is downloadable only when it actually appears under the Assets section of that Release. If a Release has no attachments yet, build from source as described below. Preview versions may not appear through GitHub's `latest` link.
 
-| System | Architecture to choose |
+| System | Asset filename suffix |
 | --- | --- |
-| Standard Intel/AMD Windows computer | windows-amd64 |
-| Windows on ARM computer | windows-arm64 |
-| Intel/AMD Linux cloud server | linux-amd64 |
-| ARM Linux server | linux-arm64 |
-| Intel-based Mac | darwin-amd64 |
-| Apple Silicon Mac (M series) | darwin-arm64 |
+| Standard Intel/AMD Windows computer | windows_amd64.zip |
+| Windows on ARM computer | windows_arm64.zip |
+| Intel/AMD Linux cloud server | linux_amd64.tar.gz |
+| ARM Linux server | linux_arm64.tar.gz |
+| Intel-based Mac | macos_amd64.tar.gz |
+| Apple Silicon Mac (M series) | macos_arm64.tar.gz |
 
 An archive should contain the executable, the `web/` directory, and third-party notices. Extract everything into a dedicated directory. Go and Bun are not required to run a packaged build. Keep all notice files. Store the data directory outside the extracted application directory so it is easier to preserve during upgrades.
 

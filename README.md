@@ -22,14 +22,14 @@
 
 在 [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases) 查看预览版本及附件。仅在对应版本的 Assets 中存在的文件才是可下载交付；尚无附件时请使用下文源码构建。预览版本不一定出现在 GitHub 的 latest 链接中。
 
-| 系统 | 架构选择 |
+| 系统 | 附件文件名后缀 |
 | --- | --- |
-| Windows 普通 Intel/AMD 电脑 | windows-amd64 |
-| Windows ARM 电脑 | windows-arm64 |
-| Linux Intel/AMD 云服务器 | linux-amd64 |
-| Linux ARM 服务器 | linux-arm64 |
-| macOS Intel 芯片 | darwin-amd64 |
-| macOS Apple Silicon（M 系列） | darwin-arm64 |
+| Windows 普通 Intel/AMD 电脑 | windows_amd64.zip |
+| Windows ARM 电脑 | windows_arm64.zip |
+| Linux Intel/AMD 云服务器 | linux_amd64.tar.gz |
+| Linux ARM 服务器 | linux_arm64.tar.gz |
+| macOS Intel 芯片 | macos_amd64.tar.gz |
+| macOS Apple Silicon（M 系列） | macos_arm64.tar.gz |
 
 压缩包应包含程序、`web/` 网页目录和第三方声明。解压到独立目录，不需要安装 Go 或 Bun。保留所有声明文件。将数据放在压缩包目录以外，升级时更容易保留。
 
