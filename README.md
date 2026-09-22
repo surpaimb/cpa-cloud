@@ -2,7 +2,7 @@
 
 面向公司内部员工的单租户 AI 接入平台，依据公开协议独立实现。
 
-**当前阶段：首轮开发已启动。尚未通过集成验收，不是可部署发行版。**
+**当前阶段：开发预览已通过 Windows 隔离模拟上游的进程集成验收，尚非生产发行版。当前仅有 openai-compatible API Key 与 Chat Completions；会员接入未实现。**
 
 ## 已确认的方向
 
@@ -15,6 +15,7 @@
 
 ## 开发入口
 
+- [集成证据与未完成项](docs/integration-status.md)
 - [首轮开发计划](docs/development-plan.md)
 - [协作任务记录](docs/work-coordination.md)
 - [开发预览接口契约](docs/preview-contract.md)
