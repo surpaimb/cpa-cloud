@@ -26,12 +26,13 @@ type discoveredModel struct {
 
 func (a *App) discoverUpstreamModels(w http.ResponseWriter, r *http.Request, _ adminSession) {
 	id := r.PathValue("id")
-	var endpoint string
+	var endpoint, providerKind string
 	var enabled int
+	var keyVersion int
 	var ciphertext []byte
 	a.admission.RLock()
-	err := a.store.db.QueryRowContext(r.Context(), `SELECT endpoint,enabled,credential_ciphertext FROM upstreams WHERE id=?`, id).
-		Scan(&endpoint, &enabled, &ciphertext)
+	err := a.store.db.QueryRowContext(r.Context(), `SELECT endpoint,enabled,provider_kind,key_version,credential_ciphertext FROM upstreams WHERE id=?`, id).
+		Scan(&endpoint, &enabled, &providerKind, &keyVersion, &ciphertext)
 	a.admission.RUnlock()
 	if errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, http.StatusNotFound, "not_found", "Upstream was not found.")
@@ -41,11 +42,19 @@ func (a *App) discoverUpstreamModels(w http.ResponseWriter, r *http.Request, _ a
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
+	if providerKind == codexMembershipProvider {
+		writeModelDiscoveryError(w, r, http.StatusConflict, "model_discovery_unsupported", "Upstream model discovery is not supported.")
+		return
+	}
 	if enabled == 0 {
 		writeAdminError(w, http.StatusConflict, "upstream_disabled", "Upstream is disabled.")
 		return
 	}
 
+	if providerKind != "openai-compatible" || keyVersion != 1 {
+		writeAdminError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	credential, err := a.secrets.decryptCredential(id, ciphertext)
 	if err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is temporarily unavailable.")

@@ -19,10 +19,14 @@ type employeeAuth struct {
 	Mode       string
 }
 type route struct {
-	AccountID     string
-	Endpoint      string
-	UpstreamModel string
-	Ciphertext    []byte
+	AccountID       string
+	Endpoint        string
+	UpstreamModel   string
+	Ciphertext      []byte
+	ProviderKind    string
+	Revision        int64
+	CredentialState sql.NullString
+	KeyVersion      int
 }
 
 func (a *App) listModels(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +36,11 @@ func (a *App) listModels(w http.ResponseWriter, r *http.Request) {
 	}
 	query := `SELECT m.id,m.created_at FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND u.enabled=1`
 	args := []any{}
+	if !a.cfg.ExperimentalCodexMembership {
+		query += ` AND u.provider_kind<>'codex-membership'`
+	} else {
+		query += ` AND (u.provider_kind<>'codex-membership' OR u.credential_state<>'reauth_required')`
+	}
 	if auth.Mode == "selected" {
 		query += ` AND EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id)`
 		args = append(args, auth.EmployeeID)
@@ -131,7 +140,7 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var route route
-	err = a.store.db.QueryRowContext(r.Context(), `SELECT u.id,u.endpoint,m.upstream_model,u.credential_ciphertext FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND u.enabled=1`, model).Scan(&route.AccountID, &route.Endpoint, &route.UpstreamModel, &route.Ciphertext)
+	err = a.store.db.QueryRowContext(r.Context(), `SELECT u.id,u.endpoint,m.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND u.enabled=1`, model).Scan(&route.AccountID, &route.Endpoint, &route.UpstreamModel, &route.Ciphertext, &route.ProviderKind, &route.Revision, &route.CredentialState, &route.KeyVersion)
 	if err != nil {
 		a.admission.RUnlock()
 		writeModelError(w, 503, "no_available_route", "No available route for this model.", requestID(r.Context()))
@@ -142,6 +151,15 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	a.admission.RUnlock()
 	if err != nil {
 		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
+		return
+	}
+	if route.ProviderKind == codexMembershipProvider {
+		a.handleCodexChatCompletion(w, r, payload, model, stream, route, modelRequestID)
+		return
+	}
+	if route.ProviderKind != "openai-compatible" || route.KeyVersion != 1 {
+		a.finishRequest(modelRequestID, "failed", 0)
+		writeModelError(w, 503, "no_available_route", "No available route for this model.", modelRequestID)
 		return
 	}
 	credential, err := a.secrets.decryptCredential(route.AccountID, route.Ciphertext)

@@ -18,14 +18,15 @@ import (
 )
 
 type Config struct {
-	DataDir               string
-	Listen                string
-	WebDir                string
-	TLSCert               string
-	TLSKey                string
-	AllowLoopbackUpstream bool
-	InstanceID            string
-	Version               string
+	DataDir                     string
+	Listen                      string
+	WebDir                      string
+	TLSCert                     string
+	TLSKey                      string
+	AllowLoopbackUpstream       bool
+	ExperimentalCodexMembership bool
+	InstanceID                  string
+	Version                     string
 }
 
 const (

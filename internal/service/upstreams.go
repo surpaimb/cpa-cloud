@@ -15,12 +15,14 @@ import (
 )
 
 type upstreamView struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	ProviderKind string `json:"provider_kind"`
-	Endpoint     string `json:"endpoint"`
-	Enabled      bool   `json:"enabled"`
-	Revision     int64  `json:"revision"`
+	ID              string  `json:"id"`
+	Name            string  `json:"name"`
+	ProviderKind    string  `json:"provider_kind"`
+	Endpoint        string  `json:"endpoint"`
+	Enabled         bool    `json:"enabled"`
+	Revision        int64   `json:"revision"`
+	CredentialState *string `json:"credential_state"`
+	VerifiedAt      *string `json:"verified_at"`
 }
 
 type createUpstreamRequest struct {
@@ -31,7 +33,7 @@ type createUpstreamRequest struct {
 }
 
 func (a *App) listUpstreams(w http.ResponseWriter, r *http.Request, _ adminSession) {
-	rows, err := a.store.db.QueryContext(r.Context(), `SELECT id,name,provider_kind,endpoint,enabled,revision FROM upstreams ORDER BY created_at,id`)
+	rows, err := a.store.db.QueryContext(r.Context(), `SELECT id,name,provider_kind,endpoint,enabled,revision,credential_state,verified_at FROM upstreams ORDER BY created_at,id`)
 	if err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -41,11 +43,14 @@ func (a *App) listUpstreams(w http.ResponseWriter, r *http.Request, _ adminSessi
 	for rows.Next() {
 		var item upstreamView
 		var enabled int
-		if err := rows.Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision); err != nil {
+		var state, verified sql.NullString
+		if err := rows.Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision, &state, &verified); err != nil {
 			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 			return
 		}
 		item.Enabled = enabled != 0
+		item.CredentialState = nullString(state)
+		item.VerifiedAt = nullString(verified)
 		items = append(items, item)
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
@@ -114,7 +119,8 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 	var item upstreamView
 	var enabled int
 	var ciphertext []byte
-	err = tx.QueryRowContext(r.Context(), `SELECT id,name,provider_kind,endpoint,enabled,revision,credential_ciphertext FROM upstreams WHERE id=?`, id).Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision, &ciphertext)
+	var state, verified sql.NullString
+	err = tx.QueryRowContext(r.Context(), `SELECT id,name,provider_kind,endpoint,enabled,revision,credential_ciphertext,credential_state,verified_at FROM upstreams WHERE id=?`, id).Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision, &ciphertext, &state, &verified)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, 404, "not_found", "Upstream was not found.")
 		return
@@ -124,6 +130,8 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 		return
 	}
 	item.Enabled = enabled != 0
+	item.CredentialState = nullString(state)
+	item.VerifiedAt = nullString(verified)
 	if item.Revision != input.ExpectedRevision {
 		writeAdminError(w, 409, "revision_conflict", "The object was changed by another request.")
 		return
@@ -140,6 +148,10 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 		item.Enabled = *input.Enabled
 	}
 	if input.APIKey != nil {
+		if item.ProviderKind == codexMembershipProvider {
+			writeAdminError(w, http.StatusBadRequest, "unsupported_feature", "Codex membership credentials must be replaced with the Codex auth endpoint.")
+			return
+		}
 		if !validText(*input.APIKey, 1, 4096) {
 			writeAdminError(w, 400, "invalid_request", "Invalid upstream fields.")
 			return

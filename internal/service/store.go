@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -89,13 +90,21 @@ func (s *store) initialize(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS upstreams (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
-			provider_kind TEXT NOT NULL CHECK(provider_kind = 'openai-compatible'),
+			provider_kind TEXT NOT NULL CHECK(provider_kind IN ('openai-compatible','codex-membership')),
 			endpoint TEXT NOT NULL,
 			enabled INTEGER NOT NULL,
 			credential_ciphertext BLOB NOT NULL,
 			key_version INTEGER NOT NULL,
 			revision INTEGER NOT NULL,
-			created_at TEXT NOT NULL
+			created_at TEXT NOT NULL,
+			credential_state TEXT CHECK(credential_state IS NULL OR credential_state IN ('imported_unverified','verified','reauth_required')),
+			verified_at TEXT,
+			operation_id TEXT UNIQUE,
+			CHECK(
+				(provider_kind = 'openai-compatible' AND credential_state IS NULL AND verified_at IS NULL AND operation_id IS NULL)
+				OR
+				(provider_kind = 'codex-membership' AND credential_state IS NOT NULL AND operation_id IS NOT NULL)
+			)
 		)`,
 		`CREATE TABLE IF NOT EXISTS models (
 			id TEXT PRIMARY KEY,
@@ -121,7 +130,148 @@ func (s *store) initialize(ctx context.Context) error {
 			return fmt.Errorf("initialize database: %w", err)
 		}
 	}
+	if err := s.migrateUpstreamsForCodexMembership(ctx); err != nil {
+		return fmt.Errorf("migrate upstreams: %w", err)
+	}
 	return nil
+}
+
+const upstreamMigrationTable = "_upstreams_membership_migration"
+
+func (s *store) migrateUpstreamsForCodexMembership(ctx context.Context) error {
+	var schema string
+	if err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='upstreams'`).Scan(&schema); err != nil {
+		return err
+	}
+	columns, err := tableColumns(ctx, s.db, "upstreams")
+	if err != nil {
+		return err
+	}
+	if columns["credential_state"] && columns["verified_at"] && columns["operation_id"] && strings.Contains(strings.ToLower(schema), "codex-membership") {
+		return nil
+	}
+
+	// SQLite cannot widen a CHECK constraint in place. Foreign-key enforcement
+	// is disabled only around one transaction that rebuilds this table; the
+	// transaction runs foreign_key_check before commit and every exit restores
+	// enforcement, so a failed migration leaves the old schema and rows intact.
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	restoreForeignKeys := func() error {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if _, restoreErr := s.db.ExecContext(cleanupContext, `PRAGMA foreign_keys = ON`); restoreErr != nil {
+			return restoreErr
+		}
+		var enabled int
+		if restoreErr := s.db.QueryRowContext(cleanupContext, `PRAGMA foreign_keys`).Scan(&enabled); restoreErr != nil {
+			return restoreErr
+		}
+		if enabled != 1 {
+			return errors.New("foreign key enforcement was not restored")
+		}
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		_ = restoreForeignKeys()
+		return err
+	}
+	committed := false
+	foreignKeysRestored := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+		if !foreignKeysRestored {
+			_ = restoreForeignKeys()
+		}
+	}()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE `+upstreamMigrationTable+` (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		provider_kind TEXT NOT NULL CHECK(provider_kind IN ('openai-compatible','codex-membership')),
+		endpoint TEXT NOT NULL,
+		enabled INTEGER NOT NULL,
+		credential_ciphertext BLOB NOT NULL,
+		key_version INTEGER NOT NULL,
+		revision INTEGER NOT NULL,
+		created_at TEXT NOT NULL,
+		credential_state TEXT CHECK(credential_state IS NULL OR credential_state IN ('imported_unverified','verified','reauth_required')),
+		verified_at TEXT,
+		operation_id TEXT UNIQUE,
+		CHECK(
+			(provider_kind = 'openai-compatible' AND credential_state IS NULL AND verified_at IS NULL AND operation_id IS NULL)
+			OR
+			(provider_kind = 'codex-membership' AND credential_state IS NOT NULL AND operation_id IS NOT NULL)
+		)
+	)`); err != nil {
+		return err
+	}
+	stateExpr, verifiedExpr, operationExpr := "NULL", "NULL", "NULL"
+	if columns["credential_state"] {
+		stateExpr = "credential_state"
+	}
+	if columns["verified_at"] {
+		verifiedExpr = "verified_at"
+	}
+	if columns["operation_id"] {
+		operationExpr = "operation_id"
+	}
+	copySQL := fmt.Sprintf(`INSERT INTO %s(
+		id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at,credential_state,verified_at,operation_id
+	) SELECT id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at,%s,%s,%s FROM upstreams`,
+		upstreamMigrationTable, stateExpr, verifiedExpr, operationExpr)
+	if _, err := tx.ExecContext(ctx, copySQL); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE upstreams`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE `+upstreamMigrationTable+` RENAME TO upstreams`); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	violated := rows.Next()
+	closeErr := rows.Close()
+	if violated {
+		return errors.New("foreign key check failed")
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	if err := restoreForeignKeys(); err != nil {
+		return err
+	}
+	foreignKeysRestored = true
+	return nil
+}
+
+func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
 }
 
 func (s *store) close() error { return s.db.Close() }

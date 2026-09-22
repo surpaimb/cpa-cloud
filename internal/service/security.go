@@ -108,6 +108,30 @@ func (s *secrets) decryptCredential(accountID string, encoded []byte) (string, e
 	return string(plaintext), nil
 }
 
+func (s *secrets) encryptCodexAuth(upstreamID string, plaintext []byte) ([]byte, error) {
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generate credential nonce: %w", err)
+	}
+	aad := []byte("cpacloud/upstream-credential/v2\x00codex-membership\x00auth-json\x00" + upstreamID)
+	sealed := s.aead.Seal(nil, nonce, plaintext, aad)
+	return append(nonce, sealed...), nil
+}
+
+func (s *secrets) decryptCodexAuth(upstreamID string, encoded []byte) ([]byte, error) {
+	if len(encoded) < s.aead.NonceSize()+s.aead.Overhead() {
+		return nil, errors.New("credential ciphertext is invalid")
+	}
+	nonce := encoded[:s.aead.NonceSize()]
+	ciphertext := encoded[s.aead.NonceSize():]
+	aad := []byte("cpacloud/upstream-credential/v2\x00codex-membership\x00auth-json\x00" + upstreamID)
+	plaintext, err := s.aead.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, errors.New("credential decryption failed")
+	}
+	return plaintext, nil
+}
+
 func randomToken(bytes int) (string, error) {
 	b := make([]byte, bytes)
 	if _, err := rand.Read(b); err != nil {

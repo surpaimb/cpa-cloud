@@ -44,6 +44,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.StringVar(&cfg.TLSKey, "tls-key", "", "TLS private key file")
 	flags.StringVar(&cfg.InstanceID, "instance-id", "", "public UUID identifying this service process in /healthz")
 	flags.BoolVar(&cfg.AllowLoopbackUpstream, "allow-loopback-upstream", false, "allow loopback upstream endpoints for local development tests")
+	flags.BoolVar(&cfg.ExperimentalCodexMembership, "experimental-codex-membership", false, "enable experimental Codex membership credential import and routing")
 	flags.BoolVar(&initialize, "init", false, "initialize the data directory using an administrator password from stdin, then exit")
 	flags.BoolVar(&checkInitialized, "check-initialized", false, "check initialization without modifying the data directory; exits 0 if initialized or 3 if not")
 	flags.BoolVar(&shutdownOnStdinEOF, "shutdown-on-stdin-eof", false, "gracefully stop the running service when stdin reaches EOF")

@@ -434,6 +434,13 @@ func (a *CodexDirectAdapter) Complete(ctx context.Context, credential *CodexAuth
 	return result, nil
 }
 
+// ValidateCredentialForScheduling performs the same local-only credential
+// checks used immediately before a request. It never performs network I/O.
+func (a *CodexDirectAdapter) ValidateCredentialForScheduling(credential *CodexAuthCredential) error {
+	_, _, err := a.validateCredential(credential)
+	return err
+}
+
 func (a *CodexDirectAdapter) Stream(ctx context.Context, credential *CodexAuthCredential, request CodexTextRequest, consume func(CodexStreamEvent) error) error {
 	if consume == nil {
 		return newCodexAdapterError(CodexErrorInvalidRequest)

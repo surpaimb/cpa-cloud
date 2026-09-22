@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	adminMaxBody = 1 << 20
-	modelMaxBody = 4 << 20
+	adminMaxBody       = 1 << 20
+	codexImportMaxBody = 8 << 20
+	modelMaxBody       = 4 << 20
 )
 
 type App struct {
@@ -26,6 +27,7 @@ type App struct {
 	store     *store
 	secrets   *secrets
 	http      *http.Client
+	codex     codexExecutor
 	admission sync.RWMutex
 	loginMu   sync.Mutex
 	logins    map[string]*loginAttempt
@@ -54,7 +56,7 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 	client := newUpstreamClient(cfg.AllowLoopbackUpstream)
-	app := &App{cfg: cfg, store: s, secrets: sec, http: client, logins: make(map[string]*loginAttempt)}
+	app := &App{cfg: cfg, store: s, secrets: sec, http: client, codex: newProductionCodexExecutor(), logins: make(map[string]*loginAttempt)}
 	trimExpiredSessions(ctx, s.db)
 	return app, nil
 }
@@ -76,7 +78,9 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/v1/keys/{id}/revoke", a.requireAdmin(a.revokeKey, true))
 	mux.HandleFunc("GET /admin/api/v1/upstreams", a.requireAdmin(a.listUpstreams, false))
 	mux.HandleFunc("POST /admin/api/v1/upstreams", a.requireAdmin(a.createUpstream, true))
+	mux.HandleFunc("POST /admin/api/v1/upstreams/codex-import", a.requireAdmin(a.importCodexUpstream, true))
 	mux.HandleFunc("PATCH /admin/api/v1/upstreams/{id}", a.requireAdmin(a.updateUpstream, true))
+	mux.HandleFunc("PUT /admin/api/v1/upstreams/{id}/codex-auth", a.requireAdmin(a.replaceCodexCredential, true))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/discover-models", a.requireAdmin(a.discoverUpstreamModels, true))
 	mux.HandleFunc("GET /admin/api/v1/models", a.requireAdmin(a.listAdminModels, false))
 	mux.HandleFunc("POST /admin/api/v1/models", a.requireAdmin(a.createModel, true))
@@ -120,18 +124,26 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSession) {
+	limitations := []string{
+		"development preview; not production hardened",
+		"Responses, Messages, account pools, and reliable billing-grade usage are not implemented",
+		"backup/restore automation, production key custody, and multi-process storage are not implemented",
+		"the host administrator can access runtime secrets and must protect the data directory and master key",
+		"single process and single SQLite database only",
+	}
+	if a.cfg.ExperimentalCodexMembership {
+		limitations = append(limitations, "Codex membership support is experimental, import-only, and does not refresh credentials or discover models")
+	} else {
+		limitations = append(limitations, "only OpenAI-compatible API-key upstreams are enabled")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version": a.cfg.Version,
 		"ready":   true,
 		"storage": "sqlite-wal",
-		"limitations": []string{
-			"development preview; not production hardened",
-			"only OpenAI-compatible API-key upstreams and Chat Completions are implemented",
-			"membership accounts, Responses, Messages, account pools, and reliable billing-grade usage are not implemented",
-			"backup/restore automation, upgrade migrations, and production key custody are not implemented",
-			"the host administrator can access runtime secrets and must protect the data directory and master key",
-			"single process and single SQLite database only",
+		"features": map[string]bool{
+			"codex_membership_import": a.cfg.ExperimentalCodexMembership,
 		},
+		"limitations": limitations,
 	})
 }
 
