@@ -39,7 +39,26 @@ After downloading, verify the file against the SHA256 manifest attached to the R
 
 All following commands are run from the **extracted application directory**. The executable is named `cpa-cloud.exe` on Windows and `cpa-cloud` on Linux/macOS. If the Unix executable bit is missing, run `chmod +x ./cpa-cloud`. Windows code signing and macOS notarization are not currently promised. Evaluate provenance and signing requirements under your organization's policy; do not disable operating-system security globally.
 
-## 2. First-time initialization
+### Desktop installers (next preview)
+
+Windows Setup and macOS DMG packages passed [native GitHub builds](https://github.com/surpaimb/cpa-cloud/actions/runs/35721996938), but are not published to Releases yet. The table above still links to preview.1 portable packages. These instructions describe the new installers; download links will follow installation acceptance testing.
+
+| System | Package | Installation |
+| --- | --- | --- |
+| Intel/AMD Windows | `windows_amd64_Setup.exe` | Run Setup for the current user, then launch from the Start menu |
+| Windows on ARM | `windows_arm64_Setup.exe` | Use the ARM64 installer with the same steps |
+| Intel Mac (macOS 13 or newer) | `macos_amd64.dmg` | Open the DMG, drag `CPA Cloud.app` into Applications, then launch it from Applications |
+| Apple Silicon Mac (macOS 13 or newer) | `macos_arm64.dmg` | Use the ARM64 DMG with the same steps |
+
+The Windows installer includes the .NET runtime. On first launch, set and confirm the administrator password in the native dialog (12–72 UTF-8 bytes). Once the service is ready, the launcher opens `http://127.0.0.1:8787`; the username is `admin`. Installer users can skip sections 2 and 3 and continue with web configuration in section 4.
+
+The Windows tray or macOS menu bar provides open console, start, stop, and quit actions. Closing the browser leaves the service running; quitting the launcher stops its owned service. If port 8787 is occupied, resolve the conflict before starting. The launcher binds to loopback only. For cloud or LAN deployment, use a portable package and the HTTPS instructions below.
+
+Data lives outside the installation directory: `%LOCALAPPDATA%\CPACloud\data` on Windows, or `~/Library/Application Support/CPACloud/data` on macOS. Before upgrading, quit the launcher and back up this data, then install the new version. Uninstalling or deleting the Mac app does not intentionally remove this data directory. The launcher does not import existing CLI data, add a login/startup entry, or download updates automatically.
+
+The installer preview has no publisher code signing or Apple notarization; the operating system may block first launch. Verify provenance under your organization's policy. Current validation includes native builds, automated tests, and DMG mount/readback checks, not complete desktop interaction testing.
+
+## 2. First-time initialization (portable packages)
 
 The initial username is always `admin`. The password is supplied through stdin and must be **12–72 UTF-8 bytes** long (not 12–72 Chinese characters). After successful initialization, the process exits. Initialization is required only once.
 

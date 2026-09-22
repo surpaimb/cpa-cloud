@@ -39,7 +39,26 @@
 
 后续命令均在**解压后的程序目录**执行。Windows 程序名为 `cpa-cloud.exe`；Linux/macOS 为 `cpa-cloud`。Unix 如缺执行权限，可执行 `chmod +x ./cpa-cloud`。目前不承诺 Windows 代码签名或 macOS 公证，按公司策略评估来源及签名要求，不要全局关闭系统安全功能。
 
-## 2. 首次初始化
+### 桌面安装版（下一预览版）
+
+Windows 安装程序和 macOS DMG 已通过 [GitHub 原生构建](https://github.com/surpaimb/cpa-cloud/actions/runs/35721996938)，尚未发布到 Release；当前上表仍提供 preview.1 便携包。下面说明新安装版的使用方式，待安装验收完成后提供下载链接。
+
+| 系统 | 安装包 | 安装方式 |
+| --- | --- | --- |
+| Windows Intel/AMD | `windows_amd64_Setup.exe` | 运行安装程序，安装到当前用户，使用开始菜单启动 |
+| Windows ARM | `windows_arm64_Setup.exe` | 使用 ARM64 安装程序，操作同上 |
+| macOS Intel（13 或更新） | `macos_amd64.dmg` | 打开 DMG，将 `CPA Cloud.app` 拖入 Applications，再从应用程序目录启动 |
+| macOS Apple Silicon（13 或更新） | `macos_arm64.dmg` | 使用 ARM64 DMG，操作同上 |
+
+Windows 安装版自带 .NET 运行时，无需另外安装。首次启动在原生窗口设置并确认管理员密码（12–72 个 UTF-8 字节），服务就绪后自动打开 `http://127.0.0.1:8787`；用户名为 `admin`。使用安装版可跳过下文第 2、3 节，直接进行第 4 节网页配置。
+
+Windows 托盘或 macOS 菜单栏提供打开后台、启动、停止和退出。关闭浏览器不会停止服务；退出启动器会停止它启动的服务。端口 8787 被占用时会报错，需要先处理端口冲突。安装版默认仅本机访问；云端或内网部署请使用便携包及下文 HTTPS 配置。
+
+数据保存在 Windows `%LOCALAPPDATA%\CPACloud\data` 或 macOS `~/Library/Application Support/CPACloud/data`，与安装目录分离。升级前退出启动器并备份数据，再安装新版；卸载程序或删除 Mac 应用不会主动删除此数据目录。启动器不会自动导入既有 CLI 数据，也不自动添加开机启动或下载更新。
+
+安装预览未进行发行者代码签名或 Apple 公证；系统可能阻止首次打开，应按组织策略核验来源。当前验证包含原生构建、自动化测试和 DMG 挂载读回，不代表已完成所有桌面交互验收。
+
+## 2. 首次初始化（便携包）
 
 初始用户名固定为 `admin`。密码通过 stdin 输入，长度为 **12–72 个 UTF-8 字节**（不是中文字符数）。初始化成功后程序退出，只需执行一次。
 
