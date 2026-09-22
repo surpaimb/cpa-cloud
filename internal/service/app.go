@@ -28,6 +28,7 @@ type App struct {
 	secrets   *secrets
 	http      *http.Client
 	codex     codexExecutor
+	responses codexResponsesExecutor
 	admission sync.RWMutex
 	loginMu   sync.Mutex
 	logins    map[string]*loginAttempt
@@ -56,7 +57,7 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 	client := newUpstreamClient(cfg.AllowLoopbackUpstream)
-	app := &App{cfg: cfg, store: s, secrets: sec, http: client, codex: newProductionCodexExecutor(), logins: make(map[string]*loginAttempt)}
+	app := &App{cfg: cfg, store: s, secrets: sec, http: client, codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(), logins: make(map[string]*loginAttempt)}
 	trimExpiredSessions(ctx, s.db)
 	return app, nil
 }
@@ -87,6 +88,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/api/v1/system/status", a.requireAdmin(a.systemStatus, false))
 	mux.HandleFunc("GET /v1/models", a.listModels)
 	mux.HandleFunc("POST /v1/chat/completions", a.chatCompletions)
+	mux.HandleFunc("POST /v1/responses", a.responsesAPI)
 	if strings.TrimSpace(a.cfg.WebDir) != "" {
 		mux.HandleFunc("GET /", a.serveWeb)
 	}
@@ -126,7 +128,7 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSession) {
 	limitations := []string{
 		"development preview; not production hardened",
-		"Responses, Messages, account pools, and reliable billing-grade usage are not implemented",
+		"Responses resources, background execution, Messages, account pools, and reliable billing-grade usage are not implemented",
 		"backup/restore automation, production key custody, and multi-process storage are not implemented",
 		"the host administrator can access runtime secrets and must protect the data directory and master key",
 		"single process and single SQLite database only",
@@ -142,6 +144,8 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"storage": "sqlite-wal",
 		"features": map[string]bool{
 			"codex_membership_import": a.cfg.ExperimentalCodexMembership,
+			"responses_api":           true,
+			"responses_streaming":     true,
 		},
 		"limitations": limitations,
 	})

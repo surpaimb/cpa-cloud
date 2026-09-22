@@ -372,8 +372,22 @@ func (a *App) markCodexVerified(id string, revision int64) error {
 	if err != nil {
 		return err
 	}
-	_, err = result.RowsAffected()
-	return err
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		var currentRevision int64
+		var currentState string
+		if queryErr := a.store.db.QueryRowContext(ctx, `SELECT revision,credential_state FROM upstreams WHERE id=? AND provider_kind=?`, id, codexMembershipProvider).Scan(&currentRevision, &currentState); queryErr != nil {
+			return queryErr
+		}
+		if currentRevision == revision && currentState == codexStateVerified {
+			return nil
+		}
+		return errors.New("Codex credential state changed during request")
+	}
+	return nil
 }
 
 func (a *App) markCodexReauthentication(id string, revision int64) error {

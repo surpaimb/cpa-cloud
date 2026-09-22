@@ -308,11 +308,26 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, response *ht
 }
 
 func (a *App) finishRequest(id, outcome string, status int) {
+	_ = a.finishRequestChecked(id, outcome, status)
+}
+
+func (a *App) finishRequestChecked(id, outcome string, status int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	var upstream any
 	if status != 0 {
 		upstream = status
 	}
-	_, _ = a.store.db.ExecContext(ctx, `UPDATE model_requests SET outcome=?,finished_at=?,upstream_status=? WHERE id=? AND outcome='running'`, outcome, utcNow(), upstream, id)
+	result, err := a.store.db.ExecContext(ctx, `UPDATE model_requests SET outcome=?,finished_at=?,upstream_status=? WHERE id=? AND outcome='running'`, outcome, utcNow(), upstream, id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return errors.New("model request state changed during request")
+	}
+	return nil
 }
