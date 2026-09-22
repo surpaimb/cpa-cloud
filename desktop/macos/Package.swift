@@ -11,7 +11,14 @@ let package = Package(
         .executable(name: "CPACloudLauncher", targets: ["CPACloudLauncher"]),
     ],
     targets: [
-        .target(name: "CPACloudLauncherCore"),
+        .target(
+            name: "CPACloudLauncherShim",
+            publicHeadersPath: "include"
+        ),
+        .target(
+            name: "CPACloudLauncherCore",
+            dependencies: ["CPACloudLauncherShim"]
+        ),
         .executableTarget(
             name: "CPACloudLauncher",
             dependencies: ["CPACloudLauncherCore"]

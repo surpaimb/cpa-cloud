@@ -31,7 +31,7 @@ public struct ServerCLI {
         process.standardError = FileHandle.nullDevice
 
         var inputPipe: Pipe?
-        if let stdin {
+        if stdin != nil {
             let pipe = Pipe()
             process.standardInput = pipe
             inputPipe = pipe

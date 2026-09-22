@@ -1,3 +1,4 @@
+import CPACloudLauncherShim
 import Darwin
 import Foundation
 
@@ -11,7 +12,7 @@ public final class SingleInstanceLock {
             throw SingleInstanceError.lockUnavailable
         }
         _ = Darwin.fcntl(fd, F_SETFD, FD_CLOEXEC)
-        guard Darwin.flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+        guard cpa_cloud_flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             Darwin.close(fd)
             throw SingleInstanceError.alreadyRunning
         }
@@ -20,7 +21,7 @@ public final class SingleInstanceLock {
 
     deinit {
         if descriptor >= 0 {
-            Darwin.flock(descriptor, LOCK_UN)
+            _ = cpa_cloud_flock(descriptor, LOCK_UN)
             Darwin.close(descriptor)
         }
     }
