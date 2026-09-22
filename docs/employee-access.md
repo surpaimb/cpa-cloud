@@ -1,6 +1,6 @@
 # 员工直接使用 CC Switch
 
-状态：产品方向确认；实际兼容性待 CPA Cloud 实现后验证。
+状态：CPA Cloud 已实现开发预览的 Chat Completions API Key 闭环；CC Switch 与实际工具的完整兼容性仍待验证。
 
 ## 接入流程
 
@@ -23,7 +23,7 @@ CC Switch 是配置工具，也有可选本地代理模式。普通配置模式�
 
 ## 配置指引
 
-后台提供按 Codex、Claude Code、Gemini CLI 分开的接入说明，逐项列出 Base URL、认证方式、模型和已验证版本。
+规划中的后台接入说明将按 Codex、Claude Code、Gemini CLI 分开，列出 Base URL、认证方式、模型和已验证版本；当前未实现这些工具需要的全部协议或一键配置。
 上游有 Gemini 账号不等于 Gemini CLI 已兼容；需单独验证其客户端协议，不能只以 /v1/models 通过代替。
 仅将已验证的客户端配置标记为可用，提供普通手工配置路径，不强制 CC Switch。
 
