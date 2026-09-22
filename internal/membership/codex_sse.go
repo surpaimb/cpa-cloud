@@ -14,10 +14,10 @@ type codexSSEState struct {
 	responseID   string
 	text         strings.Builder
 	finalText    strings.Builder
+	doneItems    map[string]codexSeenOutputItem
 	usage        CodexUsage
 	unknown      int
 	completed    bool
-	sawTextDelta bool
 	sawFinalItem bool
 }
 
@@ -127,18 +127,53 @@ func (s *codexSSEState) consumeEvent(data []byte, consume func(CodexStreamEvent)
 		if json.Unmarshal(data, &event) != nil || event.Delta == nil {
 			return newCodexAdapterError(CodexErrorProtocol)
 		}
-		s.sawTextDelta = true
 		_, _ = s.text.WriteString(*event.Delta)
 		return emitCodexEvent(consume, CodexStreamEvent{kind: CodexEventTextDelta, text: *event.Delta})
+	case "response.output_item.added":
+		return consumeCodexOutputItemAdded(data)
 	case "response.output_item.done":
 		return s.consumeOutputItem(data)
+	case "response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_part.done",
+		"response.reasoning_text.delta",
+		"response.content_part.added",
+		"response.content_part.done",
+		"response.in_progress",
+		"response.metadata",
+		"codex.response.metadata",
+		"response.output_text.done",
+		"responsesapi.websocket_timing":
+		// The pinned official client treats these as non-text metadata or
+		// framing. This text-only adapter deliberately does not expose
+		// chain-of-thought.
+		return nil
+	case "response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.done":
+		return newCodexAdapterError(CodexErrorUnsupportedFeature)
 	case "response.completed":
 		if s.completed {
 			return newCodexAdapterError(CodexErrorProtocol)
 		}
-		usage, responseID, err := parseCodexCompleted(data)
+		usage, responseID, output, err := parseCodexCompleted(data)
 		if err != nil {
 			return err
+		}
+		completedText, completedHasMessage, err := parseCodexCompletedOutput(output)
+		if err != nil {
+			return err
+		}
+		if completedHasMessage {
+			if s.sawFinalItem && s.finalText.String() != completedText {
+				return newCodexAdapterError(CodexErrorProtocol)
+			}
+			if !s.sawFinalItem {
+				s.sawFinalItem = true
+				_, _ = s.finalText.WriteString(completedText)
+			}
 		}
 		if responseID != "" {
 			if s.responseID != "" && s.responseID != responseID {
@@ -146,8 +181,19 @@ func (s *codexSSEState) consumeEvent(data []byte, consume func(CodexStreamEvent)
 			}
 			s.responseID = responseID
 		}
-		if s.sawFinalItem && s.sawTextDelta && s.text.String() != s.finalText.String() {
-			return newCodexAdapterError(CodexErrorProtocol)
+		if s.sawFinalItem {
+			visibleText := s.text.String()
+			finalText := s.finalText.String()
+			if !strings.HasPrefix(finalText, visibleText) {
+				return newCodexAdapterError(CodexErrorProtocol)
+			}
+			missingText := strings.TrimPrefix(finalText, visibleText)
+			if missingText != "" {
+				_, _ = s.text.WriteString(missingText)
+				if err := emitCodexEvent(consume, CodexStreamEvent{kind: CodexEventTextDelta, text: missingText}); err != nil {
+					return err
+				}
+			}
 		}
 		s.usage = usage
 		if usage.known() {
@@ -195,38 +241,149 @@ func (s *codexSSEState) consumeEvent(data []byte, consume func(CodexStreamEvent)
 	}
 }
 
+type codexOutputItem struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Role    string `json:"role"`
+	Summary []struct {
+		Type string  `json:"type"`
+		Text *string `json:"text"`
+	} `json:"summary"`
+	Content []struct {
+		Type string  `json:"type"`
+		Text *string `json:"text"`
+	} `json:"content"`
+	EncryptedContent json.RawMessage `json:"encrypted_content"`
+}
+
+type codexSeenOutputItem struct {
+	kind string
+	text string
+}
+
 func (s *codexSSEState) consumeOutputItem(data []byte) error {
 	var event struct {
-		Item struct {
-			Type    string `json:"type"`
-			Role    string `json:"role"`
-			Content []struct {
-				Type string  `json:"type"`
-				Text *string `json:"text"`
-			} `json:"content"`
-		} `json:"item"`
+		Item codexOutputItem `json:"item"`
 	}
 	if json.Unmarshal(data, &event) != nil || event.Item.Type == "" {
 		return newCodexAdapterError(CodexErrorProtocol)
 	}
-	if event.Item.Type != "message" || event.Item.Role != "assistant" {
-		return newCodexAdapterError(CodexErrorUnsupportedFeature)
+	text, isMessage, err := parseCodexOutputItem(event.Item)
+	if err != nil {
+		return err
+	}
+	duplicate, err := s.recordDoneItem(event.Item, text)
+	if err != nil || duplicate {
+		return err
+	}
+	if !isMessage {
+		return nil
 	}
 	s.sawFinalItem = true
-	for _, content := range event.Item.Content {
-		if content.Type != "output_text" || content.Text == nil {
-			return newCodexAdapterError(CodexErrorUnsupportedFeature)
-		}
-		_, _ = s.finalText.WriteString(*content.Text)
-	}
+	_, _ = s.finalText.WriteString(text)
 	return nil
 }
 
-func parseCodexCompleted(data []byte) (CodexUsage, string, error) {
+func (s *codexSSEState) recordDoneItem(item codexOutputItem, text string) (bool, error) {
+	if item.ID == "" {
+		return false, nil
+	}
+	if seen, ok := s.doneItems[item.ID]; ok {
+		if seen.kind != item.Type || seen.text != text {
+			return false, newCodexAdapterError(CodexErrorProtocol)
+		}
+		return true, nil
+	}
+	if s.doneItems == nil {
+		s.doneItems = make(map[string]codexSeenOutputItem)
+	}
+	s.doneItems[item.ID] = codexSeenOutputItem{kind: item.Type, text: text}
+	return false, nil
+}
+
+func consumeCodexOutputItemAdded(data []byte) error {
+	var event struct {
+		Item codexOutputItem `json:"item"`
+	}
+	if json.Unmarshal(data, &event) != nil || event.Item.Type == "" {
+		return newCodexAdapterError(CodexErrorProtocol)
+	}
+	_, _, err := parseCodexOutputItem(event.Item)
+	return err
+}
+
+func parseCodexOutputItem(item codexOutputItem) (string, bool, error) {
+	switch item.Type {
+	case "reasoning":
+		if item.Summary == nil {
+			return "", false, newCodexAdapterError(CodexErrorProtocol)
+		}
+		for _, summary := range item.Summary {
+			if summary.Type != "summary_text" || summary.Text == nil {
+				return "", false, newCodexAdapterError(CodexErrorProtocol)
+			}
+		}
+		for _, content := range item.Content {
+			if (content.Type != "reasoning_text" && content.Type != "text") || content.Text == nil {
+				return "", false, newCodexAdapterError(CodexErrorProtocol)
+			}
+		}
+		if len(item.EncryptedContent) > 0 && !isJSONNull(item.EncryptedContent) {
+			var encryptedContent string
+			if json.Unmarshal(item.EncryptedContent, &encryptedContent) != nil {
+				return "", false, newCodexAdapterError(CodexErrorProtocol)
+			}
+		}
+		// Reasoning summary, raw content, and encrypted content are normal
+		// protocol metadata but outside this text-response surface. Do not
+		// retain or forward them.
+		return "", false, nil
+	case "message":
+		if item.Role != "assistant" {
+			return "", false, newCodexAdapterError(CodexErrorUnsupportedFeature)
+		}
+		if item.Content == nil {
+			return "", false, newCodexAdapterError(CodexErrorProtocol)
+		}
+		var text strings.Builder
+		for _, content := range item.Content {
+			if content.Type != "output_text" || content.Text == nil {
+				return "", false, newCodexAdapterError(CodexErrorUnsupportedFeature)
+			}
+			_, _ = text.WriteString(*content.Text)
+		}
+		return text.String(), true, nil
+	default:
+		return "", false, newCodexAdapterError(CodexErrorUnsupportedFeature)
+	}
+}
+
+func parseCodexCompletedOutput(output []json.RawMessage) (string, bool, error) {
+	var text strings.Builder
+	hasMessage := false
+	for _, rawItem := range output {
+		var item codexOutputItem
+		if validateJSON(rawItem) != nil || json.Unmarshal(rawItem, &item) != nil || item.Type == "" {
+			return "", false, newCodexAdapterError(CodexErrorProtocol)
+		}
+		itemText, isMessage, err := parseCodexOutputItem(item)
+		if err != nil {
+			return "", false, err
+		}
+		if isMessage {
+			hasMessage = true
+			_, _ = text.WriteString(itemText)
+		}
+	}
+	return text.String(), hasMessage, nil
+}
+
+func parseCodexCompleted(data []byte) (CodexUsage, string, []json.RawMessage, error) {
 	var event struct {
 		Response *struct {
-			ID    string `json:"id"`
-			Usage *struct {
+			ID     string            `json:"id"`
+			Output []json.RawMessage `json:"output"`
+			Usage  *struct {
 				InputTokens       *int64 `json:"input_tokens"`
 				OutputTokens      *int64 `json:"output_tokens"`
 				TotalTokens       *int64 `json:"total_tokens"`
@@ -240,7 +397,7 @@ func parseCodexCompleted(data []byte) (CodexUsage, string, error) {
 		} `json:"response"`
 	}
 	if json.Unmarshal(data, &event) != nil || event.Response == nil {
-		return CodexUsage{}, "", newCodexAdapterError(CodexErrorProtocol)
+		return CodexUsage{}, "", nil, newCodexAdapterError(CodexErrorProtocol)
 	}
 	usage := CodexUsage{}
 	if event.Response.Usage != nil {
@@ -254,10 +411,10 @@ func parseCodexCompleted(data []byte) (CodexUsage, string, error) {
 			usage.ReasoningOutputTokens = event.Response.Usage.OutputTokenDetails.ReasoningTokens
 		}
 		if hasNegativeCodexUsage(usage) {
-			return CodexUsage{}, "", newCodexAdapterError(CodexErrorProtocol)
+			return CodexUsage{}, "", nil, newCodexAdapterError(CodexErrorProtocol)
 		}
 	}
-	return usage, event.Response.ID, nil
+	return usage, event.Response.ID, event.Response.Output, nil
 }
 
 func hasNegativeCodexUsage(usage CodexUsage) bool {
@@ -280,9 +437,5 @@ func emitCodexEvent(consume func(CodexStreamEvent) error, event CodexStreamEvent
 }
 
 func (s *codexSSEState) result() *CodexTextResult {
-	text := s.text.String()
-	if !s.sawTextDelta {
-		text = s.finalText.String()
-	}
-	return &CodexTextResult{text: text, responseID: s.responseID, usage: s.usage, unknownCount: s.unknown}
+	return &CodexTextResult{text: s.text.String(), responseID: s.responseID, usage: s.usage, unknownCount: s.unknown}
 }

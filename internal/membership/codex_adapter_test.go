@@ -165,6 +165,92 @@ func TestCodexDirectAdapterStreamEmitsNeutralEvents(t *testing.T) {
 	}
 }
 
+func TestCodexDirectAdapterStreamFinalItemFallbackExactlyOnce(t *testing.T) {
+	stream := `data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"response-secret-marker"}]}}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"resp"}}` + "\n\n"
+	adapter, credential, closeServer := testCodexSSEAdapter(t, stream)
+	defer closeServer()
+
+	var events []CodexStreamEvent
+	err := adapter.Stream(context.Background(), credential, testCodexTextRequest(), func(event CodexStreamEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	if len(events) != 2 || events[0].Kind() != CodexEventTextDelta || events[0].Text() != testResponseMarker || events[1].Kind() != CodexEventCompleted {
+		t.Fatalf("final item fallback events = %#v", events)
+	}
+}
+
+func TestCodexDirectAdapterStreamDoesNotDuplicateExistingDeltas(t *testing.T) {
+	stream := `data: {"type":"response.output_text.delta","delta":"response-secret-"}` + "\n\n" +
+		`data: {"type":"response.output_text.delta","delta":"marker"}` + "\n\n" +
+		`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"response-secret-marker"}]}}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"resp"}}` + "\n\n"
+	adapter, credential, closeServer := testCodexSSEAdapter(t, stream)
+	defer closeServer()
+
+	var deltas []string
+	err := adapter.Stream(context.Background(), credential, testCodexTextRequest(), func(event CodexStreamEvent) error {
+		if event.Kind() == CodexEventTextDelta {
+			deltas = append(deltas, event.Text())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	if len(deltas) != 2 || strings.Join(deltas, "") != testResponseMarker {
+		t.Fatalf("text deltas were duplicated or lost: %q", deltas)
+	}
+}
+
+func TestCodexDirectAdapterStreamFillsOnlyMissingFinalSuffix(t *testing.T) {
+	stream := `data: {"type":"response.output_text.delta","delta":"response-secret-"}` + "\n\n" +
+		`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"response-secret-marker"}]}}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"resp"}}` + "\n\n"
+	adapter, credential, closeServer := testCodexSSEAdapter(t, stream)
+	defer closeServer()
+
+	var deltas []string
+	err := adapter.Stream(context.Background(), credential, testCodexTextRequest(), func(event CodexStreamEvent) error {
+		if event.Kind() == CodexEventTextDelta {
+			deltas = append(deltas, event.Text())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	want := []string{"response-secret-", "marker"}
+	if len(deltas) != len(want) || deltas[0] != want[0] || deltas[1] != want[1] {
+		t.Fatalf("suffix reconciliation deltas = %q, want %q", deltas, want)
+	}
+}
+
+func TestCodexDirectAdapterDeduplicatesRepeatedDoneItemByID(t *testing.T) {
+	item := `data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"response-secret-marker"}]}}` + "\n\n"
+	stream := item + item + `data: {"type":"response.completed","response":{"id":"resp"}}` + "\n\n"
+	adapter, credential, closeServer := testCodexSSEAdapter(t, stream)
+	defer closeServer()
+
+	var deltas []string
+	err := adapter.Stream(context.Background(), credential, testCodexTextRequest(), func(event CodexStreamEvent) error {
+		if event.Kind() == CodexEventTextDelta {
+			deltas = append(deltas, event.Text())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	if len(deltas) != 1 || deltas[0] != testResponseMarker {
+		t.Fatalf("repeated item produced duplicate text: %q", deltas)
+	}
+}
+
 func TestCodexDirectAdapterCompletedUsageFieldsRemainUnknown(t *testing.T) {
 	adapter, credential, closeServer := testCodexSSEAdapter(t, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp\"}}\n\n")
 	defer closeServer()
@@ -235,10 +321,122 @@ func TestCodexDirectAdapterTerminalFailureEventsAreRedacted(t *testing.T) {
 }
 
 func TestCodexDirectAdapterRejectsUnsupportedOutputItem(t *testing.T) {
-	adapter, credential, closeServer := testCodexSSEAdapter(t, `data: {"type":"response.output_item.done","item":{"type":"function_call","name":"danger"}}`+"\n\n")
+	for _, eventType := range []string{"response.output_item.added", "response.output_item.done"} {
+		t.Run(eventType, func(t *testing.T) {
+			stream := fmt.Sprintf("data: {\"type\":%q,\"item\":{\"type\":\"function_call\",\"name\":\"danger\"}}\n\n", eventType)
+			adapter, credential, closeServer := testCodexSSEAdapter(t, stream)
+			defer closeServer()
+			_, err := adapter.Complete(context.Background(), credential, testCodexTextRequest())
+			assertCodexAdapterError(t, err, CodexErrorUnsupportedFeature)
+		})
+	}
+	t.Run("response.completed output", func(t *testing.T) {
+		stream := `data: {"type":"response.completed","response":{"id":"resp","output":[{"type":"function_call","name":"danger","call_id":"call_1","arguments":"{}"}]}}` + "\n\n"
+		adapter, credential, closeServer := testCodexSSEAdapter(t, stream)
+		defer closeServer()
+		_, err := adapter.Complete(context.Background(), credential, testCodexTextRequest())
+		assertCodexAdapterError(t, err, CodexErrorUnsupportedFeature)
+	})
+}
+
+func TestCodexDirectAdapterAcceptsPinnedReasoningMetadataSequence(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_reasoning"}}`,
+		"",
+		`data: {"type":"response.output_item.added","item":{"type":"reasoning","id":"rs_1","summary":[]}}`,
+		"",
+		`data: {"type":"response.reasoning_summary_part.added","item_id":"rs_1","summary_index":0}`,
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","summary_index":0,"delta":"private summary"}`,
+		"",
+		`data: {"type":"response.reasoning_summary_text.done","item_id":"rs_1","summary_index":0,"text":"private summary"}`,
+		"",
+		`data: {"type":"response.reasoning_summary_part.done","item_id":"rs_1","summary_index":0}`,
+		"",
+		`data: {"type":"response.reasoning_text.delta","item_id":"rs_1","content_index":0,"delta":"private reasoning"}`,
+		"",
+		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"private summary"}],"content":[{"type":"reasoning_text","text":"private reasoning"}],"encrypted_content":"opaque"}}`,
+		"",
+		`data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant","id":"msg_1","content":[]}}`,
+		"",
+		`data: {"type":"response.content_part.added","item_id":"msg_1","content_index":0,"part":{"type":"output_text","text":""}}`,
+		"",
+		`data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"response-secret-marker"}`,
+		"",
+		`data: {"type":"response.output_text.done","item_id":"msg_1","text":"response-secret-marker"}`,
+		"",
+		`data: {"type":"response.content_part.done","item_id":"msg_1","content_index":0,"part":{"type":"output_text","text":"response-secret-marker"}}`,
+		"",
+		`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","id":"msg_1","content":[{"type":"output_text","text":"response-secret-marker"}]}}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_reasoning","output":[{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"},{"type":"message","role":"assistant","id":"msg_1","content":[{"type":"output_text","text":"response-secret-marker"}]}]}}`,
+		"",
+	}, "\n")
+	adapter, credential, closeServer := testCodexSSEAdapter(t, stream)
 	defer closeServer()
-	_, err := adapter.Complete(context.Background(), credential, testCodexTextRequest())
-	assertCodexAdapterError(t, err, CodexErrorUnsupportedFeature)
+
+	var events []CodexStreamEvent
+	err := adapter.Stream(context.Background(), credential, testCodexTextRequest(), func(event CodexStreamEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	wantKinds := []CodexEventKind{CodexEventStarted, CodexEventTextDelta, CodexEventCompleted}
+	if len(events) != len(wantKinds) {
+		t.Fatalf("reasoning sequence event count = %d, want %d: %#v", len(events), len(wantKinds), events)
+	}
+	for index, want := range wantKinds {
+		if events[index].Kind() != want {
+			t.Fatalf("reasoning sequence event %d = %q, want %q", index, events[index].Kind(), want)
+		}
+	}
+	if events[1].Text() != testResponseMarker || events[2].UnknownEventCount() != 0 {
+		t.Fatalf("reasoning metadata affected text or unknown count")
+	}
+}
+
+func TestCodexDirectAdapterRejectsMalformedKnownOutputItems(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		item string
+	}{
+		{"message missing content", `{"type":"message","role":"assistant"}`},
+		{"reasoning missing summary", `{"type":"reasoning","encrypted_content":"opaque"}`},
+		{"reasoning invalid encrypted content", `{"type":"reasoning","summary":[],"encrypted_content":42}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stream := `data: {"type":"response.output_item.done","item":` + test.item + `}` + "\n\n"
+			adapter, credential, closeServer := testCodexSSEAdapter(t, stream)
+			defer closeServer()
+			_, err := adapter.Complete(context.Background(), credential, testCodexTextRequest())
+			assertCodexAdapterError(t, err, CodexErrorProtocol)
+		})
+	}
+}
+
+func TestCodexDirectAdapterUsesCompletedOutputAsTextFallback(t *testing.T) {
+	stream := `data: {"type":"response.completed","response":{"id":"resp","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"response-secret-marker"}]}]}}` + "\n\n"
+	adapter, credential, closeServer := testCodexSSEAdapter(t, stream)
+	defer closeServer()
+
+	var events []CodexStreamEvent
+	err := adapter.Stream(context.Background(), credential, testCodexTextRequest(), func(event CodexStreamEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	if len(events) != 2 || events[0].Kind() != CodexEventTextDelta || events[0].Text() != testResponseMarker || events[1].Kind() != CodexEventCompleted {
+		t.Fatalf("completed.output fallback events = %#v", events)
+	}
+
+	result, err := adapter.Complete(context.Background(), credential, testCodexTextRequest())
+	if err != nil || result.Text() != testResponseMarker {
+		t.Fatalf("completed.output aggregate fallback failed: result=%v error=%v", result, err)
+	}
 }
 
 func TestCodexDirectAdapterFinalItemFallbackAndConsistency(t *testing.T) {

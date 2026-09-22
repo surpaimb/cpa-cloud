@@ -2,7 +2,7 @@
 
 状态：实验性内部实现；未接公开 API、数据库、调度器或真实会员账号
 
-实现日期：2026-09-22
+实现日期：2026-09-23
 
 协议基线：OpenAI 官方 `openai/codex` commit `44b857c00e5803adedbc5b2e94c4a33574a157fe`，具体证据和逐字段出处见 [`codex-direct-protocol.md`](./codex-direct-protocol.md)。本实现依据该固定版本的公开协议规格独立编写，没有复制官方客户端实现。
 
@@ -46,14 +46,19 @@ POST https://chatgpt.com/backend-api/codex/responses
 
 - `response.created`
 - `response.output_text.delta`
-- `response.output_item.done`（仅 assistant `output_text`）
+- `response.output_item.added` / `response.output_item.done`（assistant `output_text`，以及只忽略的 reasoning metadata）
+- `response.reasoning_summary_text.*`、`response.reasoning_summary_part.*`、`response.reasoning_text.delta`（确认属于 reasoning metadata，既不暴露也不保留）
 - `response.completed`
 - `response.incomplete`
 - `response.failed`
 
-只有 `response.completed` 构成成功。先收到的 delta 在 EOF、连接错误、超时、取消、failed 或 incomplete 后不会作为成功结果返回。非流式 `Complete` 仍消费上游 SSE 并在完成后聚合文本；流式 `Stream` 逐个发出中立事件。若上游没有 delta，但提供了受支持的最终 message item，聚合结果使用最终文本。
+只有 `response.completed` 构成成功。先收到的 delta 在 EOF、连接错误、超时、取消、failed 或 incomplete 后不会作为成功结果返回。非流式 `Complete` 仍消费上游 SSE 并在完成后聚合文本；流式 `Stream` 逐个发出中立事件。若上游没有 delta，但提供了受支持的最终 message item，`Complete` 使用最终文本，`Stream` 会在 completed 前补发且只补发一个 text delta；已有 delta 是最终文本的严格前缀时只补缺失后缀，已经完整时不补，不一致时返回协议错误。
 
-未知事件只计数和忽略，不能完成请求。`output_item.done` 中的工具或未知 content 明确失败。completed usage 的 input、cached input、output、reasoning output 和 total token 字段都使用可空值；缺失保持 unknown，不伪造为零。负 usage 视为协议错误。
+固定 commit 的 [`ResponseItem::Reasoning`](https://github.com/openai/codex/blob/44b857c00e5803adedbc5b2e94c4a33574a157fe/codex-rs/protocol/src/models.rs#L939-L989) 和[官方测试夹具](https://github.com/openai/codex/blob/44b857c00e5803adedbc5b2e94c4a33574a157fe/codex-rs/core/tests/common/responses.rs#L770-L812)表明 reasoning item 是正常推理流的一部分，包含 summary、可选 raw content 和 encrypted content；本适配器的文本合同不转发 chain-of-thought，因此只验证已知外形后丢弃这些字段。工具、图片生成、web search 及其他 item 即使出现在 `output_item.added` 阶段也明确失败，未知事件只计数和忽略，不能完成请求。
+
+固定 commit 的[官方 SSE parser](https://github.com/openai/codex/blob/44b857c00e5803adedbc5b2e94c4a33574a157fe/codex-rs/codex-api/src/sse/responses.rs#L465-L488)将正文交给 `output_item.done`/delta 事件，`response.completed` 只读取 id、usage 和终止元数据；官方 Response 对象仍可携带完整 output。实现把 completed.response.output 作为有界兜底并复用同一严格 item 校验：message 可补回缺失正文，reasoning 只识别后忽略，工具和未知 item 仍失败。重复投递的同 ID message done item 只有类型和可见文本一致才去重，否则协议失败；reasoning 内容不为去重而持久保留。已收到正文时，completed.output 必须与最终 message 精确一致且不会二次发出；没有 output 且没有正文的 completed 仍按官方 [`emits_completed_without_stream_end`](https://github.com/openai/codex/blob/44b857c00e5803adedbc5b2e94c4a33574a157fe/codex-rs/codex-api/src/sse/responses.rs#L1005-L1046) 行为视为合法空结果。
+
+completed usage 的 input、cached input、output、reasoning output 和 total token 字段都使用可空值；缺失保持 unknown，不伪造为零。负 usage 视为协议错误。
 
 默认边界为：单 SSE 行 1 MiB、单事件 1 MiB、整个响应 8 MiB、请求超时两分钟。调用方 context 的取消和 deadline 直接传播到 HTTP 请求。HTTP redirect 被拒绝；401 零重试；403 只有在短码明确为 Agent Identity 要求时映射为 `auth_mode_unsupported`；429 保留有界 Retry-After 元数据。
 
@@ -69,6 +74,9 @@ POST https://chatgpt.com/backend-api/codex/responses
 
 - 固定 method/path/认证头和最小 JSON 快照，包括省略及 `null` 字段；
 - 任意 TCP chunk 下的 SSE delta、最终 item、completed 和 usage；
+- 只有最终 message item 时流式补发正文恰好一次，已有 delta 时不重复；
+- 官方 reasoning added/delta/done + assistant message 的真实形态序列不会误判为工具；
+- 工具 item 在 added/done/completed.output 阶段均拒绝，completed.output 单独携带正文时只补发一次；
 - completed 缺少 usage 时保持 unknown；
 - delta 后 EOF、failed、incomplete、未知事件、空 data 和未知输出 item；
 - 缺少 account ID、JWT 无法调度、临近过期以及不支持输入均在联网前失败；
