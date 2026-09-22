@@ -12,8 +12,9 @@
 | --- | --- |
 | 网页后台、管理员会话、员工启停、模型权限 | 多租户、SSO、管理员密码重置命令 |
 | 一人多个 Key、默认永久有效、可选到期、撤销 | 会员网页登录/自动刷新、Claude/Gemini 会员接入及真实账号验证 |
-| OpenAI-compatible API Key 上游、已核实服务商预设、模型同步与手动映射 | Responses、Anthropic Messages、Gemini 原生协议 |
+| OpenAI-compatible API Key 上游、已核实服务商预设、模型同步与手动映射 | Anthropic Messages、Gemini 原生协议 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
+| 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE | Responses 有状态会话、后台任务、托管工具与完整客户端兼容性 |
 | SQLite 持久化、上游凭据加密、重启恢复 | 账号池、可靠计费用量、自动备份/迁移、生产密钥托管 |
 
 员工 Key 正常重启后仍有效；撤销、员工停用、可选到期时间及权限限制仍会生效。员工无需知道上游供应商 Key。
@@ -28,9 +29,20 @@
 4. 员工仍使用 CPA Cloud Key，通过 `/v1/chat/completions` 调用。当前只接收 `user`/`assistant` 字符串文本，以及可选的 `stream` 布尔字段；支持文本非流式与 SSE。system/developer、工具、图片及其他未支持参数会明确拒绝。
 5. 上游请求成功完成后状态变为“已验证”；凭据过期或上游返回 401 时提示重新导入。使用现有上游行的“重新导入”替换文件，员工 Key 不变。关闭实验开关会阻止会员导入及调用，普通 API Key 上游不受影响。
 
-此阶段没有网页登录授权或自动刷新，也没有 Claude/Gemini 会员接入。自动验收使用合成凭据和假上游，**尚未用真实会员账号验证**；不应据此认定 Codex CLI、Claude Code 或 CC Switch 所配置的所有工具均可使用。员工侧 Responses/Messages 协议仍未实现。
+会员实验另支持下节的原生 Responses 子集。此阶段没有网页登录授权或自动刷新，也没有 Claude/Gemini 会员接入。自动验收使用合成凭据和假上游，**尚未用真实会员账号验证**；不应据此认定 Codex CLI、Claude Code 或 CC Switch 所配置的所有工具均可使用。员工侧 Messages 协议仍未实现。
 
 升级前停止服务并备份整个数据目录（包含数据库及主密钥），保护备份访问权限。源码首次打开旧数据库会事务化扩展上游表；迁移失败会回滚。回退旧程序时应同时恢复升级前的整份备份，勿让新旧进程同时使用同一目录。
+
+## 原生 Responses 与函数工具（仅最新源码）
+
+`POST /v1/responses` 使用同一个员工 Key 和模型路由，**不在 preview.3 下载包中**。API Key 上游需提供同协议 `/responses` 接口；Codex 文件导入上游需开启上述会员实验。已有 Chat Completions 的文本限制不变。
+
+- 支持非流式 JSON、SSE、函数工具定义、调用参数与 `call_id`，以及下一回合的 `function_call_output`；网关不替员工执行工具。
+- Codex 子集支持文本 `input`、system/developer/user/assistant 消息、`instructions`、函数工具选择及已验证的 reasoning/text 参数。工具回合需要推理历史时，请请求 `include:["reasoning.encrypted_content"]` 并回传对应完整 output items。详见[实现范围](docs/research/codex-responses-implementation.md)。
+- 当前为无状态请求：拒绝 `store:true`、后台任务和引用服务端会话；没有资源读取/删除或 WebSocket 接口。Codex 图片、音频、托管工具及未支持字段会明确拒绝。
+- 流式只有完整 `response.completed` 才表示成功；上游失败、提前断流或凭据状态保存失败不能当作完成。上游错误正文不会直接返回。
+
+这不等于已经通过真实 Codex CLI 或会员账号验收。完整功能的阶段与待办见[功能对齐计划](docs/feature-parity-plan.md)。
 
 ## 1. 下载安装
 
@@ -243,7 +255,7 @@ preview.3 会自动读取上游模型作为候选；勾选所需模型，可修�
 
 远程员工不能用 `127.0.0.1` 连接管理员电脑，该地址指向员工自己的电脑。
 
-CC Switch 可用于配置工具，但最终调用工具必须支持当前协议。**不能把此地址当作已经兼容 Codex Responses、Claude Messages 或 Gemini 原生 API。**完整实机验收仍待完成，参见[员工接入说明](docs/employee-access.md)。
+CC Switch 可用于配置工具，但最终调用工具必须支持当前协议。**preview.3 下载包仅提供 Chat Completions；最新源码增加上述 Responses 子集。**Claude Messages、Gemini 原生 API 和完整实机兼容验收仍待完成，参见[员工接入说明](docs/employee-access.md)。
 
 Bash + curl 测试示例（Key 交互输入，请求头经 stdin 传入）：
 
@@ -347,7 +359,7 @@ cd dist/local
 | 模型列表为空 | 检查模型路由、上游启用状态和员工权限 |
 | 员工 401 / 403 | 检查 Key、撤销/到期、员工状态与模型权限 |
 | 上游失败 | 检查供应商 Key、额度、模型 ID、网络和证书；报障时不粘贴秘密 |
-| Codex / Claude Code 调用失败 | 当前缺少 Responses / Messages 等协议，不一定是 Key 错误 |
+| Codex / Claude Code 调用失败 | 核对源码与下载版本、协议和支持字段；preview.3 无 Responses，Messages 尚未实现，不一定是 Key 错误 |
 
 ## 10. 开发验证
 
@@ -369,9 +381,16 @@ node scripts/smoke-preview.mjs <absolute-executable-path> <absolute-web-director
 
 覆盖初始化、网页入口、管理 API、永久 Key、非流式/SSE、凭据隔离、重启与撤销持久化，不需要真实凭据。Race 测试需要支持 CGO 的工具链，当前 Windows 验证未运行 race。
 
+源码新增的 Responses 可独立验收；脚本启动临时服务和假上游，验证工具结果回合、失败事件、员工权限与撤销，并在退出时清理测试数据：
+
+```bash
+node scripts/smoke-responses.mjs <absolute-executable-path>
+```
+
 ## 文档与许可证
 
 - [集成证据](docs/integration-status.md) · [开发计划](docs/development-plan.md) · [接口契约](docs/preview-contract.md)
+- [完整功能对齐计划](docs/feature-parity-plan.md) · [Responses 契约](docs/responses-preview-contract.md) · [任务分工](docs/work-coordination.md)
 - [产品规划](docs/product-plan.md) · [核心设计](docs/core-design.md) · [验收矩阵](docs/acceptance-matrix.md)
 - [会员接入研究](docs/research/membership-feasibility.md) · [协议来源](docs/protocol-sources.md)
 - [独立实现说明](docs/independent-implementation.md) · [贡献规则](CONTRIBUTING.md)

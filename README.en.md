@@ -12,8 +12,9 @@ A self-hosted AI access platform for internal enterprise use. Administrators man
 | --- | --- |
 | Web console, administrator sessions, employee enable/disable, model permissions | Multi-tenancy, SSO, administrator password-reset command |
 | Multiple keys per employee, no expiration by default, optional expiration, revocation | Browser membership login/automatic refresh, Claude/Gemini membership integration, and real-account validation |
-| OpenAI-compatible API-key upstreams, verified provider presets, model discovery, and manual mapping | Responses, Anthropic Messages, and native Gemini protocols |
+| OpenAI-compatible API-key upstreams, verified provider presets, model discovery, and manual mapping | Anthropic Messages and native Gemini protocols |
 | `/v1/models`, non-streaming and SSE Chat Completions | Complete compatibility testing with CC Switch and real AI tools |
+| Latest source: `POST /v1/responses`, function calls/results, non-streaming JSON and SSE | Stateful Responses sessions, background tasks, hosted tools, and full client compatibility |
 | SQLite persistence, encrypted upstream credentials, restart recovery | Account pooling, reliable billing usage, automated backup/migration, production key management |
 
 Employee keys remain valid across normal restarts. Revocation, employee disablement, optional expiration, and permission restrictions still take effect. Employees never need the upstream provider key.
@@ -28,9 +29,20 @@ This feature is integrated into the latest source and **is not included in the v
 4. Employees keep using CPA Cloud keys with `/v1/chat/completions`. The supported subset is string text in `user`/`assistant` messages and an optional `stream` boolean, with non-streaming and SSE text output. System/developer roles, tools, images, and other unsupported parameters are explicitly rejected.
 5. A completed successful upstream request marks the account verified. Expiration or an upstream 401 requires reimport. Replace credentials through the existing row's reimport action; employee keys remain unchanged. Disabling the experiment blocks membership imports and requests without affecting ordinary API-key upstreams.
 
-Browser authorization, automatic refresh, and Claude/Gemini membership integration are not implemented. Automated acceptance uses synthetic credentials and fake upstreams; **real membership accounts have not been validated**. This does not establish compatibility with Codex CLI, Claude Code, or every tool configured through CC Switch. Employee-facing Responses/Messages protocols remain unavailable.
+The membership experiment also supports the native Responses subset below. Browser authorization, automatic refresh, and Claude/Gemini membership integration are not implemented. Automated acceptance uses synthetic credentials and fake upstreams; **real membership accounts have not been validated**. This does not establish compatibility with Codex CLI, Claude Code, or every tool configured through CC Switch. Employee-facing Messages remains unavailable.
 
 Before upgrading, stop the service and back up the complete data directory, including the database and master key, with restricted access. The source build transactionally extends the existing upstream table and rolls back a failed migration. To revert to an older program, restore the complete pre-upgrade backup as well; never run old and new processes against the same directory concurrently.
+
+## Native Responses and function tools (latest source only)
+
+`POST /v1/responses` uses the same employee keys and model routes and **is not included in preview.3 downloads**. API-key upstreams must expose the same `/responses` protocol. Imported Codex upstreams require the membership experiment above. Existing Chat Completions text restrictions remain unchanged.
+
+- Supports non-streaming JSON, SSE, function definitions, call arguments and `call_id`, and subsequent `function_call_output` items. The gateway does not execute employee tools.
+- The Codex subset accepts text input, system/developer/user/assistant messages, instructions, function tool selection, and verified reasoning/text parameters. When a tool round requires reasoning history, request `include:["reasoning.encrypted_content"]` and replay the corresponding complete output items. See the [supported subset](docs/research/codex-responses-implementation.md).
+- Requests are stateless: `store:true`, background tasks, and references to server-side conversations are rejected. Resource retrieval/deletion and WebSocket endpoints are unavailable. Codex image, audio, hosted tools, and unsupported fields are explicitly rejected.
+- Only a complete `response.completed` event denotes streaming success. Upstream failure, premature EOF, or credential-state persistence failure cannot count as completion. Raw upstream error bodies are not returned.
+
+This does not establish real Codex CLI or membership-account compatibility. See the [feature parity plan](docs/feature-parity-plan.md) for stages and remaining work.
 
 ## 1. Download and installation
 
@@ -243,7 +255,7 @@ Use a client that supports **OpenAI Chat Completions**:
 
 A remote employee cannot use `127.0.0.1` to reach an administrator's computer; that address refers to the employee's own machine.
 
-CC Switch may help configure tools, but the tool making the final request must support the protocol currently implemented. **Do not treat this endpoint as already compatible with Codex Responses, Claude Messages, or the native Gemini API.** Complete real-device and real-tool validation remains pending. See [Employee access](docs/employee-access.md).
+CC Switch may help configure tools, but the tool making the final request must support the implemented protocol. **The preview.3 download provides Chat Completions; the latest source adds the Responses subset described above.** Claude Messages, native Gemini, and full real-device/tool compatibility remain pending. See [Employee access](docs/employee-access.md).
 
 Bash + curl test example (the key is entered interactively, and the request header is passed through stdin):
 
@@ -347,7 +359,7 @@ A source build is not automatically a distributable package. External distributi
 | Model list is empty | Check the model route, upstream enabled state, and employee permissions |
 | Employee receives 401 / 403 | Check the key, revocation/expiration, employee state, and model permissions |
 | Upstream request fails | Check the provider key, quota, model ID, network, and certificates; never paste secrets into a support report |
-| Codex / Claude Code request fails | Responses, Messages, and other protocols are currently missing; the key is not necessarily the problem |
+| Codex / Claude Code request fails | Check the source/download version, protocol, and supported fields; preview.3 has no Responses and Messages is unavailable, so the key is not necessarily the problem |
 
 ## 10. Development validation
 
@@ -369,9 +381,16 @@ node scripts/smoke-preview.mjs <absolute-executable-path> <absolute-web-director
 
 It covers initialization, the web entry point, management APIs, permanent keys, non-streaming/SSE, credential isolation, restart recovery, and persistent revocation without requiring real credentials. Race testing requires a CGO-capable toolchain and has not been run in the current Windows validation.
 
+Validate the source-only Responses implementation separately. This script starts a temporary service and fake upstream, checks tool-result rounds, failure events, employee permissions and revocation, and cleans up its test data:
+
+```bash
+node scripts/smoke-responses.mjs <absolute-executable-path>
+```
+
 ## Documentation and licenses
 
 - [Integration evidence](docs/integration-status.md) · [Development plan](docs/development-plan.md) · [API contract](docs/preview-contract.md)
+- [Full feature parity plan](docs/feature-parity-plan.md) · [Responses contract](docs/responses-preview-contract.md) · [Task ownership](docs/work-coordination.md)
 - [Product plan](docs/product-plan.md) · [Core design](docs/core-design.md) · [Acceptance matrix](docs/acceptance-matrix.md)
 - [Membership integration research](docs/research/membership-feasibility.md) · [Protocol sources](docs/protocol-sources.md)
 - [Independent implementation statement](docs/independent-implementation.md) · [Contribution guide](CONTRIBUTING.md)

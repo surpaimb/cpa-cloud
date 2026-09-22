@@ -6,7 +6,7 @@
 
 目标是对齐固定快照中经路由或源码文件验证的产品能力。注册、预算、限流、多租户、账单、订阅、充值、支付和兑换均在总范围内；默认产品配置仍是“一家企业、一套实例、管理员建员工”的内部企业模式，公开注册、商业计费与多租户能力默认关闭。启用外部经营模式前必须形成身份、财务、隐私、风控与合规设计及验收记录。
 
-本文不是“参考产品全部功能已经穷举”的声明。固定快照仍可能有未从入口显现的后台任务、配置开关或提供商特例；每阶段启动时应重新做一次固定 commit 的路由、任务和数据库实体盘点，并把新增发现补入带编号矩阵。
+本文不是“参考产品全部功能已经穷举”的声明。固定快照仍可能有未从入口显现的后台任务、配置开关或提供商特例；后续围绕该阶段的缺失证据定向补查，并把新增发现补入带编号矩阵。已核实的来源与接口结论复用，避免每个任务重复盘点整个参考仓库。
 
 状态含义：
 
@@ -46,7 +46,7 @@
 | MEM-05 | 多提供商账号：OpenAI、Anthropic、Google，以及快照出现的 Grok、Antigravity、国内/兼容提供商与可插拔 API Key 渠道 | 待实现/需协议核实 | ACCT-01, PROTO-01 | M2-M4 | 提供商能力注册表；逐项报告授权、协议、模型与测试证据，不用“兼容”概括 |
 | PROTO-01 | `GET /v1/models` 和模型权限目录 | 已实现（基础子集） | KEY-01 | M1 | 只列可用且获授权模型，停用账号/路由实时反映 |
 | PROTO-02 | `POST /v1/chat/completions` 非流式/SSE、取消、错误与工具调用 | 已实现（API Key 基础；会员文本实验） | KEY-01 | M1-M2 | 字段支持表、工具回合、SSE 拆包、取消、上游错误脱敏 |
-| PROTO-03 | `POST /v1/responses`；首批含 Codex 原生 function tools、function call/output 与 tool result SSE | 待实现（已定首批契约，禁止宣称完成） | PROTO-01, MEM-01 | **M0** | API Key 同协议与 Codex 适配器；非流式/SSE、工具结果回合、失败事件、EOF、取消、用量及日志脱敏 |
+| PROTO-03 | `POST /v1/responses`；首批含 Codex 原生 function tools、function call/output 与 tool result SSE | 实验（源码子集，合成上游验收；未验证真实客户端/账号） | PROTO-01, MEM-01 | **M0** | API Key 同协议与 Codex 适配器；非流式/SSE、工具结果回合、失败事件、EOF、取消、用量及日志脱敏 |
 | PROTO-04 | `POST /v1/messages`、count_tokens、Anthropic 原生流式与工具回合 | 待实现 | MEM-03, KEY-01 | M1 | 官方协议字段矩阵；工具、thinking、缓存用量、错误、取消逐项测试 |
 | PROTO-05 | Gemini `v1beta` models/generateContent/streamGenerateContent、工具与多模态 | 待实现 | MEM-04, KEY-01 | M1 | REST/SSE、function call/response、图片输入、用量和安全错误 |
 | PROTO-06 | WebSocket/Realtime 与会话侧带控制 | 待实现 | ACCT-04, LIMIT-01 | M4 | 握手鉴权、双向帧、断线取消、会话计费、并发释放、秘密头隔离 |
@@ -89,7 +89,7 @@
 
 ### M0：Responses 与 Codex 工具首批
 
-实现 `POST /v1/responses` 和 Codex 原生 function tools/function_call_output/tool result SSE，严格按 [Responses 首批契约](responses-preview-contract.md) 的子集执行。必须保留原生事件语义，未知能力明确拒绝；API Key 上游同协议转发和会员适配器分别测试。完成标准是仓库测试、进程级合成上游 smoke、取消/失败/秘密扫描通过，并在集成状态中列出实际字段范围。当前状态仍是**待实现**。
+实现 `POST /v1/responses` 和 Codex 原生 function tools/function_call_output/tool result SSE，严格按 [Responses 首批契约](responses-preview-contract.md) 的子集执行。必须保留原生事件语义，未知能力明确拒绝；API Key 上游同协议转发和会员适配器分别测试。源码子集已接入，仓库测试及进程级合成上游结果见 [集成记录](integration-status.md)。状态为实验：未验证真实账号/客户端，preview.3 不包含此功能；完整有状态 Responses、托管工具与其他协议仍有待办。
 
 ### M1：三家会员生命周期与原生协议
 

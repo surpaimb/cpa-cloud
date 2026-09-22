@@ -114,3 +114,13 @@
 - 功能默认关闭，需 `--experimental-codex-membership`。导入不代表在线认证；只支持短期凭据文件导入与 user/assistant 纯文本 Chat Completions/SSE 子集。到期重新导入；没有网页登录/自动刷新、会员模型发现、Claude/Gemini 会员、员工 Responses/Messages 协议或真实账号兼容性验证。
 
 - 迁移与列表迭代错误处理修复 `01823c9`：主任务核实 `foreign_key_check` 在 Close 前检查迭代错误，`tableColumns` 保留 defer 确保早退释放；上游和员工模型列表读取失败不会返回部分成功列表。服务任务重新运行迁移回滚/重试/重启定向测试、`go test ./internal/service -count=1` 与 `go vet ./internal/service` 均通过。
+
+## 2026-09-23：原生 Responses 与函数工具源码实验
+
+- 会员适配器 `b1c60e5`、服务入口 `cfea502`、集成错误事件补丁 `25c5f3a`。`POST /v1/responses` 在同一进程内完成员工鉴权、模型权限/撤销、路由和上游执行；API Key 同协议转发，Codex 导入仍需默认关闭的实验开关。
+- 支持范围和官方来源见 [实现说明](research/codex-responses-implementation.md) 与 [接口契约](responses-preview-contract.md)。首批包括文本、instructions、function 工具、call_id/参数/工具结果回合、已验证的 reasoning history 子集；不将完整 Responses 生命周期、媒体、托管工具或真实 Codex CLI 标成支持。共享账号尚无资源所有权表，明确拒绝 store=true/background/previous_response_id/conversation 引用。
+- 主任务独立执行 `go test ./... -count=1 -timeout=2m` 与 `go vet ./...` 通过。最终错误写入器补丁后再次运行 `go test ./internal/service -run 'Test.*(Responses|Codex)' -count=1 -timeout=2m`（33.560s）和 service vet，通过；没有新增第三方依赖，未运行 Windows race 或不可用的 govulncheck。
+- 审查修复了超大无换行 SSE 的有界读取、多行 data 重编码、事件名注入/不一致、终止对象缺失 output、verified 账号重复调用，以及 revision 改变后不能发送成功终止事件。模拟测试另覆盖 401→重新授权、取消传递和会员流式增量后原生 type:error 事件，旧 Chat 错误格式保持兼容。
+- 主任务重新构建 `dist/cpa-cloud-responses-verify.exe`，实际执行 `scripts/smoke-responses.mjs` PASS：工具定义/结果双回合、拆包/CRLF/多行 SSE、失败/未完成/提前 EOF/畸形 completed、HTTP 401/429/坏 JSON 脱敏、状态引用拒绝、员工模型权限、上游头与凭据隔离、未知 usage 不伪造、重启与撤销持久化、数据/日志秘密扫描。全部使用随机端口、合成秘密及临时目录，结束清理。
+- 同一程序配合现有 `web/dist` 运行 `scripts/smoke-preview.mjs ... --discover-models` 与 `scripts/smoke-codex-import.mjs ...` 均 PASS。后者首次调用因漏传必需的网页目录参数而在启动前退出，补齐参数后实际完成导入/CSRF/幂等/替换冲突/加密落盘/重启/关闭阻止调用验收。未改正在运行的用户实例或读取真实凭据。
+- 中英文 README 与员工说明已更新，原有 PowerShell 命令块逐块比对未变，相关文档本地链接及 diff 检查通过。只推送源码并执行轻量 CI，不创建新 tag 或全平台包；preview.3 不包含本批功能。三家会员生命周期和其他能力仍按 [完整计划](feature-parity-plan.md) 继续，任务创建及所有权见 [分工记录](work-coordination.md)。

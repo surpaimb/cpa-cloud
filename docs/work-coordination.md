@@ -2,7 +2,7 @@
 
 ## 2026-09-23 完整功能对齐首批
 
-用户将 Sub2API 的完整产品能力纳入 CPA Cloud。分期与验收见 [功能矩阵](feature-parity-plan.md)，本批接口以 [Responses 契约](responses-preview-contract.md) 为准。原有三个独立任务已完成上一批；本次使用主任务内的 GPT-5.6 Sol 协作 agent，未创建重复侧栏任务。
+用户将 Sub2API 的完整产品能力纳入 CPA Cloud。分期与验收见 [功能矩阵](feature-parity-plan.md)，本批接口以 [Responses 契约](responses-preview-contract.md) 为准。原有三个独立任务已完成上一批；Responses 首批使用主任务内的 GPT-5.6 Sol 协作 agent。用户随后要求继续以本会话总协调、多个独立任务实现子功能，后续分工如下。
 
 | 协作任务 | 文件所有权 | 当前交付目标 |
 | --- | --- | --- |
@@ -12,6 +12,18 @@
 | 主任务 | 顶层规格/README、scripts | 范围更新、独立进程假上游验收、代码审阅与集成证据 |
 
 agent 执行状态不等于功能通过验收；后续阶段列表不代表持续运行的后台任务。当前不建立自动监控、不重新打包、不访问本机真实账号或更改当前用户服务数据。仅在相关测试完成后推送本仓库代码，下载版仍保持 preview.3。
+
+## 后续三个独立任务
+
+均属于 Codex 的 `cpa-cloud` 项目，模型为 `gpt-5.6-sol`、推理强度 high，使用独立 Git worktree。当前创建工具返回排队标识，三个工作目录已创建；收到正式任务 ID 后再记录运行与验收状态，不能把创建请求当作功能完成。
+
+| 任务 | 创建标识 | 交付范围 |
+| --- | --- | --- |
+| Codex 授权与自动刷新 | client-new-thread:6aabee85-ddac-4fc8-b494-f7985886a028 | 可配置 OAuth、PKCE/state、凭据轮换、并发刷新和重新授权状态 |
+| Claude Messages 与账号接入 | client-new-thread:2a548610-cf73-4931-a752-44721ed024ae | 原生 Messages、函数工具与 SSE、API Key 及有协议依据的会员接入 |
+| Gemini 协议与账号接入 | client-new-thread:dca21846-1bf5-4af5-b967-1d34be848ab5 | generateContent/streamGenerateContent、函数工具与模型发现、区分官方账号体系 |
+
+本会话负责需求依赖、接口冲突、独立验证和合并。子任务提交代码与测试证据，不自行 push、发布、部署或打包。会员流程必须列明协议依据和实际可用条件，不将 API Key 接入或 mock 测试称为真实会员验证。后续账号池、配额、用量与运营模块按功能矩阵在依赖就绪后派发，避免多个任务重复重构同一执行路径。
 
 ## 首轮任务（历史记录）
 

@@ -2,6 +2,8 @@
 
 状态：CPA Cloud 已实现开发预览的 Chat Completions API Key 闭环；CC Switch 与实际工具的完整兼容性仍待验证。
 
+最新源码新增 `POST /v1/responses` 的 API Key 同协议转发及 Codex 实验文本/函数工具子集；下载版 preview.3 不包含此功能。接口自动测试不等于真实 Codex CLI 工具调用已验收，具体范围见 [Responses 契约](responses-preview-contract.md)。Claude Messages 与 Gemini 原生入口由后续任务实现，不能提前标成可用。
+
 ## 接入流程
 
 1. 管理员配置上游账号、模型与员工权限，生成默认不过期的员工 Key。
