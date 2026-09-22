@@ -1,0 +1,100 @@
+name: Preview release
+on:
+  push:
+    tags: ["v*-preview.*"]
+  workflow_dispatch:
+concurrency:
+  group: publish-preview-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+jobs:
+  build:
+    uses: ./.github/workflows/preview-release.yml
+    with:
+      platform: all
+
+  publish:
+    name: Publish GitHub prerelease
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-preview.')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download all native packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: package-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Download all desktop installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: installer-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify package sidecars and create aggregate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+          portables=(
+            cpa-cloud_*_windows_amd64.zip
+            cpa-cloud_*_windows_arm64.zip
+            cpa-cloud_*_linux_amd64.tar.gz
+            cpa-cloud_*_linux_arm64.tar.gz
+            cpa-cloud_*_macos_amd64.tar.gz
+            cpa-cloud_*_macos_arm64.tar.gz
+          )
+          installers=(
+            cpa-cloud_*_windows_amd64_Setup.exe
+            cpa-cloud_*_windows_arm64_Setup.exe
+            cpa-cloud_*_windows_amd64.msi
+            cpa-cloud_*_windows_arm64.msi
+            cpa-cloud_*_linux_amd64.AppImage
+            cpa-cloud_*_linux_arm64.AppImage
+            cpa-cloud_*_linux_amd64.deb
+            cpa-cloud_*_linux_arm64.deb
+            cpa-cloud_*_linux_amd64.rpm
+            cpa-cloud_*_linux_arm64.rpm
+            cpa-cloud_*_macos_universal.dmg
+            cpa-cloud_*_macos_universal.zip
+          )
+          sidecars=(cpa-cloud_*.sha256)
+          test "${#portables[@]}" -eq 6
+          test "${#installers[@]}" -eq 12
+          test "${#sidecars[@]}" -eq 18
+          for sidecar in "${sidecars[@]}"; do sha256sum -c "$sidecar"; done
+          sha256sum "${portables[@]}" "${installers[@]}" > SHA256SUMS.txt
+
+      - name: Create or update GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          ## 开发预览 / Development preview
+
+          本 Release 提供十八个产物：保留 Windows、Linux、macOS 的 amd64/arm64 六个便携包；Windows amd64/arm64 同时提供经过完整生命周期验收的 NSIS `Setup.exe` 和经过安装/重装/卸载验收的 MSI；Linux amd64/arm64 提供 AppImage、deb 和 rpm；macOS 提供同时包含 Intel 与 Apple Silicon 代码的 Universal DMG 和 ZIP。Windows 安装包包含自包含 .NET 启动器。Linux 桌面入口在终端中管理本机服务并打开浏览器。macOS DMG 内含标准 `CPA Cloud.app` 和 Applications 链接。升级与卸载不删除用户数据。所有主产物均带独立 SHA-256 sidecar，并汇总到 `SHA256SUMS.txt`。
+
+          当前仅实现 OpenAI-compatible API Key 上游和 Chat Completions。会员账号、Responses、Messages、账号池与生产级运维尚未实现。工作流在对应架构 runner 上执行 Go 测试、启动器测试、构建、包结构检查和二进制检查；这不等同于真实目标机器上的完整部署验收。Windows 安装程序、Linux 包和 macOS App 均未签名，macOS App/DMG 未经 notarization；首次运行可能触发系统安全提示。应用内自动更新尚未实现，`.sig` 不会在缺少验证链路时生成。
+
+          This prerelease provides eighteen artifacts. It retains six amd64/arm64 portable packages for Windows, Linux, and macOS. Windows amd64/arm64 each receive a fully lifecycle-tested NSIS `Setup.exe` and an install/reinstall/uninstall-tested MSI. Linux amd64/arm64 receive AppImage, deb, and rpm packages. macOS receives Universal DMG and ZIP packages containing both Intel and Apple Silicon code. Windows packages contain the self-contained .NET launcher. The Linux desktop entry hosts the local service in a terminal and opens a browser. The DMG contains `CPA Cloud.app` and an Applications link. Upgrade and uninstall preserve user data. Every primary artifact has a SHA-256 sidecar and is included in `SHA256SUMS.txt`.
+
+          The implemented scope is limited to OpenAI-compatible API-key upstreams and Chat Completions. Membership accounts, Responses, Messages, account pools, and production operations are not implemented. The workflow runs Go and launcher tests, builds, package-structure validation, and binary checks on matching architecture runners; this is not a claim of complete deployment validation on end-user machines. Windows installers, Linux packages, and the macOS app are unsigned, and the macOS app/DMG is not notarized; first launch may trigger platform security warnings. In-app updates are not implemented, so `.sig` files are not emitted without a real verification path.
+          EOF
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            gh release edit "$RELEASE_TAG" --prerelease --title "CPA Cloud $RELEASE_TAG" --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" release-assets/* --verify-tag --prerelease --notes-file release-notes.md --title "CPA Cloud $RELEASE_TAG"
+          fi

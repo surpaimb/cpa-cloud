@@ -337,6 +337,10 @@ A source build is not automatically a distributable package. External distributi
 
 ## 10. Development validation
 
+GitHub Actions follows the changed paths: documentation-only changes do not trigger builds; server and web changes run their respective tests and compilation checks without packaging installers. Launcher or packaging changes validate the affected platform; shared packaging code validates all affected platforms. New commits cancel superseded routine checks on the same branch.
+
+Full packages are built for preview tags or explicit manual builds. `Native package validation` lets you select Windows, Linux, macOS, or all platforms and uploads CI artifacts only. `Preview release` publishes a Release only when a preview tag is pushed. Routine development does not require new version tags.
+
 ```bash
 go test ./... -count=1 -timeout=2m
 go vet ./...

@@ -337,6 +337,10 @@ cd dist/local
 
 ## 10. 开发验证
 
+GitHub Actions 按改动范围执行：仅修改文档不触发构建；服务端和网页提交分别运行测试与编译检查，不生成安装包。修改某个平台的启动器或打包脚本时，只验证该平台；修改共用打包代码时验证所有受影响平台。相同分支的新提交会取消过时的日常检查。
+
+完整安装包仅在推送预览版本标签或手动运行构建工作流时生成。`Native package validation` 可手动选择 Windows、Linux、macOS 或全部平台，只上传 CI 附件；`Preview release` 仅在预览标签推送时发布 Release。日常开发无需反复创建版本标签。
+
 ```bash
 go test ./... -count=1 -timeout=2m
 go vet ./...
