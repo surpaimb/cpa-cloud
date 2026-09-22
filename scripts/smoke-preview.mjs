@@ -1,5 +1,5 @@
 // Independent process-level acceptance test; uses generated test credentials only.
-// Usage: node scripts/smoke-preview.mjs <absolute executable path>
+// Usage: node scripts/smoke-preview.mjs <absolute executable path> [absolute web directory]
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -12,6 +12,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const executable = process.argv[2];
 assert.ok(executable && path.isAbsolute(executable), 'Provide an absolute executable path');
+const webDirectory = process.argv[3] ?? path.resolve('web/dist');
+assert.ok(path.isAbsolute(webDirectory), 'Provide an absolute web directory');
 const directory = await mkdtemp(path.join(os.tmpdir(), 'cpac-smoke-'));
 const password = randomBytes(24).toString('hex');
 const upstreamSecret = randomBytes(24).toString('hex');
@@ -50,7 +52,7 @@ async function stop() {
   }
 }
 async function start() {
-  child = spawn(executable, [...baseArgs, '--listen', `127.0.0.1:${port}`, '--allow-loopback-upstream', '--web-dir', path.resolve('web/dist')], { stdio: 'ignore', windowsHide: true });
+  child = spawn(executable, [...baseArgs, '--listen', `127.0.0.1:${port}`, '--allow-loopback-upstream', '--web-dir', webDirectory], { stdio: 'ignore', windowsHide: true });
   let launchError;
   child.on('error', error => { launchError = error; });
   for (let attempt = 0; attempt < 100; attempt++) {
