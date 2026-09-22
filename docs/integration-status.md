@@ -102,3 +102,13 @@
 - 主任务从 Release 实际下载全部 37 个附件，逐项计算 18 个主产物的 SHA256 并核对 sidecar 与汇总清单，全部 PASS。下载副本位于忽略目录 `dist/preview3-download-verify`。
 - Windows amd64/arm64 的 NSIS 与 MSI 生命周期验收日志均明确 PASS；Linux 原生构建和包结构读回、Mac Universal 原生构建/架构检查/DMG 校验通过。不代表所有发行版已进行安装运行或完整人工 GUI 验收。
 - 包内 README 固定于源提交的发布前状态（仍可能指向 preview.2）；最新说明与下载入口以 main README 及本次 Release 实际资产为准，不修改已发布资产。
+
+
+## 2026-09-23：Codex 文件导入源码实验集成
+
+- 网页 `999b2cd` / `4cdd2b2`，服务端 `8bca20d`，进程级脚本 `180584c`。仅源码实验，未创建新标签、未重新打包或替换 preview.3。后续迁移读取错误处理小修另列。
+- 主任务独立运行 `go test ./...`（本轮输出使用 Go 测试缓存）和 `go vet ./...` 均通过；审阅了服务分流、AEAD 用途/类型/上游 ID 绑定、事务迁移、revision 条件状态回写及脱敏错误处理。服务任务另报告完整 Go 测试与 vet 通过，包含旧库迁移失败回滚→重试→重开、旧 API Key 本地请求、取消、401、替换竞争和 SSE 部分失败。测试上游为注入假执行器，协议适配器由独立假 transport 测试覆盖。
+- 主任务构建实际 Go 可执行程序，运行 `scripts/smoke-codex-import.mjs` PASS：随机临时数据目录及合成 JWT，CSRF 拒绝、幂等导入、无效替换保留、成功替换、旧 revision 冲突、数据库/WAL 与进程日志无测试秘密、重启保留、默认关闭后阻止导入/替换及员工模型请求、再开启后幂等重试不会恢复旧凭据。未启用真实会员模型请求；测试目录和进程均已清理。
+- 主任务对最新网页运行 TypeScript 检查和 Vite 构建通过，并用 Playwright + headless Chrome 连接上述真实 Go 服务：管理员登录、浏览器文件上传导入、同一行重新导入 revision 增加、会员模型手动创建路由均 PASS。浏览器只访问隔离测试实例；没有真实会员调用。无 JavaScript 异常、无框架错误覆盖层；控制台仅首次未登录 session 的预期 HTTP 401。
+- 主任务查看 1440×1000 桌面与 390×844 手机截图，导入按钮、文件选择及操作区域可见。截图等待响应式动画稳定后获取。证据在仓库外 `C:/Users/apple/Documents/Codex/cpa-membership-real-desktop.png`、`cpa-membership-real-mobile.png`，验收脚本 `cpa-membership-real-qa.mjs`。测试只使用合成文件，结束清理临时数据库。
+- 功能默认关闭，需 `--experimental-codex-membership`。导入不代表在线认证；只支持短期凭据文件导入与 user/assistant 纯文本 Chat Completions/SSE 子集。到期重新导入；没有网页登录/自动刷新、会员模型发现、Claude/Gemini 会员、员工 Responses/Messages 协议或真实账号兼容性验证。

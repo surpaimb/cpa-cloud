@@ -11,12 +11,26 @@ A self-hosted AI access platform for internal enterprise use. Administrators man
 | Implemented | Not yet implemented or validated |
 | --- | --- |
 | Web console, administrator sessions, employee enable/disable, model permissions | Multi-tenancy, SSO, administrator password-reset command |
-| Multiple keys per employee, no expiration by default, optional expiration, revocation | ChatGPT/Codex, Claude, and Gemini membership authorization or import |
+| Multiple keys per employee, no expiration by default, optional expiration, revocation | Browser membership login/automatic refresh, Claude/Gemini membership integration, and real-account validation |
 | OpenAI-compatible API-key upstreams, verified provider presets, model discovery, and manual mapping | Responses, Anthropic Messages, and native Gemini protocols |
 | `/v1/models`, non-streaming and SSE Chat Completions | Complete compatibility testing with CC Switch and real AI tools |
 | SQLite persistence, encrypted upstream credentials, restart recovery | Account pooling, reliable billing usage, automated backup/migration, production key management |
 
 Employee keys remain valid across normal restarts. Revocation, employee disablement, optional expiration, and permission restrictions still take effect. Employees never need the upstream provider key.
+
+## Experimental Codex credential-file import (latest source only)
+
+This feature is integrated into the latest source and **is not included in the v0.1.0-preview.3 downloads**. Build from source and append `--experimental-codex-membership` to your existing startup command. It is disabled by default; the desktop launcher does not enable it automatically. Use the same data directory for initialization and startup.
+
+1. Sign in as administrator and choose “导入 Codex auth.json” under upstream connections. Select an authorization file you provide; the service does not scan local configuration files.
+2. The file must contain a schedulable short-lived access token, an account ID, and the required structure. Its initial state is imported/unverified. The server encrypts the stored file; importing does not contact the provider to verify the account.
+3. Manually create a model route with a model ID available to that account and an employee-facing name. Membership model discovery is not provided, and arbitrary model availability is not guaranteed.
+4. Employees keep using CPA Cloud keys with `/v1/chat/completions`. The supported subset is string text in `user`/`assistant` messages and an optional `stream` boolean, with non-streaming and SSE text output. System/developer roles, tools, images, and other unsupported parameters are explicitly rejected.
+5. A completed successful upstream request marks the account verified. Expiration or an upstream 401 requires reimport. Replace credentials through the existing row's reimport action; employee keys remain unchanged. Disabling the experiment blocks membership imports and requests without affecting ordinary API-key upstreams.
+
+Browser authorization, automatic refresh, and Claude/Gemini membership integration are not implemented. Automated acceptance uses synthetic credentials and fake upstreams; **real membership accounts have not been validated**. This does not establish compatibility with Codex CLI, Claude Code, or every tool configured through CC Switch. Employee-facing Responses/Messages protocols remain unavailable.
+
+Before upgrading, stop the service and back up the complete data directory, including the database and master key, with restricted access. The source build transactionally extends the existing upstream table and rolls back a failed migration. To revert to an older program, restore the complete pre-upgrade backup as well; never run old and new processes against the same directory concurrently.
 
 ## 1. Download and installation
 
