@@ -4,7 +4,7 @@
 
 A self-hosted AI access platform for internal enterprise use. Administrators manage upstreams, models, and employee keys through a web console; employees use standard APIs without WeChat or a dedicated client. Authentication, permission checks, and upstream requests all run in the same Go service process.
 
-> This project is currently a development preview, not a production release. All six initial preview packages passed Go tests, builds, and executable help checks on matching GitHub runner architectures. The downloaded Windows amd64 package also passed a process-level mock-upstream test. Complete deployment validation on all end-user hosts remains outstanding.
+> This project is a development preview, not a production release. All 18 preview.3 primary packages completed tests, builds, and format-specific automated acceptance on matching GitHub runner architectures. Real GUI interaction and deployment validation on every target host remain incomplete.
 
 ## Features and boundaries
 
@@ -12,7 +12,7 @@ A self-hosted AI access platform for internal enterprise use. Administrators man
 | --- | --- |
 | Web console, administrator sessions, employee enable/disable, model permissions | Multi-tenancy, SSO, administrator password-reset command |
 | Multiple keys per employee, no expiration by default, optional expiration, revocation | ChatGPT/Codex, Claude, and Gemini membership authorization or import |
-| OpenAI-compatible API-key upstreams and manual model mapping | Responses, Anthropic Messages, and native Gemini protocols |
+| OpenAI-compatible API-key upstreams, verified provider presets, model discovery, and manual mapping | Responses, Anthropic Messages, and native Gemini protocols |
 | `/v1/models`, non-streaming and SSE Chat Completions | Complete compatibility testing with CC Switch and real AI tools |
 | SQLite persistence, encrypted upstream credentials, restart recovery | Account pooling, reliable billing usage, automated backup/migration, production key management |
 
@@ -20,45 +20,64 @@ Employee keys remain valid across normal restarts. Revocation, employee disablem
 
 ## 1. Download and installation
 
-**Current download: [v0.1.0-preview.2](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.2)**. The table links directly to these versioned assets.
+**Current download: [v0.1.0-preview.3](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.3)**. The table links directly to these versioned assets.
 
 See preview versions and their attachments on [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases). A file is downloadable only when it actually appears under the Assets section of that Release. If a Release has no attachments yet, build from source as described below. Preview versions may not appear through GitHub's `latest` link.
 
 | System | Asset filename suffix |
 | --- | --- |
-| Standard Intel/AMD Windows computer | [windows_amd64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_amd64.zip) |
-| Windows on ARM computer | [windows_arm64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_arm64.zip) |
-| Intel/AMD Linux cloud server | [linux_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_linux_amd64.tar.gz) |
-| ARM Linux server | [linux_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_linux_arm64.tar.gz) |
-| Intel-based Mac | [macos_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_amd64.tar.gz) |
-| Apple Silicon Mac (M series) | [macos_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_arm64.tar.gz) |
+| Standard Intel/AMD Windows computer | [windows_amd64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_amd64.zip) |
+| Windows on ARM computer | [windows_arm64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_arm64.zip) |
+| Intel/AMD Linux cloud server | [linux_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_amd64.tar.gz) |
+| ARM Linux server | [linux_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_arm64.tar.gz) |
+| Intel-based Mac | [macos_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_macos_amd64.tar.gz) |
+| Apple Silicon Mac (M series) | [macos_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_macos_arm64.tar.gz) |
 
 An archive should contain the executable, the `web/` directory, and third-party notices. Extract everything into a dedicated directory. Go and Bun are not required to run a packaged build. Keep all notice files. Store the data directory outside the extracted application directory so it is easier to preserve during upgrades.
 
-After downloading, verify the file against the SHA256 manifest attached to the Release. On Windows, run `Get-FileHash <downloaded-file> -Algorithm SHA256`; on Linux, run `sha256sum <downloaded-file>`; on macOS, run `shasum -a 256 <downloaded-file>`. Compare the result with the corresponding manifest entry.
+After downloading, verify the file against the Release's [SHA256SUMS.txt](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/SHA256SUMS.txt). On Windows, run `Get-FileHash <downloaded-file> -Algorithm SHA256`; on Linux, run `sha256sum <downloaded-file>`; on macOS, run `shasum -a 256 <downloaded-file>`. Compare the result with the corresponding manifest entry.
 
 All following commands are run from the **extracted application directory**. The executable is named `cpa-cloud.exe` on Windows and `cpa-cloud` on Linux/macOS. If the Unix executable bit is missing, run `chmod +x ./cpa-cloud`. Windows code signing and macOS notarization are not currently promised. Evaluate provenance and signing requirements under your organization's policy; do not disable operating-system security globally.
 
 ### Desktop installers
 
-Windows Setup and macOS DMG packages are published. All ten artifacts were built automatically by [GitHub Actions](https://github.com/surpaimb/cpa-cloud/actions/runs/35726220674). Both Windows architectures passed installation, same-package upgrade/reinstall, uninstall, mutex refusal, and data-preservation checks.
+This release has 18 primary packages: the six portable archives above, six Windows/macOS desktop packages below, and six Linux desktop packages. All were built automatically by [GitHub Actions run 35743039148](https://github.com/surpaimb/cpa-cloud/actions/runs/35743039148). The Release also contains a checksum sidecar for each primary package and a combined manifest. Both Windows architectures passed install, same-package reinstall, uninstall, NSIS/MSI mutual-exclusion, and data-preservation acceptance.
 
 | System | Package | Installation |
 | --- | --- | --- |
-| Intel/AMD Windows | [windows_amd64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_amd64_Setup.exe) | Run Setup for the current user, then launch from the Start menu |
-| Windows on ARM | [windows_arm64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_arm64_Setup.exe) | Use the ARM64 installer with the same steps |
-| Intel Mac (macOS 13 or newer) | [macos_amd64.dmg](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_amd64.dmg) | Open the DMG, drag `CPA Cloud.app` into Applications, then launch it from Applications |
-| Apple Silicon Mac (macOS 13 or newer) | [macos_arm64.dmg](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_arm64.dmg) | Use the ARM64 DMG with the same steps |
+| Intel/AMD Windows (NSIS) | [windows_amd64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_amd64_Setup.exe) | Run the per-user Setup, then launch from the Start menu |
+| Windows on ARM (NSIS) | [windows_arm64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_arm64_Setup.exe) | Use the ARM64 Setup with the same steps |
+| Intel/AMD Windows (MSI) | [windows_amd64.msi](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_amd64.msi) | Install per user with Windows Installer, then launch from the Start menu |
+| Windows on ARM (MSI) | [windows_arm64.msi](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_arm64.msi) | Use the ARM64 MSI with the same steps |
+| macOS Universal (13 or newer) | [macos_universal.dmg](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_macos_universal.dmg) | Supports Intel and Apple Silicon; open the DMG and drag `CPA Cloud.app` into Applications |
+| macOS Universal ZIP (13 or newer) | [macos_universal.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_macos_universal.zip) | Supports Intel and Apple Silicon; extract and move `CPA Cloud.app` into Applications |
 
-The Windows installer includes the .NET runtime. On first launch, set and confirm the administrator password in the native dialog (12–72 UTF-8 bytes). Once the service is ready, the launcher opens `http://127.0.0.1:8787`; the username is `admin`. Installer users can skip sections 2 and 3 and continue with web configuration in section 4.
+Setup.exe and MSI are alternative installers for the same Windows application. Both use `%LOCALAPPDATA%\Programs\CPA Cloud` and refuse to install over an installation managed by the other format; they cannot be installed side by side. Uninstall the current format before switching. Neither format stores user data in the installation directory.
+
+The Windows installer includes the .NET runtime. On first launch, set and confirm the administrator password in the native dialog (12–72 UTF-8 bytes). Once the service is ready, the launcher opens `http://127.0.0.1:8787`; the username is `admin`. Preview.3 fixes the initialization action becoming hidden under enlarged text. Installer users can skip sections 2 and 3 and continue with web configuration in section 4.
 
 The Windows tray or macOS menu bar provides open console, start, stop, and quit actions. Closing the browser leaves the service running; quitting the launcher stops its owned service. If port 8787 is occupied, resolve the conflict before starting. The launcher binds to loopback only. For cloud or LAN deployment, use a portable package and the HTTPS instructions below.
 
 Data lives outside the installation directory: `%LOCALAPPDATA%\CPACloud\data` on Windows, or `~/Library/Application Support/CPACloud/data` on macOS. Before upgrading, quit the launcher and back up this data, then install the new version. Uninstalling or deleting the Mac app does not intentionally remove this data directory. The launcher does not import existing CLI data, add a login/startup entry, or download updates automatically.
 
-The installer preview has no publisher code signing or Apple notarization; the operating system may block first launch. Verify provenance under your organization's policy. Current validation includes Windows installation lifecycle checks, native builds, automated tests, and DMG mount/readback checks, not complete desktop interaction testing.
+The installer preview has no publisher code signing or Apple notarization; the operating system may block first launch. Verify provenance under your organization's policy. Current validation includes the Windows installer lifecycle, native builds, Linux package readback, automated tests, and macOS DMG mount/readback. It is not complete real-GUI interaction testing on every operating system.
 
-READMEs inside portable archives are fixed to the release source and may retain prepublication “next preview” wording. This page and the Release assets provide the current download status.
+The READMEs inside preview.3 packages come from release commit `82d536b`. They still call preview.2 the current download and describe some preview.3 work as “current source” or the “next preview.” That wording was fixed into the packages at build time; this page and the Release assets are authoritative for current downloads and features.
+
+### Linux desktop packages
+
+| Architecture / distribution | Package | Install or launch |
+| --- | --- | --- |
+| Intel/AMD generic | [linux_amd64.AppImage](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_amd64.AppImage) | Run `chmod +x`, then launch the AppImage directly; it does not install into system directories |
+| ARM64 generic | [linux_arm64.AppImage](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_arm64.AppImage) | Run `chmod +x` and launch on an ARM64 Linux host |
+| Intel/AMD Debian/Ubuntu | [linux_amd64.deb](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_amd64.deb) | `sudo apt install ./cpa-cloud_v0.1.0-preview.3_linux_amd64.deb` |
+| ARM64 Debian/Ubuntu | [linux_arm64.deb](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_arm64.deb) | `sudo apt install ./cpa-cloud_v0.1.0-preview.3_linux_arm64.deb` |
+| Intel/AMD RPM distribution | [linux_amd64.rpm](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_amd64.rpm) | `sudo dnf install ./cpa-cloud_v0.1.0-preview.3_linux_amd64.rpm` |
+| ARM64 RPM distribution | [linux_arm64.rpm](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_arm64.rpm) | `sudo dnf install ./cpa-cloud_v0.1.0-preview.3_linux_arm64.rpm` |
+
+Run an AppImage from a terminal as `./cpa-cloud_v0.1.0-preview.3_linux_<arch>.AppImage`. deb/rpm packages install under `/usr/lib/cpa-cloud` and add a “CPA Cloud” desktop entry; `/usr/lib/cpa-cloud/cpa-cloud-launcher` starts the same guided launcher. These entry points perform first-run password setup in a terminal, run the loopback-only `127.0.0.1:8787` service, and use `xdg-open` to open the browser. Closing that terminal or pressing Ctrl+C stops the service. deb/rpm depend on `bash`, `curl`, `util-linux`, and `xdg-utils`.
+
+Linux desktop-package data is stored in `${XDG_CONFIG_HOME:-$HOME/.config}/cpa-cloud`; `server.log` is stored in that directory. It is outside the AppImage and the deb/rpm-owned file tree, so replacing the AppImage or uninstalling the system package does not intentionally remove user data. Stop the service and back up the complete directory before upgrading.
 
 ## 2. First-time initialization from the command line
 
@@ -165,7 +184,7 @@ This address points to the current computer. Open it on the computer running CPA
 
 ### Add an upstream
 
-**New in source, not yet included in the preview.2 downloads above:** choose DeepSeek, OpenAI, Groq, Mistral, or OpenRouter to fill the official API URL and display name, or choose a custom service. The name remains editable. Changing the provider or URL clears the API Key field, so enter the appropriate key again.
+Preview.3 lets you choose DeepSeek, OpenAI, Groq, Mistral, or OpenRouter to fill a verified official API URL and display name, or choose a custom service. The name remains editable. Changing the provider or URL clears the API Key field, so enter the appropriate key again.
 
 “Save and sync models” saves the upstream first, then fetches its model list. If discovery fails, the upstream remains saved: retry synchronization instead of adding it again. Existing upstream rows also have a sync action. Authentication failures, rate limits, unsupported model discovery, and timeouts have separate messages. If discovery is unavailable, enter model IDs manually on the model routes page.
 
@@ -186,7 +205,7 @@ Do not enter a full `/chat/completions` URL. An Endpoint ending in `/v1` has `/c
 2. Select the upstream you just added.
 3. Enter an upstream model ID that the provider actually supports and that the current provider key is authorized to use.
 
-The preview.2 downloads require the manual steps above. Current source automatically discovers candidate models: select the models you want, optionally edit their default public IDs, then create the selected routes. The add-model dialog also supports discovered suggestions and manual input. Discovery does not automatically expose every model to employees; access still depends on configured routes and employee permissions. Each public model ID currently maps to one route.
+Preview.3 automatically discovers candidate models: select the models you want, optionally edit their default public IDs, then create the selected routes. The add-model dialog also supports discovered suggestions and manual input. Discovery does not automatically expose every model to employees; access still depends on configured routes and employee permissions. Each public model ID currently maps to one route.
 
 ### Create employees and keys
 

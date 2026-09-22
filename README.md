@@ -4,7 +4,7 @@
 
 面向企业内部的自托管 AI 接入平台。管理员通过网页管理上游、模型和员工 Key；员工使用标准 API，无需微信或专用客户端。鉴权、权限检查和上游请求在同一个 Go 服务进程内完成。
 
-> 当前为开发预览，尚非生产发行版。首个预览版的 6 平台包已在对应架构 GitHub runner 上通过 Go 测试、构建和启动帮助检查；下载后的 Windows amd64 包也已通过模拟上游进程验收。尚未完成所有目标主机的真实部署验收。
+> 当前为开发预览，尚非生产发行版。preview.3 的 18 个主包已由对应架构的 GitHub runner 完成测试、构建及各格式的自动验收；尚未完成所有目标主机上的真实 GUI 操作和部署验收。
 
 ## 功能与边界
 
@@ -12,7 +12,7 @@
 | --- | --- |
 | 网页后台、管理员会话、员工启停、模型权限 | 多租户、SSO、管理员密码重置命令 |
 | 一人多个 Key、默认永久有效、可选到期、撤销 | ChatGPT/Codex、Claude、Gemini 会员授权或导入 |
-| OpenAI-compatible API Key 上游、手动模型映射 | Responses、Anthropic Messages、Gemini 原生协议 |
+| OpenAI-compatible API Key 上游、已核实服务商预设、模型同步与手动映射 | Responses、Anthropic Messages、Gemini 原生协议 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
 | SQLite 持久化、上游凭据加密、重启恢复 | 账号池、可靠计费用量、自动备份/迁移、生产密钥托管 |
 
@@ -20,45 +20,64 @@
 
 ## 1. 下载安装
 
-**当前下载版本：[v0.1.0-preview.2](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.2)**。下表链接直接下载该版本附件。
+**当前下载版本：[v0.1.0-preview.3](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.3)**。下表链接直接下载该版本附件。
 
 在 [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases) 查看预览版本及附件。仅在对应版本的 Assets 中存在的文件才是可下载交付；尚无附件时请使用下文源码构建。预览版本不一定出现在 GitHub 的 latest 链接中。
 
 | 系统 | 附件文件名后缀 |
 | --- | --- |
-| Windows 普通 Intel/AMD 电脑 | [windows_amd64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_amd64.zip) |
-| Windows ARM 电脑 | [windows_arm64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_arm64.zip) |
-| Linux Intel/AMD 云服务器 | [linux_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_linux_amd64.tar.gz) |
-| Linux ARM 服务器 | [linux_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_linux_arm64.tar.gz) |
-| macOS Intel 芯片 | [macos_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_amd64.tar.gz) |
-| macOS Apple Silicon（M 系列） | [macos_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_arm64.tar.gz) |
+| Windows 普通 Intel/AMD 电脑 | [windows_amd64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_amd64.zip) |
+| Windows ARM 电脑 | [windows_arm64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_arm64.zip) |
+| Linux Intel/AMD 云服务器 | [linux_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_amd64.tar.gz) |
+| Linux ARM 服务器 | [linux_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_arm64.tar.gz) |
+| macOS Intel 芯片 | [macos_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_macos_amd64.tar.gz) |
+| macOS Apple Silicon（M 系列） | [macos_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_macos_arm64.tar.gz) |
 
 压缩包应包含程序、`web/` 网页目录和第三方声明。解压到独立目录，不需要安装 Go 或 Bun。保留所有声明文件。将数据放在压缩包目录以外，升级时更容易保留。
 
-下载后使用 Release 中的 SHA256 清单核对文件：Windows 可运行 `Get-FileHash <下载文件> -Algorithm SHA256`；Linux 使用 `sha256sum <下载文件>`；macOS 使用 `shasum -a 256 <下载文件>`，与清单对应行比较。
+下载后使用 Release 中的 [SHA256SUMS.txt](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/SHA256SUMS.txt) 核对文件：Windows 可运行 `Get-FileHash <下载文件> -Algorithm SHA256`；Linux 使用 `sha256sum <下载文件>`；macOS 使用 `shasum -a 256 <下载文件>`，与清单对应行比较。
 
 后续命令均在**解压后的程序目录**执行。Windows 程序名为 `cpa-cloud.exe`；Linux/macOS 为 `cpa-cloud`。Unix 如缺执行权限，可执行 `chmod +x ./cpa-cloud`。目前不承诺 Windows 代码签名或 macOS 公证，按公司策略评估来源及签名要求，不要全局关闭系统安全功能。
 
 ### 桌面安装版
 
-Windows 安装程序和 macOS DMG 已发布。全部十种产物由 [GitHub Actions](https://github.com/surpaimb/cpa-cloud/actions/runs/35726220674) 自动构建；Windows 两种架构均通过安装、同包升级重装、卸载、互斥拒绝与数据保留验收。
+本版共有 18 个主包：上面的 6 个便携包、下面的 6 个 Windows/macOS 桌面包和 6 个 Linux 桌面包。它们均由 [GitHub Actions 运行 35743039148](https://github.com/surpaimb/cpa-cloud/actions/runs/35743039148) 自动构建；Release 另附每个主包的独立校验文件和汇总清单。Windows 两种架构均通过安装、同包重装、卸载、NSIS/MSI 互斥拒绝与数据保留验收。
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows Intel/AMD | [windows_amd64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_amd64_Setup.exe) | 运行安装程序，安装到当前用户，使用开始菜单启动 |
-| Windows ARM | [windows_arm64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_arm64_Setup.exe) | 使用 ARM64 安装程序，操作同上 |
-| macOS Intel（13 或更新） | [macos_amd64.dmg](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_amd64.dmg) | 打开 DMG，将 `CPA Cloud.app` 拖入 Applications，再从应用程序目录启动 |
-| macOS Apple Silicon（13 或更新） | [macos_arm64.dmg](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_arm64.dmg) | 使用 ARM64 DMG，操作同上 |
+| Windows Intel/AMD（NSIS） | [windows_amd64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_amd64_Setup.exe) | 运行当前用户安装程序，再从开始菜单启动 |
+| Windows ARM（NSIS） | [windows_arm64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_arm64_Setup.exe) | 使用 ARM64 Setup，操作同上 |
+| Windows Intel/AMD（MSI） | [windows_amd64.msi](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_amd64.msi) | 使用 Windows Installer 安装到当前用户，再从开始菜单启动 |
+| Windows ARM（MSI） | [windows_arm64.msi](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_windows_arm64.msi) | 使用 ARM64 MSI，操作同上 |
+| macOS Universal（13 或更新） | [macos_universal.dmg](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_macos_universal.dmg) | Intel 与 Apple Silicon 通用；打开 DMG，将 `CPA Cloud.app` 拖入 Applications |
+| macOS Universal ZIP（13 或更新） | [macos_universal.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_macos_universal.zip) | Intel 与 Apple Silicon 通用；解压后将 `CPA Cloud.app` 移入 Applications |
 
-Windows 安装版自带 .NET 运行时，无需另外安装。首次启动在原生窗口设置并确认管理员密码（12–72 个 UTF-8 字节），服务就绪后自动打开 `http://127.0.0.1:8787`；用户名为 `admin`。使用安装版可跳过下文第 2、3 节，直接进行第 4 节网页配置。
+Windows 的 Setup.exe 与 MSI 是同一应用的两种替代安装方式，都会使用 `%LOCALAPPDATA%\Programs\CPA Cloud`，并会检测、拒绝另一种安装器管理的现有安装；它们不能并排安装。需要切换格式时，先卸载当前安装。两者都不会把用户数据放进安装目录。
+
+Windows 安装版自带 .NET 运行时，无需另外安装。首次启动在原生窗口设置并确认管理员密码（12–72 个 UTF-8 字节），服务就绪后自动打开 `http://127.0.0.1:8787`；用户名为 `admin`。preview.3 已修复放大文字时初始化按钮可能不可见的问题。使用安装版可跳过下文第 2、3 节，直接进行第 4 节网页配置。
 
 Windows 托盘或 macOS 菜单栏提供打开后台、启动、停止和退出。关闭浏览器不会停止服务；退出启动器会停止它启动的服务。端口 8787 被占用时会报错，需要先处理端口冲突。安装版默认仅本机访问；云端或内网部署请使用便携包及下文 HTTPS 配置。
 
 数据保存在 Windows `%LOCALAPPDATA%\CPACloud\data` 或 macOS `~/Library/Application Support/CPACloud/data`，与安装目录分离。升级前退出启动器并备份数据，再安装新版；卸载程序或删除 Mac 应用不会主动删除此数据目录。启动器不会自动导入既有 CLI 数据，也不自动添加开机启动或下载更新。
 
-安装预览未进行发行者代码签名或 Apple 公证；系统可能阻止首次打开，应按组织策略核验来源。当前验证包含 Windows 安装生命周期验收、原生构建、自动化测试和 DMG 挂载读回，不代表已完成所有桌面交互验收。
+安装预览未进行发行者代码签名或 Apple 公证；系统可能阻止首次打开，应按组织策略核验来源。当前验证包含 Windows 安装生命周期、各原生构建、Linux 包内容读回、自动化测试和 macOS DMG 挂载读回，不代表已完成所有系统上的真实 GUI 交互验收。
 
-压缩包内 README 随发布源码固定，可能仍使用“下一预览版”的发布前措辞；最新下载状态以本页和 Release 附件为准。
+preview.3 包内 README 来自发布提交 `82d536b`，仍把 preview.2 写作当前下载并把部分 preview.3 功能称为“当前源码”或“下一预览版”。这是包生成时固定的旧措辞；最新下载状态与功能说明以本页和 Release 附件为准。
+
+### Linux 桌面包
+
+| 架构 / 发行版 | 安装包 | 安装或启动 |
+| --- | --- | --- |
+| Intel/AMD 通用 | [linux_amd64.AppImage](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_amd64.AppImage) | `chmod +x` 后直接运行 AppImage，不写入系统安装目录 |
+| ARM64 通用 | [linux_arm64.AppImage](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_arm64.AppImage) | 在 ARM64 Linux 上 `chmod +x` 后直接运行 |
+| Intel/AMD Debian/Ubuntu | [linux_amd64.deb](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_amd64.deb) | `sudo apt install ./cpa-cloud_v0.1.0-preview.3_linux_amd64.deb` |
+| ARM64 Debian/Ubuntu | [linux_arm64.deb](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_arm64.deb) | `sudo apt install ./cpa-cloud_v0.1.0-preview.3_linux_arm64.deb` |
+| Intel/AMD RPM 系发行版 | [linux_amd64.rpm](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_amd64.rpm) | `sudo dnf install ./cpa-cloud_v0.1.0-preview.3_linux_amd64.rpm` |
+| ARM64 RPM 系发行版 | [linux_arm64.rpm](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.3/cpa-cloud_v0.1.0-preview.3_linux_arm64.rpm) | `sudo dnf install ./cpa-cloud_v0.1.0-preview.3_linux_arm64.rpm` |
+
+AppImage 可从终端运行 `./cpa-cloud_v0.1.0-preview.3_linux_<架构>.AppImage`。deb/rpm 把程序装到 `/usr/lib/cpa-cloud` 并添加 “CPA Cloud” 桌面入口；也可运行 `/usr/lib/cpa-cloud/cpa-cloud-launcher`。这些桌面入口会在终端中完成首次密码设置、运行仅监听 `127.0.0.1:8787` 的服务并用 `xdg-open` 打开浏览器；关闭该终端或按 Ctrl+C 会停止服务。deb/rpm 依赖 `bash`、`curl`、`util-linux` 和 `xdg-utils`。
+
+Linux 桌面包的数据目录是 `${XDG_CONFIG_HOME:-$HOME/.config}/cpa-cloud`，日志是该目录下的 `server.log`。它位于 AppImage 和 deb/rpm 管理的文件之外，替换 AppImage 或卸载系统包不会主动删除数据；升级前仍应停止服务并备份完整数据目录。
 
 ## 2. 命令行首次初始化
 
@@ -165,7 +184,7 @@ http://127.0.0.1:8787/
 
 ### 添加上游
 
-**当前源码新增，尚未包含在上面的 preview.2 下载包中：** 可选择 DeepSeek、OpenAI、Groq、Mistral 或 OpenRouter，自动填写官方 API 地址与显示名称；也可选择自定义服务。名称可以修改，切换服务商或修改地址后需重新填写 API Key。
+preview.3 可选择 DeepSeek、OpenAI、Groq、Mistral 或 OpenRouter，自动填写已核实的官方 API 地址与显示名称；也可选择自定义服务。名称可以修改，切换服务商或修改地址后需重新填写 API Key。
 
 点击“保存并同步模型”会先保存上游，再读取模型列表。若同步失败，上游仍已保存，点击“重试同步”即可，不要重复添加。已有上游可点击“同步模型”。API Key 无效、上游限流、不支持模型列表或超时会分别提示；不支持自动同步时，可在“模型路由”中手动输入。
 
@@ -186,7 +205,7 @@ http://127.0.0.1:8787/
 2. 选择刚添加的上游。
 3. 填写该供应商实际支持、当前供应商 Key 有权访问的上游模型 ID。
 
-preview.2 下载版需按上述步骤手动填写。当前源码会自动读取上游模型作为候选；勾选所需模型，可修改默认的对外模型 ID，再点击“创建所选路由”。“添加模型路由”页面也支持从同步结果选择或手动输入。同步列表不会自动给员工开放所有模型，员工可用模型仍由已创建路由与员工权限决定。当前一个对外模型 ID 对应一条路由。
+preview.3 会自动读取上游模型作为候选；勾选所需模型，可修改默认的对外模型 ID，再点击“创建所选路由”。“添加模型路由”页面也支持从同步结果选择或手动输入。同步列表不会自动给员工开放所有模型，员工可用模型仍由已创建路由与员工权限决定。当前一个对外模型 ID 对应一条路由。
 
 ### 创建员工和 Key
 
