@@ -62,6 +62,12 @@ func (a *App) listModels(w http.ResponseWriter, r *http.Request) {
 		t, _ := parseTime(created)
 		data = append(data, map[string]any{"id": id, "object": "model", "created": t.Unix(), "owned_by": "cpa-cloud"})
 	}
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	if iterationErr != nil || closeErr != nil {
+		writeModelError(w, 503, "service_unavailable", "Service is temporarily unavailable.", requestID(r.Context()))
+		return
+	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
 

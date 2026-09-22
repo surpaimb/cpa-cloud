@@ -53,6 +53,12 @@ func (a *App) listUpstreams(w http.ResponseWriter, r *http.Request, _ adminSessi
 		item.VerifiedAt = nullString(verified)
 		items = append(items, item)
 	}
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	if iterationErr != nil || closeErr != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
 

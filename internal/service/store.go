@@ -237,7 +237,11 @@ func (s *store) migrateUpstreamsForCodexMembership(ctx context.Context) error {
 		return err
 	}
 	violated := rows.Next()
+	iterationErr := rows.Err()
 	closeErr := rows.Close()
+	if iterationErr != nil {
+		return iterationErr
+	}
 	if violated {
 		return errors.New("foreign key check failed")
 	}
@@ -271,7 +275,15 @@ func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]boo
 		}
 		columns[name] = true
 	}
-	return columns, rows.Err()
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	if iterationErr != nil {
+		return nil, iterationErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return columns, nil
 }
 
 func (s *store) close() error { return s.db.Close() }
