@@ -2,8 +2,24 @@ name: Preview release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*-preview.*"
+    paths:
+      - ".github/workflows/preview-release.yml"
+      - "cmd/**"
+      - "desktop/**"
+      - "docs/**"
+      - "internal/**"
+      - "packaging/**"
+      - "scripts/release*"
+      - "web/**"
+      - "go.mod"
+      - "go.sum"
+      - "LICENSE*"
+      - "THIRD_PARTY_NOTICES.md"
+  workflow_dispatch:
 
 concurrency:
   group: preview-release-${{ github.ref }}
@@ -12,13 +28,16 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v0.1.0-preview.2' }}
+
 jobs:
   web:
     name: Build and review web payload
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Check out tagged source
+      - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Go from go.mod
@@ -33,8 +52,6 @@ jobs:
           bun-version: 1.3.14
 
       - name: Validate preview tag
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: go run ./scripts/release-package.go validate-tag
 
       - name: Install locked web dependencies
@@ -93,7 +110,7 @@ jobs:
             goarch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - name: Check out tagged source
+      - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Go from go.mod
@@ -112,8 +129,6 @@ jobs:
         run: go test ./... -count=1 -timeout=2m
 
       - name: Build native package and collect license texts
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: go run ./scripts/release-package.go package --source . --web-assets release-web --output release-out --target-os "${{ matrix.goos }}" --target-arch "${{ matrix.goarch }}" --asset-os "${{ matrix.asset_os }}"
 
       - name: Upload release asset
@@ -124,9 +139,118 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  installer:
+    name: Build ${{ matrix.asset_os }} ${{ matrix.arch }} installer
+    needs: package
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            asset_os: windows
+            arch: amd64
+            dotnet_arch: x64
+            portable_glob: "*.zip"
+          - runner: windows-11-arm
+            asset_os: windows
+            arch: arm64
+            dotnet_arch: arm64
+            portable_glob: "*.zip"
+          - runner: macos-15-intel
+            asset_os: macos
+            arch: amd64
+            portable_glob: "*.tar.gz"
+          - runner: macos-15
+            asset_os: macos
+            arch: arm64
+            portable_glob: "*.tar.gz"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download matching portable package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: package-${{ matrix.asset_os }}-${{ matrix.arch }}
+          path: installer-input
+
+      - name: Set up .NET 10 SDK
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: 10.0.x
+          architecture: ${{ matrix.dotnet_arch }}
+
+      - name: Test Windows launcher
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: dotnet run --project desktop/windows/CPACloud.Launcher.csproj -c Release -- --self-test
+
+      - name: Download and verify NSIS 3.12
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'nsis-3.12.zip'
+          $extract = Join-Path $env:RUNNER_TEMP 'nsis-3.12'
+          $expected = '56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f'
+          $urls = @(
+            'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.12/nsis-3.12.zip',
+            'https://mirrors.mit.edu/macports/distfiles/nsis/nsis-3.12.zip'
+          )
+          $actual = ''
+          foreach ($url in $urls) {
+            try { Invoke-WebRequest -Uri $url -OutFile $archive -TimeoutSec 60 } catch { continue }
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+            if ($actual -eq $expected) { break }
+          }
+          if ($actual -ne $expected) {
+            throw "No NSIS download matched the canonical SHA-256; last hash: $actual"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $extract
+          $nsisRoot = Join-Path $extract 'nsis-3.12'
+          if (-not (Test-Path -LiteralPath (Join-Path $nsisRoot 'makensis.exe') -PathType Leaf)) {
+            throw 'Verified NSIS archive has an unexpected layout.'
+          }
+          "NSIS_ROOT=$nsisRoot" >> $env:GITHUB_ENV
+
+      - name: Build per-user Windows setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem -LiteralPath installer-input -Filter '${{ matrix.portable_glob }}' -File)
+          $checksums = @(Get-ChildItem -LiteralPath installer-input -Filter '*.sha256' -File)
+          if ($archives.Count -ne 1 -or $checksums.Count -ne 1) { throw 'Expected one portable archive and one checksum.' }
+          ./scripts/release-windows-installer.ps1 -Source . -PortableArchive $archives[0].FullName -PortableChecksum $checksums[0].FullName -Output installer-out -Version $env:RELEASE_TAG -Arch '${{ matrix.arch }}' -NSISRoot $env:NSIS_ROOT
+
+      - name: Test macOS launcher
+        if: runner.os == 'macOS'
+        run: swift test --package-path desktop/macos
+
+      - name: Build macOS app DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archives=(installer-input/${{ matrix.portable_glob }})
+          checksums=(installer-input/*.sha256)
+          test "${#archives[@]}" -eq 1
+          test "${#checksums[@]}" -eq 1
+          ./scripts/release-macos-dmg.sh --source . --portable-archive "${archives[0]}" --portable-checksum "${checksums[0]}" --output installer-out --version "$RELEASE_TAG" --arch "${{ matrix.arch }}"
+
+      - name: Upload installer asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: installer-${{ matrix.asset_os }}-${{ matrix.arch }}
+          path: installer-out/*
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     name: Publish GitHub prerelease
-    needs: package
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-preview.')
+    needs: [package, installer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -139,37 +263,45 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Download all desktop installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: installer-*
+          path: release-assets
+          merge-multiple: true
+
       - name: Verify package sidecars and create aggregate checksums
         shell: bash
         run: |
           set -euo pipefail
           cd release-assets
           shopt -s nullglob
-          archives=(cpa-cloud_*.zip cpa-cloud_*.tar.gz)
+          portables=(cpa-cloud_*.zip cpa-cloud_*.tar.gz)
+          installers=(cpa-cloud_*_Setup.exe cpa-cloud_*.dmg)
           sidecars=(cpa-cloud_*.sha256)
-          test "${#archives[@]}" -eq 6
-          test "${#sidecars[@]}" -eq 6
+          test "${#portables[@]}" -eq 6
+          test "${#installers[@]}" -eq 4
+          test "${#sidecars[@]}" -eq 10
           for sidecar in "${sidecars[@]}"; do sha256sum -c "$sidecar"; done
-          sha256sum "${archives[@]}" > SHA256SUMS.txt
+          sha256sum "${portables[@]}" "${installers[@]}" > SHA256SUMS.txt
 
       - name: Create or update GitHub prerelease
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           cat > release-notes.md <<'EOF'
           ## 开发预览 / Development preview
 
-          本 Release 提供六个由对应架构 GitHub 托管 runner 原生构建的便携包：Windows、Linux、macOS 的 amd64 与 arm64。每个包包含服务程序、`web/` 管理界面、中英文 README、文档、第三方声明与包内 SHA-256 清单。请先核对 `SHA256SUMS.txt`，解压后在包目录按 README 执行管理员初始化。
+          本 Release 提供十个由对应架构 GitHub 托管 runner 原生构建的产物：Windows、Linux、macOS 的 amd64 与 arm64 共六个便携包，另有 Windows amd64/arm64 当前用户安装程序和 macOS amd64/arm64 拖放安装 DMG。Windows 安装程序包含自包含 .NET 启动器，提供开始菜单快捷方式与可选桌面快捷方式；升级与卸载不会删除用户数据。macOS DMG 内含标准 `CPA Cloud.app` 和 Applications 链接。便携包继续保留，内容包括服务程序、`web/` 管理界面、中英文 README、文档、第三方声明与包内 SHA-256 清单。请先核对 `SHA256SUMS.txt`。
 
-          当前仅实现 OpenAI-compatible API Key 上游和 Chat Completions。会员账号、Responses、Messages、账号池与生产级运维尚未实现。工作流在对应架构 runner 上执行 Go 测试、构建和二进制 `--help` 检查；这不等同于真实目标机器上的完整部署验收。Windows/macOS 二进制未签名，macOS 包未经 notarization。
+          当前仅实现 OpenAI-compatible API Key 上游和 Chat Completions。会员账号、Responses、Messages、账号池与生产级运维尚未实现。工作流在对应架构 runner 上执行 Go 测试、启动器测试、构建、包结构检查和二进制检查；这不等同于真实目标机器上的完整部署验收。Windows 安装程序与 macOS App 均未签名，macOS App/DMG 未经 notarization；首次运行可能触发系统安全提示。
 
-          This prerelease provides six portable packages built natively on matching GitHub-hosted runner architectures: amd64 and arm64 for Windows, Linux, and macOS. Each package contains the server, the `web/` console, bilingual READMEs, documentation, third-party notices, and an internal SHA-256 manifest. Verify `SHA256SUMS.txt`, extract the package, and follow the README from the extracted directory to initialize the administrator.
+          This prerelease provides ten artifacts built natively on matching GitHub-hosted runner architectures: six portable packages for Windows, Linux, and macOS on amd64 and arm64, plus per-user Windows Setup executables and drag-and-drop macOS DMGs for both architectures. Windows Setup includes a self-contained .NET launcher, a Start menu shortcut, and an optional desktop shortcut; upgrades and uninstall do not delete user data. Each macOS DMG contains `CPA Cloud.app` and an Applications link. The portable packages remain available and contain the server, `web/` console, bilingual READMEs, documentation, third-party notices, and an internal SHA-256 manifest. Verify `SHA256SUMS.txt` before use.
 
-          The implemented scope is limited to OpenAI-compatible API-key upstreams and Chat Completions. Membership accounts, Responses, Messages, account pools, and production operations are not implemented. The workflow runs Go tests, builds, and a binary `--help` check on matching architecture runners; this is not a claim of complete deployment validation on end-user machines. Windows and macOS binaries are unsigned, and macOS packages are not notarized.
+          The implemented scope is limited to OpenAI-compatible API-key upstreams and Chat Completions. Membership accounts, Responses, Messages, account pools, and production operations are not implemented. The workflow runs Go and launcher tests, builds, package-structure validation, and binary checks on matching architecture runners; this is not a claim of complete deployment validation on end-user machines. Windows Setup and the macOS app are unsigned, and the macOS app/DMG is not notarized; first launch may trigger platform security warnings.
           EOF
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" release-assets/* --clobber
