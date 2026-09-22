@@ -93,3 +93,12 @@
 - 页面身份、非空内容、无框架错误覆盖层通过；无 JavaScript 页面异常。控制台仅两个预期的 HTTP 资源错误（未登录 session 401 和模拟上游 429），没有其他告警或错误。
 - 主任务查看 1440×1000 与 390×844 截图，弹窗模型行和操作按钮可见。证据位于仓库外 `C:/Users/apple/Documents/Codex/cpa-discovery-real-desktop.png`、`cpa-discovery-real-mobile.png`，临时验收脚本为同目录 `cpa-discovery-real-qa.mjs`。
 - 这验证了当前源码的真实网页/服务衔接，不代表真实供应商账号验收或已发布下载包；会员授权/导入仍未实现。
+
+## 2026-09-22：preview.3 发布与下载校验
+
+- `v0.1.0-preview.3` 固定源 `82d536bb28e50cf4228944236ce899b529321f85`。主分支 CI `35742185549` 和发布 CI `35743039148` 均成功；发布地址 https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.3 。
+- 本版包含服务商预设、保存上游后自动发现模型、选择模型创建路由，以及 Windows 初始化窗口布局修复。会员授权和授权文件导入尚未实现。
+- 六便携包、两种 Windows Setup、两种 Windows MSI、Linux 双架构 AppImage/deb/rpm、macOS Universal DMG/ZIP，共 18 个主产物；加 18 个独立校验文件和汇总清单，共 37 个附件。
+- 主任务从 Release 实际下载全部 37 个附件，逐项计算 18 个主产物的 SHA256 并核对 sidecar 与汇总清单，全部 PASS。下载副本位于忽略目录 `dist/preview3-download-verify`。
+- Windows amd64/arm64 的 NSIS 与 MSI 生命周期验收日志均明确 PASS；Linux 原生构建和包结构读回、Mac Universal 原生构建/架构检查/DMG 校验通过。不代表所有发行版已进行安装运行或完整人工 GUI 验收。
+- 包内 README 固定于源提交的发布前状态（仍可能指向 preview.2）；最新说明与下载入口以 main README 及本次 Release 实际资产为准，不修改已发布资产。
