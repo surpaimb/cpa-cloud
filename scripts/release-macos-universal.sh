@@ -66,7 +66,7 @@ portable_root=""
 extract_portable() {
   local archive=$1 checksum=$2 destination=$3 swift_arch=$4
   [[ -f "$archive" && -f "$checksum" ]] || { echo "portable input is missing for $swift_arch" >&2; exit 1; }
-  local expected_checksum expected_name actual_checksum root_count root
+  local expected_checksum expected_name actual_checksum root
   expected_checksum=$(awk 'NF == 2 { print $1; exit }' "$checksum")
   expected_name=$(awk 'NF == 2 { print $2; exit }' "$checksum")
   [[ "$expected_checksum" =~ ^[a-fA-F0-9]{64}$ && "$expected_name" == "$(basename "$archive")" ]] || {
@@ -77,10 +77,11 @@ extract_portable() {
   [[ "$actual_checksum" == "$expected_checksum" ]] || { echo "portable archive checksum mismatch for $swift_arch" >&2; exit 1; }
   mkdir -p "$destination"
   tar -xzf "$archive" -C "$destination"
-  root_count=$(find "$destination" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')
-  [[ "$root_count" == "1" ]] || { echo "portable archive must contain exactly one root directory for $swift_arch" >&2; exit 1; }
-  root=$(find "$destination" -mindepth 1 -maxdepth 1 -type d -print | head -n 1)
-  for required in cpa-cloud web/index.html THIRD_PARTY_NOTICES.md THIRD-PARTY-LICENSES; do
+  local roots=()
+  while IFS= read -r -d '' root; do roots+=("$root"); done < <(find "$destination" -mindepth 1 -maxdepth 1 -type d -print0)
+  [[ ${#roots[@]} -eq 1 ]] || { echo "portable archive must contain exactly one root directory for $swift_arch" >&2; exit 1; }
+  root=${roots[0]}
+  for required in cpa-cloud web/index.html THIRD_PARTY_NOTICES.md THIRD-PARTY-LICENSES GO-DEPENDENCIES.txt FRONTEND-DEPENDENCIES.txt BUILD-INFO.txt; do
     [[ -e "$root/$required" ]] || { echo "portable archive is incomplete for $swift_arch: missing $required" >&2; exit 1; }
   done
   local server_arches
@@ -95,8 +96,14 @@ extract_portable "$arm64_archive" "$arm64_checksum" "$stage_root/portable-arm64"
 arm64_root=$portable_root
 
 diff -qr "$amd64_root/web" "$arm64_root/web" >/dev/null || { echo "web payload differs between macOS architectures" >&2; exit 1; }
-diff -qr "$amd64_root/THIRD-PARTY-LICENSES" "$arm64_root/THIRD-PARTY-LICENSES" >/dev/null || { echo "license payload differs between macOS architectures" >&2; exit 1; }
+amd64_license_compare="$stage_root/license-compare-amd64"
+arm64_license_compare="$stage_root/license-compare-arm64"
+ditto "$amd64_root/THIRD-PARTY-LICENSES" "$amd64_license_compare"
+ditto "$arm64_root/THIRD-PARTY-LICENSES" "$arm64_license_compare"
+rm "$amd64_license_compare/go-runtime/VERSION" "$arm64_license_compare/go-runtime/VERSION"
+diff -qr "$amd64_license_compare" "$arm64_license_compare" >/dev/null || { echo "license payload differs between macOS architectures outside the Go runtime version record" >&2; exit 1; }
 cmp -s "$amd64_root/THIRD_PARTY_NOTICES.md" "$arm64_root/THIRD_PARTY_NOTICES.md" || { echo "third-party notice differs between macOS architectures" >&2; exit 1; }
+cmp -s "$amd64_root/FRONTEND-DEPENDENCIES.txt" "$arm64_root/FRONTEND-DEPENDENCIES.txt" || { echo "frontend dependency inventory differs between macOS architectures" >&2; exit 1; }
 
 package_dir="$source_root/desktop/macos"
 swift build --package-path "$package_dir" -c release --arch x86_64 --product CPACloudLauncher
@@ -123,11 +130,13 @@ cp "$stage_root/cpa-cloud-universal" "$app/Contents/Resources/server/cpa-cloud"
 ditto "$amd64_root/web" "$app/Contents/Resources/web"
 ditto "$amd64_root/THIRD-PARTY-LICENSES" "$app/Contents/Resources/notices/THIRD-PARTY-LICENSES"
 cp "$amd64_root/THIRD_PARTY_NOTICES.md" "$app/Contents/Resources/notices/THIRD_PARTY_NOTICES.md"
-for notice in GO-DEPENDENCIES.txt FRONTEND-DEPENDENCIES.txt; do
-  [[ ! -f "$amd64_root/$notice" ]] || cp "$amd64_root/$notice" "$app/Contents/Resources/notices/$notice"
-done
-[[ ! -f "$amd64_root/BUILD-INFO.txt" ]] || cp "$amd64_root/BUILD-INFO.txt" "$app/Contents/Resources/notices/PORTABLE-BUILD-INFO-amd64.txt"
-[[ ! -f "$arm64_root/BUILD-INFO.txt" ]] || cp "$arm64_root/BUILD-INFO.txt" "$app/Contents/Resources/notices/PORTABLE-BUILD-INFO-arm64.txt"
+mv "$app/Contents/Resources/notices/THIRD-PARTY-LICENSES/go-runtime/VERSION" "$app/Contents/Resources/notices/THIRD-PARTY-LICENSES/go-runtime/VERSION-amd64.txt"
+cp "$arm64_root/THIRD-PARTY-LICENSES/go-runtime/VERSION" "$app/Contents/Resources/notices/THIRD-PARTY-LICENSES/go-runtime/VERSION-arm64.txt"
+cp "$amd64_root/FRONTEND-DEPENDENCIES.txt" "$app/Contents/Resources/notices/FRONTEND-DEPENDENCIES.txt"
+cp "$amd64_root/GO-DEPENDENCIES.txt" "$app/Contents/Resources/notices/GO-DEPENDENCIES-amd64.txt"
+cp "$arm64_root/GO-DEPENDENCIES.txt" "$app/Contents/Resources/notices/GO-DEPENDENCIES-arm64.txt"
+cp "$amd64_root/BUILD-INFO.txt" "$app/Contents/Resources/notices/PORTABLE-BUILD-INFO-amd64.txt"
+cp "$arm64_root/BUILD-INFO.txt" "$app/Contents/Resources/notices/PORTABLE-BUILD-INFO-arm64.txt"
 chmod 755 "$app/Contents/MacOS/CPACloudLauncher" "$app/Contents/Resources/server/cpa-cloud"
 
 plutil -lint "$app/Contents/Info.plist"

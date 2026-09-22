@@ -145,6 +145,13 @@ CPA Cloud.app/
     Resources/notices/
 ```
 
+The two native inputs may have been built by runners carrying different Go
+patch releases. The package therefore requires every license file and the
+frontend inventory to match, while retaining architecture-labelled copies of
+each Go runtime `VERSION`, Go dependency inventory, and portable build record.
+This preserves both provenance chains instead of treating a legitimate Go
+patch-version difference as a license mismatch or silently discarding it.
+
 The bundle identifier is `com.surpaimb.cpa-cloud.launcher`. The compressed DMG
 contains the app and an `/Applications` symlink for the standard drag-and-drop
 installation flow. Packaging uses only Apple/Xcode system tools (`swift`,

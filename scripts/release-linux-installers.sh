@@ -86,13 +86,14 @@ trap cleanup EXIT
 portable_extract="$stage_root/portable"
 mkdir -p "$portable_extract"
 tar -xzf "$portable_archive" -C "$portable_extract"
-portable_root_count=$(find "$portable_extract" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')
-[[ "$portable_root_count" == "1" ]] || { echo "portable archive must contain exactly one root directory" >&2; exit 1; }
-portable_root=$(find "$portable_extract" -mindepth 1 -maxdepth 1 -type d -print | head -n 1)
+mapfile -d '' portable_roots < <(find "$portable_extract" -mindepth 1 -maxdepth 1 -type d -print0)
+[[ ${#portable_roots[@]} -eq 1 ]] || { echo "portable archive must contain exactly one root directory" >&2; exit 1; }
+portable_root=${portable_roots[0]}
 for required in cpa-cloud web/index.html THIRD_PARTY_NOTICES.md THIRD-PARTY-LICENSES; do
   [[ -e "$portable_root/$required" ]] || { echo "portable archive is incomplete: missing $required" >&2; exit 1; }
 done
-file "$portable_root/cpa-cloud" | grep -Fq "$elf_pattern" || { echo "server architecture does not match linux/$arch" >&2; exit 1; }
+server_file_description=$(file "$portable_root/cpa-cloud")
+[[ "$server_file_description" == *"$elf_pattern"* ]] || { echo "server architecture does not match linux/$arch" >&2; exit 1; }
 
 package_root="$stage_root/package-root"
 install -Dm755 "$portable_root/cpa-cloud" "$package_root/usr/lib/cpa-cloud/cpa-cloud"
@@ -171,7 +172,9 @@ Description: Local CPA Cloud administration service and desktop launcher
 EOF
 dpkg-deb --build --root-owner-group "$deb_root" "$deb" >/dev/null
 dpkg-deb --info "$deb" >/dev/null
-dpkg-deb --contents "$deb" | grep -q './usr/lib/cpa-cloud/cpa-cloud$' || { echo "deb readback is missing the server" >&2; exit 1; }
+deb_contents="$stage_root/deb-contents.txt"
+dpkg-deb --contents "$deb" > "$deb_contents"
+grep -q './usr/lib/cpa-cloud/cpa-cloud$' "$deb_contents" || { echo "deb readback is missing the server" >&2; exit 1; }
 
 rpm_top="$stage_root/rpmbuild"
 mkdir -p "$rpm_top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
@@ -209,7 +212,9 @@ rpmbuild -bb --define "_topdir $rpm_top" --target "$rpm_arch" "$rpm_top/SPECS/cp
 built_rpms=("$rpm_top"/RPMS/"$rpm_arch"/*.rpm)
 [[ ${#built_rpms[@]} -eq 1 && -f "${built_rpms[0]}" ]] || { echo "expected exactly one built rpm" >&2; exit 1; }
 cp "${built_rpms[0]}" "$rpm_output"
-rpm -qpl "$rpm_output" | grep -q '/usr/lib/cpa-cloud/cpa-cloud$' || { echo "rpm readback is missing the server" >&2; exit 1; }
+rpm_contents="$stage_root/rpm-contents.txt"
+rpm -qpl "$rpm_output" > "$rpm_contents"
+grep -q '/usr/lib/cpa-cloud/cpa-cloud$' "$rpm_contents" || { echo "rpm readback is missing the server" >&2; exit 1; }
 
 for output in "$appimage" "$deb" "$rpm_output"; do
   digest=$(sha256sum "$output" | awk '{print $1}')
