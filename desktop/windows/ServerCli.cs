@@ -29,8 +29,8 @@ internal static class ServerCli
         }
 
         // Drain both streams so a verbose child cannot block. Output is deliberately discarded.
-        var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
+        var stdout = OutputDrainer.DrainAsync(process.StandardOutput.BaseStream, cancellationToken);
+        var stderr = OutputDrainer.DrainAsync(process.StandardError.BaseStream, cancellationToken);
 
         if (password is null)
         {

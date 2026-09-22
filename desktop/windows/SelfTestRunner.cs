@@ -18,6 +18,7 @@ internal static class SelfTestRunner
             TestPasswords();
             TestCommands();
             TestHealthIdentity();
+            TestBoundedHealthProbeAsync().GetAwaiter().GetResult();
             TestPortProbe();
             TestSecureDataDirectory();
             TestNamedMutexProbe();
@@ -123,6 +124,48 @@ internal static class SelfTestRunner
         Assert(!HealthResponse.Matches("not-json", id), "invalid health response");
     }
 
+    private static async Task TestBoundedHealthProbeAsync()
+    {
+        const string id = "123e4567-e89b-12d3-a456-426614174000";
+        var endpoint = new Uri("http://127.0.0.1/healthz");
+
+        using (var validClient = CreateStubClient(new StringContent(
+            $"{{\"status\":\"ok\",\"instance_id\":\"{id}\"}}")))
+        {
+            Assert(
+                await HealthProbe.MatchesAsync(validClient, endpoint, id, TimeSpan.FromSeconds(1), CancellationToken.None),
+                "bounded valid health response");
+        }
+
+        using (var oversizedClient = CreateStubClient(new ByteArrayContent(
+            new byte[HealthResponse.MaximumBodyBytes + 1])))
+        {
+            Assert(
+                !await HealthProbe.MatchesAsync(oversizedClient, endpoint, id, TimeSpan.FromSeconds(1), CancellationToken.None),
+                "oversized health response");
+        }
+
+        using (var slowClient = CreateStubClient(new StreamContent(new NeverEndingReadStream())))
+        {
+            var stopwatch = Stopwatch.StartNew();
+            Assert(
+                !await HealthProbe.MatchesAsync(slowClient, endpoint, id, TimeSpan.FromMilliseconds(100), CancellationToken.None),
+                "slow health body timeout");
+            Assert(stopwatch.Elapsed < TimeSpan.FromSeconds(2), "slow health body remained bounded");
+        }
+
+        using var handler = ServerProcessController.CreateHttpHandler();
+        Assert(!handler.AllowAutoRedirect, "health redirects disabled");
+        Assert(!handler.UseProxy, "health proxy disabled");
+        Assert(handler.MaxResponseHeadersLength == 4, "health header limit");
+    }
+
+    private static HttpClient CreateStubClient(HttpContent content) =>
+        new(new StubHttpMessageHandler(new HttpResponseMessage(HttpStatusCode.OK) { Content = content }))
+        {
+            Timeout = Timeout.InfiniteTimeSpan,
+        };
+
     private static void TestPortProbe()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -185,5 +228,43 @@ internal static class SelfTestRunner
         {
             throw new InvalidOperationException($"Self-test failed: {name}");
         }
+    }
+
+    private sealed class StubHttpMessageHandler(HttpResponseMessage response) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) => Task.FromResult(response);
+    }
+
+    private sealed class NeverEndingReadStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }

@@ -20,13 +20,8 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
 
-        if (IsNamedMutexPresent(SetupMutexName))
+        if (ExitForActiveSetup())
         {
-            MessageBox.Show(
-                "CPA Cloud 正在安装或卸载，请完成后重试。\n\nCPA Cloud setup is in progress. Please try again when it finishes.",
-                "CPA Cloud",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
             return 0;
         }
 
@@ -38,6 +33,14 @@ internal static class Program
                 "CPA Cloud",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
+            return 0;
+        }
+
+        // The installer owns the setup mutex before its final launcher check.
+        // Re-check after taking our mutex so both sides cannot pass only their
+        // first check during the same scheduling window.
+        if (ExitForActiveSetup())
+        {
             return 0;
         }
 
@@ -67,6 +70,21 @@ internal static class Program
                 // The mutex is process-scoped and may already have been released.
             }
         }
+    }
+
+    private static bool ExitForActiveSetup()
+    {
+        if (!IsNamedMutexPresent(SetupMutexName))
+        {
+            return false;
+        }
+
+        MessageBox.Show(
+            "CPA Cloud 正在安装或卸载，请完成后重试。\n\nCPA Cloud setup is in progress. Please try again when it finishes.",
+            "CPA Cloud",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+        return true;
     }
 
     internal static bool IsNamedMutexPresent(string name)

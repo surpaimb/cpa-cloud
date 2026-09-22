@@ -35,7 +35,8 @@ The built-in non-UI self-test covers bundle/data path derivation, UTF-8 password
 - First-run initialization checks state through `--check-initialized`; it does not infer success from file existence.
 - The password and confirmation stay in native password fields. The password is sent as raw UTF-8 bytes to `cpa-cloud.exe --init` over redirected stdin, which is then closed. It is never placed in command-line arguments or launcher logs.
 - Before each service start, the launcher verifies that `127.0.0.1:8787` can be bound. It never kills the port owner and never chooses another port.
-- Every start uses a new UUID with `--instance-id`. The browser opens only while the owned child is alive and `/healthz` returns that exact identifier.
+- Every start uses a new UUID with `--instance-id`. The browser opens only while the owned child is alive and `/healthz` returns that exact identifier. Health requests do not follow redirects; each headers-plus-body attempt is time-bounded and rejects bodies larger than 4 KiB.
+- Child stdout and stderr are continuously read into fixed-size discard buffers, so service-lifetime output is neither logged nor accumulated in launcher memory.
 - Normal stop and launcher exit close the child stdin pipe first. Only if the owned child misses the bounded shutdown deadline is that same process tree terminated.
 - Unexpected exits are shown as an error and are not restarted automatically.
 

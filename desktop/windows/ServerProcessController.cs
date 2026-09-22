@@ -15,6 +15,7 @@ internal enum ServerState
 internal sealed class ServerProcessController : IDisposable
 {
     private static readonly TimeSpan ReadinessTimeout = TimeSpan.FromSeconds(20);
+    internal static readonly TimeSpan HealthAttemptTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(10);
     private readonly object _gate = new();
     private readonly LauncherPaths _paths;
@@ -28,15 +29,19 @@ internal sealed class ServerProcessController : IDisposable
     internal ServerProcessController(LauncherPaths paths)
     {
         _paths = paths;
-        _httpClient = new HttpClient(new SocketsHttpHandler
+        _httpClient = new HttpClient(CreateHttpHandler())
         {
-            UseProxy = false,
-            AutomaticDecompression = DecompressionMethods.None,
-        })
-        {
-            Timeout = TimeSpan.FromSeconds(2),
+            Timeout = Timeout.InfiniteTimeSpan,
         };
     }
+
+    internal static SocketsHttpHandler CreateHttpHandler() => new()
+    {
+        UseProxy = false,
+        AllowAutoRedirect = false,
+        AutomaticDecompression = DecompressionMethods.None,
+        MaxResponseHeadersLength = 4,
+    };
 
     internal event EventHandler? StateChanged;
 
@@ -115,8 +120,8 @@ internal sealed class ServerProcessController : IDisposable
                 throw new InvalidOperationException("Windows 未能启动服务进程。");
             }
 
-            _ = DrainAsync(process.StandardOutput);
-            _ = DrainAsync(process.StandardError);
+            _ = OutputDrainer.DrainAsync(process.StandardOutput.BaseStream);
+            _ = OutputDrainer.DrainAsync(process.StandardError.BaseStream);
         }
         catch (Exception ex)
         {
@@ -195,28 +200,12 @@ internal sealed class ServerProcessController : IDisposable
 
     private async Task<bool> HasMatchingHealthAsync(string instanceId, CancellationToken cancellationToken)
     {
-        try
-        {
-            using var response = await _httpClient.GetAsync(
-                $"http://127.0.0.1:{LoopbackPortProbe.ServicePort}/healthz",
-                HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken);
-            if (response.StatusCode != HttpStatusCode.OK)
-            {
-                return false;
-            }
-
-            var json = await response.Content.ReadAsStringAsync(cancellationToken);
-            return HealthResponse.Matches(json, instanceId);
-        }
-        catch (HttpRequestException)
-        {
-            return false;
-        }
-        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            return false;
-        }
+        return await HealthProbe.MatchesAsync(
+            _httpClient,
+            new Uri($"http://127.0.0.1:{LoopbackPortProbe.ServicePort}/healthz"),
+            instanceId,
+            HealthAttemptTimeout,
+            cancellationToken);
     }
 
     private async Task StopSpecificProcessAsync(Process process)
@@ -306,20 +295,6 @@ internal sealed class ServerProcessController : IDisposable
             _lastError = message;
         }
         RaiseStateChanged();
-    }
-
-    private static async Task DrainAsync(StreamReader reader)
-    {
-        try
-        {
-            await reader.ReadToEndAsync();
-        }
-        catch (IOException)
-        {
-        }
-        catch (ObjectDisposedException)
-        {
-        }
     }
 
     private static bool HasExited(Process process)
