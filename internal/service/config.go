@@ -24,6 +24,11 @@ type Config struct {
 	Version               string
 }
 
+const (
+	adminPasswordMinBytes = 12
+	adminPasswordMaxBytes = 72
+)
+
 func Initialize(ctx context.Context, dataDir string, passwordReader io.Reader) error {
 	if strings.TrimSpace(dataDir) == "" {
 		return errors.New("data directory is required")
@@ -60,8 +65,8 @@ func Initialize(ctx context.Context, dataDir string, passwordReader io.Reader) e
 	if len(passwordBytes) > 4096 {
 		return errors.New("administrator password is too long")
 	}
-	if len(password) < 12 || len(password) > 256 {
-		return errors.New("administrator password must be 12 to 256 bytes")
+	if err := validateAdminPassword(password); err != nil {
+		return err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
 	if err != nil {
@@ -73,6 +78,13 @@ func Initialize(ctx context.Context, dataDir string, passwordReader io.Reader) e
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO admins(id,username,password_hash,created_at) VALUES(?,?,?,?)`, id, "admin", hash, utcNow()); err != nil {
 		return fmt.Errorf("create administrator: %w", err)
+	}
+	return nil
+}
+
+func validateAdminPassword(password string) error {
+	if len(password) < adminPasswordMinBytes || len(password) > adminPasswordMaxBytes {
+		return errors.New("administrator password must be 12 to 72 bytes")
 	}
 	return nil
 }

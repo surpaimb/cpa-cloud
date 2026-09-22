@@ -38,8 +38,18 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input loginRequest
-	if !decodeJSON(w, r, adminMaxBody, &input) || input.Username == "" || input.Password == "" || len(input.Password) > 256 {
+	if !decodeJSON(w, r, adminMaxBody, &input) {
 		a.recordLoginFailure(remote)
+		return
+	}
+	if !validText(input.Username, 1, 120) {
+		a.recordLoginFailure(remote)
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Invalid login request.")
+		return
+	}
+	if validateAdminPassword(input.Password) != nil {
+		a.recordLoginFailure(remote)
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Administrator password must be 12 to 72 bytes.")
 		return
 	}
 	var adminID, username string

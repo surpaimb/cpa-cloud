@@ -198,6 +198,61 @@ func TestNetworkSafetyValidation(t *testing.T) {
 	}
 }
 
+func TestAdministratorPasswordLengthBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{name: "below minimum", length: 11, wantErr: true},
+		{name: "minimum", length: 12},
+		{name: "bcrypt maximum", length: 72},
+		{name: "above bcrypt maximum", length: 73, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			password := strings.Repeat("s", test.length)
+			err := Initialize(context.Background(), t.TempDir(), strings.NewReader(password+"\n"))
+			if test.wantErr && err == nil {
+				t.Fatalf("Initialize accepted %d-byte password", test.length)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("Initialize rejected %d-byte password: %v", test.length, err)
+			}
+			if err != nil && strings.Contains(err.Error(), password) {
+				t.Fatal("initialization error exposed the supplied password")
+			}
+		})
+	}
+
+	dataDir := t.TempDir()
+	validPassword := strings.Repeat("v", adminPasswordMaxBytes)
+	if err := Initialize(context.Background(), dataDir, strings.NewReader(validPassword+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	app := openTestApp(t, dataDir)
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	accepted := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/sessions",
+		`{"username":"admin","password":`+quoteJSON(validPassword)+`}`, nil, "", server.URL)
+	if accepted.StatusCode != http.StatusOK {
+		t.Fatalf("login rejected 72-byte password: status=%d body=%s", accepted.StatusCode, readBody(accepted))
+	}
+	accepted.Body.Close()
+	for _, length := range []int{11, 73} {
+		password := strings.Repeat("private", length/7) + strings.Repeat("x", length%7)
+		response := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/sessions",
+			`{"username":"admin","password":`+quoteJSON(password)+`}`, nil, "", server.URL)
+		body := readBody(response)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("login password length %d status=%d body=%s", length, response.StatusCode, body)
+		}
+		if strings.Contains(body, password) {
+			t.Fatal("login error exposed the supplied password")
+		}
+	}
+}
+
 func openTestApp(t *testing.T, dataDir string) *App {
 	t.Helper()
 	app, err := Open(context.Background(), Config{DataDir: dataDir, Listen: "127.0.0.1:0", AllowLoopbackUpstream: true, Version: "test"})
