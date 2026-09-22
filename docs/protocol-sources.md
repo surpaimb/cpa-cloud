@@ -15,3 +15,17 @@
 
 核心设计中的 API 路径和支持批次是产品目标，不代表所有官方接口字段已经验证。
 后续新增来源应记录具体章节、版本/日期、支持子集与独立测试证据；不抄录大段原文。
+
+## Gemini Developer API 原生通路
+
+查阅日期：2026-09-23。
+
+- Gemini API 总览、原生端点与 `x-goog-api-key`：<https://ai.google.dev/api>
+- GenerateContent、SSE、Content、函数调用、生成配置与用量：<https://ai.google.dev/api/generate-content>
+- Models list/get：<https://ai.google.dev/api/models>
+- v1/v1beta 版本边界：<https://ai.google.dev/gemini-api/docs/api-versions>
+- Gemini CLI 官方鉴权说明：<https://github.com/google-gemini/gemini-cli/blob/main/docs/get-started/authentication.mdx>
+- Gemini CLI 官方条款/隐私与第三方 OAuth 边界：<https://github.com/google-gemini/gemini-cli/blob/main/docs/resources/tos-privacy.md>
+- Gemini CLI FAQ 的第三方 OAuth 边界：<https://github.com/google-gemini/gemini-cli/blob/main/docs/resources/faq.md>
+
+实现范围与不能据 API Key 宣称会员已可用的边界见 [Gemini 原生 API 开发预览契约](gemini-native-contract.md)。

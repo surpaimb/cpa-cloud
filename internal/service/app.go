@@ -105,6 +105,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/responses", a.responsesAPI)
 	mux.HandleFunc("POST /v1/messages", a.messages)
 	mux.HandleFunc("POST /v1/messages/count_tokens", a.countMessageTokens)
+	mux.HandleFunc("GET /v1beta/models", a.listGeminiModels)
+	mux.HandleFunc("POST /v1beta/models/{operation}", a.geminiGenerateContent)
 	if strings.TrimSpace(a.cfg.WebDir) != "" {
 		mux.HandleFunc("GET /", a.serveWeb)
 	}
@@ -155,8 +157,9 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			limitations = append(limitations, "Codex OAuth requires explicit --codex-oauth-client-id and --codex-oauth-redirect-uri configuration")
 		}
 	} else {
-		limitations = append(limitations, "only OpenAI-compatible and Anthropic API-key upstreams are enabled")
+		limitations = append(limitations, "only API-key upstreams are enabled; Codex membership is disabled")
 	}
+	limitations = append(limitations, "Gemini native support uses Gemini Developer API keys; Google account and Code Assist OAuth credentials are not accepted")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version": a.cfg.Version,
 		"ready":   true,
@@ -166,6 +169,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"responses_api":           true,
 			"responses_streaming":     true,
 			"codex_membership_oauth":  a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
+			"gemini_native_api":       true,
 		},
 		"limitations": limitations,
 	})

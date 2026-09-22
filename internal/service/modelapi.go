@@ -114,6 +114,22 @@ func (a *App) lookupEmployeeKey(ctx context.Context, key string) (employeeAuth, 
 	return auth, true
 }
 
+func (a *App) authenticateEmployeeRequest(r *http.Request) (employeeAuth, error) {
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 || len(r.Header.Values("X-API-Key")) != 0 {
+		return employeeAuth{}, errors.New("invalid employee key")
+	}
+	parts := strings.Fields(values[0])
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return employeeAuth{}, errors.New("invalid employee key")
+	}
+	auth, valid := a.lookupEmployeeKey(r.Context(), parts[1])
+	if !valid {
+		return employeeAuth{}, errors.New("invalid employee key")
+	}
+	return auth, nil
+}
+
 func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, modelMaxBody)
 	body, err := io.ReadAll(r.Body)

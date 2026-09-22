@@ -18,7 +18,7 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 | /employees/{id}/model-policy | PUT | {expected_revision,mode,models}; mode all/selected |
 | /employees/{id}/keys | GET/POST | POST {name,operation_id,expires_at?}; 默认 null；返回 {id,name,key?,expires_at,revoked_at}，只有首次创建有 key |
 | /keys/{id}/revoke | POST | {}；返回 {ok:true} |
-| /upstreams | GET/POST | POST {name,provider_kind,endpoint,api_key}; kind openai-compatible；列表绝不返回 api_key/ciphertext |
+| /upstreams | GET/POST | POST {name,provider_kind,endpoint?,api_key}; kind openai-compatible 或 gemini-api-key；Gemini 生产端点固定为 Google 官方地址；列表绝不返回 api_key/ciphertext |
 | /upstreams/{id} | PATCH | {expected_revision,name?,enabled?,api_key?} |
 | /models | GET/POST | POST {id,upstream_id,upstream_model}; 暂一模型一路由；返回 {id,upstream_id,upstream_model,enabled} |
 | /system/status | GET | {version,ready,storage,limitations:[]} |
@@ -34,6 +34,7 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 服务商预设仅辅助填写名称和端点，后端仍为 `openai-compatible`。自定义地址继续支持；切换服务商或目标地址时清空未保存 Key，避免将凭据发送给错误目标。不得通过携带 Key 的试探请求猜测服务商地址。
 GET /healthz 只返回 {status}，不暴露员工或上游详情。
 模型入口 GET /v1/models 和 POST /v1/chat/completions 使用 Bearer 员工 Key。
+Gemini 原生入口 GET /v1beta/models、POST /v1beta/models/{model}:generateContent 和 POST /v1beta/models/{model}:streamGenerateContent 使用同一 Bearer 员工 Key；字段范围、错误、SSE、固定端点与 Google 会员边界见 [Gemini 原生契约](gemini-native-contract.md)。
 默认不自动重试；鉴权和上游执行同进程，员工秘密不向上游传递。
 开发测试可显式允许回环模拟上游（仅测试配置），不能默认允许任意内部地址或重定向。
 

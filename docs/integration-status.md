@@ -136,3 +136,10 @@
 - 本机缺少 gcc/clang，Windows race 未通过环境前置条件；原任务此前的 race PASS 报告已撤回。轻量 Linux `core` CI 新增显式 `CGO_ENABLED=1` 的 `go test -race ./internal/service ./internal/membership -count=1 -timeout=5m`，运行结果在下方另记，不能用普通测试替代 race 证据。
 - 中英文 README、导入/生命周期契约、功能矩阵和分工说明同步为“源码实验、后台授权及手动刷新”。原 PowerShell 命令块逐块比对未变，文档本地链接、6 个 CI 路径分类测试及 diff 检查通过。默认关闭，无网页授权入口、后台自动刷新或真实会员验证，不新建 tag 或安装包，下载版仍为 preview.3。
 - 集成与验收提交 `a71ae3e3535ad14cb8a48083820b4e9dfdda8237` 已推送 main。[Code validation 35802158197](https://github.com/surpaimb/cpa-cloud/actions/runs/35802158197) 全部成功：core 的全量 Go 测试、`CGO_ENABLED=1` race、vet 和构建均通过，web 检查通过，windows/linux/macos 安装构建均 skipped。主任务读取 core job `106994752057` 日志核实 race 实际执行：service `223.479s`、membership `1.667s` 均为 `ok`；没有用 Windows 环境失败或普通测试冒充 race 结果。
+
+## 2026-09-23：Gemini Developer API 原生通路源码实现
+
+- 新增 `gemini-api-key` 上游、固定 Google 生产端点、独立 AEAD 用途绑定、事务化 schema 扩展、管理员模型发现，以及员工 `GET /v1beta/models`、`generateContent`、`streamGenerateContent`。
+- 独立假上游测试覆盖员工 Bearer Key 隔离、模型映射、contents/systemInstruction、函数声明与 functionCall/functionResponse 回合、明确 generationConfig 子集、finishReason/usage 原样返回、SSE、多帧、取消、错误脱敏、429、权限、撤销、凭据替换和重启恢复。没有访问真实 Google 账号或端点。
+- Google 官方 Gemini CLI 条款与 FAQ 明确反对第三方复用 Gemini CLI OAuth 访问 Code Assist 后端，因此未实现会员 OAuth/缓存 Token 导入，且不把 AI Studio API Key 通路称为会员可用。该边界是当前官方材料下的产品阻塞，不代表普遍法律结论；未来如有适用的公开委托协议需另立契约。
+- 本功能尚未由主任务集成、进程级验收或发布；测试结果与最终提交号以集成回报为准。

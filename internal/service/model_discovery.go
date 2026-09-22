@@ -50,6 +50,10 @@ func (a *App) discoverUpstreamModels(w http.ResponseWriter, r *http.Request, _ a
 		writeAdminError(w, http.StatusConflict, "upstream_disabled", "Upstream is disabled.")
 		return
 	}
+	if providerKind == geminiAPIKeyProvider {
+		a.discoverGeminiUpstreamModels(w, r, id, endpoint, keyVersion, ciphertext)
+		return
+	}
 
 	if (providerKind != "openai-compatible" && providerKind != anthropicAPIKeyProvider) || keyVersion != 1 {
 		writeAdminError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is temporarily unavailable.")

@@ -103,7 +103,7 @@ func (s *store) initialize(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS upstreams (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
-			provider_kind TEXT NOT NULL CHECK(provider_kind IN ('openai-compatible','anthropic-api-key','codex-membership')),
+			provider_kind TEXT NOT NULL CHECK(provider_kind IN ('openai-compatible','anthropic-api-key','gemini-api-key','codex-membership')),
 			endpoint TEXT NOT NULL,
 			enabled INTEGER NOT NULL,
 			credential_ciphertext BLOB NOT NULL,
@@ -114,7 +114,7 @@ func (s *store) initialize(ctx context.Context) error {
 			verified_at TEXT,
 			operation_id TEXT UNIQUE,
 			CHECK(
-				(provider_kind IN ('openai-compatible','anthropic-api-key') AND credential_state IS NULL AND verified_at IS NULL AND operation_id IS NULL)
+				(provider_kind IN ('openai-compatible','anthropic-api-key','gemini-api-key') AND credential_state IS NULL AND verified_at IS NULL AND operation_id IS NULL)
 				OR
 				(provider_kind = 'codex-membership' AND credential_state IS NOT NULL AND operation_id IS NOT NULL)
 			)
@@ -219,7 +219,7 @@ func (s *store) migrateUpstreamsForCodexMembership(ctx context.Context) error {
 		return err
 	}
 	lowerSchema := strings.ToLower(schema)
-	if columns["credential_state"] && columns["verified_at"] && columns["operation_id"] && strings.Contains(lowerSchema, "codex-membership") && strings.Contains(lowerSchema, "anthropic-api-key") {
+	if columns["credential_state"] && columns["verified_at"] && columns["operation_id"] && strings.Contains(lowerSchema, "codex-membership") && strings.Contains(lowerSchema, "anthropic-api-key") && strings.Contains(lowerSchema, "gemini-api-key") {
 		return nil
 	}
 
@@ -263,7 +263,7 @@ func (s *store) migrateUpstreamsForCodexMembership(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE `+upstreamMigrationTable+` (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
-		provider_kind TEXT NOT NULL CHECK(provider_kind IN ('openai-compatible','anthropic-api-key','codex-membership')),
+		provider_kind TEXT NOT NULL CHECK(provider_kind IN ('openai-compatible','anthropic-api-key','gemini-api-key','codex-membership')),
 		endpoint TEXT NOT NULL,
 		enabled INTEGER NOT NULL,
 		credential_ciphertext BLOB NOT NULL,
@@ -274,7 +274,7 @@ func (s *store) migrateUpstreamsForCodexMembership(ctx context.Context) error {
 		verified_at TEXT,
 		operation_id TEXT UNIQUE,
 		CHECK(
-			(provider_kind IN ('openai-compatible','anthropic-api-key') AND credential_state IS NULL AND verified_at IS NULL AND operation_id IS NULL)
+			(provider_kind IN ('openai-compatible','anthropic-api-key','gemini-api-key') AND credential_state IS NULL AND verified_at IS NULL AND operation_id IS NULL)
 			OR
 			(provider_kind = 'codex-membership' AND credential_state IS NOT NULL AND operation_id IS NOT NULL)
 		)

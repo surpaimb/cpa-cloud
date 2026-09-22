@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+const (
+	geminiAPIKeyProvider = "gemini-api-key"
+	geminiAPIEndpoint    = "https://generativelanguage.googleapis.com"
+)
+
 type upstreamView struct {
 	ID              string  `json:"id"`
 	Name            string  `json:"name"`
@@ -69,11 +74,17 @@ func (a *App) createUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 	}
 	input.Name = strings.TrimSpace(input.Name)
 	input.Endpoint = strings.TrimSpace(input.Endpoint)
-	if !validText(input.Name, 1, 120) || (input.ProviderKind != "openai-compatible" && input.ProviderKind != anthropicAPIKeyProvider) || !validText(input.APIKey, 1, 4096) {
+	if !validText(input.Name, 1, 120) || (input.ProviderKind != "openai-compatible" && input.ProviderKind != anthropicAPIKeyProvider && input.ProviderKind != geminiAPIKeyProvider) || !validText(input.APIKey, 1, 4096) {
 		writeAdminError(w, 400, "invalid_request", "Invalid upstream fields.")
 		return
 	}
-	endpoint, err := validateEndpoint(r.Context(), input.Endpoint, a.cfg.AllowLoopbackUpstream)
+	var endpoint string
+	var err error
+	if input.ProviderKind == geminiAPIKeyProvider {
+		endpoint, err = validateGeminiEndpoint(r.Context(), input.Endpoint, a.cfg.AllowLoopbackUpstream)
+	} else {
+		endpoint, err = validateEndpoint(r.Context(), input.Endpoint, a.cfg.AllowLoopbackUpstream)
+	}
 	if err != nil {
 		writeAdminError(w, 400, "invalid_endpoint", "Upstream endpoint is not allowed.")
 		return
@@ -83,13 +94,20 @@ func (a *App) createUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 		writeAdminError(w, 503, "service_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	ciphertext, err := a.secrets.encryptCredential(id, input.APIKey)
+	keyVersion := 1
+	var ciphertext []byte
+	if input.ProviderKind == geminiAPIKeyProvider {
+		keyVersion = 2
+		ciphertext, err = a.secrets.encryptGeminiAPIKey(id, input.APIKey)
+	} else {
+		ciphertext, err = a.secrets.encryptCredential(id, input.APIKey)
+	}
 	if err != nil {
 		writeAdminError(w, 503, "service_unavailable", "Service is temporarily unavailable.")
 		return
 	}
 	item := upstreamView{ID: id, Name: input.Name, ProviderKind: input.ProviderKind, Endpoint: endpoint, Enabled: true, Revision: 1}
-	_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, item.ID, item.Name, item.ProviderKind, item.Endpoint, 1, ciphertext, 1, item.Revision, utcNow())
+	_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, item.ID, item.Name, item.ProviderKind, item.Endpoint, 1, ciphertext, keyVersion, item.Revision, utcNow())
 	if err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -162,7 +180,11 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 			writeAdminError(w, 400, "invalid_request", "Invalid upstream fields.")
 			return
 		}
-		ciphertext, err = a.secrets.encryptCredential(id, *input.APIKey)
+		if item.ProviderKind == geminiAPIKeyProvider {
+			ciphertext, err = a.secrets.encryptGeminiAPIKey(id, *input.APIKey)
+		} else {
+			ciphertext, err = a.secrets.encryptCredential(id, *input.APIKey)
+		}
 		if err != nil {
 			writeAdminError(w, 503, "service_unavailable", "Service is temporarily unavailable.")
 			return
@@ -184,6 +206,36 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 		return
 	}
 	writeJSON(w, 200, item)
+}
+
+func validateGeminiEndpoint(ctx context.Context, raw string, allowLoopback bool) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = geminiAPIEndpoint
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("invalid Gemini endpoint")
+	}
+	if u.Scheme == "https" && strings.EqualFold(u.Host, "generativelanguage.googleapis.com") && (u.Path == "" || u.Path == "/") {
+		return geminiAPIEndpoint, nil
+	}
+	if !allowLoopback {
+		return "", errors.New("Gemini endpoint must use the official service")
+	}
+	endpoint, err := validateEndpoint(ctx, raw, true)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || net.ParseIP(parsed.Hostname()) == nil || !net.ParseIP(parsed.Hostname()).IsLoopback() {
+		return "", errors.New("test Gemini endpoint must be a literal loopback address")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	if parsed.Path == "/v1" {
+		parsed.Path = ""
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 type modelView struct {
@@ -229,9 +281,13 @@ func (a *App) createModel(w http.ResponseWriter, r *http.Request, _ adminSession
 		writeAdminError(w, 400, "invalid_request", "Invalid model fields.")
 		return
 	}
-	var exists int
-	if err := a.store.db.QueryRowContext(r.Context(), `SELECT 1 FROM upstreams WHERE id=?`, input.UpstreamID).Scan(&exists); err != nil {
+	var providerKind string
+	if err := a.store.db.QueryRowContext(r.Context(), `SELECT provider_kind FROM upstreams WHERE id=?`, input.UpstreamID).Scan(&providerKind); err != nil {
 		writeAdminError(w, 400, "invalid_request", "Upstream was not found.")
+		return
+	}
+	if providerKind == geminiAPIKeyProvider && (strings.Contains(input.ID, "/") || !validGeminiUpstreamModel(input.UpstreamModel)) {
+		writeAdminError(w, 400, "invalid_request", "Invalid Gemini model fields.")
 		return
 	}
 	a.admission.Lock()
