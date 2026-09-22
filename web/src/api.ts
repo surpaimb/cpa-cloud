@@ -70,6 +70,7 @@ export type ModelRoute = {
   upstream_model: string
   enabled: boolean
 }
+export type DiscoveredModel = { id: string }
 export type SystemStatus = {
   version: string
   ready: boolean
@@ -105,6 +106,8 @@ export const api = {
     request<Upstream>('/upstreams', { method: 'POST', body: JSON.stringify(body) }, csrf),
   updateUpstream: (id: string, body: Record<string, unknown>, csrf: string) =>
     request<Upstream>(`/upstreams/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+  discoverUpstreamModels: (id: string, csrf: string) =>
+    request<{ items: DiscoveredModel[] }>(`/upstreams/${encodeURIComponent(id)}/discover-models`, { method: 'POST' }, csrf),
   models: () => request<{ items: ModelRoute[] }>('/models'),
   createModel: (body: Record<string, unknown>, csrf: string) =>
     request<ModelRoute>('/models', { method: 'POST', body: JSON.stringify(body) }, csrf),
