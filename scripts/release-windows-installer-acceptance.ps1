@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$script:OwnedUninstallerCopies = @{}
 
 function Assert-Condition([bool]$Condition, [string]$Message) {
     if (-not $Condition) {
@@ -24,17 +25,66 @@ function Invoke-BoundedProcess([string]$Path, [string]$ArgumentLine, [int]$Timeo
     return $process.ExitCode
 }
 
-function Invoke-RealNsisUninstaller([string]$InstalledUninstaller, [string]$HarnessCopy, [string]$InstallDirectory) {
-    Assert-Condition (-not (Test-Path -LiteralPath $HarnessCopy)) "Temporary uninstaller copy already exists: $HarnessCopy"
-    Copy-Item -LiteralPath $InstalledUninstaller -Destination $HarnessCopy
+function Remove-OwnedFileWithRetry([string]$Path, [string]$ExpectedSha256, [int]$TimeoutSeconds = 30) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while (Test-Path -LiteralPath $Path) {
+        try {
+            $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+        } catch {
+            if (-not (Test-Path -LiteralPath $Path)) {
+                return
+            }
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Temporary file ownership could not be verified before timeout: $Path"
+            }
+            Start-Sleep -Milliseconds 200
+            continue
+        }
+        Assert-Condition ($actualSha256 -eq $ExpectedSha256) "Refusing to remove a temporary file whose ownership hash changed: $Path"
+        try {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        } catch {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Temporary file was not removed before timeout: $Path"
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+}
+
+function Invoke-RealNsisUninstaller([string]$InstalledUninstaller, [string]$HarnessDirectory, [string]$InstallDirectory) {
+    $sourceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $InstalledUninstaller).Hash
+    $copyName = 'cpa-cloud-uninstaller-acceptance-{0}.exe' -f [Guid]::NewGuid().ToString('N')
+    $harnessCopy = Assert-ChildPath (Join-Path $HarnessDirectory $copyName) $HarnessDirectory 'uninstaller harness copy'
+    Assert-Condition (-not (Test-Path -LiteralPath $harnessCopy)) "Generated temporary uninstaller path already exists: $harnessCopy"
+    $sourceStream = $null
+    $destinationStream = $null
+    $createdByHarness = $false
     try {
+        try {
+            $sourceStream = [IO.File]::Open($InstalledUninstaller, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            $destinationStream = [IO.File]::Open($harnessCopy, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $createdByHarness = $true
+            $script:OwnedUninstallerCopies[$harnessCopy] = $sourceSha256
+            $sourceStream.CopyTo($destinationStream)
+        } finally {
+            if ($null -ne $destinationStream) {
+                $destinationStream.Dispose()
+            }
+            if ($null -ne $sourceStream) {
+                $sourceStream.Dispose()
+            }
+        }
+        $copySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $harnessCopy).Hash
+        Assert-Condition ($copySha256 -eq $sourceSha256) "Temporary uninstaller copy hash does not match its source: $harnessCopy"
         # _?= must be the final, unquoted parameter. It disables another NSIS
         # bootstrap copy and makes this process the real uninstaller whose exit
         # code the harness can observe.
-        return Invoke-BoundedProcess $HarnessCopy "/S _?=$InstallDirectory"
+        return Invoke-BoundedProcess $harnessCopy "/S _?=$InstallDirectory"
     } finally {
-        if (Test-Path -LiteralPath $HarnessCopy) {
-            Remove-Item -LiteralPath $HarnessCopy -Force -ErrorAction SilentlyContinue
+        if ($createdByHarness) {
+            Remove-OwnedFileWithRetry $harnessCopy $sourceSha256
+            $script:OwnedUninstallerCopies.Remove($harnessCopy) | Out-Null
         }
     }
 }
@@ -97,11 +147,10 @@ $dataRoot = Assert-ChildPath (Join-Path $localAppData 'CPACloud\data') $localApp
 $startMenuRoot = Assert-ChildPath (Join-Path $appData 'Microsoft\Windows\Start Menu\Programs\CPA Cloud') $appData 'Start menu root'
 $desktopShortcut = Assert-ChildPath (Join-Path $desktop 'CPA Cloud.lnk') $desktop 'desktop shortcut'
 $reparseTarget = Assert-ChildPath (Join-Path $runnerTemp 'cpa-cloud-installer-reparse-target') $runnerTemp 'reparse test target'
-$uninstallerHarnessCopy = Assert-ChildPath (Join-Path $runnerTemp 'cpa-cloud-uninstaller-acceptance.exe') $runnerTemp 'uninstaller harness copy'
 $uninstallRegistry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CPACloud.Launcher'
 $appRegistry = 'HKCU:\Software\CPACloud'
 
-foreach ($path in @($installRoot, $dataRoot, $startMenuRoot, $desktopShortcut, $reparseTarget, $uninstallerHarnessCopy)) {
+foreach ($path in @($installRoot, $dataRoot, $startMenuRoot, $desktopShortcut, $reparseTarget)) {
     Assert-Condition (-not (Test-Path -LiteralPath $path)) "Runner is not clean; refusing to use existing path: $path"
 }
 foreach ($registryPath in @($uninstallRegistry, $appRegistry)) {
@@ -163,11 +212,11 @@ try {
     # NSIS uninstallers normally bootstrap a temporary child, so the original
     # process cannot report the child's error level. Mirror NSIS's documented
     # copy process, then use final _?= to wait for the real process.
-    $uninstallRefusal = Invoke-WithNamedMutex $launcherMutex { Invoke-RealNsisUninstaller $uninstaller $uninstallerHarnessCopy $installRoot }
+    $uninstallRefusal = Invoke-WithNamedMutex $launcherMutex { Invoke-RealNsisUninstaller $uninstaller $runnerTemp $installRoot }
     Assert-Condition ($uninstallRefusal -eq 10) "Uninstaller did not return launcher-running exit code 10; got $uninstallRefusal."
     Assert-Condition (Test-Path -LiteralPath $launcher -PathType Leaf) 'Refused uninstall removed the launcher.'
 
-    $uninstallExit = Invoke-RealNsisUninstaller $uninstaller $uninstallerHarnessCopy $installRoot
+    $uninstallExit = Invoke-RealNsisUninstaller $uninstaller $runnerTemp $installRoot
     Assert-Condition ($uninstallExit -eq 0) "Silent uninstall failed with exit code $uninstallExit."
     Wait-PathAbsent $uninstaller
     foreach ($removed in @($launcher, (Join-Path $installRoot 'cpa-cloud.exe'), (Join-Path $installRoot 'web\index.html'), (Join-Path $installRoot '.cpa-cloud-install'), $startMenuRoot)) {
@@ -196,8 +245,13 @@ try {
         if (Test-Path -LiteralPath $desktopShortcut) {
             Remove-Item -LiteralPath $desktopShortcut -Force -ErrorAction SilentlyContinue
         }
-        if (Test-Path -LiteralPath $uninstallerHarnessCopy) {
-            Remove-Item -LiteralPath $uninstallerHarnessCopy -Force -ErrorAction SilentlyContinue
+        foreach ($ownedCopy in @($script:OwnedUninstallerCopies.Keys)) {
+            try {
+                Remove-OwnedFileWithRetry $ownedCopy $script:OwnedUninstallerCopies[$ownedCopy]
+                $script:OwnedUninstallerCopies.Remove($ownedCopy) | Out-Null
+            } catch {
+                Write-Warning $_
+            }
         }
         foreach ($registryPath in @($uninstallRegistry, $appRegistry)) {
             if (Test-Path -LiteralPath $registryPath) {
