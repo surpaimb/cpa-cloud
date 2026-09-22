@@ -20,18 +20,18 @@ Employee keys remain valid across normal restarts. Revocation, employee disablem
 
 ## 1. Download and installation
 
-**Current download: [v0.1.0-preview.1](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.1)**. The table links directly to these versioned assets.
+**Current download: [v0.1.0-preview.2](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.2)**. The table links directly to these versioned assets.
 
 See preview versions and their attachments on [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases). A file is downloadable only when it actually appears under the Assets section of that Release. If a Release has no attachments yet, build from source as described below. Preview versions may not appear through GitHub's `latest` link.
 
 | System | Asset filename suffix |
 | --- | --- |
-| Standard Intel/AMD Windows computer | [windows_amd64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_windows_amd64.zip) |
-| Windows on ARM computer | [windows_arm64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_windows_arm64.zip) |
-| Intel/AMD Linux cloud server | [linux_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_linux_amd64.tar.gz) |
-| ARM Linux server | [linux_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_linux_arm64.tar.gz) |
-| Intel-based Mac | [macos_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_macos_amd64.tar.gz) |
-| Apple Silicon Mac (M series) | [macos_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_macos_arm64.tar.gz) |
+| Standard Intel/AMD Windows computer | [windows_amd64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_amd64.zip) |
+| Windows on ARM computer | [windows_arm64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_arm64.zip) |
+| Intel/AMD Linux cloud server | [linux_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_linux_amd64.tar.gz) |
+| ARM Linux server | [linux_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_linux_arm64.tar.gz) |
+| Intel-based Mac | [macos_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_amd64.tar.gz) |
+| Apple Silicon Mac (M series) | [macos_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_arm64.tar.gz) |
 
 An archive should contain the executable, the `web/` directory, and third-party notices. Extract everything into a dedicated directory. Go and Bun are not required to run a packaged build. Keep all notice files. Store the data directory outside the extracted application directory so it is easier to preserve during upgrades.
 
@@ -39,16 +39,16 @@ After downloading, verify the file against the SHA256 manifest attached to the R
 
 All following commands are run from the **extracted application directory**. The executable is named `cpa-cloud.exe` on Windows and `cpa-cloud` on Linux/macOS. If the Unix executable bit is missing, run `chmod +x ./cpa-cloud`. Windows code signing and macOS notarization are not currently promised. Evaluate provenance and signing requirements under your organization's policy; do not disable operating-system security globally.
 
-### Desktop installers (next preview)
+### Desktop installers
 
-Windows Setup and macOS DMG packages passed [native GitHub builds](https://github.com/surpaimb/cpa-cloud/actions/runs/35721996938), but are not published to Releases yet. The table above still links to preview.1 portable packages. These instructions describe the new installers; download links will follow installation acceptance testing.
+Windows Setup and macOS DMG packages are published. All ten artifacts were built automatically by [GitHub Actions](https://github.com/surpaimb/cpa-cloud/actions/runs/35726220674). Both Windows architectures passed installation, same-package upgrade/reinstall, uninstall, mutex refusal, and data-preservation checks.
 
 | System | Package | Installation |
 | --- | --- | --- |
-| Intel/AMD Windows | `windows_amd64_Setup.exe` | Run Setup for the current user, then launch from the Start menu |
-| Windows on ARM | `windows_arm64_Setup.exe` | Use the ARM64 installer with the same steps |
-| Intel Mac (macOS 13 or newer) | `macos_amd64.dmg` | Open the DMG, drag `CPA Cloud.app` into Applications, then launch it from Applications |
-| Apple Silicon Mac (macOS 13 or newer) | `macos_arm64.dmg` | Use the ARM64 DMG with the same steps |
+| Intel/AMD Windows | [windows_amd64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_amd64_Setup.exe) | Run Setup for the current user, then launch from the Start menu |
+| Windows on ARM | [windows_arm64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_arm64_Setup.exe) | Use the ARM64 installer with the same steps |
+| Intel Mac (macOS 13 or newer) | [macos_amd64.dmg](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_amd64.dmg) | Open the DMG, drag `CPA Cloud.app` into Applications, then launch it from Applications |
+| Apple Silicon Mac (macOS 13 or newer) | [macos_arm64.dmg](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_arm64.dmg) | Use the ARM64 DMG with the same steps |
 
 The Windows installer includes the .NET runtime. On first launch, set and confirm the administrator password in the native dialog (12–72 UTF-8 bytes). Once the service is ready, the launcher opens `http://127.0.0.1:8787`; the username is `admin`. Installer users can skip sections 2 and 3 and continue with web configuration in section 4.
 
@@ -56,7 +56,9 @@ The Windows tray or macOS menu bar provides open console, start, stop, and quit 
 
 Data lives outside the installation directory: `%LOCALAPPDATA%\CPACloud\data` on Windows, or `~/Library/Application Support/CPACloud/data` on macOS. Before upgrading, quit the launcher and back up this data, then install the new version. Uninstalling or deleting the Mac app does not intentionally remove this data directory. The launcher does not import existing CLI data, add a login/startup entry, or download updates automatically.
 
-The installer preview has no publisher code signing or Apple notarization; the operating system may block first launch. Verify provenance under your organization's policy. Current validation includes native builds, automated tests, and DMG mount/readback checks, not complete desktop interaction testing.
+The installer preview has no publisher code signing or Apple notarization; the operating system may block first launch. Verify provenance under your organization's policy. Current validation includes Windows installation lifecycle checks, native builds, automated tests, and DMG mount/readback checks, not complete desktop interaction testing.
+
+READMEs inside portable archives are fixed to the release source and may retain prepublication “next preview” wording. This page and the Release assets provide the current download status.
 
 ## 2. First-time initialization (portable packages)
 

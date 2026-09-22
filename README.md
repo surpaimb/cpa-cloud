@@ -20,18 +20,18 @@
 
 ## 1. 下载安装
 
-**当前下载版本：[v0.1.0-preview.1](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.1)**。下表链接直接下载该版本附件。
+**当前下载版本：[v0.1.0-preview.2](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.2)**。下表链接直接下载该版本附件。
 
 在 [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases) 查看预览版本及附件。仅在对应版本的 Assets 中存在的文件才是可下载交付；尚无附件时请使用下文源码构建。预览版本不一定出现在 GitHub 的 latest 链接中。
 
 | 系统 | 附件文件名后缀 |
 | --- | --- |
-| Windows 普通 Intel/AMD 电脑 | [windows_amd64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_windows_amd64.zip) |
-| Windows ARM 电脑 | [windows_arm64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_windows_arm64.zip) |
-| Linux Intel/AMD 云服务器 | [linux_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_linux_amd64.tar.gz) |
-| Linux ARM 服务器 | [linux_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_linux_arm64.tar.gz) |
-| macOS Intel 芯片 | [macos_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_macos_amd64.tar.gz) |
-| macOS Apple Silicon（M 系列） | [macos_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_macos_arm64.tar.gz) |
+| Windows 普通 Intel/AMD 电脑 | [windows_amd64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_amd64.zip) |
+| Windows ARM 电脑 | [windows_arm64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_arm64.zip) |
+| Linux Intel/AMD 云服务器 | [linux_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_linux_amd64.tar.gz) |
+| Linux ARM 服务器 | [linux_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_linux_arm64.tar.gz) |
+| macOS Intel 芯片 | [macos_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_amd64.tar.gz) |
+| macOS Apple Silicon（M 系列） | [macos_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_arm64.tar.gz) |
 
 压缩包应包含程序、`web/` 网页目录和第三方声明。解压到独立目录，不需要安装 Go 或 Bun。保留所有声明文件。将数据放在压缩包目录以外，升级时更容易保留。
 
@@ -39,16 +39,16 @@
 
 后续命令均在**解压后的程序目录**执行。Windows 程序名为 `cpa-cloud.exe`；Linux/macOS 为 `cpa-cloud`。Unix 如缺执行权限，可执行 `chmod +x ./cpa-cloud`。目前不承诺 Windows 代码签名或 macOS 公证，按公司策略评估来源及签名要求，不要全局关闭系统安全功能。
 
-### 桌面安装版（下一预览版）
+### 桌面安装版
 
-Windows 安装程序和 macOS DMG 已通过 [GitHub 原生构建](https://github.com/surpaimb/cpa-cloud/actions/runs/35721996938)，尚未发布到 Release；当前上表仍提供 preview.1 便携包。下面说明新安装版的使用方式，待安装验收完成后提供下载链接。
+Windows 安装程序和 macOS DMG 已发布。全部十种产物由 [GitHub Actions](https://github.com/surpaimb/cpa-cloud/actions/runs/35726220674) 自动构建；Windows 两种架构均通过安装、同包升级重装、卸载、互斥拒绝与数据保留验收。
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows Intel/AMD | `windows_amd64_Setup.exe` | 运行安装程序，安装到当前用户，使用开始菜单启动 |
-| Windows ARM | `windows_arm64_Setup.exe` | 使用 ARM64 安装程序，操作同上 |
-| macOS Intel（13 或更新） | `macos_amd64.dmg` | 打开 DMG，将 `CPA Cloud.app` 拖入 Applications，再从应用程序目录启动 |
-| macOS Apple Silicon（13 或更新） | `macos_arm64.dmg` | 使用 ARM64 DMG，操作同上 |
+| Windows Intel/AMD | [windows_amd64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_amd64_Setup.exe) | 运行安装程序，安装到当前用户，使用开始菜单启动 |
+| Windows ARM | [windows_arm64_Setup.exe](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_windows_arm64_Setup.exe) | 使用 ARM64 安装程序，操作同上 |
+| macOS Intel（13 或更新） | [macos_amd64.dmg](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_amd64.dmg) | 打开 DMG，将 `CPA Cloud.app` 拖入 Applications，再从应用程序目录启动 |
+| macOS Apple Silicon（13 或更新） | [macos_arm64.dmg](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.2/cpa-cloud_v0.1.0-preview.2_macos_arm64.dmg) | 使用 ARM64 DMG，操作同上 |
 
 Windows 安装版自带 .NET 运行时，无需另外安装。首次启动在原生窗口设置并确认管理员密码（12–72 个 UTF-8 字节），服务就绪后自动打开 `http://127.0.0.1:8787`；用户名为 `admin`。使用安装版可跳过下文第 2、3 节，直接进行第 4 节网页配置。
 
@@ -56,7 +56,9 @@ Windows 托盘或 macOS 菜单栏提供打开后台、启动、停止和退出�
 
 数据保存在 Windows `%LOCALAPPDATA%\CPACloud\data` 或 macOS `~/Library/Application Support/CPACloud/data`，与安装目录分离。升级前退出启动器并备份数据，再安装新版；卸载程序或删除 Mac 应用不会主动删除此数据目录。启动器不会自动导入既有 CLI 数据，也不自动添加开机启动或下载更新。
 
-安装预览未进行发行者代码签名或 Apple 公证；系统可能阻止首次打开，应按组织策略核验来源。当前验证包含原生构建、自动化测试和 DMG 挂载读回，不代表已完成所有桌面交互验收。
+安装预览未进行发行者代码签名或 Apple 公证；系统可能阻止首次打开，应按组织策略核验来源。当前验证包含 Windows 安装生命周期验收、原生构建、自动化测试和 DMG 挂载读回，不代表已完成所有桌面交互验收。
+
+压缩包内 README 随发布源码固定，可能仍使用“下一预览版”的发布前措辞；最新下载状态以本页和 Release 附件为准。
 
 ## 2. 首次初始化（便携包）
 

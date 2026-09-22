@@ -70,3 +70,11 @@
 - 主任务独立执行 Windows self-contained x64 启动器 `--self-test` 和 `--integration-test`，均退出 0；未进行桌面界面点击验收。
 - 安装任务报告两种 Windows Setup 已成功编译，NSIS 文件清单卸载、目录所有权与重解析点检查已加入；这不等同于实际安装/升级/卸载验证。
 - GitHub Actions 原生验证：https://github.com/surpaimb/cpa-cloud/actions/runs/35720289355 。启动时状态 in_progress，尚不能认定 Mac 构建或整轮验证通过。main 构建仅上传工作流附件，不发布 Release。
+
+## 2026-09-22：桌面安装预览发布完成
+
+- `v0.1.0-preview.2` 固定源提交 `bdc092fb7a939c2b4cc4a817948520021bae3cc5`；发布工作流 https://github.com/surpaimb/cpa-cloud/actions/runs/35726220674 全部成功。
+- Windows amd64/arm64 在 GitHub 临时 runner 完成安装、同包升级重装、卸载、互斥拒绝、重解析点拒绝以及用户数据/非程序文件哨兵保留验收。Mac 两架构完成 Swift 测试、app 构建、DMG 挂载读回。未进行人工 GUI 点击或签名/公证验证。
+- Release 包含六便携包、四安装包、十个 sidecar 和汇总 SHA256SUMS.txt，共 21 附件。主任务实际下载全部十个主要附件，与下载的汇总清单逐项核对 SHA256，全部 PASS；文件保存在忽略目录 `dist/preview2-download-verify`。
+- main 中英文 README 更新为真实 preview.2 下载链接与安装说明；归档内 README 保留发布源码当时措辞，main 已明确此差异，不替换已发布附件。
+- 本轮桌面安装预览交付完成。会员账号、其他原生协议及生产运维仍属于后续产品工作。
