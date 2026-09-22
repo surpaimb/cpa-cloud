@@ -4,7 +4,7 @@
 
 A self-hosted AI access platform for internal enterprise use. Administrators manage upstreams, models, and employee keys through a web console; employees use standard APIs without WeChat or a dedicated client. Authentication, permission checks, and upstream requests all run in the same Go service process.
 
-> This project is currently a development preview, not a production release. The Windows build has passed an end-to-end process test against a mock upstream. Linux amd64 and macOS arm64 have been cross-compiled but have not yet been executed and validated on their target systems. Refer to each Release for its exact validation scope.
+> This project is currently a development preview, not a production release. All six initial preview packages passed Go tests, builds, and executable help checks on matching GitHub runner architectures. The downloaded Windows amd64 package also passed a process-level mock-upstream test. Complete deployment validation on all end-user hosts remains outstanding.
 
 ## Features and boundaries
 
@@ -20,16 +20,18 @@ Employee keys remain valid across normal restarts. Revocation, employee disablem
 
 ## 1. Download and installation
 
+**Current download: [v0.1.0-preview.1](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.1)**. The table links directly to these versioned assets.
+
 See preview versions and their attachments on [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases). A file is downloadable only when it actually appears under the Assets section of that Release. If a Release has no attachments yet, build from source as described below. Preview versions may not appear through GitHub's `latest` link.
 
 | System | Asset filename suffix |
 | --- | --- |
-| Standard Intel/AMD Windows computer | windows_amd64.zip |
-| Windows on ARM computer | windows_arm64.zip |
-| Intel/AMD Linux cloud server | linux_amd64.tar.gz |
-| ARM Linux server | linux_arm64.tar.gz |
-| Intel-based Mac | macos_amd64.tar.gz |
-| Apple Silicon Mac (M series) | macos_arm64.tar.gz |
+| Standard Intel/AMD Windows computer | [windows_amd64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_windows_amd64.zip) |
+| Windows on ARM computer | [windows_arm64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_windows_arm64.zip) |
+| Intel/AMD Linux cloud server | [linux_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_linux_amd64.tar.gz) |
+| ARM Linux server | [linux_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_linux_arm64.tar.gz) |
+| Intel-based Mac | [macos_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_macos_amd64.tar.gz) |
+| Apple Silicon Mac (M series) | [macos_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_macos_arm64.tar.gz) |
 
 An archive should contain the executable, the `web/` directory, and third-party notices. Extract everything into a dedicated directory. Go and Bun are not required to run a packaged build. Keep all notice files. Store the data directory outside the extracted application directory so it is easier to preserve during upgrades.
 

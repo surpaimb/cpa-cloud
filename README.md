@@ -4,7 +4,7 @@
 
 面向企业内部的自托管 AI 接入平台。管理员通过网页管理上游、模型和员工 Key；员工使用标准 API，无需微信或专用客户端。鉴权、权限检查和上游请求在同一个 Go 服务进程内完成。
 
-> 当前为开发预览，尚非生产发行版。已完成 Windows 模拟上游进程验收；Linux amd64、macOS arm64 已完成交叉编译，尚未完成目标系统运行验收。各 Release 的实际验证范围以对应说明为准。
+> 当前为开发预览，尚非生产发行版。首个预览版的 6 平台包已在对应架构 GitHub runner 上通过 Go 测试、构建和启动帮助检查；下载后的 Windows amd64 包也已通过模拟上游进程验收。尚未完成所有目标主机的真实部署验收。
 
 ## 功能与边界
 
@@ -20,16 +20,18 @@
 
 ## 1. 下载安装
 
+**当前下载版本：[v0.1.0-preview.1](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.1)**。下表链接直接下载该版本附件。
+
 在 [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases) 查看预览版本及附件。仅在对应版本的 Assets 中存在的文件才是可下载交付；尚无附件时请使用下文源码构建。预览版本不一定出现在 GitHub 的 latest 链接中。
 
 | 系统 | 附件文件名后缀 |
 | --- | --- |
-| Windows 普通 Intel/AMD 电脑 | windows_amd64.zip |
-| Windows ARM 电脑 | windows_arm64.zip |
-| Linux Intel/AMD 云服务器 | linux_amd64.tar.gz |
-| Linux ARM 服务器 | linux_arm64.tar.gz |
-| macOS Intel 芯片 | macos_amd64.tar.gz |
-| macOS Apple Silicon（M 系列） | macos_arm64.tar.gz |
+| Windows 普通 Intel/AMD 电脑 | [windows_amd64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_windows_amd64.zip) |
+| Windows ARM 电脑 | [windows_arm64.zip](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_windows_arm64.zip) |
+| Linux Intel/AMD 云服务器 | [linux_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_linux_amd64.tar.gz) |
+| Linux ARM 服务器 | [linux_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_linux_arm64.tar.gz) |
+| macOS Intel 芯片 | [macos_amd64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_macos_amd64.tar.gz) |
+| macOS Apple Silicon（M 系列） | [macos_arm64.tar.gz](https://github.com/surpaimb/cpa-cloud/releases/download/v0.1.0-preview.1/cpa-cloud_v0.1.0-preview.1_macos_arm64.tar.gz) |
 
 压缩包应包含程序、`web/` 网页目录和第三方声明。解压到独立目录，不需要安装 Go 或 Bun。保留所有声明文件。将数据放在压缩包目录以外，升级时更容易保留。
 

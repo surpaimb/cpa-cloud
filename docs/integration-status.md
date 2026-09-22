@@ -49,3 +49,11 @@
 - 自动审批检查拒绝删除 `.git/doc-init-d4f4c05f74584cc39ec83a4760bf5754`，该目录保留随机测试数据，不在 Git 跟踪范围内。
 - 用户要求参考 CC Switch 多平台 Release；首批范围为 Windows/Linux/macOS 各 amd64/arm64 便携包，不包含桌面安装器或自动更新。
 - 发布打包工作由服务端任务负责，主任务审阅发现的 GitHub CLI 仓库上下文及中间网页产物误下载问题已反馈并修正。尚未推送预览 tag，不声称附件已可下载。
+
+## 2026-09-22：首个六平台预览 Release 已发布
+
+- 发布源提交 `c7655c5`，标签 `v0.1.0-preview.1`；工作流 https://github.com/surpaimb/cpa-cloud/actions/runs/35712559009 全部成功。
+- Windows、Linux、macOS 的 amd64/arm64 六个对应架构 runner 均通过 Go 测试、构建与二进制帮助启动检查；网页测试/构建及发布作业成功。
+- Release https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.1 已核实包含六个压缩包、六个单独SHA256文件及汇总 SHA256SUMS.txt。
+- 主任务从 GitHub 实际下载 Windows amd64 附件，核对汇总 SHA256 后解压，使用包内程序和网页独立重跑 smoke，完整 PASS。
+- 未对其余五种下载包执行本地端到端部署验证，不宣称会员或其他尚未实现协议支持。各包未签名/未公证。README main 分支新增六个已存在附件的直接下载链接。
