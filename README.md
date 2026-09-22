@@ -119,10 +119,30 @@ unset CPA_ADMIN_PASSWORD
 
 ## 3. 本机启动
 
-Windows：
+**Windows 安装版**：通常从开始菜单打开 CPA Cloud 即可。如果需要前台命令行运行，请先退出托盘启动器，避免端口冲突；以下完整代码可从任意目录执行，使用安装版原有数据。
 
 ```powershell
-.\cpa-cloud.exe --data-dir ..\cpa-cloud-data --listen 127.0.0.1:8787 --web-dir .\web
+& {
+    $appDir = "$env:LOCALAPPDATA\Programs\CPA Cloud"
+    $data = "$env:LOCALAPPDATA\CPACloud\data"
+    $exe = Join-Path $appDir 'cpa-cloud.exe'
+    $web = Join-Path $appDir 'web'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw "CPA Cloud executable not found: $exe"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $web 'index.html') -PathType Leaf)) {
+        throw "CPA Cloud web files not found: $web"
+    }
+    & $exe --data-dir $data --listen 127.0.0.1:8787 --web-dir $web
+    if ($LASTEXITCODE -ne 0) { throw 'CPA Cloud failed to start; see the message above.' }
+}
+```
+
+**Windows 便携包**：把上面 `$appDir` 和 `$data` 两行换为下面的路径，修改为你实际解压的位置后执行整段。数据目录必须与初始化时一致。
+
+```powershell
+$appDir = "C:\Tools\CPACloud"
+$data = [IO.Path]::GetFullPath((Join-Path $appDir "..\cpa-cloud-data"))
 ```
 
 Linux / macOS：

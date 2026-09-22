@@ -119,10 +119,30 @@ The success message is `Initialized administrator admin.` If the directory has a
 
 ## 3. Local startup
 
-Windows:
+**Windows installer**: normally launch CPA Cloud from the Start menu. For foreground command-line operation, quit the tray launcher first to avoid a port conflict. Run this complete block from any directory; it uses the existing installer data.
 
 ```powershell
-.\cpa-cloud.exe --data-dir ..\cpa-cloud-data --listen 127.0.0.1:8787 --web-dir .\web
+& {
+    $appDir = "$env:LOCALAPPDATA\Programs\CPA Cloud"
+    $data = "$env:LOCALAPPDATA\CPACloud\data"
+    $exe = Join-Path $appDir 'cpa-cloud.exe'
+    $web = Join-Path $appDir 'web'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw "CPA Cloud executable not found: $exe"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $web 'index.html') -PathType Leaf)) {
+        throw "CPA Cloud web files not found: $web"
+    }
+    & $exe --data-dir $data --listen 127.0.0.1:8787 --web-dir $web
+    if ($LASTEXITCODE -ne 0) { throw 'CPA Cloud failed to start; see the message above.' }
+}
+```
+
+**Windows portable package**: replace `$appDir` and `$data` above with the following paths, edit the extracted location, then run the complete block. The data directory must match initialization.
+
+```powershell
+$appDir = "C:\Tools\CPACloud"
+$data = [IO.Path]::GetFullPath((Join-Path $appDir "..\cpa-cloud-data"))
 ```
 
 Linux / macOS:
