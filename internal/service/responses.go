@@ -459,13 +459,13 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body 
 	}
 	defer credential.Destroy()
 	if validationErr := membership.NewCodexDirectAdapter().ValidateCredentialForScheduling(credential); validationErr != nil {
-		a.handleCodexRunFailure(w, r, selected, reqID, normalizeCodexRunError(validationErr), false)
+		a.handleCodexFailure(w, r, selected, reqID, normalizeCodexRunError(validationErr), false, writeResponsesStreamError)
 		return
 	}
 	if !stream {
 		result, runErr := a.responses.Responses(r.Context(), credential, body, nil)
 		if runErr != nil {
-			a.handleCodexRunFailure(w, r, selected, reqID, runErr, false)
+			a.handleCodexFailure(w, r, selected, reqID, runErr, false, writeResponsesStreamError)
 			return
 		}
 		if validateCompletedResponse(result) != nil {
@@ -528,7 +528,7 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body 
 		return nil
 	})
 	if runErr != nil {
-		a.handleCodexRunFailure(w, r, selected, reqID, runErr, committed)
+		a.handleCodexFailure(w, r, selected, reqID, runErr, committed, writeResponsesStreamError)
 		return
 	}
 	if len(completed) == 0 {

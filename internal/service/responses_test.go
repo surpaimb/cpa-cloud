@@ -206,6 +206,46 @@ func TestCodexResponsesExecutorBuffersCompletionUntilStateWrite(t *testing.T) {
 	}
 }
 
+func TestCodexResponsesFailureAfterDeltaUsesNativeErrorEvent(t *testing.T) {
+	for _, code := range []membership.CodexAdapterErrorCode{membership.CodexErrorUpstream, membership.CodexErrorReauthentication} {
+		t.Run(string(code), func(t *testing.T) {
+			fixture := newCodexServiceFixture(t, &fakeCodexExecutor{})
+			defer fixture.close()
+			fixture.app.responses = fakeCodexResponsesExecutor{fn: func(_ context.Context, _ *membership.CodexAuthCredential, _ []byte, consume func(json.RawMessage) error) (json.RawMessage, *codexRunError) {
+				if err := consume(json.RawMessage(`{"type":"response.output_text.delta","delta":"synthetic"}`)); err != nil {
+					return nil, normalizeCodexRunError(err)
+				}
+				return nil, &codexRunError{Code: code, UpstreamStatus: http.StatusUnauthorized}
+			}}
+			response := employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/responses", `{"model":"company-codex","stream":true,"input":"x"}`, fixture.employeeKey.Key, context.Background())
+			body := readBody(response)
+			if response.StatusCode != http.StatusOK || strings.Contains(body, "response.completed") {
+				t.Fatalf("unexpected terminal status=%d body=%s", response.StatusCode, body)
+			}
+			var nativeError bool
+			for _, line := range strings.Split(body, "\n") {
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				var event struct {
+					Type    string `json:"type"`
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+					t.Fatal(err)
+				}
+				if event.Type == "error" && event.Code != "" && event.Message != "" {
+					nativeError = true
+				}
+			}
+			if !nativeError {
+				t.Fatalf("missing native error event: %s", body)
+			}
+		})
+	}
+}
+
 func TestCodexResponsesReauthenticationCancellationAndRevisionConflict(t *testing.T) {
 	runner := &fakeCodexExecutor{completeFn: func(context.Context, *membership.CodexAuthCredential, membership.CodexTextRequest) (codexExecutionResult, *codexRunError) {
 		return codexExecutionResult{}, nil

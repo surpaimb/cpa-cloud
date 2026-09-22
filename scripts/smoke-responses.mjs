@@ -42,6 +42,10 @@ const mock = http.createServer(async (req, res) => {
     if (scenario === 'invalid-json') {
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{invalid'); return;
     }
+    if (scenario === 'invalid-completed-json') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id: 'resp_synthetic', object: 'response', status: 'completed', output: null })); return;
+    }
     const completed = finalResponse(scenario === 'tool' ? [call] : [
       { type: 'message', id: 'msg_synthetic', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: toolOutput, annotations: [] }] },
     ]);
@@ -52,6 +56,9 @@ const mock = http.createServer(async (req, res) => {
     // The event spans writes, has CRLF delimiters and multiple data lines.
     const created = 'event: response.created\r\ndata: {"type":"response.created",\r\ndata: "response":{"id":"resp_synthetic","object":"response","status":"in_progress"}}\r\n\r\n';
     res.write(created.slice(0, 39)); await delay(5); res.write(created.slice(39));
+    if (scenario === 'invalid-completed-stream') {
+      res.end('event: response.completed\ndata: {"type":"response.completed","response":null}\n\n'); return;
+    }
     if (scenario === 'truncated') { res.end(); return; }
     if (scenario === 'failed' || scenario === 'incomplete') {
       const type = `response.${scenario}`;
@@ -142,17 +149,20 @@ try {
   assert.equal(streamed.filter(event => event.type === 'response.completed').length, 1);
   assert.equal(streamed.filter(event => event.type === 'response.function_call_arguments.delta').map(event => event.delta).join(''), call.arguments);
   assert.deepEqual(streamed.at(-1).response.output, [call]);
-  for (scenario of ['failed', 'incomplete', 'truncated']) {
+  for (scenario of ['failed', 'incomplete', 'truncated', 'invalid-completed-stream']) {
     const response = await request({ stream: true }); const text = await response.text(); assertRedacted(text);
     assert.ok(!text.includes('response.completed'), `${scenario} became successful completion`);
-    assert.ok(response.status >= 400 || events(text).some(event => event.type === 'error' || event.type === 'response.failed' || event.type === 'response.incomplete' || event.error), `${scenario} did not communicate failure`);
+    assert.ok(response.status >= 400 || events(text).some(event => event.type === 'error' || event.type === 'response.failed' || event.type === 'response.incomplete'), `${scenario} did not communicate a native failure event`);
   }
-  for (scenario of ['unauthorized', 'limited', 'invalid-json']) {
+  for (scenario of ['unauthorized', 'limited', 'invalid-json', 'invalid-completed-json']) {
     const response = await request(); assert.ok(response.status >= 400, `${scenario} not rejected`); assertRedacted(await response.text());
   }
   scenario = 'tool';
   const beforeInvalid = calls;
   const invalid = await request({ stream: null }); assert.equal(invalid.status, 400); await invalid.text(); assert.equal(calls, beforeInvalid);
+  for (const extra of [{ store: true }, { store: null }, { background: true }, { previous_response_id: 'resp_someone_else' }, { conversation: 'conv_someone_else' }]) {
+    const response = await request(extra); assert.equal(response.status, 400); await response.text(); assert.equal(calls, beforeInvalid, 'Stateful request reached shared upstream');
+  }
   employee = await admin(`/employees/${employee.id}/model-policy`, 'PUT', { expected_revision: employee.revision, mode: 'selected', models: [] });
   const forbidden = await request(); assert.equal(forbidden.status, 403); await forbidden.text(); assert.equal(calls, beforeInvalid);
   await admin(`/employees/${employee.id}/model-policy`, 'PUT', { expected_revision: employee.revision, mode: 'all', models: [] });

@@ -275,6 +275,10 @@ func (a *App) streamCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 }
 
 func (a *App) handleCodexRunFailure(w http.ResponseWriter, r *http.Request, selected route, modelRequestID string, runErr *codexRunError, streamCommitted bool) {
+	a.handleCodexFailure(w, r, selected, modelRequestID, runErr, streamCommitted, writeCodexStreamError)
+}
+
+func (a *App) handleCodexFailure(w http.ResponseWriter, r *http.Request, selected route, modelRequestID string, runErr *codexRunError, streamCommitted bool, writeStreamError func(http.ResponseWriter, string, string, string)) {
 	if codexCredentialNeedsReimport(runErr.Code) {
 		if stateErr := a.markCodexReauthentication(selected.AccountID, selected.Revision); stateErr != nil {
 			outcome := "failed"
@@ -283,7 +287,7 @@ func (a *App) handleCodexRunFailure(w http.ResponseWriter, r *http.Request, sele
 			}
 			a.finishRequest(modelRequestID, outcome, runErr.UpstreamStatus)
 			if streamCommitted {
-				writeCodexStreamError(w, modelRequestID, "storage_unavailable", "Service is temporarily unavailable.")
+				writeStreamError(w, modelRequestID, "storage_unavailable", "Service is temporarily unavailable.")
 			} else {
 				writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
 			}
@@ -300,7 +304,7 @@ func (a *App) handleCodexRunFailure(w http.ResponseWriter, r *http.Request, sele
 	}
 	a.finishRequest(modelRequestID, outcome, runErr.UpstreamStatus)
 	if streamCommitted {
-		writeCodexStreamError(w, modelRequestID, codexPublicErrorCode(runErr), "Upstream request failed.")
+		writeStreamError(w, modelRequestID, codexPublicErrorCode(runErr), "Upstream request failed.")
 		return
 	}
 	a.writeCodexRunError(w, r, modelRequestID, runErr)
