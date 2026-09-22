@@ -81,7 +81,8 @@ Function CheckLauncherNotRunning
   System::Call 'kernel32::OpenMutexW(i 0x00100000, i 0, w "${APP_MUTEX}") p.r0'
   ${If} $0 != 0
     System::Call 'kernel32::CloseHandle(p r0)'
-    MessageBox MB_OK|MB_ICONEXCLAMATION "$(LauncherRunning)"
+    SetErrorLevel 10
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(LauncherRunning)" /SD IDOK
     Abort
   ${EndIf}
 FunctionEnd
@@ -89,12 +90,14 @@ FunctionEnd
 Function CheckArchitecture
 !if "${TARGET_ARCH}" == "amd64"
   ${IfNot} ${IsNativeAMD64}
-    MessageBox MB_OK|MB_ICONSTOP "$(WrongAMD64)"
+    SetErrorLevel 12
+    MessageBox MB_OK|MB_ICONSTOP "$(WrongAMD64)" /SD IDOK
     Abort
   ${EndIf}
 !else if "${TARGET_ARCH}" == "arm64"
   ${IfNot} ${IsNativeARM64}
-    MessageBox MB_OK|MB_ICONSTOP "$(WrongARM64)"
+    SetErrorLevel 12
+    MessageBox MB_OK|MB_ICONSTOP "$(WrongARM64)" /SD IDOK
     Abort
   ${EndIf}
 !else
@@ -111,7 +114,8 @@ Function CheckInstallOwnership
   FileClose $0
   StrCmp $1 "${APP_ID}$\r$\n" ownership_ok
 ownership_bad:
-  MessageBox MB_OK|MB_ICONSTOP "$(UnownedDirectory)"
+  SetErrorLevel 13
+  MessageBox MB_OK|MB_ICONSTOP "$(UnownedDirectory)" /SD IDOK
   Abort
 ownership_ok:
 FunctionEnd
@@ -125,7 +129,8 @@ reparse_loop:
   ${If} $1 != -1
     IntOp $2 $1 & 0x400
     ${If} $2 != 0
-      MessageBox MB_OK|MB_ICONSTOP "$(UnsafeReparse)$\r$\n$0"
+      SetErrorLevel 14
+      MessageBox MB_OK|MB_ICONSTOP "$(UnsafeReparse)$\r$\n$0" /SD IDOK
       Abort
     ${EndIf}
   ${EndIf}
@@ -148,7 +153,8 @@ Function .onInit
   StrCpy $SetupMutexHandle $0
   System::Call 'kernel32::GetLastError() i.r1'
   ${If} $1 = 183
-    MessageBox MB_OK|MB_ICONEXCLAMATION "$(SetupRunning)"
+    SetErrorLevel 11
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(SetupRunning)" /SD IDOK
     Abort
   ${EndIf}
   Call CheckLauncherNotRunning
@@ -171,7 +177,8 @@ Function un.onInit
   StrCpy $SetupMutexHandle $0
   System::Call 'kernel32::GetLastError() i.r1'
   ${If} $1 = 183
-    MessageBox MB_OK|MB_ICONEXCLAMATION "$(SetupRunning)"
+    SetErrorLevel 11
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(SetupRunning)" /SD IDOK
     Abort
   ${EndIf}
   Call un.CheckLauncherNotRunning
@@ -186,7 +193,8 @@ Function un.CheckInstallOwnership
   FileClose $0
   StrCmp $1 "${APP_ID}$\r$\n" ownership_ok
 ownership_bad:
-  MessageBox MB_OK|MB_ICONSTOP "$(UnownedDirectory)"
+  SetErrorLevel 13
+  MessageBox MB_OK|MB_ICONSTOP "$(UnownedDirectory)" /SD IDOK
   Abort
 ownership_ok:
 FunctionEnd
@@ -200,7 +208,8 @@ reparse_loop:
   ${If} $1 != -1
     IntOp $2 $1 & 0x400
     ${If} $2 != 0
-      MessageBox MB_OK|MB_ICONSTOP "$(UnsafeReparse)$\r$\n$0"
+      SetErrorLevel 14
+      MessageBox MB_OK|MB_ICONSTOP "$(UnsafeReparse)$\r$\n$0" /SD IDOK
       Abort
     ${EndIf}
   ${EndIf}
@@ -219,7 +228,8 @@ Function un.CheckLauncherNotRunning
   System::Call 'kernel32::OpenMutexW(i 0x00100000, i 0, w "${APP_MUTEX}") p.r0'
   ${If} $0 != 0
     System::Call 'kernel32::CloseHandle(p r0)'
-    MessageBox MB_OK|MB_ICONEXCLAMATION "$(LauncherRunning)"
+    SetErrorLevel 10
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(LauncherRunning)" /SD IDOK
     Abort
   ${EndIf}
 FunctionEnd

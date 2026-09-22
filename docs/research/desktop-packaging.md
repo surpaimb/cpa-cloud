@@ -124,6 +124,17 @@ sidecars. Windows setup compilation is performed on the corresponding Windows
 runner; Swift app/DMG construction is performed on the corresponding macOS
 runner.
 
+Each ephemeral GitHub-hosted Windows runner also performs a bounded silent
+lifecycle test. Starting from clean product paths and registry keys, it checks
+install and same-package upgrade/reinstall, Start menu creation, the default
+absence of the optional desktop shortcut, launcher/setup mutex refusal exit
+codes, reparse-point refusal with an out-of-tree sentinel, uninstall, exact
+payload removal, non-payload-file preservation, and user-data preservation.
+Refusal message boxes have explicit silent defaults so the test cannot wait for
+UI input. The acceptance script refuses to run outside a GitHub-hosted Actions
+runner and cleans only paths that it first proved were absent and then created
+itself.
+
 These checks do not replace installation tests on clean end-user machines.
 Before promoting beyond preview, test install, upgrade, already-running refusal,
 uninstall/data preservation, OS security prompts, and first-run initialization

@@ -224,6 +224,15 @@ jobs:
           if ($archives.Count -ne 1 -or $checksums.Count -ne 1) { throw 'Expected one portable archive and one checksum.' }
           ./scripts/release-windows-installer.ps1 -Source . -PortableArchive $archives[0].FullName -PortableChecksum $checksums[0].FullName -Output installer-out -Version $env:RELEASE_TAG -Arch '${{ matrix.arch }}' -NSISRoot $env:NSIS_ROOT
 
+      - name: Test Windows install, upgrade, refusal, and uninstall lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -LiteralPath installer-out -Filter '*_Setup.exe' -File)
+          $checksums = @(Get-ChildItem -LiteralPath installer-out -Filter '*_Setup.exe.sha256' -File)
+          if ($installers.Count -ne 1 -or $checksums.Count -ne 1) { throw 'Expected one installer and one checksum.' }
+          ./scripts/release-windows-installer-acceptance.ps1 -Installer $installers[0].FullName -InstallerChecksum $checksums[0].FullName -Version $env:RELEASE_TAG
+
       - name: Test macOS launcher
         if: runner.os == 'macOS'
         run: swift test --package-path desktop/macos
