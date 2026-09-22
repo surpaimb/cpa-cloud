@@ -2,11 +2,11 @@
 
 面向公司内部员工的单租户 AI 接入平台，依据公开协议独立实现。
 
-**当前阶段：需求与架构规划。尚无可运行服务。**
+**当前阶段：首轮开发已启动。尚未通过集成验收，不是可部署发行版。**
 
 ## 已确认的方向
 
-- Linux 无图形桌面部署；网页后台管理，命令行部署与维护。
+- 云服务器、公司内网和个人电脑部署；目标支持 Linux、Windows、macOS，无需图形桌面；网页后台管理，命令行部署与维护。
 - 管理员管理上游账号、员工、Key、模型权限和用量。
 - 员工无需微信、Gate 或网页注册；使用独立 Key 接入标准 API。
 - 员工可以使用 CC Switch 或直接配置工具，专用客户端是后续可选能力。
@@ -15,6 +15,9 @@
 
 ## 开发入口
 
+- [首轮开发计划](docs/development-plan.md)
+- [协作任务记录](docs/work-coordination.md)
+- [开发预览接口契约](docs/preview-contract.md)
 - [第一版功能与架构](docs/product-plan.md)
 - [四个核心模块详细设计](docs/core-design.md)
 - [员工直接使用 CC Switch](docs/employee-access.md)
