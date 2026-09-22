@@ -3,7 +3,7 @@
 // Usage: node scripts/smoke-launcher-cli.mjs <absolute cpa-cloud executable>
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -51,13 +51,15 @@ try {
   assert.equal((await finish(launch(['--data-dir', data, '--check-initialized']))).code, 0);
   for (let restart = 0; restart < 2; restart++) {
     const port = await reservePort();
-    const child = launch(['--data-dir', data, '--listen', `127.0.0.1:${port}`, '--shutdown-on-stdin-eof'], undefined, true);
+    const instanceId = randomUUID();
+    const child = launch(['--data-dir', data, '--listen', `127.0.0.1:${port}`, '--shutdown-on-stdin-eof', '--instance-id', instanceId], undefined, true);
     let ready = false;
     for (let attempt = 0; attempt < 80; attempt++) {
       assert.equal(child.exitCode, null, 'Service exited before readiness');
       try {
         const response = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(500) });
-        ready = response.ok && (await response.json()).status === 'ok';
+        const health = await response.json();
+        ready = response.ok && health.status === 'ok' && health.instance_id === instanceId;
       } catch {}
       if (ready) break;
       await delay(100);
@@ -67,7 +69,7 @@ try {
     assert.equal((await finish(child)).code, 0, 'EOF must cause graceful service shutdown');
     assert.equal((await finish(launch(['--data-dir', data, '--check-initialized']))).code, 0);
   }
-  console.log('PASS: read-only initialization check, conflicting flags, initialization, EOF shutdown, restart');
+  console.log('PASS: read-only initialization check, conflicting flags, initialization, instance identity, EOF shutdown, restart');
 } finally {
   for (const child of children) child.kill();
   await Promise.allSettled([...children].map(child => child.done));
