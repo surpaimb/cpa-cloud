@@ -21,7 +21,7 @@ let child, origin, cookie = '', csrf = '', logs = '', calls = 0, fault = false, 
 const upstreamErrors = [];
 const received = [];
 const tool = { name: 'lookup', description: 'Synthetic lookup', input_schema: { type: 'object', properties: { id: { type: 'string' } } } };
-const geminiTool = { functionDeclarations: [{ name: 'lookup', parameters: tool.input_schema }] };
+const geminiTool = { functionDeclarations: [{ name: 'lookup', description: tool.description, parameters: tool.input_schema }] };
 const mock = http.createServer(async (req, res) => {
   try {
     calls++;
@@ -56,7 +56,9 @@ const mock = http.createServer(async (req, res) => {
     }
     res.setHeader('Content-Type', 'text/event-stream');
     if (fault) {
-      const error = { type: 'error', error: { type: 'api_error', message: privateError + claudeSecret + geminiSecret } };
+      const error = isGemini
+        ? { error: { code: 500, status: 'INTERNAL', message: privateError + claudeSecret + geminiSecret } }
+        : { type: 'error', error: { type: 'api_error', message: privateError + claudeSecret + geminiSecret } };
       res.end((isGemini ? '' : 'event: error\n') + `data: ${JSON.stringify(error)}\n\n`); return;
     }
     const frames = isGemini ? [
@@ -128,11 +130,16 @@ try {
   let employee = await admin('/employees', 'POST', { name: 'native acceptance' });
   issued = await admin(`/employees/${employee.id}/keys`, 'POST', { name: 'test', operation_id: randomUUID() });
   for (const kind of ['claude', 'gemini']) {
-    const response = await request(kind); assert.equal(response.status, 200);
+    const response = await request(kind);
+    assert.equal(response.status, 200, `${kind}: HTTP ${response.status}${response.ok ? '' : ' ' + await response.text()}`);
     const body = await response.json();
     if (kind === 'claude') {
       assert.equal(body.content[0].type, 'tool_use');
       assert.deepEqual(received.at(-1).payload.tools, [tool]);
+      const count = await fetch(origin + '/v1/messages/count_tokens', { method: 'POST',
+        headers: { Authorization: `Bearer ${issued.key}`, 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: 'public-claude', messages: [{ role: 'user', content: prompt }] }), signal: AbortSignal.timeout(5000) });
+      assert.equal(count.status, 200); assert.deepEqual(await count.json(), { input_tokens: 7 });
       const followup = await request(kind, false, { messages: [{ role: 'assistant', content: body.content }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'synthetic-call', content: 'synthetic-result' }] }] });
       assert.equal(followup.status, 200); await followup.text();
       assert.equal(received.at(-1).payload.messages[1].content[0].tool_use_id, 'synthetic-call');

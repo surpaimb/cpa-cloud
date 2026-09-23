@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,81 @@ import (
 
 	"cpacloud.local/server/internal/membership"
 )
+
+func TestCodexModelCatalogFailuresAreRedactedAndDoNotPoisonCredentials(t *testing.T) {
+	dir := t.TempDir()
+	if err := Initialize(context.Background(), dir, strings.NewReader("a-strong-preview-password\n")); err != nil {
+		t.Fatal(err)
+	}
+	app := openCodexAdminTestApp(t, dir, true)
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	for index, test := range []struct {
+		name                   string
+		upstreamStatus, status int
+		code                   string
+		reauth, replace        bool
+	}{
+		{"access denied", 403, 502, "upstream_access_denied", false, false},
+		{"rate limit", 429, 429, "upstream_rate_limited", false, false},
+		{"upstream failure", 500, 502, "model_discovery_failed", false, false},
+		{"unauthorized", 401, 502, "upstream_authentication_failed", true, false},
+		{"stale unauthorized", 401, 502, "upstream_authentication_failed", false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			auth := codexAdminAuthJSON(t, time.Now().Add(time.Hour), "synthetic-account", "synthetic-refresh")
+			op := fmt.Sprintf("1fa5fa10-702c-4727-86dd-%012d", index)
+			created := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-import", map[string]any{
+				"name": test.name, "auth_json": auth, "operation_id": op,
+			}, cookie, csrf, server.URL)
+			if created.StatusCode != http.StatusCreated {
+				t.Fatalf("import: %s", readBody(created))
+			}
+			var upstream upstreamView
+			decodeResponse(t, created, &upstream)
+			var calls int
+			client, err := membership.NewCodexModelsClientWithTransport("0.1.0", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.Scheme != "https" || r.URL.Host != "chatgpt.com" || r.Header.Get("Cookie") != "" {
+					t.Error("unexpected provider request")
+				}
+				if test.replace {
+					_, updateErr := app.store.db.Exec(`UPDATE upstreams SET revision=revision+1 WHERE id=?`, upstream.ID)
+					if updateErr != nil {
+						t.Error(updateErr)
+					}
+				}
+				return &http.Response{StatusCode: test.upstreamStatus, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":"synthetic-private-provider-body"}`))}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			app.catalogMu.Lock()
+			app.codexCatalog = client
+			app.catalogMu.Unlock()
+			response := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/discover-models", "{}", cookie, csrf, server.URL)
+			body := readBody(response)
+			if response.StatusCode != test.status || !strings.Contains(body, test.code) || strings.Contains(body, "synthetic-private") {
+				t.Fatalf("unexpected catalog error: %d %s", response.StatusCode, body)
+			}
+			if calls != 1 {
+				t.Fatalf("failure retried %d times", calls)
+			}
+			var state string
+			if err := app.store.db.QueryRow(`SELECT credential_state FROM upstreams WHERE id=?`, upstream.ID).Scan(&state); err != nil {
+				t.Fatal(err)
+			}
+			if (state == codexStateReauth) != test.reauth {
+				t.Fatalf("credential state incorrectly changed: %s", state)
+			}
+			if len(app.catalogs) != 0 {
+				t.Fatal("failed catalog response was cached")
+			}
+		})
+	}
+}
 
 type codexCatalogFunc func(context.Context, *membership.CodexAuthCredential) (membership.CodexModelCatalog, error)
 
