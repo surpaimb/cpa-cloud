@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/membership"
+	"cpacloud.local/server/internal/scheduling"
 )
 
 const (
@@ -37,6 +38,11 @@ type codexRunError struct {
 	Code           membership.CodexAdapterErrorCode
 	UpstreamStatus int
 	RetryAfter     time.Duration
+	// PreflightAccountSpecific is positive evidence that this error belongs to
+	// the selected account and happened before model execution. Its zero value
+	// is deliberately unsafe for failover.
+	PreflightAccountSpecific bool
+	PreflightClass           scheduling.FailureClass
 }
 
 func (e *codexRunError) Error() string { return "Codex membership request failed." }

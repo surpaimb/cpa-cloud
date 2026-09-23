@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"cpacloud.local/server/internal/membership"
+	"cpacloud.local/server/internal/scheduling"
 )
 
 const (
@@ -73,9 +74,66 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if stream {
+		if _, ok := w.(http.Flusher); !ok {
+			writeModelError(w, http.StatusInternalServerError, "streaming_unavailable", "Streaming is unavailable.", requestID(r.Context()))
+			return
+		}
+	}
 	reqID := requestID(r.Context())
-	selected, lease, failure := a.selectModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider}, true)
+	var upstreamReq *http.Request
+	var codexPrepared *codexResponsesPreflight
+	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider}, true, func(candidateRequest *http.Request, candidate route) *modelPreflightError {
+		candidatePayload := make(map[string]json.RawMessage, len(payload))
+		for key, value := range payload {
+			candidatePayload[key] = value
+		}
+		candidatePayload["model"], _ = json.Marshal(candidate.UpstreamModel)
+		outgoing, err := json.Marshal(candidatePayload)
+		if err != nil {
+			return requestPreflightFailure(http.StatusBadRequest, "invalid_request_error", "Invalid request.")
+		}
+		if candidate.ProviderKind == codexMembershipProvider {
+			prepared, failed := a.prepareCodexResponses(candidateRequest.Context(), outgoing, candidate)
+			if failed != nil {
+				return failed
+			}
+			codexPrepared = prepared
+			return nil
+		}
+		if candidate.ProviderKind != "openai-compatible" || candidate.KeyVersion != 1 {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		credential, err := a.secrets.decryptCredential(candidate.AccountID, candidate.Ciphertext)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailureAuth)
+		}
+		endpoint, err := validateEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		target, err := upstreamResponsesURL(endpoint)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		prepared, err := http.NewRequestWithContext(candidateRequest.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
+		if err != nil {
+			return accountPreflightFailure(http.StatusBadGateway, "upstream_unavailable", "Upstream is unavailable.", scheduling.FailurePermanent)
+		}
+		prepared.Header.Set("Authorization", "Bearer "+credential)
+		prepared.Header.Set("Content-Type", "application/json")
+		if stream {
+			prepared.Header.Set("Accept", "text/event-stream")
+		} else {
+			prepared.Header.Set("Accept", "application/json")
+		}
+		upstreamReq = prepared
+		return nil
+	})
 	if failure != nil {
+		if codexPrepared != nil {
+			codexPrepared.Destroy()
+		}
 		if r.Context().Err() != nil {
 			return
 		}
@@ -86,19 +144,21 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(lease.Context())
 	}
 	defer a.releaseModelLease(lease, reqID, true)
-
-	payload["model"], _ = json.Marshal(selected.UpstreamModel)
-	outgoing, err := json.Marshal(payload)
-	if err != nil {
+	if codexPrepared != nil {
+		defer codexPrepared.Destroy()
+		selected = codexPrepared.selected
+	}
+	if err := a.beginRouteUpstreamUsage(r.Context(), reqID, selected); err != nil {
 		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request.", reqID)
+		writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.", reqID)
 		return
 	}
-	if selected.ProviderKind == codexMembershipProvider {
-		a.handleCodexResponses(w, r, outgoing, stream, selected, reqID)
+	lease.MarkDispatch()
+	if codexPrepared != nil {
+		a.handleCodexResponses(w, r, stream, codexPrepared, reqID)
 		return
 	}
-	a.handleAPIKeyResponses(w, r, outgoing, stream, selected, reqID)
+	a.handleAPIKeyResponses(w, r, upstreamReq, stream, reqID)
 }
 
 func rejectsResponsesLifecycle(payload map[string]json.RawMessage) bool {
@@ -122,48 +182,7 @@ func rejectsResponsesLifecycle(payload map[string]json.RawMessage) bool {
 	return false
 }
 
-func (a *App) handleAPIKeyResponses(w http.ResponseWriter, r *http.Request, body []byte, stream bool, selected route, reqID string) {
-	if selected.ProviderKind != "openai-compatible" || selected.KeyVersion != 1 {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", reqID)
-		return
-	}
-	credential, err := a.secrets.decryptCredential(selected.AccountID, selected.Ciphertext)
-	if err != nil {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", reqID)
-		return
-	}
-	endpoint, err := validateEndpoint(r.Context(), selected.Endpoint, a.cfg.AllowLoopbackUpstream)
-	if err != nil {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", reqID)
-		return
-	}
-	target, err := upstreamResponsesURL(endpoint)
-	if err != nil {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", reqID)
-		return
-	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
-	if err != nil {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, 502, "upstream_unavailable", "Upstream is unavailable.", reqID)
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+credential)
-	req.Header.Set("Content-Type", "application/json")
-	if stream {
-		req.Header.Set("Accept", "text/event-stream")
-	} else {
-		req.Header.Set("Accept", "application/json")
-	}
-	if err := a.beginUpstreamUsage(r.Context(), reqID, selected.AccountID); err != nil {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", reqID)
-		return
-	}
+func (a *App) handleAPIKeyResponses(w http.ResponseWriter, r *http.Request, req *http.Request, stream bool, reqID string) {
 	response, err := a.http.Do(req)
 	if err != nil {
 		outcome := "failed"
@@ -439,44 +458,56 @@ func writeResponsesSSE(w io.Writer, event responsesSSEEvent) error {
 	return err
 }
 
-func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body []byte, stream bool, selected route, reqID string) {
+type codexResponsesPreflight struct {
+	selected   route
+	credential *membership.CodexAuthCredential
+	body       []byte
+}
+
+func (p *codexResponsesPreflight) Destroy() {
+	if p != nil && p.credential != nil {
+		p.credential.Destroy()
+		p.credential = nil
+	}
+}
+
+func (a *App) prepareCodexResponses(ctx context.Context, body []byte, selected route) (*codexResponsesPreflight, *modelPreflightError) {
 	if !a.cfg.ExperimentalCodexMembership {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", reqID)
-		return
+		return nil, requestPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.")
 	}
 	if selected.KeyVersion != 2 || !selected.CredentialState.Valid || selected.CredentialState.String == codexStateReauth {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, 502, "upstream_reauthentication_required", "The upstream credential must be re-imported.", reqID)
-		return
+		return nil, accountPreflightFailure(http.StatusBadGateway, "upstream_reauthentication_required", "The upstream credential must be re-imported.", scheduling.FailureAuth)
 	}
 	if selected.CredentialState.String != codexStateImported && selected.CredentialState.String != codexStateVerified {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", reqID)
-		return
+		return nil, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
 	}
-	selected, credential, runErr := a.acquireCodexCredential(r.Context(), selected)
+	selected, credential, runErr := a.acquireCodexCredential(ctx, selected)
 	if runErr != nil {
-		a.handleCodexFailure(w, r, selected, reqID, runErr, false, writeResponsesStreamError)
-		return
+		status, code, message := codexPublicError(runErr)
+		var failure *modelPreflightError
+		if runErr.PreflightAccountSpecific {
+			failure = accountPreflightFailure(status, code, message, runErr.PreflightClass)
+		} else {
+			failure = requestPreflightFailure(status, code, message)
+		}
+		failure.UpstreamStatus = runErr.UpstreamStatus
+		return nil, failure
 	}
-	defer credential.Destroy()
-	if err := a.beginUpstreamUsage(r.Context(), reqID, selected.AccountID); err != nil {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", reqID)
-		return
-	}
+	return &codexResponsesPreflight{selected: selected, credential: credential, body: body}, nil
+}
+
+func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, stream bool, prepared *codexResponsesPreflight, reqID string) {
 	if !stream {
-		result, runErr := a.responses.Responses(r.Context(), credential, body, nil)
+		result, runErr := a.responses.Responses(r.Context(), prepared.credential, prepared.body, nil)
 		if runErr != nil {
-			a.handleCodexFailure(w, r, selected, reqID, runErr, false, writeResponsesStreamError)
+			a.handleCodexFailure(w, r, prepared.selected, reqID, runErr, false, writeResponsesStreamError)
 			return
 		}
 		if validateCompletedResponse(result) != nil {
 			a.responsesProtocolError(w, reqID, http.StatusOK)
 			return
 		}
-		if err := a.markCodexVerified(selected.AccountID, selected.Revision); err != nil {
+		if err := a.markCodexVerified(prepared.selected.AccountID, prepared.selected.Revision); err != nil {
 			a.finishRequest(reqID, "failed", 200)
 			writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", reqID)
 			return
@@ -508,7 +539,7 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body 
 			committed = true
 		}
 	}
-	_, runErr = a.responses.Responses(r.Context(), credential, body, func(event json.RawMessage) error {
+	_, runErr := a.responses.Responses(r.Context(), prepared.credential, prepared.body, func(event json.RawMessage) error {
 		var head struct {
 			Type string `json:"type"`
 		}
@@ -533,7 +564,7 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body 
 		return nil
 	})
 	if runErr != nil {
-		a.handleCodexFailure(w, r, selected, reqID, runErr, committed, writeResponsesStreamError)
+		a.handleCodexFailure(w, r, prepared.selected, reqID, runErr, committed, writeResponsesStreamError)
 		return
 	}
 	if len(completed) == 0 {
@@ -545,7 +576,7 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body 
 		}
 		return
 	}
-	if err := a.markCodexVerified(selected.AccountID, selected.Revision); err != nil {
+	if err := a.markCodexVerified(prepared.selected.AccountID, prepared.selected.Revision); err != nil {
 		a.finishRequest(reqID, "failed", 200)
 		if committed {
 			writeResponsesStreamError(w, reqID, "storage_unavailable", "Service is temporarily unavailable.")

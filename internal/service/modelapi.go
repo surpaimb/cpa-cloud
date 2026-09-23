@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"cpacloud.local/server/internal/scheduling"
 )
 
 type employeeAuth struct {
@@ -151,9 +153,66 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if stream {
+		if _, ok := w.(http.Flusher); !ok {
+			writeModelError(w, http.StatusInternalServerError, "streaming_unavailable", "Streaming is unavailable.", requestID(r.Context()))
+			return
+		}
+	}
 	modelRequestID := requestID(r.Context())
-	route, lease, failure := a.selectModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider}, true)
+	var upstreamReq *http.Request
+	var codexPrepared *codexChatPreflight
+	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider}, true, func(candidateRequest *http.Request, candidate route) *modelPreflightError {
+		if candidate.ProviderKind == codexMembershipProvider {
+			prepared, failed := a.prepareCodexChatCompletion(candidateRequest.Context(), payload, candidate)
+			if failed != nil {
+				return failed
+			}
+			codexPrepared = prepared
+			return nil
+		}
+		if candidate.ProviderKind != "openai-compatible" || candidate.KeyVersion != 1 {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		credential, err := a.secrets.decryptCredential(candidate.AccountID, candidate.Ciphertext)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailureAuth)
+		}
+		candidatePayload := make(map[string]json.RawMessage, len(payload))
+		for key, value := range payload {
+			candidatePayload[key] = value
+		}
+		candidatePayload["model"], _ = json.Marshal(candidate.UpstreamModel)
+		outgoing, err := json.Marshal(candidatePayload)
+		if err != nil {
+			return requestPreflightFailure(http.StatusBadRequest, "invalid_request_error", "Invalid request.")
+		}
+		endpoint, err := validateEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		target, err := upstreamChatURL(endpoint)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		prepared, err := http.NewRequestWithContext(candidateRequest.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "upstream_unavailable", "Upstream is unavailable.", scheduling.FailurePermanent)
+		}
+		prepared.Header.Set("Authorization", "Bearer "+credential)
+		prepared.Header.Set("Content-Type", "application/json")
+		if stream {
+			prepared.Header.Set("Accept", "text/event-stream")
+		} else {
+			prepared.Header.Set("Accept", "application/json")
+		}
+		upstreamReq = prepared
+		return nil
+	})
 	if failure != nil {
+		if codexPrepared != nil {
+			codexPrepared.Destroy()
+		}
 		if r.Context().Err() != nil {
 			return
 		}
@@ -164,57 +223,18 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(lease.Context())
 	}
 	defer a.releaseModelLease(lease, modelRequestID, true)
-
-	if route.ProviderKind == codexMembershipProvider {
-		a.handleCodexChatCompletion(w, r, payload, model, stream, route, modelRequestID)
-		return
+	if codexPrepared != nil {
+		defer codexPrepared.Destroy()
+		selected = codexPrepared.selected
 	}
-	if route.ProviderKind != "openai-compatible" || route.KeyVersion != 1 {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", modelRequestID)
-		return
-	}
-	credential, err := a.secrets.decryptCredential(route.AccountID, route.Ciphertext)
-	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", modelRequestID)
-		return
-	}
-	payload["model"], _ = json.Marshal(route.UpstreamModel)
-	outgoing, err := json.Marshal(payload)
-	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, 400, "invalid_request_error", "Invalid request.", modelRequestID)
-		return
-	}
-	endpoint, err := validateEndpoint(r.Context(), route.Endpoint, a.cfg.AllowLoopbackUpstream)
-	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", modelRequestID)
-		return
-	}
-	target, err := upstreamChatURL(endpoint)
-	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", modelRequestID)
-		return
-	}
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
-	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, 503, "upstream_unavailable", "Upstream is unavailable.", modelRequestID)
-		return
-	}
-	upstreamReq.Header.Set("Authorization", "Bearer "+credential)
-	upstreamReq.Header.Set("Content-Type", "application/json")
-	if stream {
-		upstreamReq.Header.Set("Accept", "text/event-stream")
-	} else {
-		upstreamReq.Header.Set("Accept", "application/json")
-	}
-	if err := a.beginUpstreamUsage(r.Context(), modelRequestID, route.AccountID); err != nil {
+	if err := a.beginRouteUpstreamUsage(r.Context(), modelRequestID, selected); err != nil {
 		a.finishRequest(modelRequestID, "failed", 0)
 		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
+		return
+	}
+	lease.MarkDispatch()
+	if codexPrepared != nil {
+		a.handleCodexChatCompletion(w, r, model, stream, codexPrepared, modelRequestID)
 		return
 	}
 	response, err := a.http.Do(upstreamReq)

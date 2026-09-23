@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/membership"
+	"cpacloud.local/server/internal/scheduling"
 )
 
 type codexRequestMappingError struct {
@@ -88,60 +89,66 @@ func mapCodexChatRequest(payload map[string]json.RawMessage, upstreamModel strin
 	return membership.CodexTextRequest{Model: upstreamModel, Messages: messages}, nil
 }
 
-func (a *App) handleCodexChatCompletion(w http.ResponseWriter, r *http.Request, payload map[string]json.RawMessage, publicModel string, stream bool, selected route, modelRequestID string) {
+type codexChatPreflight struct {
+	selected   route
+	credential *membership.CodexAuthCredential
+	mapped     membership.CodexTextRequest
+}
+
+func (p *codexChatPreflight) Destroy() {
+	if p != nil && p.credential != nil {
+		p.credential.Destroy()
+		p.credential = nil
+	}
+}
+
+func (a *App) prepareCodexChatCompletion(ctx context.Context, payload map[string]json.RawMessage, selected route) (*codexChatPreflight, *modelPreflightError) {
 	if !a.cfg.ExperimentalCodexMembership {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, http.StatusForbidden, "feature_disabled", "Codex membership routing is disabled.", modelRequestID)
-		return
+		return nil, requestPreflightFailure(http.StatusForbidden, "feature_disabled", "Codex membership routing is disabled.")
 	}
 	if selected.KeyVersion != 2 || !selected.CredentialState.Valid {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", modelRequestID)
-		return
+		return nil, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailureAuth)
 	}
 	if selected.CredentialState.String == codexStateReauth {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, http.StatusBadGateway, "upstream_reauthentication_required", "The upstream credential must be re-imported.", modelRequestID)
-		return
+		return nil, accountPreflightFailure(http.StatusBadGateway, "upstream_reauthentication_required", "The upstream credential must be re-imported.", scheduling.FailureAuth)
 	}
 	if selected.CredentialState.String != codexStateImported && selected.CredentialState.String != codexStateVerified {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", modelRequestID)
-		return
+		return nil, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
 	}
 	mapped, err := mapCodexChatRequest(payload, selected.UpstreamModel)
 	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
 		var mappingError *codexRequestMappingError
 		if errors.As(err, &mappingError) && mappingError.unsupported {
-			writeModelError(w, http.StatusBadRequest, "unsupported_feature", "This request uses a feature that is not supported for Codex membership routing.", modelRequestID)
-		} else {
-			writeModelError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request.", modelRequestID)
+			return nil, requestPreflightFailure(http.StatusBadRequest, "unsupported_feature", "This request uses a feature that is not supported for Codex membership routing.")
 		}
-		return
+		return nil, requestPreflightFailure(http.StatusBadRequest, "invalid_request_error", "Invalid request.")
 	}
-	selected, credential, runErr := a.acquireCodexCredential(r.Context(), selected)
+	selected, credential, runErr := a.acquireCodexCredential(ctx, selected)
 	if runErr != nil {
-		a.finishRequest(modelRequestID, "failed", runErr.UpstreamStatus)
-		a.writeCodexRunError(w, r, modelRequestID, runErr)
-		return
+		status, code, message := codexPublicError(runErr)
+		var failure *modelPreflightError
+		if runErr.PreflightAccountSpecific {
+			failure = accountPreflightFailure(status, code, message, runErr.PreflightClass)
+		} else {
+			failure = requestPreflightFailure(status, code, message)
+		}
+		failure.UpstreamStatus = runErr.UpstreamStatus
+		return nil, failure
 	}
-	defer credential.Destroy()
-	if err := a.beginUpstreamUsage(r.Context(), modelRequestID, selected.AccountID); err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
-		return
-	}
+	return &codexChatPreflight{selected: selected, credential: credential, mapped: mapped}, nil
+}
+
+func (a *App) handleCodexChatCompletion(w http.ResponseWriter, r *http.Request, publicModel string, stream bool, prepared *codexChatPreflight, modelRequestID string) {
 	if stream {
-		a.streamCodexChatCompletion(w, r, publicModel, mapped, credential, selected, modelRequestID)
+		a.streamCodexChatCompletion(w, r, publicModel, prepared.mapped, prepared.credential, prepared.selected, modelRequestID)
 		return
 	}
-	result, runErr := a.codex.Complete(r.Context(), credential, mapped)
+	result, runErr := a.codex.Complete(r.Context(), prepared.credential, prepared.mapped)
 	if runErr != nil {
-		a.handleCodexRunFailure(w, r, selected, modelRequestID, runErr, false)
+		a.handleCodexRunFailure(w, r, prepared.selected, modelRequestID, runErr, false)
 		return
 	}
-	if stateErr := a.markCodexVerified(selected.AccountID, selected.Revision); stateErr != nil {
+	if stateErr := a.markCodexVerified(prepared.selected.AccountID, prepared.selected.Revision); stateErr != nil {
 		a.finishRequest(modelRequestID, "failed", http.StatusOK)
 		writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
 		return

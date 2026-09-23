@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/membership"
+	"cpacloud.local/server/internal/scheduling"
 )
 
 const (
@@ -19,8 +20,9 @@ const (
 )
 
 type codexRefreshFailure struct {
-	code string
-	err  error
+	code            string
+	err             error
+	accountSpecific bool
 }
 
 func (e *codexRefreshFailure) Error() string {
@@ -276,7 +278,7 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 		return snapshot, &codexRefreshFailure{code: "reauthorization_required"}
 	}
 	if refreshState.String == "paused" {
-		return snapshot, &codexRefreshFailure{code: "refresh_paused"}
+		return snapshot, &codexRefreshFailure{code: "refresh_paused", accountSpecific: true}
 	}
 	if refreshState.String != "ready" {
 		return snapshot, &codexRefreshFailure{code: "refresh_unavailable"}
@@ -315,6 +317,18 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 	if changed != 1 {
 		return snapshot, &codexRefreshFailure{code: "refresh_unavailable"}
 	}
+	pause := func(reason string, cause error) (codexRefreshSnapshot, error) {
+		if err := c.markPaused(id, snapshot.revision, reason); err != nil {
+			return snapshot, err
+		}
+		return snapshot, &codexRefreshFailure{code: "refresh_paused", err: cause, accountSpecific: true}
+	}
+	pauseThenGlobal := func(reason string, cause error) (codexRefreshSnapshot, error) {
+		if err := c.markPaused(id, snapshot.revision, reason); err != nil {
+			return snapshot, err
+		}
+		return snapshot, &codexRefreshFailure{code: "refresh_paused", err: cause}
+	}
 
 	tokens, wireErr := c.app.requestCodexOAuthTokensWithRetryGuard(ctx, codexOAuthTokenRequest{
 		GrantType: "refresh_token", ClientID: boundClient, RefreshToken: refreshToken,
@@ -323,6 +337,9 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 	})
 	if wireErr != nil {
 		if wireErr.internal != nil {
+			if err := c.markPaused(id, snapshot.revision, "uncertain_refresh_outcome"); err != nil {
+				return snapshot, err
+			}
 			return snapshot, wireErr.internal
 		}
 		if wireErr.Status == http.StatusUnauthorized || wireErr.Code == "invalid_grant" {
@@ -347,36 +364,30 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 			}
 			return snapshot, &codexRefreshFailure{code: "refresh_rate_limited"}
 		}
-		c.markPaused(id, snapshot.revision, "uncertain_refresh_outcome")
-		return snapshot, &codexRefreshFailure{code: "refresh_paused", err: ctx.Err()}
+		return pause("uncertain_refresh_outcome", ctx.Err())
 	}
 
 	rawAuth, err := codexAuthJSONFromTokens(tokens)
 	if err != nil {
-		c.markPaused(id, snapshot.revision, "uncertain_refresh_response")
-		return snapshot, &codexRefreshFailure{code: "refresh_paused", err: err}
+		return pause("uncertain_refresh_response", err)
 	}
 	defer clear(rawAuth)
 	validated, err := parseSchedulableCodexAuth(rawAuth)
 	if err != nil {
-		c.markPaused(id, snapshot.revision, "uncertain_refresh_response")
-		return snapshot, &codexRefreshFailure{code: "refresh_paused", err: err}
+		return pause("uncertain_refresh_response", err)
 	}
 	validated.Destroy()
 	rotated, err := c.app.secrets.encryptCodexAuth(id, rawAuth)
 	if err != nil {
-		c.markPaused(id, snapshot.revision, "rotated_credential_save_failed")
-		return snapshot, &codexRefreshFailure{code: "refresh_paused", err: err}
+		return pauseThenGlobal("rotated_credential_save_failed", err)
 	}
 	if c.beforePersist != nil {
 		if err := c.beforePersist(id); err != nil {
-			c.markPaused(id, snapshot.revision, "rotated_credential_save_failed")
-			return snapshot, &codexRefreshFailure{code: "refresh_paused", err: err}
+			return pauseThenGlobal("rotated_credential_save_failed", err)
 		}
 	}
 	if err := c.persistRotated(ctx, id, snapshot.revision, enabled, boundClient, rotated); err != nil {
-		c.markPaused(id, snapshot.revision, "rotated_credential_save_failed")
-		return snapshot, err
+		return pauseThenGlobal("rotated_credential_save_failed", err)
 	}
 	snapshot.revision++
 	snapshot.ciphertext = rotated
@@ -434,12 +445,23 @@ func (c *codexRefreshCoordinator) requireCurrentAttempt(ctx context.Context, id 
 	return err
 }
 
-func (c *codexRefreshCoordinator) markPaused(id string, revision int64, reason string) {
+func (c *codexRefreshCoordinator) markPaused(id string, revision int64, reason string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, _ = c.app.store.db.ExecContext(ctx, `UPDATE codex_oauth_refresh_states
+	result, err := c.app.store.db.ExecContext(ctx, `UPDATE codex_oauth_refresh_states
 		SET state='paused',reason_code=?,updated_at=?
 		WHERE upstream_id=? AND state='in_progress' AND attempt_revision=?`, reason, utcNow(), id, revision)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return &codexRefreshFailure{code: "revision_conflict"}
+	}
+	return nil
 }
 
 func (c *codexRefreshCoordinator) markReauthorization(id string, revision int64) error {
@@ -530,23 +552,36 @@ func (a *App) acquireCodexCredential(ctx context.Context, selected route) (route
 			return updated, nil, &codexRunError{Code: membership.CodexErrorCancelled}
 		}
 		var failure *codexRefreshFailure
-		if errors.As(err, &failure) && (failure.code == "reauthorization_required" || failure.code == "refresh_paused") {
-			return updated, nil, &codexRunError{Code: membership.CodexErrorReauthentication}
+		if errors.As(err, &failure) && (failure.code == "reauthorization_required" || (failure.code == "refresh_paused" && failure.accountSpecific)) {
+			return updated, nil, codexAccountPreflightError(membership.CodexErrorReauthentication, scheduling.FailureAuth)
+		}
+		if errors.As(err, &failure) && failure.code == "credential_unavailable" {
+			return updated, nil, codexAccountPreflightError(membership.CodexErrorUpstream, scheduling.FailureAuth)
+		}
+		if errors.As(err, &failure) && failure.code == "refresh_rate_limited" {
+			return updated, nil, codexAccountPreflightError(membership.CodexErrorUpstream, scheduling.FailureRateLimit)
 		}
 		return updated, nil, &codexRunError{Code: membership.CodexErrorUpstream}
 	}
 	plaintext, err := a.secrets.decryptCodexAuth(updated.AccountID, updated.Ciphertext)
 	if err != nil {
-		return updated, nil, &codexRunError{Code: membership.CodexErrorUpstream}
+		return updated, nil, codexAccountPreflightError(membership.CodexErrorUpstream, scheduling.FailureAuth)
 	}
 	credential, err := membership.ParseCodexAuthJSON(plaintext)
 	clear(plaintext)
 	if err != nil {
-		return updated, nil, &codexRunError{Code: membership.CodexErrorUpstream}
+		return updated, nil, codexAccountPreflightError(membership.CodexErrorUpstream, scheduling.FailureAuth)
 	}
 	if err := membership.NewCodexDirectAdapter().ValidateCredentialForExecution(credential); err != nil {
 		credential.Destroy()
-		return updated, nil, normalizeCodexRunError(err)
+		runErr := normalizeCodexRunError(err)
+		runErr.PreflightAccountSpecific = true
+		runErr.PreflightClass = scheduling.FailureAuth
+		return updated, nil, runErr
 	}
 	return updated, credential, nil
+}
+
+func codexAccountPreflightError(code membership.CodexAdapterErrorCode, class scheduling.FailureClass) *codexRunError {
+	return &codexRunError{Code: code, PreflightAccountSpecific: true, PreflightClass: class}
 }
