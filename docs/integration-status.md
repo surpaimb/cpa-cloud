@@ -11,6 +11,7 @@
 - README PowerShell 块与基线保持一致，104 个本地文档链接、6 项 CI 路径测试及 diff 检查通过。当前变更只触发 core/web，三个安装平台不触发；本机无 C 编译器，完整 Linux race 待本批 CI，不冒充已经通过。
 - 源码 `191db7c3edef77c807a86083b666bc480bbaa0fd` 的 [Code validation 35857351905](https://github.com/surpaimb/cpa-cloud/actions/runs/35857351905) 普通 Go 步骤通过（Linux service 145.946s），网页日志已核实 TypeScript、74 项测试及构建通过，Windows/Linux/macOS 安装 job 全部 skipped。完整 service race 在 25 分钟上限超时，堆栈停在 Responses 用量测试的真实 bcrypt 初始化；日志未出现 DATA RACE，但超时不能视为 race 通过，后续 vet/构建/进程 smoke 因该失败未执行。
 - 针对初始化成本，`8ef53cf`/`d0bea39` 只调整 runtime 测试夹具：复用一个已经关闭的合成初始化模板，每个测试复制到独立目录和数据库；不共享 App/DB，不降低 bcrypt cost=12，认证与迁移测试保留真实初始化。子任务完整非缓存 service 回归 PASS 320.774s（墙钟 323.749s）；根任务审查后独立运行模板/会话边界 1.566s、7 项恢复协调器测试 5.058s 及全仓 vet，均 PASS。缺 Cookie、错误 Origin/CSRF、退出、过期及写隔离均有断言；等待相同范围的完整 Linux race 复验，不提高超时或删减套件。
+- 最终源码 `e53d59132bec893d6c57d5199371a592f51432ea` 的 [Code validation 35860548646](https://github.com/surpaimb/cpa-cloud/actions/runs/35860548646) 已全部成功。根任务读取 core job `107179469464` 实际日志：普通 Linux service 109.854s；相同完整 race 范围 service 1078.025s、membership 1.802s、scheduling 1.087s、accounting 55.232s 全部 PASS；vet、编译、上游健康、恢复基础和自动恢复三组隔离进程 smoke 全部 PASS。三个安装 job 均 skipped；本轮未改网页，web job skipped，网页证据仍为上一轮 74 项及真实浏览器验收。此结果仅覆盖本批恢复源码，不覆盖尚在独立分支的出站代理和治理组件。
 - 本批仍仅源码，preview.3 不含本功能；没有新 tag、安装包、真实供应商/会员账号或生产部署。预算、代理池、商业化及其他功能矩阵待办继续保留。
 
 ## 2026-09-23：生成恢复基础模块与独立探测账本
