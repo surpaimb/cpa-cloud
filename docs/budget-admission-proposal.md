@@ -3,6 +3,8 @@
 状态：**待实现设计草案**，2026-09-23。本文件补充[员工请求治理契约](governance-contract.md)、
 [治理 Shadow 观测契约](governance-observation-contract.md)和[用量与价格管理契约](usage-management-contract.md)。
 它不表示当前服务、网页或发布包已经提供 hard TPM、余额、收费或成本预算。
+具体接线以[持久核心与服务契约](budget-persistence-integration-contract.md)为准，特别是当前实际锁顺序、
+Token/成本分维度结算、提交结果不确定、未知用量的本系统归因窗口和联合恢复。下文保留最初提案推导，不能覆盖新契约。
 
 本提案依据 CPA Cloud 当前 `internal/governance`、`internal/accounting`、`internal/scheduling` 和模型执行接线独立编写，
 没有读取参考产品源码或真实凭据。现有 shadow 观测是事后事实查询，不能直接搬到派发前做硬拒绝。
@@ -88,7 +90,7 @@ type DispatchBoundProof struct {
 固定模型候选可以采用独立 `InputMax=C`、`OutputMax=M`：Token 上界 checked-add 为 `C+M`，成本为
 `ceil((C*max(三项输入费率)+M*output_rate)/1_000_000)`。这项公式只在输入三桶互斥关系有该 profile 的证据时适用，
 不改变通用四桶算术接口。新增组合算术接口应接受原始不可变价格快照，不能把费率改写后仍伪装成同一价格版本；
-当前基础构件尚未实现这项组合接口。实际 usage 超出任一采用的 bound 必须如实保存 overage 并停用该 profile，
+独立预算分支已补组合算术接口（见 Accounting 基础），仍没有生产 profile 或预算运行时。实际 usage 超出任一采用的 bound 必须如实保存 overage 并停用该 profile，
 不能截断用量以维持预算表面成立。
 
 proof 只绑定已经解析并冻结的内存 payload。数据库保存模型、协议、bounder 版本和数值，不保存 prompt、response、

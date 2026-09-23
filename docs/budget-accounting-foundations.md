@@ -1,7 +1,7 @@
 # 预算准入的 Accounting 基础构件
 
 状态：**基础构件已实现，硬预算仍未实现**，2026-09-23。本文件记录
-[硬 TPM 与成本预算准入提案](budget-admission-proposal.md)所需的两个 accounting 接口。它们不增加 reservation 表、
+[硬 TPM 与成本预算准入提案](budget-admission-proposal.md)所需的 accounting 事务与算术接口。它们不增加 reservation 表、
 运行时准入、Token 上界生成器、管理员 API、网页开关或任何生产 hard TPM/成本预算能力。
 
 实现依据本仓规格与既有 accounting 账本独立完成，没有读取参考产品源码或真实数据。没有新增第三方依赖。
@@ -95,3 +95,13 @@ service 的 Accounting/Usage/Ledger、治理 HTTP 四协议和 Codex 交叉测�
 
 互斥输入组专项另以 `math/big` oracle 覆盖三种输入费率分别为最大值、向上取整、Token checked-add、`MaxInt64`、
 成本溢出、非法价格和原始快照不变；同时回归四桶 helper 仍分别累计三类输入桶。该算术验收不等于生产 bound profile。
+
+## 2026-09-24 根集成复验
+
+互斥输入组算术、注释/多桶证明修订与 caller-owned accounting 恢复接口已整合到独立 budget 分支。
+根独立 accounting 全包非缓存 PASS（17.271s）；governance 全包含两包联合事务测试 PASS（26.916s）；
+service 用量账本及治理终结/取消/重启专项 PASS（7.868s）。三包 vet、实际 Go 编译及最终二进制上的
+`scripts/smoke-governance-observations.mjs` 隔离进程模拟上游验收 PASS。
+
+恢复 API 与联合事务证明见[恢复基础](budget-recovery-foundations.md)。这些新增代码仍未合入 main 或运行自身 Linux
+race，不引用主线观测 CI 冒充验证；暂无 reservation/schema/生产 profile/预算开关，也不发布新安装包。

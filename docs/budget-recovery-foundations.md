@@ -46,11 +46,11 @@ func (l *accounting.Ledger) RecoverInterruptedTx(
 
 两包的时间规则有意不同，联合协调器不能借一方规则弱化另一方：
 
-- accounting 保持现有 `validateRecoveryTime` 规则，严格拒绝早于任一 pending 父请求的起始时刻，或早于该 pending 父请求下已经终结的 child attempt `finished_at` 的恢复时间；它不会自行把调用方的 `at` 抬高。
+- accounting 保持现有 `validateRecoveryTime` 规则，严格拒绝早于任一 pending 父请求或 pending attempt 的起始时刻，或早于该 pending 父请求下已经终结的 child attempt `finished_at` 的恢复时间；它不会自行把调用方的 `at` 抬高。
 - governance 保持持久 effective clock 的 `max` 钳制，允许观测时钟回拨但只会保守延后 effective 结束和释放判定。
 - 未来联合协调器必须在同一个联合写事务内读取完整相关 stored facts，确定并校验一个不早于这些事实的统一恢复时刻，再把同一个时刻传给两个包；不能在事务外先读后假定数据未变化。不能捕获 accounting 的时间错误后改用治理钳制结果，也不能跳过 governance 的持久时钟。
 
-下一批联合接线以 `docs/budget-persistence-integration-contract.md` 为准：启动恢复发生在 App ready 和后台 worker 启动前，不凭空要求服务 admission 锁；在一个 SQLite 写事务内调用两个包的 `RecoverInterruptedTx`、写入必要的 sibling 状态，最后只提交一次。任一包或 sibling 写失败都回滚全部变更。事务提交未知时只能用相同输入检查持久状态；不得假定失败、重复上游请求或伪造成功。此启动恢复边界也不能泛化为普通派发锁序；普通派发现有顺序是 account lease、mutation、admission、SQLite 事务，后续实现必须遵守对应集成契约。
+下一批联合接线以[持久核心与服务契约](budget-persistence-integration-contract.md)为准：启动恢复发生在 App ready 和后台 worker 启动前，不凭空要求服务 admission 锁；在一个 SQLite 写事务内调用两个包的 `RecoverInterruptedTx`、写入必要的 sibling 状态，最后只提交一次。任一包或 sibling 写失败都回滚全部变更。事务提交未知时只能用相同输入检查持久状态；不得假定失败、重复上游请求或伪造成功。此启动恢复边界也不能泛化为普通派发锁序；普通派发现有顺序是 account lease、mutation、admission、SQLite 事务，后续实现必须遵守对应集成契约。
 
 ## 已验证边界
 
@@ -64,3 +64,13 @@ func (l *accounting.Ledger) RecoverInterruptedTx(
 - nil、非法时间、取消 context 和已关闭事务使用固定错误。
 
 这些测试只证明事务原语和治理元数据语义。它们不证明 hard TPM/成本预算、预算预留/结算、联合 App 恢复或生产账单已经实现。
+
+### 根任务组合验收
+
+2026-09-24 根任务在同一隔离 SQLite 中分别按 accounting-first 与 governance-first 调用两个 Tx 接口。
+插入受约束的 sibling 回执失败后，三个真实表均保持 pending；共同提交后全部 interrupted，未知 Token/cost 仍为 NULL，
+未到期治理 lease 的原 expires/released 状态保持。测试明确只证明可组合原语，不运行或声称 App 已联合恢复预算。
+
+根 governance 全包（含该交叉测试）非缓存 26.916s、accounting 全包 17.271s、service 用量/治理取消与重启专项 7.868s
+均 PASS；三包 vet、最终程序编译及真实临时进程观测 smoke PASS。所有数据和上游均为合成；没有读取真实凭据。
+此独立分支尚未运行 Linux race，后续完整预算增量统一进行轻量 CI。
