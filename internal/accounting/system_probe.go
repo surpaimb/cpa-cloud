@@ -309,33 +309,41 @@ func (l *SystemProbeLedger) InterruptPendingTx(ctx context.Context, tx *sql.Tx, 
 	if l == nil || l.db == nil || ctx == nil || tx == nil {
 		return 0, ErrInvalid
 	}
-	finishedAt, err := canonicalTime(at)
+	if _, err := canonicalTime(at); err != nil {
+		return 0, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT operation_id,started_at,may_have_sent_at FROM system_probe_attempts WHERE status='pending' ORDER BY operation_id`)
 	if err != nil {
 		return 0, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT started_at,may_have_sent_at FROM system_probe_attempts WHERE status='pending'`)
-	if err != nil {
-		return 0, err
+	type pendingProbe struct {
+		operationID string
+		started     time.Time
+		sent        *time.Time
 	}
+	pending := make([]pendingProbe, 0)
 	for rows.Next() {
+		var item pendingProbe
 		var started string
 		var sent sql.NullString
-		if err := rows.Scan(&started, &sent); err != nil {
+		if err := rows.Scan(&item.operationID, &started, &sent); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		startedTime, err := parseSystemProbeTime(started)
-		if err != nil || at.UTC().Before(startedTime) {
+		item.started, err = parseSystemProbeTime(started)
+		if err != nil {
 			rows.Close()
 			return 0, ErrInvalid
 		}
 		if sent.Valid {
 			sentTime, err := parseSystemProbeTime(sent.String)
-			if err != nil || at.UTC().Before(sentTime) {
+			if err != nil || sentTime.Before(item.started) {
 				rows.Close()
 				return 0, ErrInvalid
 			}
+			item.sent = &sentTime
 		}
+		pending = append(pending, item)
 	}
 	iterationErr, closeErr := rows.Err(), rows.Close()
 	if iterationErr != nil {
@@ -344,11 +352,29 @@ func (l *SystemProbeLedger) InterruptPendingTx(ctx context.Context, tx *sql.Tx, 
 	if closeErr != nil {
 		return 0, closeErr
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE system_probe_attempts SET status='interrupted',result_code='interrupted',finished_at=? WHERE status='pending'`, finishedAt)
-	if err != nil {
-		return 0, err
+	var interrupted int64
+	for _, item := range pending {
+		finished := at.UTC()
+		if item.started.After(finished) {
+			finished = item.started
+		}
+		if item.sent != nil && item.sent.After(finished) {
+			finished = *item.sent
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE system_probe_attempts SET status='interrupted',result_code='interrupted',finished_at=? WHERE operation_id=? AND status='pending'`, finished.Format(time.RFC3339Nano), item.operationID)
+		if err != nil {
+			return 0, err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if changed != 1 {
+			return 0, fmt.Errorf("%w: pending system probe changed during interruption", ErrConflict)
+		}
+		interrupted++
 	}
-	return result.RowsAffected()
+	return interrupted, nil
 }
 
 func (l *SystemProbeLedger) Get(ctx context.Context, operationID string) (SystemProbeAttempt, error) {

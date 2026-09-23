@@ -228,6 +228,59 @@ func TestSystemProbeCallerTransactionRollbackRetryAndInterrupt(t *testing.T) {
 	}
 }
 
+func TestSystemProbeInterruptPendingClampsClockRollbackPerAttempt(t *testing.T) {
+	db, _, probes := openSystemProbeTest(t, filepath.Join(t.TempDir(), "probe.db"))
+	defer db.Close()
+	ctx := context.Background()
+	insertPriceUpstream(t, db, "ups_probe")
+	startedOnly := testSystemProbeStart(6)
+	dispatched := testSystemProbeStart(7)
+	alreadyTerminal := testSystemProbeStart(8)
+	for _, start := range []SystemProbeStart{startedOnly, dispatched, alreadyTerminal} {
+		beginSystemProbe(t, db, probes, start)
+	}
+	sentAt := systemProbeTestStart.Add(5 * time.Second)
+	withSystemProbeTx(t, db, func(tx *sql.Tx) {
+		if _, err := probes.MarkMayHaveSentTx(ctx, tx, dispatched.OperationID, sentAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := probes.FinishTx(ctx, tx, SystemProbeFinish{OperationID: alreadyTerminal.OperationID, Status: SystemProbeFailed,
+			Result: SystemProbeConfigurationChanged, FinishedAt: systemProbeTestStart.Add(time.Second)}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	rollbackNow := systemProbeTestStart.Add(-time.Hour)
+	withSystemProbeTx(t, db, func(tx *sql.Tx) {
+		count, err := probes.InterruptPendingTx(ctx, tx, rollbackNow)
+		if err != nil || count != 2 {
+			t.Fatalf("clock rollback interrupt count=%d err=%v", count, err)
+		}
+	})
+	for _, expected := range []struct {
+		operationID string
+		finished    time.Time
+		status      SystemProbeStatus
+	}{
+		{startedOnly.OperationID, systemProbeTestStart, SystemProbeInterrupted},
+		{dispatched.OperationID, sentAt, SystemProbeInterrupted},
+		{alreadyTerminal.OperationID, systemProbeTestStart.Add(time.Second), SystemProbeFailed},
+	} {
+		attempt, err := probes.Get(ctx, expected.operationID)
+		if err != nil || attempt.Status != expected.status || attempt.FinishedAt == nil || !attempt.FinishedAt.Equal(expected.finished) || !sameUsage(attempt.Usage, Usage{}) || attempt.CostMicro != nil {
+			t.Fatalf("operation=%s attempt=%+v err=%v", expected.operationID, attempt, err)
+		}
+	}
+	withSystemProbeTx(t, db, func(tx *sql.Tx) {
+		count, err := probes.InterruptPendingTx(ctx, tx, rollbackNow.Add(-time.Hour))
+		if err != nil || count != 0 {
+			t.Fatalf("terminal replay count=%d err=%v", count, err)
+		}
+	})
+	if err := probes.Migrate(ctx); err != nil {
+		t.Fatalf("clamped terminal metadata failed restart validation: %v", err)
+	}
+}
+
 func TestSystemProbeHistoryLimitPreservesExistingOperations(t *testing.T) {
 	db, _, probes := openSystemProbeTest(t, filepath.Join(t.TempDir(), "probe.db"))
 	defer db.Close()
