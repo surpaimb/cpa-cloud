@@ -416,6 +416,37 @@ func TestSystemProbeMigrationStrictRollbackAndStoredValidation(t *testing.T) {
 			t.Fatal("case-changed result CHECK was accepted")
 		}
 	})
+
+	t.Run("check literal whitespace is exact and rollback is retryable", func(t *testing.T) {
+		db := openPriceDB(t, filepath.Join(t.TempDir(), "literal-space.db"))
+		defer db.Close()
+		if _, err := db.Exec(`CREATE TABLE upstreams(id TEXT PRIMARY KEY)`); err != nil {
+			t.Fatal(err)
+		}
+		definition := strings.Replace(systemProbeDDL, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
+		definition = strings.ReplaceAll(definition, "'succeeded'", "'suc ceeded'")
+		if _, err := db.Exec(definition); err != nil {
+			t.Fatal(err)
+		}
+		ledger := NewSystemProbeLedger(db)
+		if err := ledger.Migrate(context.Background()); err == nil {
+			t.Fatal("whitespace-changed status CHECK was accepted")
+		}
+		var storedDefinition string
+		if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, systemProbeTable).Scan(&storedDefinition); err != nil || !strings.Contains(storedDefinition, "'suc ceeded'") {
+			t.Fatalf("failed migration changed malformed old table definition=%q err=%v", storedDefinition, err)
+		}
+		var leakedIndexes int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('system_probe_attempts_account_started_idx','system_probe_attempts_status_started_idx')`).Scan(&leakedIndexes); err != nil || leakedIndexes != 0 {
+			t.Fatalf("failed migration leaked indexes=%d err=%v", leakedIndexes, err)
+		}
+		if _, err := db.Exec(`DROP TABLE system_probe_attempts`); err != nil {
+			t.Fatal(err)
+		}
+		if err := ledger.Migrate(context.Background()); err != nil {
+			t.Fatalf("migration after repairing literal: %v", err)
+		}
+	})
 }
 
 func TestPriceCatalogCurrentTx(t *testing.T) {
@@ -438,6 +469,14 @@ func TestPriceCatalogCurrentTx(t *testing.T) {
 	})
 	if _, err := prices.CurrentTx(context.Background(), nil, "ups_probe", "actual model"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil tx err=%v", err)
+	}
+}
+
+func TestNormalizeSystemProbeSQLPreservesQuotedWhitespaceAndEscapes(t *testing.T) {
+	input := " CREATE\u2003TABLE \"table  name\" (value TEXT CHECK(value IN ('suc ceeded','it''s valid')), [bracket  name] TEXT, `tick  name` TEXT) "
+	want := "CREATETABLE\"table  name\"(valueTEXTCHECK(valueIN('suc ceeded','it''s valid')),[bracket  name]TEXT,`tick  name`TEXT)"
+	if got := normalizeSystemProbeSQL(input); got != want {
+		t.Fatalf("normalized SQL=%q want=%q", got, want)
 	}
 }
 

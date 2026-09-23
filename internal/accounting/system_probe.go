@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -671,12 +672,38 @@ func validateSystemProbeSchema(ctx context.Context, tx *sql.Tx) error {
 }
 
 func normalizeSystemProbeSQL(value string) string {
-	return strings.Map(func(character rune) rune {
-		if character == ' ' || character == '\t' || character == '\r' || character == '\n' {
-			return -1
+	characters := []rune(value)
+	var normalized strings.Builder
+	normalized.Grow(len(value))
+	var closingQuote rune
+	for index := 0; index < len(characters); index++ {
+		character := characters[index]
+		if closingQuote != 0 {
+			normalized.WriteRune(character)
+			if character == closingQuote {
+				if index+1 < len(characters) && characters[index+1] == closingQuote {
+					normalized.WriteRune(characters[index+1])
+					index++
+				} else {
+					closingQuote = 0
+				}
+			}
+			continue
 		}
-		return character
-	}, value)
+		switch character {
+		case '\'', '"', '`':
+			closingQuote = character
+			normalized.WriteRune(character)
+		case '[':
+			closingQuote = ']'
+			normalized.WriteRune(character)
+		default:
+			if !unicode.IsSpace(character) {
+				normalized.WriteRune(character)
+			}
+		}
+	}
+	return normalized.String()
 }
 
 func validateSystemProbeForeignKey(ctx context.Context, tx *sql.Tx) error {
