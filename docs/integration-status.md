@@ -1,5 +1,18 @@
 # 集成状态
 
+## 2026-09-24：预算事务基础（独立分支，未合入主线）
+
+- 分支 `codex/budget-integration` 保存 caller-owned `BeginAttemptTx`、accounting/governance `RecoverInterruptedTx`、
+  原始不可变价格的四桶/互斥输入组上界算术；根只读审查和修订三输入桶之和的 proof 条件，并补两包真实 SQLite
+  共同提交/回滚测试。来源为本仓契约，没有新增第三方依赖、参考源码或真实凭据。
+- 根独立非缓存 accounting 全包 17.271s、governance 全包 26.916s、service 用量账本/治理终结/取消/重启专项 7.868s
+  均 PASS；三包 vet、实际 Go 编译及最终二进制上的观测进程 smoke PASS。详细证据见
+  [算术与事务基础](budget-accounting-foundations.md)及[恢复基础](budget-recovery-foundations.md)。
+- [下一批集成契约](budget-persistence-integration-contract.md)已按自有源码复核实际锁顺序、两个结算维度、严格升级、
+  提交结果不确定、未知用量内部归因窗口和持久化超界隔离。它是实现输入，不是实现证据。
+- 尚无 reservation 表、生产 bound profile、运行时预算拒绝或 App 联合恢复；该分支尚未运行自身 Linux race。
+  不使用下方主线观测 CI 冒充本批验证，不新增 tag/安装包或自动部署。
+
 ## 2026-09-23：治理用量观测集成（轻量 CI 已通过）
 
 - 按[只读观测契约](governance-observation-contract.md)独立实现核心 `7e015dc`、管理员 HTTP `1ff03c2`、网页 `e328acf`。根任务挂 App 路由并审查签名 cursor、稳定 scope 跨 revision 汇总、半开时间窗、整数溢出和索引迁移；不启用 TPM/成本硬拒绝，不新增收费或正文记录。
