@@ -46,6 +46,18 @@ scope 完成检查和预留，任一失败则全部不写，不能依赖遍历�
 首批不排队：超过硬限制立即返回固定的限流结果。以后若加入等待队列，必须另行规定配置变更通知和
 公平性，不能复用账号 scheduler 的等待队列。
 
+这里的 `now` 是事务内持久化的单调有效时间，不直接使用可能回拨的系统时钟。每次治理准入读取服务端
+观测 UTC 和上一次已提交的 effective admission time，并计算
+`effective_time = max(observed_utc, last_effective_admission_time)`。首次准入把 observed 和 effective 两个时间
+一起保存；相同 request ID 重试复用已保存值，不重新取时钟。RPM 窗口、事件排序、租约截止及重启恢复都
+使用 effective time。系统时钟回拨会保守延长窗口或占位，绝不能让此前写入的“未来”事件漏计或让租约
+提前释放；实现不尝试把该保守延长伪装成真实墙钟时间。
+
+RPM 和并发统计的稳定维度是 `(scope_kind, scope_id)`，不是 policy ID 或 policy revision。修改阈值、停用再
+启用策略或产生新 revision 都不能清空该 scope 最近 60 秒的已治理事件，也不能释放其旧治理租约。总开关
+关闭期间通过的请求没有治理记录，重新启用时不得追溯为它们建立 RPM 事件或并发预留；重新启用只约束
+之后的新准入。不过，关闭前已经存在的治理 RPM 事件在有效窗口内仍参与统计，未释放旧租约仍占并发。
+
 一个客户端生成请求只计一次 RPM 和并发。派发前安全换号仍属于同一 request ID，不重复计数；未真正
 进入执行器的失败候选不产生 attempt。未来若允许多个真实上游 attempt，请求数仍为一，但每个真实
 attempt 的用量和内部成本都必须分别进入 shadow 统计。
@@ -102,6 +114,9 @@ func (c *Coordinator) RecoverInterrupted(
 ) (RecoveryResult, error)
 ```
 
+`AdmissionStart.StartedAt` 是调用方观测 UTC，仅用于首次请求的不可变输入；`AdmitTx` 必须在事务内自行读取并
+推进持久 effective time，调用方不能提供或覆盖 effective time。
+
 `RequestID` 使用服务已有稳定 request ID。相同 ID 与完全相同的不可变主体、模型、协议、开始时间和策略
 快照是幂等重放；相同 ID 的任一不可变输入不同则返回固定冲突。首次 `FinishTx` 冻结状态和时间，后续
 相同快照幂等，不同状态或时间不得覆盖。数据库提交结果不确定时，调用方只能以同一 ID 和原快照重试，
@@ -118,12 +133,12 @@ func (c *Coordinator) RecoverInterrupted(
 
 | 表 | 必要字段与语义 |
 | --- | --- |
-| `governance_settings` | singleton 主键、`enabled`、`revision >= 1`、`updated_at`；新库固定 `enabled=false` |
+| `governance_settings` | singleton 主键、`enabled`、`revision >= 1`、nullable `last_effective_admission_at`、`updated_at`；新库固定 `enabled=false` |
 | `governance_groups` | `id`、唯一 `name`、`revision >= 1`、`created_at`、`updated_at` |
 | `governance_group_members` | `group_id`、`employee_id` 联合主键和外键；成员事务必须同时增加 group revision |
 | `governance_policies` | `id`、唯一 `(scope_kind,scope_id)`、`enabled`、revision、nullable 正整数 RPM/并发阈值、nullable shadow TPM/预算阈值及预算币种/窗口、时间字段 |
-| `governance_requests` | request ID 主键、employee/key、公开模型、固定协议、开始/结束时间、终态、租约截止、实际释放时间；不含正文 |
-| `governance_request_scopes` | request ID + policy ID 主键，保存 scope ID、policy revision 和准入时阈值快照；用于 RPM、并发及历史解释 |
+| `governance_requests` | request ID 主键、employee/key、公开模型、固定协议、observed/effective 开始时间、结束时间、终态、租约截止、实际释放时间；不含正文 |
+| `governance_request_scopes` | request ID + scope kind + scope ID 主键，另存 policy ID、policy revision 和准入时阈值快照；统计键始终是稳定 scope，用于 RPM、并发及历史解释 |
 
 `scope_kind` 只允许 `employee`、`key`、`group`。多态 scope 必须在管理写事务中显式确认目标存在，
 不能接受悬空 ID。Key 策略不能扩大员工模型权限或绕过员工停用；组成员关系也只增加治理约束。
@@ -133,6 +148,11 @@ shadow TPM 固定使用 `accounting.Usage` 的四个互斥桶：ordinary input�
 `unknown_token_attempts`，不能部分相加后称为 total。shadow 成本直接使用 attempt 的不可变价格快照和
 `cost_micro`；价格缺失或任一用量桶未知时成本保持 `NULL` 并计入 `unknown_cost_attempts`。金额只按同一
 ISO 币种分别汇总，跨币种绝不相加。
+
+每个 shadow 阈值判断只允许三态：`exceeded`、`below`、`unknown`。已知部分本身已经超过阈值时，即使还有
+未知值也判为 `exceeded`；已知部分没有超过且存在任一未知值时判为 `unknown`；只有所有相关值都已知且
+合计不超过阈值时才可判为 `below`。`unknown` 不能计入 would-block，也不能显示为余量充足。成本判断按
+每个策略币种独立应用同一规则。
 
 治理表不保存 Authorization、Key 明文或 digest、IP 原文、上游凭据、提示词、响应、工具参数、原始错误
 或任意日志正文。公开模型、固定协议、主体 ID、策略 revision、固定状态、时间和 nullable 数值已足够。
@@ -199,9 +219,10 @@ Key 撤销和员工停用不主动取消已派发流。若将来提供“停止�
 已经停止：其并发占位保留到原 `expires_at`，不会从启动时重新延长。到期后才可清理占位。恢复不填写
 Token、成本或成功状态，也不重新发送上游请求。
 
-RPM 依据已经提交的 request scope 事件计算，重启不会清空当前窗口。系统时钟回拨时不得写早于 started_at
-的 finished/released 时间；实现应拒绝整次恢复或把每行恢复时间钳制到不早于自身 started_at，并在契约测试
-中冻结选定行为。
+RPM 依据已经提交的稳定 request scope 事件和 effective time 计算，重启不会清空当前窗口。启动必须先读取
+持久化的 `last_effective_admission_at`，不能因进程内时钟状态丢失而漏计未来 timestamp。系统时钟回拨时不得
+写早于 effective started_at 的 finished/released 时间；状态转换使用不早于该行 effective start 和当前持久
+effective time 的值。任何钳制只会保守延长窗口或占位，不能提前释放。
 
 ## 未来 hard TPM 与成本预算
 
@@ -245,13 +266,15 @@ operation ID 和原 payload，由管理员查询或同 ID 重试，不自动生�
 
 实现批次至少自动覆盖：
 
-- 默认关闭、无策略无限制、关闭期间在途租约仍可终结；
+- 默认关闭、无策略无限制、关闭期间在途租约仍可终结；关闭期请求不追溯，重新启用只限制新准入；
 - employee/key/多个治理组策略组合的全有或全无预留；
-- 精确 60 秒窗口边界、并发 finish 与相同 request ID 幂等；
+- 精确 60 秒窗口边界、并发 finish 与相同 request ID 幂等；系统时钟前跳后回拨及重启仍不漏计未来事件；
+- 同一 scope 跨 policy revision、阈值修改、策略停用/启用及总开关关闭/开启不清空窗口或旧并发占位；
 - 相同 ID 不同主体/时间/策略快照冲突，管理 operation ID 不确定重试；
 - 派发前换号仍只有一个 RPM/request，零失败候选 attempt 和一个实际 attempt；
 - 撤销/停用/策略 revision 与准入并发，成功返回后新请求拒绝、已准入流按约定完成；
-- 四协议 JSON/SSE 正常、失败、取消、半帧和 EOF 的 known/unknown shadow 结果；
+- 四协议 JSON/SSE 正常、失败、取消、半帧和 EOF 的 known/unknown shadow 结果，以及 exceeded/below/unknown
+  三态边界；
 - 无价格、部分 Token、溢出、跨币种不相加，未知值始终为空；
 - 终结事务任一写失败全回滚，不发送成功终帧，重试不重复释放或计费；
 - 进程关闭、重启 interrupted、原 TTL 保守占位、时钟回拨；
