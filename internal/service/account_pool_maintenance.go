@@ -556,3 +556,21 @@ func (rt *accountPoolRuntime) startMaintenanceHeartbeat(lease *accountMaintenanc
 	}()
 	return true
 }
+
+// cancelMaintenanceLeases terminates execution contexts for the exact
+// isolation event an administrator cleared. Recovery snapshots are immutable,
+// so filtering needs only rt.mu and deliberately never takes lease.mu. In
+// particular, callers may hold cooldownTransition without reversing the
+// Finalize lock order (lease.mu -> cooldownTransition).
+func (rt *accountPoolRuntime) cancelMaintenanceLeases(accountID, eventID string) {
+	if rt == nil || accountID == "" || eventID == "" {
+		return
+	}
+	rt.mu.Lock()
+	for lease := range rt.maintenanceActive {
+		if lease.state.AccountID == accountID && lease.state.CooldownEventID == eventID {
+			lease.cancel()
+		}
+	}
+	rt.mu.Unlock()
+}

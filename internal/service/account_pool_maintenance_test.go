@@ -243,3 +243,59 @@ func TestMaintenanceFinalizeMatchSeparatesCancellationHeartbeatAndConfiguration(
 		}
 	})
 }
+
+func TestCooldownClearCancelsOnlyMatchingMaintenanceEvent(t *testing.T) {
+	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 8)
+	acquire := func(t *testing.T, account, model, event, operation string) (accountRecoveryState, *accountMaintenanceLease) {
+		t.Helper()
+		f.insertAccount(t, account, true)
+		f.insertModelPool(t, model, account, 1, modelAccountView{UpstreamID: account, UpstreamModel: "provider-" + account, Weight: 1, MaxConcurrency: 1})
+		state := installRecoveryState(t, f, account, model, event, operation, 1)
+		result := f.rt.AcquireMaintenance(context.Background(), maintenanceRequest(state), beginMaintenanceState)
+		if result.Code != accountPoolAcquired || result.Lease == nil {
+			t.Fatalf("maintenance acquire=%+v", result)
+		}
+		if code := result.Lease.MarkDispatch(context.Background(), func(context.Context, *sql.Tx) error { return nil }); code != accountPoolAcquired {
+			t.Fatalf("mark dispatch=%s", code)
+		}
+		return state, result.Lease
+	}
+
+	stateA, leaseA := acquire(t, "ups_clear_cancel_a", "clear-cancel-model-a", "cool_clear_cancel_a", "probe_clear_cancel_a")
+	_, leaseB := acquire(t, "ups_clear_cancel_b", "clear-cancel-model-b", "cool_clear_cancel_b", "probe_clear_cancel_b")
+	if result, _, code := f.rt.clearCooldown(context.Background(), stateA.AccountID, stateA.AccountRevision, stateA.CooldownEventID); result != cooldownCleared || code != cooldownCleared {
+		t.Fatalf("clear matching event result=%s code=%s", result, code)
+	}
+	select {
+	case <-leaseA.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("matching maintenance lease was not cancelled")
+	}
+	select {
+	case <-leaseB.Context().Done():
+		t.Fatal("clear cancelled another account maintenance lease")
+	default:
+	}
+	current := true
+	if code := leaseA.Finalize(context.Background(), func(_ context.Context, _ *sql.Tx, match bool) error { current = match; return nil }); code != accountPoolReleased || current {
+		t.Fatalf("cleared lease finalize code=%s current=%v", code, current)
+	}
+	var isolated int
+	if err := f.base.app.store.db.QueryRow(`SELECT COUNT(*) FROM account_recovery_states WHERE account_id=?`, stateA.AccountID).Scan(&isolated); err != nil || isolated != 0 {
+		t.Fatalf("old finalize recreated isolation count=%d err=%v", isolated, err)
+	}
+
+	newState := installRecoveryState(t, f, stateA.AccountID, stateA.PublicModel, "cool_clear_cancel_a_new", "probe_clear_cancel_a_new", 1)
+	newResult := f.rt.AcquireMaintenance(context.Background(), maintenanceRequest(newState), beginMaintenanceState)
+	if newResult.Code != accountPoolAcquired || newResult.Lease == nil {
+		t.Fatalf("new event acquire=%+v", newResult)
+	}
+	if result, _, code := f.rt.clearCooldown(context.Background(), newState.AccountID, newState.AccountRevision, stateA.CooldownEventID); result != "" || code != cooldownEventConflict {
+		t.Fatalf("stale clear result=%s code=%s", result, code)
+	}
+	select {
+	case <-newResult.Lease.Context().Done():
+		t.Fatal("stale clear cancelled the new event maintenance lease")
+	default:
+	}
+}

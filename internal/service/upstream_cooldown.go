@@ -593,6 +593,7 @@ func (rt *accountPoolRuntime) clearCooldown(ctx context.Context, accountID strin
 	if err := tx.Commit(); err != nil {
 		return "", revision, cooldownStorageFailure
 	}
+	rt.cancelMaintenanceLeases(accountID, expectedEventID)
 	rt.NotifyChanged()
 	rt.scheduler.ClearCooldown(accountID, expectedEventID)
 	return cooldownCleared, revision, cooldownCleared
