@@ -149,6 +149,11 @@ func TestOutboundProxyTestVersionChangeWinsOverHandshake(t *testing.T) {
 	if finished.ResultCode == nil || *finished.ResultCode != outboundProxyTestConfigurationChanged {
 		t.Fatalf("finished=%+v", finished)
 	}
+	// Resolve the exact row as if the preceding configuration_changed commit
+	// had returned an uncertain error to a worker holding handshake_ok.
+	if err := f.coordinator.finalize(finished, outboundProxyTestHandshakeOK, *finished.FinishedAt, *finished.LatencyMS); err != nil {
+		t.Fatalf("resolve uncertain configuration-changed commit: %v", err)
+	}
 }
 
 func TestOutboundProxyTestFinalizeRetriesMetadataWithoutReconnect(t *testing.T) {

@@ -401,11 +401,13 @@ func (c *outboundProxyTestCoordinator) claim(operation outboundProxyTestOperatio
 				return true, nil
 			}
 		}
+		cancel()
 		// An UPDATE whose commit result was uncertain must be resolved before
 		// deciding whether a handshake may begin. Reading the exact frozen
 		// claim cannot cause a second network attempt.
-		stored, readErr := c.load(ctx, operation.OperationID)
-		cancel()
+		readCtx, readCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		stored, readErr := c.load(readCtx, operation.OperationID)
+		readCancel()
 		if readErr == nil && stored.State == outboundProxyTestInProgress && stored.StartedAt != nil && stored.StartedAt.Equal(started) {
 			return true, nil
 		}
@@ -522,7 +524,12 @@ func (c *outboundProxyTestCoordinator) finalize(operation outboundProxyTestOpera
 		return errOutboundProxyTestUnavailable
 	}
 	if stored.State == outboundProxyTestCompleted {
-		if stored.ResultCode != nil && *stored.ResultCode == proposedCode && stored.FinishedAt != nil && stored.FinishedAt.Equal(finished) && stored.LatencyMS != nil && *stored.LatencyMS == latency {
+		// A prior uncertain commit may have atomically replaced the proposed
+		// transport result with configuration_changed after its version check.
+		// Both results use the same frozen finish metadata; no other terminal
+		// result is accepted as this worker's settlement.
+		matchingResult := stored.ResultCode != nil && (*stored.ResultCode == proposedCode || *stored.ResultCode == outboundProxyTestConfigurationChanged)
+		if matchingResult && stored.FinishedAt != nil && stored.FinishedAt.Equal(finished) && stored.LatencyMS != nil && *stored.LatencyMS == latency {
 			return nil
 		}
 		return errOutboundProxyTestUnavailable
