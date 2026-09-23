@@ -117,6 +117,9 @@ func TestMigrateRejectsPreSnapshotScopeSchema(t *testing.T) {
 	if _, err := db.Exec(`DROP TABLE governance_request_scopes`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`DROP TABLE governance_requests; DROP TABLE governance_settings`); err != nil {
+		t.Fatal(err)
+	}
 	if err := coordinator.Migrate(context.Background()); err != nil {
 		t.Fatalf("retry after scope schema repair: %v", err)
 	}
@@ -224,8 +227,8 @@ func TestMigrateValidatesStoredRowsAndForeignKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO governance_request_scopes(
-		request_id,scope_kind,scope_id,policy_id,policy_revision,group_revision,rpm_limit,shadow_currency,shadow_window
-	) VALUES('missing-request','group','group-orphan','policy-orphan',1,1,1,'','')`); err != nil {
+		request_id,scope_kind,scope_id,policy_id,policy_revision,group_revision,rpm_limit,hard_currency,hard_window,unknown_mode,shadow_currency,shadow_window
+	) VALUES('missing-request','group','group-orphan','policy-orphan',1,1,1,'','','shadow','','')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {

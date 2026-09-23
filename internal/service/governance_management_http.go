@@ -22,12 +22,21 @@ type governanceShadowView struct {
 	Window    *string `json:"window"`
 }
 
+type governanceBudgetView struct {
+	TPM         *int64  `json:"tpm"`
+	CostMicro   *string `json:"cost_micro"`
+	Currency    *string `json:"currency"`
+	Window      *string `json:"window"`
+	UnknownMode string  `json:"unknown_mode"`
+}
+
 type governancePolicyHTTPView struct {
 	ID        string               `json:"id"`
 	ScopeKind governance.ScopeKind `json:"scope_kind"`
 	ScopeID   string               `json:"scope_id"`
 	Enabled   bool                 `json:"enabled"`
 	Hard      governanceHardLimits `json:"hard"`
+	Budget    governanceBudgetView `json:"budget"`
 	Shadow    governanceShadowView `json:"shadow"`
 	Revision  int64                `json:"revision"`
 	CreatedAt string               `json:"created_at"`
@@ -82,19 +91,29 @@ func (s *governanceManagementStore) putGovernanceSettings(a *App, w http.Respons
 		return
 	}
 	object, err := decodeUniqueJSONObject(w, r, governanceManagementMaxBody)
-	if err != nil || !exactJSONKeys(object, "operation_id", "expected_revision", "enabled") {
+	if err != nil || !(exactJSONKeys(object, "operation_id", "expected_revision", "enabled") ||
+		exactJSONKeys(object, "operation_id", "expected_revision", "enabled", "budget_enabled")) {
 		writeGovernanceManagementError(w, errGovernanceManagementInvalid)
 		return
 	}
 	operationID, operationOK := object["operation_id"].(string)
 	expected, revisionOK := parseGovernanceJSONRevision(object["expected_revision"])
 	enabled, enabledOK := object["enabled"].(bool)
+	var budgetEnabled *bool
+	if value, present := object["budget_enabled"]; present {
+		parsed, ok := value.(bool)
+		if !ok {
+			writeGovernanceManagementError(w, errGovernanceManagementInvalid)
+			return
+		}
+		budgetEnabled = &parsed
+	}
 	if !operationOK || !revisionOK || !enabledOK {
 		writeGovernanceManagementError(w, errGovernanceManagementInvalid)
 		return
 	}
 	a.admission.Lock()
-	receipt, err := s.updateSettings(r.Context(), session.AdminID, operationID, expected, enabled)
+	receipt, err := s.updateSettingsPatch(r.Context(), session.AdminID, operationID, expected, enabled, budgetEnabled)
 	a.admission.Unlock()
 	if err != nil {
 		writeGovernanceManagementError(w, err)
@@ -205,7 +224,8 @@ func (s *governanceManagementStore) postGovernancePolicy(a *App, w http.Response
 		return
 	}
 	object, err := decodeUniqueJSONObject(w, r, governanceManagementMaxBody)
-	if err != nil || !exactJSONKeys(object, "operation_id", "scope_kind", "scope_id", "enabled", "hard", "shadow") {
+	if err != nil || !(exactJSONKeys(object, "operation_id", "scope_kind", "scope_id", "enabled", "hard", "shadow") ||
+		exactJSONKeys(object, "operation_id", "scope_kind", "scope_id", "enabled", "hard", "budget", "shadow")) {
 		writeGovernanceManagementError(w, errGovernanceManagementInvalid)
 		return
 	}
@@ -244,7 +264,8 @@ func (s *governanceManagementStore) putGovernancePolicy(a *App, w http.ResponseW
 		return
 	}
 	object, err := decodeUniqueJSONObject(w, r, governanceManagementMaxBody)
-	if err != nil || !exactJSONKeys(object, "operation_id", "expected_revision", "enabled", "hard", "shadow") {
+	if err != nil || !(exactJSONKeys(object, "operation_id", "expected_revision", "enabled", "hard", "shadow") ||
+		exactJSONKeys(object, "operation_id", "expected_revision", "enabled", "hard", "budget", "shadow")) {
 		writeGovernanceManagementError(w, errGovernanceManagementInvalid)
 		return
 	}
@@ -368,16 +389,22 @@ func (s *governanceManagementStore) listPolicies(ctx context.Context, limit int,
 }
 
 func governanceSettingsResponse(item governance.Settings) map[string]any {
-	return map[string]any{"enabled": item.Enabled, "revision": item.Revision, "updated_at": item.UpdatedAt.UTC().Format(time.RFC3339Nano)}
+	return map[string]any{"enabled": item.Enabled, "budget_enabled": item.BudgetEnabled, "revision": item.Revision, "updated_at": item.UpdatedAt.UTC().Format(time.RFC3339Nano)}
 }
 
 func governancePolicyResponse(item governancePolicyView) governancePolicyHTTPView {
+	budget := governanceBudgetView{TPM: item.Budget.TPM, Currency: item.Budget.Currency, Window: item.Budget.Window, UnknownMode: item.Budget.UnknownMode}
+	if item.Budget.CostMicro != nil {
+		value := strconv.FormatInt(*item.Budget.CostMicro, 10)
+		budget.CostMicro = &value
+	}
 	shadow := governanceShadowView{TPM: item.Shadow.TPM, Currency: item.Shadow.Currency, Window: item.Shadow.Window}
 	if item.Shadow.CostMicro != nil {
 		value := strconv.FormatInt(*item.Shadow.CostMicro, 10)
 		shadow.CostMicro = &value
 	}
-	return governancePolicyHTTPView{item.ID, item.ScopeKind, item.ScopeID, item.Enabled, item.Hard, shadow, item.Revision, item.CreatedAt, item.UpdatedAt}
+	return governancePolicyHTTPView{ID: item.ID, ScopeKind: item.ScopeKind, ScopeID: item.ScopeID, Enabled: item.Enabled, Hard: item.Hard,
+		Budget: budget, Shadow: shadow, Revision: item.Revision, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
 }
 
 func parseGovernancePolicyJSON(object map[string]any, create bool) (governancePolicyInput, bool) {
@@ -405,6 +432,29 @@ func parseGovernancePolicyJSON(object map[string]any, create bool) (governancePo
 	if input.Hard.Concurrency, ok = parseGovernanceNullableSafeInt(hard["concurrency"]); !ok {
 		return input, false
 	}
+	if rawBudget, present := object["budget"]; present {
+		budgetObject, ok := rawBudget.(map[string]any)
+		if !ok || !exactJSONKeys(budgetObject, "tpm", "cost_micro", "currency", "window", "unknown_mode") {
+			return input, false
+		}
+		budget := governanceBudgetLimits{}
+		if budget.TPM, ok = parseGovernanceNullableSafeInt(budgetObject["tpm"]); !ok {
+			return input, false
+		}
+		if budget.CostMicro, ok = parseGovernanceNullableCost(budgetObject["cost_micro"]); !ok {
+			return input, false
+		}
+		if budget.Currency, ok = parseGovernanceNullableString(budgetObject["currency"]); !ok {
+			return input, false
+		}
+		if budget.Window, ok = parseGovernanceNullableString(budgetObject["window"]); !ok {
+			return input, false
+		}
+		if budget.UnknownMode, ok = budgetObject["unknown_mode"].(string); !ok {
+			return input, false
+		}
+		input.Budget = &budget
+	}
 	shadow, ok := object["shadow"].(map[string]any)
 	if !ok || !exactJSONKeys(shadow, "tpm", "cost_micro", "currency", "window") {
 		return input, false
@@ -424,7 +474,7 @@ func parseGovernancePolicyJSON(object map[string]any, create bool) (governancePo
 	if create {
 		return input, validGovernancePolicyInput(input)
 	}
-	return input, validGovernancePolicyLimits(input)
+	return input, validGovernancePolicyComponents(input)
 }
 
 func parseGovernanceNullableSafeInt(value any) (*int64, bool) {

@@ -2,6 +2,7 @@ package governance
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -14,6 +15,27 @@ func (c *Coordinator) RecoverInterrupted(ctx context.Context, at time.Time) (Rec
 		return RecoveryResult{}, ErrUnavailable
 	}
 	defer tx.Rollback()
+	result, err := c.RecoverInterruptedTx(ctx, tx, at)
+	if err != nil {
+		return RecoveryResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RecoveryResult{}, ErrUnavailable
+	}
+	return result, nil
+}
+
+// RecoverInterruptedTx records restart recovery in the caller-owned transaction.
+// A nil error means only that the writes are present in tx; the caller must still
+// commit the transaction and handle an uncertain commit outcome conservatively.
+func (c *Coordinator) RecoverInterruptedTx(ctx context.Context, tx *sql.Tx, at time.Time) (RecoveryResult, error) {
+	if c == nil || c.db == nil || ctx == nil || tx == nil || !validUTCTime(at) {
+		return RecoveryResult{}, ErrInvalid
+	}
+	return c.recoverInterrupted(ctx, tx, at)
+}
+
+func (c *Coordinator) recoverInterrupted(ctx context.Context, tx *sql.Tx, at time.Time) (RecoveryResult, error) {
 	if err := lockSettingsRow(ctx, tx); err != nil {
 		return RecoveryResult{}, err
 	}
@@ -80,9 +102,6 @@ func (c *Coordinator) RecoverInterrupted(ctx context.Context, at time.Time) (Rec
 			return RecoveryResult{}, ErrUnavailable
 		}
 		result.Interrupted++
-	}
-	if err := tx.Commit(); err != nil {
-		return RecoveryResult{}, ErrUnavailable
 	}
 	return result, nil
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +47,8 @@ type App struct {
 	usage              *usageLedgerCoordinator
 	governance         *requestGovernance
 	governancePolicies *governanceManagementStore
+	budget             *governance.Budget
+	budgetCommit       func(string, *sql.Tx) error
 	usageRequests      sync.Map
 	loginMu            sync.Mutex
 	logins             map[string]*loginAttempt
@@ -109,7 +112,10 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	}
 	app.usage = newUsageLedgerCoordinator(s.db)
 	app.usage.priceLookup = prices.Current
-	if err := app.usage.start(ctx); err != nil {
+	if err := app.usage.ledger.Migrate(ctx); err != nil {
+		return nil, err
+	}
+	if err := app.initializeGovernance(ctx); err != nil {
 		return nil, err
 	}
 	trimExpiredSessions(ctx, s.db)
@@ -122,9 +128,6 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	}
 	app.healthTests, err = newUpstreamHealthCoordinator(app)
 	if err != nil {
-		return nil, err
-	}
-	if err := app.initializeGovernance(ctx); err != nil {
 		return nil, err
 	}
 	if err := app.refresh.Start(); err != nil {
@@ -147,17 +150,20 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := core.Migrate(ctx); err != nil {
-		return err
-	}
 	policies, err := newGovernanceManagementStore(a.store.db, core)
 	if err != nil {
 		return err
 	}
-	if err := policies.Migrate(ctx); err != nil {
+	budget := governance.NewBudget(a.store.db)
+	if err := a.migrateGovernanceBudget(ctx, core, policies, budget); err != nil {
 		return err
 	}
-	runtime, err := newRequestGovernance(a, core, policies)
+	a.budget = budget
+	a.usage.budget = budget
+	if err := a.recoverRequestLedgers(ctx, core); err != nil {
+		return err
+	}
+	runtime, err := newRequestGovernanceRuntime(a, core, policies)
 	if err != nil {
 		return err
 	}

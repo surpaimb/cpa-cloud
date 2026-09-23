@@ -15,7 +15,7 @@
 
 ### 下一批预算基础
 
-观测源码 `60ea6f6` 已推 main。预算准备工作独立保存在
+观测源码 `60ea6f6` 已推 main 并通过 CI，主线文档收尾为 `2a1dca8`。预算基础代码独立保存在
 [`codex/budget-integration`](https://github.com/surpaimb/cpa-cloud/tree/codex/budget-integration)，不纳入观测这轮 CI 的通过范围：
 
 - `scheduler_finish` 在独立 budget-accounting 工作树交付 caller-owned `BeginAttemptTx` 与 checked 成本上界算术；
@@ -24,7 +24,7 @@
   收紧为有条件的工程推断。研究结论不是 profile 已实现，也不是实际供应商账单保证。
 - 根协调器保留预算预留 schema、派发/结算/恢复接线和最终集成职责。当前没有 reservation 表、可调用的 bound profile、
   hard TPM/成本开关或真实供应商兼容证据，预算总目标仍未完成。独立分支尚未合入 main 或运行其自身 Linux CI；合并应与
-  下一项完整预算增量统一安排，不为这组基础接口打新包。观测 CI 已于 2026-09-23 完成；独立分支的互斥输入组上界算术与持久核心接口核查继续进行。
+  下一项完整预算增量统一安排，不为这组基础接口打新包。观测 CI 已于 2026-09-23 完成；独立分支的互斥输入组上界算术、两个恢复 Tx 原语与交叉验收现已完成。三个子任务均已交付，无后台运行任务。
 
 ## 2026-09-23 完整功能对齐首批
 
@@ -71,3 +71,13 @@ Codex OAuth 当前集成分支为 `codex/oauth-integration`。原任务在 `code
 
 首轮模拟上游端到端验收在后端和网页可运行后进行。三家会员接入若存在官方协议条件不足，
 研究任务须提供精确阻塞依据；不能以 API Key 开发预览替代完整产品目标。
+
+## 2026-09-24 预算基础收尾与下一项边界
+
+根继续承担总协调。`scheduler_finish` 交付互斥输入组算术并按审查补三桶同时非零证明；`gemini_sse_finish` 交付治理恢复
+Tx 与真实 SQLite 测试；`batch_import_finish` 只读复核服务接口，识别并收紧两个提交/锁序歧义。根独立实现 accounting
+恢复 Tx、两包联合事务测试，并审查所有提交；运行证据见[集成状态](integration-status.md)。各工作树独立且未争改主线。
+
+下一项完整预算增量依[持久核心与接线契约](budget-persistence-integration-contract.md)执行，仍需实际实现严格迁移、
+reservation/settlement、持久化 profile 隔离、共享派发和恢复，再统一轻量 CI。此次基础交付不能替代上述增量，也不表示
+已经派发或持续后台执行全部后续任务。完整 Sub2API 对齐及 Claude/Gemini 会员等阻塞/待办仍保留。

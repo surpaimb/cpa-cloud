@@ -82,6 +82,25 @@ type Usage struct {
 	CacheWriteTokens *int64
 }
 
+// UpperUsage contains caller-proven, non-null token upper bounds. It does not
+// derive those bounds from a model request.
+type UpperUsage struct {
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+}
+
+// MutuallyExclusiveInputUpperUsage contains bounds for a profile whose caller
+// has proved that each input token belongs to exactly one of ordinary input,
+// cache-read input, or cache-write input. Multiple categories may be nonzero in
+// one response. InputMax bounds their sum; OutputMax independently bounds
+// output.
+type MutuallyExclusiveInputUpperUsage struct {
+	InputMax  int64
+	OutputMax int64
+}
+
 type AttemptFinish struct {
 	ID         string
 	Status     Status
@@ -278,12 +297,33 @@ func (l *Ledger) BeginAttempt(ctx context.Context, input AttemptStart) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := beginAttemptTx(ctx, tx, input, startedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// BeginAttemptTx participates in a caller-owned dispatch transaction. It does
+// not commit or roll back, so sibling reservation metadata can be atomic with
+// the attempt start.
+func (l *Ledger) BeginAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptStart) error {
+	if l == nil || l.db == nil || ctx == nil || tx == nil {
+		return ErrInvalid
+	}
+	startedAt, err := validateAttemptStart(input)
+	if err != nil {
+		return err
+	}
+	return beginAttemptTx(ctx, tx, input, startedAt)
+}
+
+func beginAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptStart, startedAt string) error {
 	matched, err := sameAttemptStart(ctx, tx, input, startedAt)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
 	if matched {
-		return tx.Commit()
+		return nil
 	}
 	if !errors.Is(err, ErrNotFound) {
 		return fmt.Errorf("%w: attempt start differs", ErrConflict)
@@ -338,7 +378,7 @@ func (l *Ledger) BeginAttempt(ctx context.Context, input AttemptStart) error {
 			return fmt.Errorf("%w: attempt start differs", ErrConflict)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (l *Ledger) FinishAttempt(ctx context.Context, input AttemptFinish) error {
@@ -478,6 +518,9 @@ func finishRequestTx(ctx context.Context, tx *sql.Tx, input RequestFinish, finis
 }
 
 func (l *Ledger) RecoverInterrupted(ctx context.Context, at time.Time) (RecoveryResult, error) {
+	if l == nil || l.db == nil || ctx == nil {
+		return RecoveryResult{}, ErrInvalid
+	}
 	finishedAt, err := canonicalTime(at)
 	if err != nil {
 		return RecoveryResult{}, err
@@ -487,6 +530,32 @@ func (l *Ledger) RecoverInterrupted(ctx context.Context, at time.Time) (Recovery
 		return RecoveryResult{}, err
 	}
 	defer tx.Rollback()
+	result, err := recoverInterruptedTx(ctx, tx, at, finishedAt)
+	if err != nil {
+		return RecoveryResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RecoveryResult{}, err
+	}
+	return result, nil
+}
+
+// RecoverInterruptedTx marks pending accounting facts interrupted in a
+// caller-owned transaction. It neither commits nor rolls back; its counts
+// describe tentative writes, not confirmed persistence. A caller must reconcile
+// an uncertain commit before inferring recovery succeeded or releasing capacity.
+func (l *Ledger) RecoverInterruptedTx(ctx context.Context, tx *sql.Tx, at time.Time) (RecoveryResult, error) {
+	if l == nil || l.db == nil || ctx == nil || tx == nil {
+		return RecoveryResult{}, ErrInvalid
+	}
+	finishedAt, err := canonicalTime(at)
+	if err != nil {
+		return RecoveryResult{}, err
+	}
+	return recoverInterruptedTx(ctx, tx, at, finishedAt)
+}
+
+func recoverInterruptedTx(ctx context.Context, tx *sql.Tx, at time.Time, finishedAt string) (RecoveryResult, error) {
 	if err := validateRecoveryTime(ctx, tx, at); err != nil {
 		return RecoveryResult{}, err
 	}
@@ -503,9 +572,6 @@ func (l *Ledger) RecoverInterrupted(ctx context.Context, at time.Time) (Recovery
 		return RecoveryResult{}, err
 	}
 	if result.Requests, err = requests.RowsAffected(); err != nil {
-		return RecoveryResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
 		return RecoveryResult{}, err
 	}
 	return result, nil
@@ -943,34 +1009,119 @@ func calculateCost(usage Usage, price *PriceSnapshot) (*int64, error) {
 			return nil, nil
 		}
 	}
-	rates := []int64{price.InputPerMillionMicro, price.OutputPerMillionMicro, price.CacheReadPerMillionMicro, price.CacheWritePerMillionMicro}
+	cost, err := calculateKnownCost(
+		[4]int64{*values[0], *values[1], *values[2], *values[3]},
+		[4]int64{price.InputPerMillionMicro, price.OutputPerMillionMicro, price.CacheReadPerMillionMicro, price.CacheWritePerMillionMicro},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &cost, nil
+}
+
+// CalculateUpperCost applies a validated immutable price snapshot to token
+// bounds proved elsewhere. It performs arithmetic only; it does not inspect a
+// request or claim that the supplied values are safe bounds.
+func CalculateUpperCost(usage UpperUsage, price PriceSnapshot) (int64, error) {
+	values := [4]int64{usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens}
+	if !validUpperUsage(values) || !validUpperPrice(price) {
+		return 0, ErrInvalid
+	}
+	return calculateKnownCost(values, [4]int64{
+		price.InputPerMillionMicro,
+		price.OutputPerMillionMicro,
+		price.CacheReadPerMillionMicro,
+		price.CacheWritePerMillionMicro,
+	})
+}
+
+// CalculateMutuallyExclusiveInputUpperBound returns token and cost bounds for
+// a caller-proved disjoint input group whose three input categories sum to no
+// more than InputMax. It validates and reads the original immutable price
+// snapshot without modifying its identity or rates. It performs arithmetic
+// only and does not create or verify that proof against actual bucket usage.
+func CalculateMutuallyExclusiveInputUpperBound(usage MutuallyExclusiveInputUpperUsage, price PriceSnapshot) (int64, int64, error) {
+	if usage.InputMax < 0 || usage.OutputMax < 0 || !validUpperPrice(price) {
+		return 0, 0, ErrInvalid
+	}
+	tokenUpper, err := checkedNonnegativeAdd(usage.InputMax, usage.OutputMax)
+	if err != nil {
+		return 0, 0, err
+	}
+	inputRate := price.InputPerMillionMicro
+	if price.CacheReadPerMillionMicro > inputRate {
+		inputRate = price.CacheReadPerMillionMicro
+	}
+	if price.CacheWritePerMillionMicro > inputRate {
+		inputRate = price.CacheWritePerMillionMicro
+	}
+	costUpper, err := calculateKnownCost(
+		[4]int64{usage.InputMax, usage.OutputMax, 0, 0},
+		[4]int64{inputRate, price.OutputPerMillionMicro, 0, 0},
+	)
+	if err != nil {
+		return 0, 0, err
+	}
+	return tokenUpper, costUpper, nil
+}
+
+func checkedNonnegativeAdd(left, right int64) (int64, error) {
+	if left < 0 || right < 0 || left > math.MaxInt64-right {
+		return 0, ErrInvalid
+	}
+	return left + right, nil
+}
+
+func calculateKnownCost(values, rates [4]int64) (int64, error) {
 	var high, low uint64
 	for index, value := range values {
-		productHigh, productLow := bits.Mul64(uint64(*value), uint64(rates[index]))
+		if value < 0 || rates[index] < 0 {
+			return 0, ErrInvalid
+		}
+		productHigh, productLow := bits.Mul64(uint64(value), uint64(rates[index]))
 		var carry uint64
 		low, carry = bits.Add64(low, productLow, 0)
 		var overflow uint64
 		high, overflow = bits.Add64(high, productHigh, carry)
 		if overflow != 0 {
-			return nil, ErrInvalid
+			return 0, ErrInvalid
 		}
 	}
 	if high == 0 && low == 0 {
-		zero := int64(0)
-		return &zero, nil
+		return 0, nil
 	}
 	var carry uint64
 	low, carry = bits.Add64(low, 999_999, 0)
 	high, carry = bits.Add64(high, 0, carry)
 	if carry != 0 || high >= 1_000_000 {
-		return nil, ErrInvalid
+		return 0, ErrInvalid
 	}
 	quotient, _ := bits.Div64(high, low, 1_000_000)
 	if quotient > math.MaxInt64 {
-		return nil, ErrInvalid
+		return 0, ErrInvalid
 	}
-	cost := int64(quotient)
-	return &cost, nil
+	return int64(quotient), nil
+}
+
+func validUpperUsage(values [4]int64) bool {
+	for _, value := range values {
+		if value < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func validUpperPrice(price PriceSnapshot) bool {
+	if !validPrice(&price) {
+		return false
+	}
+	for _, rate := range []int64{price.InputPerMillionMicro, price.OutputPerMillionMicro, price.CacheReadPerMillionMicro, price.CacheWritePerMillionMicro} {
+		if rate > MaxPriceRate {
+			return false
+		}
+	}
+	return true
 }
 
 func sameUsage(left, right Usage) bool {

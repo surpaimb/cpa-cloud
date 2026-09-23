@@ -59,9 +59,19 @@ type Coordinator struct {
 
 type Settings struct {
 	Enabled                    bool
+	BudgetEnabled              bool
 	Revision                   int64
 	LastEffectiveAdmissionTime *time.Time
 	UpdatedAt                  time.Time
+}
+
+// SettingsChange updates one or both governance gates with one revision CAS.
+// Nil fields retain their stored value.
+type SettingsChange struct {
+	ExpectedRevision int64
+	Enabled          *bool
+	BudgetEnabled    *bool
+	UpdatedAt        time.Time
 }
 
 type SettingsUpdate struct {
@@ -88,6 +98,11 @@ type ScopeSnapshot struct {
 	GroupRevision    *int64
 	RPMLimit         *int64
 	ConcurrencyLimit *int64
+	HardTPM          *int64
+	HardCostMicro    *int64
+	HardCurrency     string
+	HardWindow       string
+	UnknownMode      string
 	ShadowTPM        *int64
 	ShadowCostMicro  *int64
 	ShadowCurrency   string
@@ -139,6 +154,7 @@ type storedRequest struct {
 	publicModel         string
 	protocol            accounting.UsageProtocol
 	settingsRevision    int64
+	budgetEnabled       bool
 	observedStartedAt   time.Time
 	effectiveStartedAt  time.Time
 	effectiveLeaseAt    time.Time
@@ -167,13 +183,35 @@ func (c *Coordinator) Settings(ctx context.Context) (Settings, error) {
 // operation-ID deduplication; a caller with an uncertain commit must reload
 // settings rather than treating a repeated CAS as an idempotent network retry.
 func (c *Coordinator) SetEnabledTx(ctx context.Context, tx *sql.Tx, input SettingsUpdate) (Settings, error) {
+	enabled := input.Enabled
+	return c.SetSettingsTx(ctx, tx, SettingsChange{ExpectedRevision: input.ExpectedRevision, Enabled: &enabled, UpdatedAt: input.UpdatedAt})
+}
+
+// SetSettingsTx atomically updates governance gates while preserving omitted
+// fields. Operation-ID idempotency remains the management caller's concern.
+func (c *Coordinator) SetSettingsTx(ctx context.Context, tx *sql.Tx, input SettingsChange) (Settings, error) {
 	if c == nil || c.db == nil || ctx == nil || tx == nil || !validRevision(input.ExpectedRevision) || !validUTCTime(input.UpdatedAt) {
 		return Settings{}, ErrInvalid
 	}
+	if input.Enabled == nil && input.BudgetEnabled == nil {
+		return Settings{}, ErrInvalid
+	}
+	stored, err := readSettings(ctx, tx)
+	if err != nil {
+		return Settings{}, err
+	}
+	enabled := stored.Enabled
+	budgetEnabled := stored.BudgetEnabled
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	if input.BudgetEnabled != nil {
+		budgetEnabled = *input.BudgetEnabled
+	}
 	updatedAt := formatTime(input.UpdatedAt)
 	result, err := tx.ExecContext(ctx, `UPDATE governance_settings
-		SET enabled=?,revision=revision+1,updated_at=?
-		WHERE singleton=1 AND revision=? AND revision<?`, boolInteger(input.Enabled), updatedAt, input.ExpectedRevision, MaxRevision)
+		SET enabled=?,budget_enabled=?,revision=revision+1,updated_at=?
+		WHERE singleton=1 AND revision=? AND revision<?`, boolInteger(enabled), boolInteger(budgetEnabled), updatedAt, input.ExpectedRevision, MaxRevision)
 	if err != nil {
 		return Settings{}, ErrUnavailable
 	}
@@ -279,17 +317,18 @@ func (c *Coordinator) AdmitTx(ctx context.Context, tx *sql.Tx, input AdmissionSt
 		return nil, Decision{}, ErrUnavailable
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO governance_requests(
-		id,employee_id,key_id,public_model,protocol,settings_revision,observed_started_at,effective_started_at,effective_lease_at,expires_at,status
-	) VALUES(?,?,?,?,?,?,?,?,?,?,'pending')`, input.RequestID, input.Subject.EmployeeID, input.Subject.KeyID, input.Subject.PublicModel,
-		string(input.Subject.Protocol), input.SettingsRevision, formatTime(input.StartedAt), formattedEffective, formattedEffective, formatTime(expires)); err != nil {
+		id,employee_id,key_id,public_model,protocol,settings_revision,budget_enabled,observed_started_at,effective_started_at,effective_lease_at,expires_at,status
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending')`, input.RequestID, input.Subject.EmployeeID, input.Subject.KeyID, input.Subject.PublicModel,
+		string(input.Subject.Protocol), input.SettingsRevision, boolInteger(settings.BudgetEnabled), formatTime(input.StartedAt), formattedEffective, formattedEffective, formatTime(expires)); err != nil {
 		return nil, Decision{}, ErrUnavailable
 	}
 	for _, scope := range scopes {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO governance_request_scopes(
 			request_id,scope_kind,scope_id,policy_id,policy_revision,group_revision,rpm_limit,concurrency_limit,
-			shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, input.RequestID, string(scope.Kind), scope.ID, scope.PolicyID, scope.PolicyRevision,
+			hard_tpm,hard_cost_micro,hard_currency,hard_window,unknown_mode,shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, input.RequestID, string(scope.Kind), scope.ID, scope.PolicyID, scope.PolicyRevision,
 			nullableLimit(scope.GroupRevision), nullableLimit(scope.RPMLimit), nullableLimit(scope.ConcurrencyLimit),
+			nullableLimit(scope.HardTPM), nullableLimit(scope.HardCostMicro), scope.HardCurrency, scope.HardWindow, normalizeUnknownMode(scope.UnknownMode),
 			nullableLimit(scope.ShadowTPM), nullableLimit(scope.ShadowCostMicro), scope.ShadowCurrency, scope.ShadowWindow); err != nil {
 			return nil, Decision{}, ErrUnavailable
 		}
@@ -408,10 +447,13 @@ func validateAdmission(input AdmissionStart) ([]ScopeSnapshot, error) {
 		return scopes[i].ID < scopes[j].ID
 	})
 	for index, scope := range scopes {
+		scope.UnknownMode = normalizeUnknownMode(scope.UnknownMode)
+		scopes[index] = scope
 		if !validScopeKind(scope.Kind) || !validMetadata(scope.ID, 256) || !validMetadata(scope.PolicyID, 256) || !validRevision(scope.PolicyRevision) ||
 			!validScopeGroupRevision(scope) || !validLimit(scope.RPMLimit) || !validLimit(scope.ConcurrencyLimit) ||
+			!validSafeLimit(scope.HardTPM) || !validLimit(scope.HardCostMicro) || !validHardCost(scope) || !validUnknownMode(scope.UnknownMode) ||
 			!validLimit(scope.ShadowTPM) || !validLimit(scope.ShadowCostMicro) || !validShadowCost(scope) ||
-			scope.RPMLimit == nil && scope.ConcurrencyLimit == nil && scope.ShadowTPM == nil && scope.ShadowCostMicro == nil {
+			scope.RPMLimit == nil && scope.ConcurrencyLimit == nil && scope.HardTPM == nil && scope.HardCostMicro == nil && scope.ShadowTPM == nil && scope.ShadowCostMicro == nil {
 			return nil, ErrInvalid
 		}
 		if scope.Kind == ScopeEmployee && scope.ID != input.Subject.EmployeeID || scope.Kind == ScopeKey && scope.ID != input.Subject.KeyID {
@@ -438,6 +480,9 @@ func sameScopes(left, right []ScopeSnapshot) bool {
 		if left[index].Kind != right[index].Kind || left[index].ID != right[index].ID || left[index].PolicyID != right[index].PolicyID ||
 			left[index].PolicyRevision != right[index].PolicyRevision || !sameLimit(left[index].GroupRevision, right[index].GroupRevision) ||
 			!sameLimit(left[index].RPMLimit, right[index].RPMLimit) || !sameLimit(left[index].ConcurrencyLimit, right[index].ConcurrencyLimit) ||
+			!sameLimit(left[index].HardTPM, right[index].HardTPM) || !sameLimit(left[index].HardCostMicro, right[index].HardCostMicro) ||
+			left[index].HardCurrency != right[index].HardCurrency || left[index].HardWindow != right[index].HardWindow ||
+			normalizeUnknownMode(left[index].UnknownMode) != normalizeUnknownMode(right[index].UnknownMode) ||
 			!sameLimit(left[index].ShadowTPM, right[index].ShadowTPM) || !sameLimit(left[index].ShadowCostMicro, right[index].ShadowCostMicro) ||
 			left[index].ShadowCurrency != right[index].ShadowCurrency || left[index].ShadowWindow != right[index].ShadowWindow {
 			return false
@@ -451,6 +496,8 @@ func sameLimit(left, right *int64) bool {
 }
 
 func validLimit(value *int64) bool { return value == nil || *value > 0 }
+
+func validSafeLimit(value *int64) bool { return value == nil || *value > 0 && *value <= MaxRevision }
 
 func validScopeGroupRevision(scope ScopeSnapshot) bool {
 	if scope.Kind == ScopeGroup {
@@ -473,6 +520,30 @@ func validShadowCost(scope ScopeSnapshot) bool {
 	}
 	return true
 }
+
+func validHardCost(scope ScopeSnapshot) bool {
+	if scope.HardCostMicro == nil {
+		return scope.HardCurrency == "" && scope.HardWindow == ""
+	}
+	if len(scope.HardCurrency) != 3 || scope.HardWindow != ShadowWindowRolling24h {
+		return false
+	}
+	for index := 0; index < len(scope.HardCurrency); index++ {
+		if scope.HardCurrency[index] < 'A' || scope.HardCurrency[index] > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeUnknownMode(value string) string {
+	if value == "" {
+		return "shadow"
+	}
+	return value
+}
+
+func validUnknownMode(value string) bool { return value == "shadow" || value == "deny_unknown" }
 
 func validRevision(value int64) bool { return value >= 1 && value <= MaxRevision }
 
@@ -568,14 +639,14 @@ type queryRower interface {
 }
 
 func readSettings(ctx context.Context, query queryRower) (Settings, error) {
-	var enabled int
+	var enabled, budgetEnabled int
 	var revision int64
 	var last sql.NullString
 	var updated string
-	if err := query.QueryRowContext(ctx, `SELECT enabled,revision,last_effective_admission_at,updated_at FROM governance_settings WHERE singleton=1`).Scan(&enabled, &revision, &last, &updated); err != nil {
+	if err := query.QueryRowContext(ctx, `SELECT enabled,budget_enabled,revision,last_effective_admission_at,updated_at FROM governance_settings WHERE singleton=1`).Scan(&enabled, &budgetEnabled, &revision, &last, &updated); err != nil {
 		return Settings{}, ErrUnavailable
 	}
-	if enabled != 0 && enabled != 1 || !validRevision(revision) {
+	if enabled != 0 && enabled != 1 || budgetEnabled != 0 && budgetEnabled != 1 || !validRevision(revision) {
 		return Settings{}, ErrSchema
 	}
 	updatedAt, err := parseStoredTime(updated)
@@ -586,7 +657,7 @@ func readSettings(ctx context.Context, query queryRower) (Settings, error) {
 	if err != nil {
 		return Settings{}, err
 	}
-	return Settings{Enabled: enabled == 1, Revision: revision, LastEffectiveAdmissionTime: lastAt, UpdatedAt: updatedAt}, nil
+	return Settings{Enabled: enabled == 1, BudgetEnabled: budgetEnabled == 1, Revision: revision, LastEffectiveAdmissionTime: lastAt, UpdatedAt: updatedAt}, nil
 }
 
 func lockSettingsRow(ctx context.Context, tx *sql.Tx) error {
@@ -604,13 +675,14 @@ func lockSettingsRow(ctx context.Context, tx *sql.Tx) error {
 func loadRequest(ctx context.Context, tx *sql.Tx, id string) (storedRequest, bool, error) {
 	var row storedRequest
 	var protocol string
+	var budgetEnabled int
 	var observedStart, effectiveStart, effectiveLease, expires string
 	var observedFinish, effectiveFinish, released sql.NullString
 	var status string
-	err := tx.QueryRowContext(ctx, `SELECT id,employee_id,key_id,public_model,protocol,settings_revision,
+	err := tx.QueryRowContext(ctx, `SELECT id,employee_id,key_id,public_model,protocol,settings_revision,budget_enabled,
 		observed_started_at,effective_started_at,effective_lease_at,expires_at,observed_finished_at,effective_finished_at,released_at,status
 		FROM governance_requests WHERE id=?`, id).Scan(&row.id, &row.employeeID, &row.keyID, &row.publicModel, &protocol, &row.settingsRevision,
-		&observedStart, &effectiveStart, &effectiveLease, &expires, &observedFinish, &effectiveFinish, &released, &status)
+		&budgetEnabled, &observedStart, &effectiveStart, &effectiveLease, &expires, &observedFinish, &effectiveFinish, &released, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedRequest{}, false, nil
 	}
@@ -618,6 +690,10 @@ func loadRequest(ctx context.Context, tx *sql.Tx, id string) (storedRequest, boo
 		return storedRequest{}, false, ErrUnavailable
 	}
 	row.protocol = accounting.UsageProtocol(protocol)
+	if budgetEnabled != 0 && budgetEnabled != 1 {
+		return storedRequest{}, false, ErrSchema
+	}
+	row.budgetEnabled = budgetEnabled == 1
 	row.status = accounting.Status(status)
 	row.observedStartedAt, err = parseStoredTime(observedStart)
 	if err != nil {
@@ -649,7 +725,7 @@ func loadRequest(ctx context.Context, tx *sql.Tx, id string) (storedRequest, boo
 
 func loadScopes(ctx context.Context, tx *sql.Tx, requestID string) ([]ScopeSnapshot, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT scope_kind,scope_id,policy_id,policy_revision,group_revision,rpm_limit,concurrency_limit,
-		shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window
+		hard_tpm,hard_cost_micro,hard_currency,hard_window,unknown_mode,shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window
 		FROM governance_request_scopes WHERE request_id=? ORDER BY scope_kind,scope_id`, requestID)
 	if err != nil {
 		return nil, ErrUnavailable
@@ -658,14 +734,17 @@ func loadScopes(ctx context.Context, tx *sql.Tx, requestID string) ([]ScopeSnaps
 	scopes := make([]ScopeSnapshot, 0)
 	for rows.Next() {
 		var scope ScopeSnapshot
-		var groupRevision, rpm, concurrency, shadowTPM, shadowCost sql.NullInt64
+		var groupRevision, rpm, concurrency, hardTPM, hardCost, shadowTPM, shadowCost sql.NullInt64
 		if err := rows.Scan(&scope.Kind, &scope.ID, &scope.PolicyID, &scope.PolicyRevision, &groupRevision, &rpm, &concurrency,
+			&hardTPM, &hardCost, &scope.HardCurrency, &scope.HardWindow, &scope.UnknownMode,
 			&shadowTPM, &shadowCost, &scope.ShadowCurrency, &scope.ShadowWindow); err != nil {
 			return nil, ErrUnavailable
 		}
 		setOptionalInt64(&scope.GroupRevision, groupRevision)
 		setOptionalInt64(&scope.RPMLimit, rpm)
 		setOptionalInt64(&scope.ConcurrencyLimit, concurrency)
+		setOptionalInt64(&scope.HardTPM, hardTPM)
+		setOptionalInt64(&scope.HardCostMicro, hardCost)
 		setOptionalInt64(&scope.ShadowTPM, shadowTPM)
 		setOptionalInt64(&scope.ShadowCostMicro, shadowCost)
 		scopes = append(scopes, scope)

@@ -3,9 +3,16 @@
 状态：**待实现设计草案**，2026-09-23。本文件补充[员工请求治理契约](governance-contract.md)、
 [治理 Shadow 观测契约](governance-observation-contract.md)和[用量与价格管理契约](usage-management-contract.md)。
 它不表示当前服务、网页或发布包已经提供 hard TPM、余额、收费或成本预算。
+具体接线以[持久核心与服务契约](budget-persistence-integration-contract.md)为准，特别是当前实际锁顺序、
+Token/成本分维度结算、提交结果不确定、未知用量的本系统归因窗口和联合恢复。下文保留最初提案推导，不能覆盖新契约。
 
 本提案依据 CPA Cloud 当前 `internal/governance`、`internal/accounting`、`internal/scheduling` 和模型执行接线独立编写，
 没有读取参考产品源码或真实凭据。现有 shadow 观测是事后事实查询，不能直接搬到派发前做硬拒绝。
+
+本分支已完成[账本事务与算术基础](budget-accounting-foundations.md)，尚无 reservation 或运行时接线。
+[首个固定模型候选研究](research/budget-bound-profile-feasibility.md)给出了一种极保守的容量上界方案；它依赖官方容量
+语义与响应一致性，不是无条件计费保证，仍需专项实现及验收。下文的四桶 proof 是一种上界形式，不得据此假定所有
+提供商或模型已经有可用 profile。
 
 ## 安全目标与兼容默认
 
@@ -78,6 +85,13 @@ type DispatchBoundProof struct {
 沿用 accounting 的 128 位乘加和向上取整规则；不得在 service 再写一套浮点公式。若 bounder 只能证明输入类 Token 的
 总上界而不能证明 ordinary/cache read/cache write 的划分，它必须为各桶给出各自安全上界，即使结果保守；不能假设
 供应商分类互斥，除非该 profile 的协议验收明确证明。
+
+后续 proof 应以显式版本/类型区分“独立四桶上界”与“互斥输入组上界”，不以缺失字段或零值猜类型。
+固定模型候选可以采用独立 `InputMax=C`、`OutputMax=M`：Token 上界 checked-add 为 `C+M`，成本为
+`ceil((C*max(三项输入费率)+M*output_rate)/1_000_000)`。这项公式只在输入三桶互斥关系有该 profile 的证据时适用，
+不改变通用四桶算术接口。新增组合算术接口应接受原始不可变价格快照，不能把费率改写后仍伪装成同一价格版本；
+独立预算分支已补组合算术接口（见 Accounting 基础），仍没有生产 profile 或预算运行时。实际 usage 超出任一采用的 bound 必须如实保存 overage 并停用该 profile，
+不能截断用量以维持预算表面成立。
 
 proof 只绑定已经解析并冻结的内存 payload。数据库保存模型、协议、bounder 版本和数值，不保存 prompt、response、
 工具参数、Authorization，也不保存正文摘要；正文 hash 仍可能泄露低熵内容。reservation 提交后不得再增加消息、工具、

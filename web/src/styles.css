@@ -339,7 +339,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .governance-settings .governance-recovery { grid-column: 1 / -1; }
 .governance-panel + .governance-panel { margin-top: 20px; }
 .governance-table { min-width: 720px; }
-.governance-policy-table { min-width: 920px; }
+.governance-policy-table { min-width: 1120px; }
 .governance-table td small { display: block; margin-top: 5px; color: var(--muted); }
 .governance-recovery, .governance-conflict { margin-top: 16px; padding: 13px 15px; color: #734213; background: #fff7e8; border: 1px solid #f1d39b; border-radius: 7px; }
 .governance-recovery strong, .governance-conflict strong { display: block; }
@@ -356,6 +356,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .governance-member-picker small { margin-top: 3px; color: var(--muted); }
 .governance-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .governance-enabled { align-self: end; }
+.governance-budget-note { display: grid; gap: 4px; margin-top: 16px; padding: 13px 15px; color: #31566c; background: #edf6fa; border: 1px solid #c5dee9; border-radius: 7px; font-size: 13px; line-height: 1.55; }
 .governance-shadow-note { display: grid; gap: 4px; margin-top: 16px; padding: 13px 15px; color: #5d4a27; background: #fff9ed; border: 1px solid #edd8aa; border-radius: 7px; font-size: 13px; line-height: 1.55; }
 .governance-observations { margin-bottom: 20px; }
 .governance-observations__intro { margin: 0; padding: 0 20px 20px; color: var(--muted); font-size: 13px; line-height: 1.6; }

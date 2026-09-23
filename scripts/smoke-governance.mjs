@@ -76,7 +76,7 @@ try {
   await stop();
   if(previousExecutable){const old=new DatabaseSync(path.join(directory,'cpa-cloud.db'),{readOnly:true});try{assert.equal(old.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='governance_settings'").get().n,0);}finally{old.close();}}
   activeExecutable=executable;await start();
-  let setting=await admin('/governance/settings');assert.equal(setting.enabled,false);
+  let setting=await admin('/governance/settings');assert.equal(setting.enabled,false);assert.equal(setting.budget_enabled,false);
   const policyInput={operation_id:randomUUID(),scope_kind:'employee',scope_id:person.id,enabled:true,hard:{rpm:1,concurrency:1},shadow:noShadow};
   const receipt=await admin('/governance/policies','POST',policyInput);assert.equal(receipt.resource_kind,'policy');
   assert.deepEqual(await admin('/governance/policies','POST',policyInput),receipt);
@@ -123,11 +123,29 @@ try {
   await start();assert.equal((await admin('/governance/settings')).enabled,false);
   assert.equal((await admin('/governance/groups/'+groupReceipt.resource_id)).revision,1);
   assert.equal((await admin('/governance/policies/'+groupPolicy.resource_id)).enabled,true);
+  // The real process must reject unprovable hard-budget requests before even
+  // contacting the loopback mock. It must not treat that endpoint as official.
+  const currentPolicy=await admin('/governance/policies/'+firstPolicy.id);
+  const hardBudget={tpm:3000000,cost_micro:null,currency:null,window:null,unknown_mode:'deny_unknown'};
+  const budgetWrite={operation_id:randomUUID(),expected_revision:currentPolicy.revision,enabled:true,hard:{rpm:20,concurrency:1},shadow:noShadow,budget:hardBudget};
+  const budgetReceipt=await admin('/governance/policies/'+firstPolicy.id,'PUT',budgetWrite);
+  assert.deepEqual(await admin('/governance/policies/'+firstPolicy.id,'PUT',budgetWrite),budgetReceipt);
+  const beforeBudget=calls;
+  await employee(key,200); // configuring a hard policy does not enable it
+  setting=await admin('/governance/settings');
+  await admin('/governance/settings','PUT',{operation_id:randomUUID(),expected_revision:setting.revision,enabled:true,budget_enabled:true});
+  await employee(key,503);assert.equal(calls,beforeBudget+1,'Unproven hard-budget request reached upstream');
+  await stop();await start();
+  setting=await admin('/governance/settings');assert.equal(setting.budget_enabled,true);
+  assert.equal((await admin('/governance/policies/'+firstPolicy.id)).budget.unknown_mode,'deny_unknown');
+  assert.deepEqual(await admin('/governance/operations/'+budgetWrite.operation_id),budgetReceipt);
+  await employee(key,503);assert.equal(calls,beforeBudget+1,'Restart bypassed hard-budget proof');
+  await admin('/governance/settings','PUT',{operation_id:randomUUID(),expected_revision:setting.revision,enabled:true,budget_enabled:false});
   await employee(key,200);await admin(`/keys/${keyRecord.id}/revoke`,'POST',{});await employee(key,401);
   await stop();
   for(const name of await readdir(directory)){const bytes=await readFile(path.join(directory,name));for(const secret of sensitive)assert.ok(!bytes.includes(Buffer.from(secret)),'Plaintext credential persisted');}
   for(const secret of sensitive)assert.ok(!logs.includes(secret),'Secret logged');
-  console.log('PASS governance: upgrade/default-off/RPM/concurrency/invalid-session/groups/shadow/CAS/receipts/cancel/restart/revocation');
+  console.log('PASS governance: upgrade/default-off/RPM/concurrency/invalid-session/groups/shadow/CAS/receipts/cancel/restart/revocation/budget-gates/unproven-zero-dispatch');
 } finally {
   block=false;release?.();await stop();await new Promise(resolve=>mock.close(resolve));
   const resolved=path.resolve(directory);assert.equal(path.dirname(resolved),path.resolve(os.tmpdir()));assert.ok(path.basename(resolved).startsWith('cpac-governance-'));
