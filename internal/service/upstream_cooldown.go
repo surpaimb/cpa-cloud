@@ -555,26 +555,40 @@ func (rt *accountPoolRuntime) clearCooldown(ctx context.Context, accountID strin
 	if revision != expectedRevision {
 		return "", revision, cooldownRevisionConflict
 	}
-	var eventID string
-	if err := tx.QueryRowContext(ctx, `SELECT event_id FROM account_pool_runtime_cooldowns WHERE account_id=?`, accountID).Scan(&eventID); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return "", revision, cooldownStorageFailure
-		}
+	var cooldownEvent, recoveryEvent sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT
+		(SELECT event_id FROM account_pool_runtime_cooldowns WHERE account_id=?),
+		(SELECT cooldown_event_id FROM account_recovery_states WHERE account_id=?)`, accountID, accountID).Scan(&cooldownEvent, &recoveryEvent); err != nil {
+		return "", revision, cooldownStorageFailure
+	}
+	if !cooldownEvent.Valid && !recoveryEvent.Valid {
 		if err := tx.Commit(); err != nil {
 			return "", revision, cooldownStorageFailure
 		}
 		return cooldownAlreadyClear, revision, cooldownAlreadyClear
 	}
-	if eventID != expectedEventID {
+	if cooldownEvent.Valid && cooldownEvent.String != expectedEventID || recoveryEvent.Valid && recoveryEvent.String != expectedEventID {
 		return "", revision, cooldownEventConflict
 	}
-	result, err := tx.ExecContext(ctx, `DELETE FROM account_pool_runtime_cooldowns WHERE account_id=? AND event_id=?`, accountID, expectedEventID)
-	if err != nil {
-		return "", revision, cooldownStorageFailure
+	if recoveryEvent.Valid {
+		result, err := tx.ExecContext(ctx, `DELETE FROM account_recovery_states WHERE account_id=? AND cooldown_event_id=?`, accountID, expectedEventID)
+		if err != nil {
+			return "", revision, cooldownStorageFailure
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return "", revision, cooldownStorageFailure
+		}
 	}
-	changed, err := result.RowsAffected()
-	if err != nil || changed != 1 {
-		return "", revision, cooldownStorageFailure
+	if cooldownEvent.Valid {
+		result, err := tx.ExecContext(ctx, `DELETE FROM account_pool_runtime_cooldowns WHERE account_id=? AND event_id=?`, accountID, expectedEventID)
+		if err != nil {
+			return "", revision, cooldownStorageFailure
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return "", revision, cooldownStorageFailure
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return "", revision, cooldownStorageFailure

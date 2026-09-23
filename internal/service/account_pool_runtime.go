@@ -65,6 +65,7 @@ type accountPoolRuntime struct {
 	closed             bool
 	wg                 sync.WaitGroup
 	active             map[*accountPoolLease]struct{}
+	maintenanceActive  map[*accountMaintenanceLease]struct{}
 	changeEpoch        uint64
 	changeContext      context.Context
 	changeCancel       context.CancelFunc
@@ -146,6 +147,12 @@ func (s *store) migrateAccountPoolRuntime(ctx context.Context) error {
 		return err
 	}
 	if err := migrateAccountPoolCooldownSchema(ctx, tx); err != nil {
+		return err
+	}
+	if err := migrateAccountRecoveryStateTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := migrateAccountPoolMaintenanceTx(ctx, tx); err != nil {
 		return err
 	}
 	if err := verifyAccountPoolTable(ctx, tx, accountPoolCooldownTable,
@@ -245,6 +252,24 @@ func newAccountPoolRuntimeWithConfig(app *App, config accountPoolRuntimeConfig) 
 			return nil, err
 		}
 	}
+	maintenanceRestored, err := loadRestoredMaintenanceLeasesTx(context.Background(), tx, now)
+	if err != nil {
+		return nil, err
+	}
+	leaseIDs := make(map[string]struct{}, len(restored)+len(maintenanceRestored))
+	for _, snapshot := range restored {
+		if _, duplicate := leaseIDs[snapshot.LeaseID]; duplicate {
+			return nil, errors.New("duplicate restored account pool lease id")
+		}
+		leaseIDs[snapshot.LeaseID] = struct{}{}
+	}
+	for _, snapshot := range maintenanceRestored {
+		if _, duplicate := leaseIDs[snapshot.LeaseID]; duplicate {
+			return nil, errors.New("duplicate restored account pool lease id across lease tables")
+		}
+		leaseIDs[snapshot.LeaseID] = struct{}{}
+		restored = append(restored, snapshot)
+	}
 	activeRestored := restored[:0]
 	for _, snapshot := range restored {
 		if snapshot.ExpiresAt.After(now) {
@@ -297,7 +322,7 @@ func newAccountPoolRuntimeWithConfig(app *App, config accountPoolRuntimeConfig) 
 	}
 	for _, item := range storedCooldowns {
 		if !item.until.After(now) {
-			if _, err := tx.Exec(`DELETE FROM account_pool_runtime_cooldowns WHERE account_id=?`, item.accountID); err != nil {
+			if _, err := tx.Exec(`DELETE FROM account_pool_runtime_cooldowns WHERE account_id=? AND NOT EXISTS(SELECT 1 FROM account_recovery_states rs WHERE rs.account_id=? AND rs.cooldown_event_id=account_pool_runtime_cooldowns.event_id)`, item.accountID, item.accountID); err != nil {
 				return nil, err
 			}
 			continue
@@ -320,15 +345,16 @@ func newAccountPoolRuntimeWithConfig(app *App, config accountPoolRuntimeConfig) 
 	runtimeContext, cancel := context.WithCancel(context.Background())
 	changeContext, changeCancel := context.WithCancel(context.Background())
 	rt := &accountPoolRuntime{
-		app:           app,
-		clock:         config.Clock,
-		leaseTTL:      config.LeaseTTL,
-		cooldowns:     config.Cooldowns,
-		ctx:           runtimeContext,
-		cancel:        cancel,
-		active:        make(map[*accountPoolLease]struct{}),
-		changeContext: changeContext,
-		changeCancel:  changeCancel,
+		app:               app,
+		clock:             config.Clock,
+		leaseTTL:          config.LeaseTTL,
+		cooldowns:         config.Cooldowns,
+		ctx:               runtimeContext,
+		cancel:            cancel,
+		active:            make(map[*accountPoolLease]struct{}),
+		maintenanceActive: make(map[*accountMaintenanceLease]struct{}),
+		changeContext:     changeContext,
+		changeCancel:      changeCancel,
 	}
 	rt.scheduler = scheduling.New(scheduling.Config{Clock: config.Clock, Random: config.Random, LeaseTTL: config.LeaseTTL, StickyTTL: config.StickyTTL, MaxSticky: config.MaxSticky, MaxWaiters: config.MaxWaiters, Cooldowns: config.Cooldowns, RestoredLeases: restored, RestoredCooldowns: restoredCooldowns})
 	return rt, nil
@@ -533,10 +559,11 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 	for _, provider := range allowedProviders {
 		allowed[provider] = true
 	}
-	rows, err := rt.app.store.db.QueryContext(ctx, `SELECT r.upstream_id,r.upstream_model,r.priority,r.weight,r.max_concurrency,u.provider_kind,u.enabled,u.revision,u.credential_state,c.event_id,c.cooldown_until,
+	rows, err := rt.app.store.db.QueryContext(ctx, `SELECT r.upstream_id,r.upstream_model,r.priority,r.weight,r.max_concurrency,u.provider_kind,u.enabled,u.revision,u.credential_state,c.event_id,c.cooldown_until,rs.account_id,
 		(SELECT MIN(global_route.max_concurrency) FROM model_account_pool_routes global_route JOIN models global_model ON global_model.id=global_route.model_id WHERE global_route.upstream_id=r.upstream_id AND global_model.enabled=1)
 		FROM model_account_pool_routes r JOIN upstreams u ON u.id=r.upstream_id
 		LEFT JOIN account_pool_runtime_cooldowns c ON c.account_id=u.id
+		LEFT JOIN account_recovery_states rs ON rs.account_id=u.id
 		WHERE r.model_id=? ORDER BY r.position LIMIT ?`, model, maxModelAccounts+1)
 	if err != nil {
 		return poolSnapshot{}, false, accountPoolStorageUnavailable
@@ -546,8 +573,8 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 	for rows.Next() {
 		var item poolCandidate
 		var enabled int
-		var state, cooldownEvent, cooldown sql.NullString
-		if err := rows.Scan(&item.configured.UpstreamID, &item.configured.UpstreamModel, &item.configured.Priority, &item.configured.Weight, &item.configured.MaxConcurrency, &item.provider, &enabled, &item.revision, &state, &cooldownEvent, &cooldown, &item.capacity); err != nil {
+		var state, cooldownEvent, cooldown, recoveryAccount sql.NullString
+		if err := rows.Scan(&item.configured.UpstreamID, &item.configured.UpstreamModel, &item.configured.Priority, &item.configured.Weight, &item.configured.MaxConcurrency, &item.provider, &enabled, &item.revision, &state, &cooldownEvent, &cooldown, &recoveryAccount, &item.capacity); err != nil {
 			return poolSnapshot{}, false, accountPoolStorageUnavailable
 		}
 		if pool.provider == "" {
@@ -555,7 +582,7 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 		} else if pool.provider != item.provider {
 			return poolSnapshot{}, false, accountPoolConfigurationChanged
 		}
-		if !allowed[item.provider] || enabled == 0 || item.provider == codexMembershipProvider && (!rt.app.cfg.ExperimentalCodexMembership || state.String == codexStateReauth) {
+		if recoveryAccount.Valid || !allowed[item.provider] || enabled == 0 || item.provider == codexMembershipProvider && (!rt.app.cfg.ExperimentalCodexMembership || state.String == codexStateReauth) {
 			continue
 		}
 		if cooldown.Valid != cooldownEvent.Valid {
@@ -621,7 +648,7 @@ func (rt *accountPoolRuntime) persistRevalidatedLease(ctx context.Context, model
 	err = tx.QueryRowContext(ctx, `SELECT u.id,u.endpoint,r.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version,u.enabled,c.event_id,c.cooldown_until,
 		(SELECT MIN(global_route.max_concurrency) FROM model_account_pool_routes global_route JOIN models global_model ON global_model.id=global_route.model_id WHERE global_route.upstream_id=r.upstream_id AND global_model.enabled=1)
 		FROM model_account_pool_routes r JOIN upstreams u ON u.id=r.upstream_id LEFT JOIN account_pool_runtime_cooldowns c ON c.account_id=u.id
-		WHERE r.model_id=? AND r.upstream_id=?`, model, inner.AccountID()).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion, &enabled, &cooldownEvent, &cooldownUntil, &effectiveCapacity)
+		WHERE r.model_id=? AND r.upstream_id=? AND NOT EXISTS(SELECT 1 FROM account_recovery_states rs WHERE rs.account_id=u.id)`, model, inner.AccountID()).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion, &enabled, &cooldownEvent, &cooldownUntil, &effectiveCapacity)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return route{}, accountPoolAccountChanged
@@ -883,6 +910,9 @@ func (rt *accountPoolRuntime) Close() error {
 		rt.cancel()
 		rt.changeCancel()
 		for lease := range rt.active {
+			lease.cancel()
+		}
+		for lease := range rt.maintenanceActive {
 			lease.cancel()
 		}
 	}
