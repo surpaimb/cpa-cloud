@@ -26,9 +26,18 @@ const (
 // data JSON objects. It retains only normalized counters, never response JSON.
 // It is intended to be owned by one request-forwarding goroutine.
 type UsageAccumulator struct {
-	protocol UsageProtocol
-	usage    Usage
-	invalid  bool
+	protocol   UsageProtocol
+	usage      Usage
+	invalid    bool
+	fixedGPT41 bool
+}
+
+// NewGPT41SnapshotUsageAccumulator is only for a request whose final upstream
+// endpoint, model and payload passed the versioned GPT-4.1 bound profile. It is
+// not a generic OpenAI usage default. Missing cache-write metadata is classified
+// as ordinary input billing for this snapshot, not as proof of no physical write.
+func NewGPT41SnapshotUsageAccumulator() *UsageAccumulator {
+	return &UsageAccumulator{protocol: ProtocolOpenAIChatCompletions, fixedGPT41: true}
 }
 
 func NewUsageAccumulator(protocol UsageProtocol) (*UsageAccumulator, error) {
@@ -67,7 +76,11 @@ func (a *UsageAccumulator) Observe(dataJSON []byte) error {
 	var observed *Usage
 	switch a.protocol {
 	case ProtocolOpenAIChatCompletions:
-		observed, err = parseOpenAIChat(root)
+		if a.fixedGPT41 {
+			observed, err = parseGPT41SnapshotUsage(dataJSON)
+		} else {
+			observed, err = parseOpenAIChat(root)
+		}
 	case ProtocolOpenAIResponses:
 		observed, err = parseOpenAIResponses(root)
 	case ProtocolAnthropicMessages:
