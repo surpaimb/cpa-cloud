@@ -68,7 +68,7 @@ describe('upstream health controls', () => {
 
     expect(await screen.findByText('本地凭据检查未通过')).toBeInTheDocument()
     expect(screen.getByText(/此检查没有访问上游/)).toBeInTheDocument()
-    expect(screen.queryByText('上游拒绝当前凭据')).not.toBeInTheDocument()
+    expect(screen.queryByText('凭据检查未通过')).not.toBeInTheDocument()
     expect(onReload).toHaveBeenCalledTimes(1)
 
     const calls = fetchMock.mock.calls

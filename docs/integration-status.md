@@ -1,5 +1,17 @@
 # 集成状态
 
+## 2026-09-23：上游凭据/目录测试与冷却管理
+
+- 后台 `5501f51`、网络边界测试 `d7298f5`、冷却运行时 `9e69bba`、Codex 专项 `4290c68` 和网页 `4f9fbb0` 已交付。根任务负责 App 生命周期/路由、列表投影、契约及进程验收接线。实现依据本仓[上游测试与恢复契约](upstream-health-contract.md)，只允许本地凭据检查与模型目录请求，不新增生成请求或后台探测定时器。
+- 操作编号稳定幂等；同号不同输入冲突，网络中断查询原号，服务重启记 interrupted、不自动重发。测试与当前 provider/凭据来源/revision 绑定；最终重读和写入处于同一事务及相应锁内，重导入只产生 stale。终结存储失败后，协调器辨别仍在执行的同一操作，将遗留记录恢复为 interrupted；存储仍不可用则返回固定 503。
+- 后台任务专项通过：health 与既有 OpenAI/Gemini/Codex 目录回归 29.834s；网络边界专项 3.254s，元数据/私网在 transport 前拒绝、302 不跟随且密钥不抵达目标。Codex 专项由调度任务执行 3.430s：实验开关关闭零解密/刷新/List，本地检查不刷新，新目录操作绕过缓存，相同操作零重放，共享刷新 requested=1/tested=2，无 mutation 自锁，重导入 stale，目录401不另写 reauth。
+- 冷却每次有效失败推进事件 ID，期限取最大值；数据库提交的事件/截止时间传入内存 scheduler。条件清除同时比较账号 revision 与事件 ID，不改 enabled、凭据或观测。Release、Clear 与最终准入共用变更锁；旧等待者保守终止，新失败不能被旧页面清除。专项覆盖同一时刻短/长冷却、最终派发屏障、并发清除及重启恢复。
+- 根任务在 `eefb8ef`（含根任务接线）构建最终程序并运行 `scripts/smoke-upstream-health.mjs` 通过，使用旧 `dist/preflight-smoke.exe` 初始化的隔离数据库升级：管理员/CSRF/员工隔离、本地零网络、OpenAI/Anthropic/Gemini目录与两类分页、同号幂等、严格输入、在途替换 stale、进程中断恢复、目录成功不清冷却、事件 CAS、重启与内存清除、员工撤销和数据库/日志无秘密。包含早取消、终结失败恢复与严格迁移修订；强制崩溃在 Windows/Linux 均使用 SIGKILL，不以正常 SIGTERM 退出冒充崩溃。
+- 严格迁移补丁 `b32a25e` 已审阅：旧/新 cooldown 表精确验证主键、type/nullability、外键、唯一约束及 expiry index，失败事务回滚并支持修复后重试。专项 12.590s 通过；根任务完整非缓存 `go test -p 1 ./... -count=1 -timeout=8m` 通过（service 307.515s），全仓 `go vet -p 1 ./...` 通过。随后 `eefb8ef` 的 Codex 无效/超大目录错误分类小修另由根任务专项非缓存验证 3.753s，通过后重建并执行上述最终 smoke。本机无 C 编译器，Linux race 留给本批轻量 CI。
+- 根任务独立网页 TypeScript、70 项测试及 Vite 构建通过。真实 Go + Playwright Chrome（Browser plugin not available）在随机隔离地址验证：本地测试零网络、目录测试、保存响应丢失后关闭/重开并查询同一操作且上游只调用一次、手机导航和冷却清除。桌面 1440×1000、手机 390×844 均无横向溢出，0 JavaScript 页面异常；仅预期 session401 与主动注入的 ERR_FAILED。最终手机截图已查看，合成数据/服务进程已清理。截图目录：`C:/Users/apple/AppData/Local/Temp/cpac-health-ui-evidence-swW1fS`。
+- 最后仅修订网页错误文案，避免把本地凭据失败说成上游已经拒绝、把静态配置无效说成刚发生变更；TypeScript、6 项健康入口测试和 Vite 构建再次通过，未改变布局或请求逻辑。两份 README PowerShell 块与基线保持一致，87 个本地 Markdown 目标及 CI 路径计划检查通过；core/web=true，三个安装平台=false。
+- 本批仅源码，preview.3 和已发布资产保持不变；生成恢复探测、代理池、预算、商业化及 Claude/Gemini 会员仍在总目标中。没有真实会员或供应商账号验收。
+
 ## 2026-09-23：派发前一次安全换号
 
 - 账号运行时 `22c0300`、Claude/Gemini 接线 `17024df`、Chat/Responses/Codex 接线 `63c1988`、公共协调器与实际账号账本 `7ac7e5b` 已整合。实现依据本仓[安全换号契约](account-pool-failover-contract.md)独立编写，未复制参考产品代码。只有显式账号池中可证明尚未进入模型 HTTP/Codex 执行器的账号特定预检失败，才可选择一个不同账号一次；进入执行器后任何错误均不自动重放。

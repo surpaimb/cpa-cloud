@@ -35,6 +35,7 @@ type App struct {
 	admission     sync.RWMutex
 	refresh       *codexRefreshCoordinator
 	accountPool   *accountPoolRuntime
+	healthTests   *upstreamHealthCoordinator
 	usage         *usageLedgerCoordinator
 	usageRequests sync.Map
 	loginMu       sync.Mutex
@@ -97,7 +98,14 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		s.close()
 		return nil, err
 	}
+	app.healthTests, err = newUpstreamHealthCoordinator(app)
+	if err != nil {
+		app.accountPool.Close()
+		s.close()
+		return nil, err
+	}
 	if err := app.refresh.Start(); err != nil {
+		app.healthTests.Close()
 		app.accountPool.Close()
 		s.close()
 		return nil, err
@@ -106,6 +114,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 }
 
 func (a *App) Close() error {
+	if a.healthTests != nil {
+		a.healthTests.Close()
+	}
 	if a.accountPool != nil {
 		a.accountPool.Close()
 	}
@@ -142,6 +153,9 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/api/v1/codex/oauth/callback", a.requireAdmin(a.completeCodexOAuth, false))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/codex-refresh", a.requireAdmin(a.refreshCodexCredential, true))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/discover-models", a.requireAdmin(a.discoverUpstreamModels, true))
+	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/tests", a.requireAdmin(a.runUpstreamTest, true))
+	mux.HandleFunc("GET /admin/api/v1/upstreams/{id}/tests/{operation_id}", a.requireAdmin(a.getUpstreamTest, false))
+	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/cooldown/clear", a.requireAdmin(a.clearUpstreamCooldown, true))
 	mux.HandleFunc("GET /admin/api/v1/models", a.requireAdmin(a.listAdminModels, false))
 	mux.HandleFunc("POST /admin/api/v1/models", a.requireAdmin(a.createModel, true))
 	mux.HandleFunc("GET /admin/api/v1/system/status", a.requireAdmin(a.systemStatus, false))
@@ -191,7 +205,8 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSession) {
 	limitations := []string{
 		"development preview; not production hardened",
-		"Responses resources, background execution, automatic account failover, and reliable billing-grade usage are not implemented; Messages is available only for Anthropic API-key routes",
+		"Responses resources, background execution, failover after upstream dispatch, and reliable billing-grade usage are not implemented; Messages is available only for Anthropic API-key routes",
+		"account tests cover local credentials or model catalogs only; automatic generation recovery probes are not implemented",
 		"backup/restore automation, production key custody, and multi-process storage are not implemented",
 		"the host administrator can access runtime secrets and must protect the data directory and master key",
 		"single process and single SQLite database only",
@@ -218,6 +233,8 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"anthropic_native_api":            true,
 			"codex_model_discovery":           a.cfg.ExperimentalCodexMembership,
 			"upstream_batch_import":           true,
+			"upstream_account_tests":          a.healthTests != nil,
+			"upstream_cooldown_management":    a.accountPool != nil,
 			"account_pool_configuration":      true,
 			"account_pool_routing":            a.accountPool != nil,
 			"account_pool_preflight_failover": a.accountPool != nil,

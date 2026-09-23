@@ -93,6 +93,16 @@ The optional `X-CPA-Session` header accepts a 1–256-byte identifier. Only an e
 
 The source usage ledger records employee requests separately from upstream attempts. It retains call metadata and explicitly reported token counts, without prompts, replies, or tool arguments. Unknown usage and costs without configured prices remain null, not zero. See the [usage integration contract](docs/usage-service-contract.md).
 
+## Upstream account tests and cooldown management (latest source only)
+
+This source batch has passed local acceptance and is **not included in preview.3 downloads**. On “上游连接”, open “账号测试” and choose a local credential check or a catalog test. A local check only decrypts and parses the stored credential; a catalog test reads the provider's model directory. Neither sends a generation request or proves generation availability. Codex catalog tests may update the credential revision through the shared refresh service; local checks do not refresh credentials.
+
+Each test has a stable operation ID. After a network interruption, query that operation or retry the same ID; an existing operation does not repeat the upstream call. Restart marks unfinished operations as interrupted without replaying them. Limits are one test per account, four per installation, and ten seconds for upstream execution; state writes have separate bounded timeouts. The installation retains up to 10,000 operation records, then rejects new operations while keeping existing IDs queryable.
+
+The list shows administrator enablement, test observations, and cooldown separately. Manual clearing checks both the account revision and the cooldown event ID, so an old page cannot remove a newer failure. Clearing does not enable an account, change credentials, or prove recovery. A successful catalog test does not clear cooldown. Reload the list after a conflict before acting again.
+
+These operations require an administrator session and CSRF validation; employee keys cannot invoke them. Automatic generation recovery probes remain unimplemented. See the [upstream health contract](docs/upstream-health-contract.md) for API and failure semantics.
+
 ## Usage and cost management (latest source only)
 
 This feature is **not included in preview.3 downloads**. On “用量与成本” (Usage and cost), administrators can filter by time, employee, key ID, public model, upstream, provider, and status. “查看尝试” shows the actual account, token counters, and price version for each attempt. Requests and attempts are counted separately; currencies are never added together. Queries cover at most 31 days. Pagination pins the selected window; “最近24小时” refreshes the most recent 24 hours.

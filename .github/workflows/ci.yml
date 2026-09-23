@@ -51,6 +51,8 @@ jobs:
         run: go test -race ./internal/service ./internal/membership ./internal/scheduling ./internal/accounting -count=1 -timeout=20m
       - run: go vet ./...
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud" ./cmd/cpa-cloud
+      - name: Test upstream health with isolated synthetic providers
+        run: node scripts/smoke-upstream-health.mjs "$RUNNER_TEMP/cpa-cloud"
 
   web:
     needs: changes
