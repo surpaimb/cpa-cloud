@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"unicode"
@@ -27,6 +28,10 @@ type outboundProxyCredential struct {
 
 func (outboundProxyCredential) String() string   { return "[redacted proxy credential]" }
 func (outboundProxyCredential) GoString() string { return "[redacted proxy credential]" }
+
+func (outboundProxyCredential) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, "[redacted proxy credential]")
+}
 
 func validOutboundProxyCredential(value outboundProxyCredential) bool {
 	if value.username == "" || len(value.username) > 1024 || len(value.password) > 4096 ||

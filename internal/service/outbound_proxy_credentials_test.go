@@ -67,7 +67,11 @@ func TestOutboundProxyCredentialEncryptionAndIsolation(t *testing.T) {
 	if _, err := sec.decryptCredential("proxy_test", ciphertext); err == nil {
 		t.Fatal("proxy credential accepted as upstream API key")
 	}
-	for _, formatted := range []string{fmt.Sprint(credential), fmt.Sprintf("%+v", credential), fmt.Sprintf("%#v", credential)} {
+	for _, formatted := range []string{
+		fmt.Sprint(credential), fmt.Sprintf("%+v", credential), fmt.Sprintf("%#v", credential),
+		fmt.Sprintf("%d", credential), fmt.Sprintf("%s", &credential),
+		fmt.Sprintf("%d", struct{ Value outboundProxyCredential }{credential}),
+	} {
 		if strings.Contains(formatted, credential.username) || strings.Contains(formatted, credential.password) {
 			t.Fatal("formatting leaked credentials")
 		}
