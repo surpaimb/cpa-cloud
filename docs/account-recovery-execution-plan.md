@@ -3,6 +3,7 @@
 状态：**基础模块已进入源码集成验收，自动恢复仍未启用**。独立账本、维护租约/隔离、固定 runner 和内部
 事务桥的本批边界见[基础模块契约](system-probe-foundations-contract.md)。后台开关、失败快照与定时调度
 继续按下文完成；不能把底层模块视为完整后台恢复交付。
+后台协调器的开关、失败快照、Codex adoption 和重试接口见[细化实施契约](account-recovery-coordinator-contract.md)，明确仍待实现。
 依据本仓[上游测试与恢复契约](upstream-health-contract.md)、账号运行时和用量源码独立设计；不复制参考产品实现。
 
 ## 已确定的实现选择
