@@ -149,7 +149,7 @@ func (s *governanceManagementStore) getGovernanceGroup(w http.ResponseWriter, r 
 		writeGovernanceManagementError(w, errGovernanceManagementInvalid)
 		return
 	}
-	item, err := loadGovernanceGroup(r.Context(), s.db, r.PathValue("id"))
+	item, err := s.group(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeGovernanceManagementError(w, err)
 		return
@@ -287,7 +287,12 @@ func (s *governanceManagementStore) getGovernanceOperation(w http.ResponseWriter
 }
 
 func (s *governanceManagementStore) listGroups(ctx context.Context, limit int, after string) ([]governanceGroupView, *string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM governance_groups WHERE id>? ORDER BY id LIMIT ?`, after, limit+1)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, errGovernanceManagementUnavailable
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM governance_groups WHERE id>? ORDER BY id LIMIT ?`, after, limit+1)
 	if err != nil {
 		return nil, nil, errGovernanceManagementUnavailable
 	}
@@ -315,7 +320,7 @@ func (s *governanceManagementStore) listGroups(ctx context.Context, limit int, a
 	}
 	items := make([]governanceGroupView, 0, len(ids))
 	for _, id := range ids {
-		item, err := loadGovernanceGroup(ctx, s.db, id)
+		item, err := loadGovernanceGroup(ctx, tx, id)
 		if err != nil {
 			return nil, nil, err
 		}

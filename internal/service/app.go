@@ -17,6 +17,7 @@ import (
 
 	"cpacloud.local/server/internal/accounting"
 	"cpacloud.local/server/internal/egress"
+	"cpacloud.local/server/internal/governance"
 )
 
 const (
@@ -26,30 +27,31 @@ const (
 )
 
 type App struct {
-	cfg             Config
-	store           *store
-	secrets         *secrets
-	outboundProxies *outboundProxyStore
-	proxyClients    *egress.ClientCache
-	proxyTests      *outboundProxyTestCoordinator
-	http            *http.Client
-	codex           codexExecutor
-	responses       codexResponsesExecutor
-	oauthHTTP       *http.Client
-	admission       sync.RWMutex
-	refresh         *codexRefreshCoordinator
-	accountPool     *accountPoolRuntime
-	healthTests     *upstreamHealthCoordinator
-	systemProbes    *accounting.SystemProbeLedger
-	recovery        *accountRecoveryCoordinator
-	usage           *usageLedgerCoordinator
-	governance      *requestGovernance
-	usageRequests   sync.Map
-	loginMu         sync.Mutex
-	logins          map[string]*loginAttempt
-	catalogMu       sync.Mutex
-	catalogs        map[string]codexCatalogCacheEntry
-	codexCatalog    codexCatalogLister
+	cfg                Config
+	store              *store
+	secrets            *secrets
+	outboundProxies    *outboundProxyStore
+	proxyClients       *egress.ClientCache
+	proxyTests         *outboundProxyTestCoordinator
+	http               *http.Client
+	codex              codexExecutor
+	responses          codexResponsesExecutor
+	oauthHTTP          *http.Client
+	admission          sync.RWMutex
+	refresh            *codexRefreshCoordinator
+	accountPool        *accountPoolRuntime
+	healthTests        *upstreamHealthCoordinator
+	systemProbes       *accounting.SystemProbeLedger
+	recovery           *accountRecoveryCoordinator
+	usage              *usageLedgerCoordinator
+	governance         *requestGovernance
+	governancePolicies *governanceManagementStore
+	usageRequests      sync.Map
+	loginMu            sync.Mutex
+	logins             map[string]*loginAttempt
+	catalogMu          sync.Mutex
+	catalogs           map[string]codexCatalogCacheEntry
+	codexCatalog       codexCatalogLister
 }
 
 type loginAttempt struct {
@@ -83,71 +85,91 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		oauthHTTP: newCodexOAuthHTTPClient(), codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(),
 		logins: make(map[string]*loginAttempt),
 	}
+	opened := false
+	defer func() {
+		if !opened {
+			app.Close()
+		}
+	}()
 	app.outboundProxies = newOutboundProxyStore(s.db, sec, cfg.AllowLoopbackUpstream)
 	if err := app.outboundProxies.Migrate(ctx); err != nil {
-		s.close()
 		return nil, err
 	}
 	app.proxyClients, err = egress.NewClientCache(64)
 	if err != nil {
-		s.close()
 		return nil, err
 	}
 	app.refresh = newCodexRefreshCoordinator(app)
 	prices := accounting.NewPriceCatalog(s.db)
 	if err := prices.Migrate(ctx); err != nil {
-		s.close()
 		return nil, errUsageLedgerUnavailable
 	}
 	if err := app.initializeSystemProbeAccounting(ctx); err != nil {
-		s.close()
 		return nil, err
 	}
 	app.usage = newUsageLedgerCoordinator(s.db)
 	app.usage.priceLookup = prices.Current
 	if err := app.usage.start(ctx); err != nil {
-		s.close()
 		return nil, err
 	}
 	trimExpiredSessions(ctx, s.db)
 	if err := recoverCodexOAuthSessions(ctx, s.db); err != nil {
-		s.close()
 		return nil, err
 	}
 	app.accountPool, err = newAccountPoolRuntime(app)
 	if err != nil {
-		s.close()
 		return nil, err
 	}
 	app.healthTests, err = newUpstreamHealthCoordinator(app)
 	if err != nil {
-		app.accountPool.Close()
-		s.close()
+		return nil, err
+	}
+	if err := app.initializeGovernance(ctx); err != nil {
 		return nil, err
 	}
 	if err := app.refresh.Start(); err != nil {
-		app.healthTests.Close()
-		app.accountPool.Close()
-		s.close()
 		return nil, err
 	}
 	app.recovery = newAccountRecoveryCoordinator(app)
 	if err := app.recovery.Start(ctx); err != nil {
-		app.healthTests.Close()
-		app.accountPool.Close()
-		app.refresh.Close()
-		s.close()
 		return nil, err
 	}
 	app.proxyTests, err = newOutboundProxyTestCoordinator(app)
 	if err != nil {
-		app.Close()
 		return nil, err
 	}
+	opened = true
 	return app, nil
 }
 
+func (a *App) initializeGovernance(ctx context.Context) error {
+	core, err := governance.New(a.store.db, governance.Config{LeaseTTL: 2 * time.Minute})
+	if err != nil {
+		return err
+	}
+	if err := core.Migrate(ctx); err != nil {
+		return err
+	}
+	policies, err := newGovernanceManagementStore(a.store.db, core)
+	if err != nil {
+		return err
+	}
+	if err := policies.Migrate(ctx); err != nil {
+		return err
+	}
+	runtime, err := newRequestGovernance(a, core, policies)
+	if err != nil {
+		return err
+	}
+	a.governancePolicies, a.governance = policies, runtime
+	a.usage.governance = core
+	return nil
+}
+
 func (a *App) Close() error {
+	if a.governance != nil {
+		a.governance.Close()
+	}
 	if a.proxyTests != nil {
 		a.proxyTests.Close()
 	}
@@ -174,6 +196,9 @@ func (a *App) Handler() http.Handler {
 	a.registerAccountPoolHandlers(mux)
 	a.registerOutboundProxyHandlers(mux)
 	a.proxyTests.Register(mux)
+	if a.governancePolicies != nil {
+		a.governancePolicies.Register(a, mux)
+	}
 	a.registerPricingHandlers(mux)
 	a.registerUsageHandlers(mux)
 	a.registerSystemProbeHandlers(mux)

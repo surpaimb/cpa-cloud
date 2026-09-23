@@ -417,6 +417,9 @@ func (s *governanceManagementStore) updatePolicy(ctx context.Context, actorID, o
 		return governanceOperationReceipt{}, errGovernanceManagementRevisionConflict
 	}
 	input.ScopeKind, input.ScopeID = policy.ScopeKind, policy.ScopeID
+	if err := validateGovernanceScopeExists(ctx, tx, input.ScopeKind, input.ScopeID); err != nil {
+		return governanceOperationReceipt{}, err
+	}
 	now := s.effectiveTime(mustParseGovernanceTime(policy.UpdatedAt))
 	stamp := formatGovernanceTime(now)
 	result, err := tx.ExecContext(ctx, `UPDATE governance_policies SET enabled=?,rpm_limit=?,concurrency_limit=?,shadow_tpm=?,shadow_cost_micro=?,
@@ -707,6 +710,18 @@ func governancePolicyDigestInput(id string, expected int64, input governancePoli
 type governanceManagementQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+// The revision and full membership must come from one database snapshot.
+// Otherwise a concurrent member replacement could return a revision paired
+// with members from another version and undermine the editor's CAS baseline.
+func (s *governanceManagementStore) group(ctx context.Context, id string) (governanceGroupView, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return governanceGroupView{}, errGovernanceManagementUnavailable
+	}
+	defer tx.Rollback()
+	return loadGovernanceGroup(ctx, tx, id)
 }
 
 func loadGovernanceGroup(ctx context.Context, query governanceManagementQueryer, id string) (governanceGroupView, error) {
