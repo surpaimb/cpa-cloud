@@ -18,6 +18,7 @@ const (
 	geminiMaxSSELine      = 256 << 10
 	geminiMaxSSEEvent     = 1 << 20
 	geminiMaxSSEStream    = 64 << 20
+	geminiMaxSSETerminal  = 4 << 20
 )
 
 func (a *App) listGeminiModels(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +194,11 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 	} else {
 		upstreamReq.Header.Set("Accept", "application/json")
 	}
+	if err := a.beginUpstreamUsage(r.Context(), modelRequestID, route.AccountID); err != nil {
+		a.finishRequest(modelRequestID, "failed", 0)
+		writeGeminiError(w, 503, "UNAVAILABLE", "Service is temporarily unavailable.")
+		return
+	}
 	response, err := a.http.Do(upstreamReq)
 	if err != nil {
 		outcome := "failed"
@@ -246,12 +252,16 @@ func (a *App) forwardGeminiJSON(w http.ResponseWriter, response *http.Response, 
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, geminiMaxResponseBody+1))
 	trimmed := bytes.TrimSpace(body)
-	if err != nil || len(body) > geminiMaxResponseBody || len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+	if err != nil || len(body) > geminiMaxResponseBody || len(trimmed) == 0 || trimmed[0] != '{' || !validChatResponseObject(trimmed) {
 		a.finishRequest(modelRequestID, "failed", response.StatusCode)
 		writeGeminiError(w, http.StatusBadGateway, "UNAVAILABLE", "Upstream returned an invalid response.")
 		return
 	}
-	a.finishRequest(modelRequestID, "succeeded", response.StatusCode)
+	a.observeRequestUsage(modelRequestID, body)
+	if err := a.finishRequestChecked(modelRequestID, "succeeded", response.StatusCode); err != nil {
+		writeGeminiError(w, 503, "UNAVAILABLE", "Service is temporarily unavailable.")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
@@ -274,7 +284,7 @@ func (a *App) forwardGeminiStream(w http.ResponseWriter, r *http.Request, respon
 	first, firstProgress, err := readGeminiSSEEvent(reader)
 	if err != nil {
 		outcome := "failed"
-		if errors.Is(r.Context().Err(), context.Canceled) {
+		if r.Context().Err() != nil {
 			outcome = "cancelled"
 		}
 		a.finishRequest(modelRequestID, outcome, response.StatusCode)
@@ -295,19 +305,53 @@ func (a *App) forwardGeminiStream(w http.ResponseWriter, r *http.Request, respon
 	outcome := "failed"
 	event := first
 	progress := newGeminiSSEProgress()
-	progress.observe(firstProgress)
+	eventProgress := firstProgress
+	var terminal bytes.Buffer
+	bufferTerminal := false
 	for {
-		if _, err := w.Write(event); err != nil {
-			outcome = "cancelled"
-			break
+		a.observeSSEUsage(modelRequestID, event)
+		progress.observe(eventProgress)
+		if eventProgress.terminal() {
+			bufferTerminal = true
 		}
-		flusher.Flush()
+		if bufferTerminal {
+			if terminal.Len()+len(event) > geminiMaxSSETerminal {
+				if r.Context().Err() != nil {
+					outcome = "cancelled"
+				} else if err := writeGeminiStreamError(w); err != nil {
+					outcome = "cancelled"
+				} else {
+					flusher.Flush()
+				}
+				break
+			}
+			terminal.Write(event)
+		} else {
+			if _, err := w.Write(event); err != nil {
+				outcome = "cancelled"
+				break
+			}
+			flusher.Flush()
+		}
 		nextEvent, nextProgress, err := readGeminiSSEEvent(reader)
 		if errors.Is(err, io.EOF) {
-			if errors.Is(r.Context().Err(), context.Canceled) {
+			if r.Context().Err() != nil {
 				outcome = "cancelled"
 			} else if limited.N > 0 && progress.complete() {
-				outcome = "succeeded"
+				if r.Context().Err() != nil {
+					outcome = "cancelled"
+					break
+				}
+				if err := a.finishRequestChecked(modelRequestID, "succeeded", response.StatusCode); err != nil {
+					_ = writeGeminiStreamError(w)
+					flusher.Flush()
+					return
+				}
+				if _, err := w.Write(terminal.Bytes()); err != nil {
+					return
+				}
+				flusher.Flush()
+				return
 			} else {
 				if err := writeGeminiStreamError(w); err != nil {
 					outcome = "cancelled"
@@ -318,7 +362,7 @@ func (a *App) forwardGeminiStream(w http.ResponseWriter, r *http.Request, respon
 			break
 		}
 		if err != nil {
-			if errors.Is(r.Context().Err(), context.Canceled) {
+			if r.Context().Err() != nil {
 				outcome = "cancelled"
 			} else {
 				if err := writeGeminiStreamError(w); err != nil {
@@ -338,14 +382,26 @@ func (a *App) forwardGeminiStream(w http.ResponseWriter, r *http.Request, respon
 			break
 		}
 		event = nextEvent
-		progress.observe(nextProgress)
+		eventProgress = nextProgress
 	}
-	a.finishRequest(modelRequestID, outcome, response.StatusCode)
+	_ = a.finishRequestChecked(modelRequestID, outcome, response.StatusCode)
 }
 
 type geminiSSEEventProgress struct {
 	candidates    map[int]bool
 	promptBlocked bool
+}
+
+func (p geminiSSEEventProgress) terminal() bool {
+	if p.promptBlocked {
+		return true
+	}
+	for _, finished := range p.candidates {
+		if finished {
+			return true
+		}
+	}
+	return false
 }
 
 type geminiSSEProgress struct {

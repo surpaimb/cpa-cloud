@@ -159,6 +159,11 @@ func (a *App) handleAPIKeyResponses(w http.ResponseWriter, r *http.Request, body
 	} else {
 		req.Header.Set("Accept", "application/json")
 	}
+	if err := a.beginUpstreamUsage(r.Context(), reqID, selected.AccountID); err != nil {
+		a.finishRequest(reqID, "failed", 0)
+		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", reqID)
+		return
+	}
 	response, err := a.http.Do(req)
 	if err != nil {
 		outcome := "failed"
@@ -206,6 +211,7 @@ func (a *App) forwardResponsesJSON(w http.ResponseWriter, response *http.Respons
 		a.responsesProtocolError(w, reqID, response.StatusCode)
 		return
 	}
+	a.observeRequestUsage(reqID, body)
 	if err := a.finishRequestChecked(reqID, "succeeded", response.StatusCode); err != nil {
 		writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.", reqID)
 		return
@@ -254,7 +260,11 @@ type responsesSSEEvent struct {
 	kind string
 }
 
-var errResponsesCompleted = errors.New("Responses stream completed")
+var (
+	errResponsesCompleted  = errors.New("Responses stream completed")
+	errResponsesFailed     = errors.New("Responses stream failed")
+	errResponsesIncomplete = errors.New("Responses stream incomplete")
+)
 
 func readResponsesSSE(ctx context.Context, reader io.Reader, consume func(responsesSSEEvent) error) error {
 	scanner := bufio.NewScanner(reader)
@@ -356,8 +366,11 @@ func (a *App) forwardResponsesStream(w http.ResponseWriter, r *http.Request, res
 			}
 			terminal, completed = event, true
 			return errResponsesCompleted
-		case "response.failed", "response.incomplete", "error":
-			return errors.New("terminal upstream failure")
+		case "response.failed", "error":
+			return errResponsesFailed
+		case "response.incomplete":
+			a.observeRequestUsage(reqID, event.data)
+			return errResponsesIncomplete
 		default:
 			start()
 			if err := writeResponsesSSE(w, event); err != nil {
@@ -368,10 +381,7 @@ func (a *App) forwardResponsesStream(w http.ResponseWriter, r *http.Request, res
 		}
 	})
 	if (!errors.Is(err, errResponsesCompleted) && err != nil) || !completed {
-		outcome := "interrupted"
-		if r.Context().Err() != nil {
-			outcome = "cancelled"
-		}
+		outcome := responsesStreamFailureOutcome(r.Context().Err(), err)
 		a.finishRequest(reqID, outcome, response.StatusCode)
 		if r.Context().Err() == nil {
 			if committed {
@@ -382,6 +392,7 @@ func (a *App) forwardResponsesStream(w http.ResponseWriter, r *http.Request, res
 		}
 		return
 	}
+	a.observeRequestUsage(reqID, terminal.data)
 	if err := a.finishRequestChecked(reqID, "succeeded", response.StatusCode); err != nil {
 		if committed {
 			writeResponsesStreamError(w, reqID, "storage_unavailable", "Service is temporarily unavailable.")
@@ -395,6 +406,16 @@ func (a *App) forwardResponsesStream(w http.ResponseWriter, r *http.Request, res
 		return
 	}
 	flusher.Flush()
+}
+
+func responsesStreamFailureOutcome(contextErr, streamErr error) string {
+	if contextErr != nil {
+		return "cancelled"
+	}
+	if errors.Is(streamErr, errResponsesIncomplete) || errors.Is(streamErr, io.EOF) || errors.Is(streamErr, io.ErrUnexpectedEOF) {
+		return "interrupted"
+	}
+	return "failed"
 }
 
 func writeResponsesStreamError(w http.ResponseWriter, requestID, code, message string) {
@@ -440,6 +461,11 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body 
 		return
 	}
 	defer credential.Destroy()
+	if err := a.beginUpstreamUsage(r.Context(), reqID, selected.AccountID); err != nil {
+		a.finishRequest(reqID, "failed", 0)
+		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", reqID)
+		return
+	}
 	if !stream {
 		result, runErr := a.responses.Responses(r.Context(), credential, body, nil)
 		if runErr != nil {
@@ -455,6 +481,7 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body 
 			writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", reqID)
 			return
 		}
+		a.observeRequestUsage(reqID, result)
 		if err := a.finishRequestChecked(reqID, "succeeded", 200); err != nil {
 			writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", reqID)
 			return
@@ -527,6 +554,7 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body 
 		}
 		return
 	}
+	a.observeRequestUsage(reqID, completed)
 	if err := a.finishRequestChecked(reqID, "succeeded", 200); err != nil {
 		if committed {
 			writeResponsesStreamError(w, reqID, "storage_unavailable", "Service is temporarily unavailable.")

@@ -303,7 +303,7 @@ func TestGeminiNativeSSECompletionBoundsAndRedaction(t *testing.T) {
 		{name: "late error", marker: "late-error", wantStatus: http.StatusOK, wantOutcome: "failed", want: []string{`"text":"partial"`}, doNotWant: []string{privateError}, wantSSEError: true},
 		{name: "clean eof without finish", marker: "clean-eof-without-finish", wantStatus: http.StatusOK, wantOutcome: "failed", want: []string{`"text":"partial"`}, wantSSEError: true},
 		{name: "half frame", marker: "half-frame", wantStatus: http.StatusBadGateway, wantOutcome: "failed", want: []string{`"status":"UNAVAILABLE"`}, doNotWant: []string{`"finishReason"`}},
-		{name: "unfinished candidate", marker: "unfinished-candidate", wantStatus: http.StatusOK, wantOutcome: "failed", want: []string{`"finishReason":"STOP"`}, wantSSEError: true},
+		{name: "unfinished candidate", marker: "unfinished-candidate", wantStatus: http.StatusOK, wantOutcome: "failed", doNotWant: []string{`"finishReason":"STOP"`}, wantSSEError: true},
 		{name: "all candidates finish", marker: "all-candidates-finish", wantStatus: http.StatusOK, wantOutcome: "succeeded", want: []string{`"finishReason":"STOP"`, `"finishReason":"MAX_TOKENS"`}, doNotWant: []string{`"error"`}},
 		{name: "prompt block completes", marker: "prompt-block", wantStatus: http.StatusOK, wantOutcome: "succeeded", want: []string{`"blockReason":"SAFETY"`}, doNotWant: []string{`"error"`}},
 		{name: "line too large", marker: "line-too-large", wantStatus: http.StatusBadGateway, wantOutcome: "failed", want: []string{`"status":"UNAVAILABLE"`}},
