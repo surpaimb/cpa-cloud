@@ -9,6 +9,8 @@
 - 网页 TypeScript、74 项测试及生产构建通过。根任务用真实 Go + Playwright Chrome 验证开启/关闭、员工失败后隔离展示、服务器已保存但浏览器丢失响应后查询实际设置、桌面 1440×1080 和手机 390×844。修正手机隔离列表横向滚动后再次通过；0 页面 JavaScript 异常，仅预期 session401 与主动注入 ERR_FAILED。最终截图已查看：`C:/Users/apple/.codex/visualizations/2026/09/23/cpa-recovery/desktop.png`、`mobile.png`。所有模型调用只到合成回环上游。
 - 后台子任务 `074a91a` 专项通过（恢复 service 29.912s、探测 accounting 7.502s），运行时 `a4ce167` 专项 44.922s 通过。根任务完整非缓存 `go test -p 1 ./... -count=1 -timeout=10m` PASS：service 404.179s、accounting 14.477s、membership 0.403s、scheduling 0.148s。最终全仓 `go vet -p 1 ./...` 和编译 PASS。补充时钟回拨后的固定结算时间测试通过，未改变重试的原始结果；网页文案收尾后相关 10 项测试、TypeScript/构建和真实浏览器流程再次 PASS。
 - README PowerShell 块与基线保持一致，104 个本地文档链接、6 项 CI 路径测试及 diff 检查通过。当前变更只触发 core/web，三个安装平台不触发；本机无 C 编译器，完整 Linux race 待本批 CI，不冒充已经通过。
+- 源码 `191db7c3edef77c807a86083b666bc480bbaa0fd` 的 [Code validation 35857351905](https://github.com/surpaimb/cpa-cloud/actions/runs/35857351905) 普通 Go 步骤通过（Linux service 145.946s），网页日志已核实 TypeScript、74 项测试及构建通过，Windows/Linux/macOS 安装 job 全部 skipped。完整 service race 在 25 分钟上限超时，堆栈停在 Responses 用量测试的真实 bcrypt 初始化；日志未出现 DATA RACE，但超时不能视为 race 通过，后续 vet/构建/进程 smoke 因该失败未执行。
+- 针对初始化成本，`8ef53cf`/`d0bea39` 只调整 runtime 测试夹具：复用一个已经关闭的合成初始化模板，每个测试复制到独立目录和数据库；不共享 App/DB，不降低 bcrypt cost=12，认证与迁移测试保留真实初始化。子任务完整非缓存 service 回归 PASS 320.774s（墙钟 323.749s）；根任务审查后独立运行模板/会话边界 1.566s、7 项恢复协调器测试 5.058s 及全仓 vet，均 PASS。缺 Cookie、错误 Origin/CSRF、退出、过期及写隔离均有断言；等待相同范围的完整 Linux race 复验，不提高超时或删减套件。
 - 本批仍仅源码，preview.3 不含本功能；没有新 tag、安装包、真实供应商/会员账号或生产部署。预算、代理池、商业化及其他功能矩阵待办继续保留。
 
 ## 2026-09-23：生成恢复基础模块与独立探测账本
