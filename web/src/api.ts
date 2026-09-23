@@ -143,6 +143,99 @@ export type SystemStatus = {
   }
 }
 
+export type UsageStatus = 'pending' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
+export type UsageProvider = 'openai' | 'openai-compatible' | 'anthropic' | 'gemini' | 'codex'
+export type UsageFilters = {
+  from: string
+  to: string
+  employee_id?: string
+  key_id?: string
+  model_id?: string
+  upstream_id?: string
+  provider?: UsageProvider
+  status?: UsageStatus
+}
+export type UsageCounter = { known_total: string; unknown_attempts: string }
+export type UsageSummary = {
+  from: string
+  to: string
+  requests: Record<'total' | UsageStatus, string>
+  attempts: Array<{
+    currency: string
+    total: string
+    pending: string
+    succeeded: string
+    failed: string
+    cancelled: string
+    interrupted: string
+    known_cost_micro: string
+    unknown_cost_attempts: string
+    input_tokens: UsageCounter
+    output_tokens: UsageCounter
+    cache_read_tokens: UsageCounter
+    cache_write_tokens: UsageCounter
+  }>
+}
+export type UsageRequestItem = {
+  id: string
+  employee_id: string
+  key_id: string
+  model_id: string
+  provider: UsageProvider
+  status: UsageStatus
+  started_at: string
+  finished_at: string | null
+  attempt_count: string
+}
+export type UsageRequestsPage = {
+  items: UsageRequestItem[]
+  next_cursor: string | null
+  from: string
+  to: string
+}
+export type UsageAttempt = {
+  id: string
+  request_id: string
+  account_id: string
+  provider: UsageProvider
+  dispatch: string
+  status: UsageStatus
+  started_at: string
+  finished_at: string | null
+  price_version: string | null
+  currency: string | null
+  input_tokens: string | null
+  output_tokens: string | null
+  cache_read_tokens: string | null
+  cache_write_tokens: string | null
+  cost_micro: string | null
+}
+export type PriceRate = {
+  currency: string
+  input_per_million_micro: string
+  output_per_million_micro: string
+  cache_read_per_million_micro: string
+  cache_write_per_million_micro: string
+}
+export type UpstreamPrice = {
+  upstream_id: string
+  upstream_model: string
+  version: string
+  revision: number
+  created_at: string
+  price: PriceRate | null
+}
+
+function usageSearch(filters: UsageFilters, cursor?: string) {
+  const query = new URLSearchParams({ from: filters.from, to: filters.to })
+  for (const key of ['employee_id', 'key_id', 'model_id', 'upstream_id', 'provider', 'status'] as const) {
+    const value = filters[key]
+    if (value) query.set(key, value)
+  }
+  if (cursor) query.set('cursor', cursor)
+  return query.toString()
+}
+
 export const api = {
   session: () => request<Session>('/session'),
   login: (username: string, password: string) =>
@@ -200,5 +293,15 @@ export const api = {
     request<ModelAccounts>(`/models/${encodeURIComponent(id)}/accounts`, { signal }),
   putModelAccounts: (id: string, body: { expected_revision: number; items: ModelAccount[] }, csrf: string) =>
     request<ModelAccounts>(`/models/${encodeURIComponent(id)}/accounts`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
+  usageSummary: (filters: UsageFilters, signal?: AbortSignal) =>
+    request<UsageSummary>(`/usage/summary?${usageSearch(filters)}`, { signal }),
+  usageRequests: (filters: UsageFilters, cursor?: string, signal?: AbortSignal) =>
+    request<UsageRequestsPage>(`/usage/requests?${usageSearch(filters, cursor)}`, { signal }),
+  usageAttempts: (requestId: string, signal?: AbortSignal) =>
+    request<{ items: UsageAttempt[] }>(`/usage/requests/${encodeURIComponent(requestId)}/attempts`, { signal }),
+  upstreamPrices: (upstreamId: string, signal?: AbortSignal) =>
+    request<{ items: UpstreamPrice[] }>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { signal }),
+  saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
+    request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   status: () => request<SystemStatus>('/system/status'),
 }
