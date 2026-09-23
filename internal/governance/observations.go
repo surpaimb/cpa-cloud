@@ -410,7 +410,10 @@ func loadObservationTotals(ctx context.Context, tx *sql.Tx, kind ScopeKind, scop
 	}
 	totals := observationTotals{currencies: make(map[string]observationCurrency)}
 	var previousRequest string
+	var previousHasAccounting bool
 	var previousHasAttempt bool
+	var previousHasPendingAttempt bool
+	var previousHasSucceededAttempt bool
 	var previousStatus accounting.Status
 	var previousInTPM bool
 	for rows.Next() {
@@ -436,14 +439,17 @@ func loadObservationTotals(ctx context.Context, tx *sql.Tx, kind ScopeKind, scop
 		}
 		if requestID != previousRequest {
 			if previousRequest != "" {
-				if err := finishObservationRequest(&totals, previousStatus, previousHasAttempt, previousInTPM); err != nil {
+				if err := finishObservationRequest(&totals, previousStatus, previousHasAccounting, previousHasAttempt,
+					previousHasPendingAttempt, previousHasSucceededAttempt, previousInTPM); err != nil {
 					rows.Close()
 					return observationTotals{}, err
 				}
 			}
-			previousRequest, previousStatus, previousHasAttempt = requestID, status, false
+			previousRequest, previousStatus = requestID, status
+			previousHasAccounting, previousHasAttempt = accountingID.Valid, false
+			previousHasPendingAttempt, previousHasSucceededAttempt = false, false
 			previousInTPM = effective.After(tpmFrom)
-		} else if status != previousStatus || previousInTPM != effective.After(tpmFrom) {
+		} else if status != previousStatus || previousHasAccounting != accountingID.Valid || previousInTPM != effective.After(tpmFrom) {
 			rows.Close()
 			return observationTotals{}, observationError(ObservationSchema)
 		}
@@ -453,6 +459,9 @@ func loadObservationTotals(ctx context.Context, tx *sql.Tx, kind ScopeKind, scop
 				rows.Close()
 				return observationTotals{}, err
 			}
+			attemptStatus := accounting.Status(attempt.status.String)
+			previousHasPendingAttempt = previousHasPendingAttempt || attemptStatus == accounting.StatusPending
+			previousHasSucceededAttempt = previousHasSucceededAttempt || attemptStatus == accounting.StatusSucceeded
 		} else if attempt.status.Valid || attempt.input.Valid || attempt.output.Valid || attempt.cacheRead.Valid || attempt.cacheWrite.Valid || attempt.currency.Valid || attempt.cost.Valid {
 			rows.Close()
 			return observationTotals{}, observationError(ObservationSchema)
@@ -463,7 +472,8 @@ func loadObservationTotals(ctx context.Context, tx *sql.Tx, kind ScopeKind, scop
 		return observationTotals{}, observationError(ObservationUnavailable)
 	}
 	if previousRequest != "" {
-		if err := finishObservationRequest(&totals, previousStatus, previousHasAttempt, previousInTPM); err != nil {
+		if err := finishObservationRequest(&totals, previousStatus, previousHasAccounting, previousHasAttempt,
+			previousHasPendingAttempt, previousHasSucceededAttempt, previousInTPM); err != nil {
 			return observationTotals{}, err
 		}
 	}
@@ -483,7 +493,16 @@ func validObservationRelation(requestID, employeeID, keyID, modelID string, stat
 		accountingStatus.Valid && accounting.Status(accountingStatus.String) == status
 }
 
-func finishObservationRequest(totals *observationTotals, status accounting.Status, hasAttempt, inTPM bool) error {
+func finishObservationRequest(totals *observationTotals, status accounting.Status, hasAccounting, hasAttempt,
+	hasPendingAttempt, hasSucceededAttempt, inTPM bool,
+) error {
+	if !hasAccounting && hasAttempt {
+		return observationError(ObservationSchema)
+	}
+	if hasAccounting && status != accounting.StatusPending &&
+		(hasPendingAttempt || status == accounting.StatusSucceeded && !hasSucceededAttempt) {
+		return observationError(ObservationSchema)
+	}
 	pending := status == accounting.StatusPending
 	if pending {
 		if err := checkedIncrement(&totals.cost.pendingRequests); err != nil {

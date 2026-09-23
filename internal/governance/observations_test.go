@@ -189,6 +189,75 @@ func TestObservationPendingParentWithFinishedAttemptsStaysUnknown(t *testing.T) 
 	}
 }
 
+func TestObservationRejectsAccountingParentChildMismatch(t *testing.T) {
+	failed, pending := accounting.StatusFailed, accounting.StatusPending
+	for _, test := range []struct {
+		name      string
+		parent    accounting.Status
+		attempt   *accounting.Status
+		requestID string
+	}{
+		{name: "succeeded-zero-attempt", parent: accounting.StatusSucceeded, requestID: "succeeded-zero"},
+		{name: "succeeded-only-failed-attempt", parent: accounting.StatusSucceeded, attempt: &failed, requestID: "succeeded-failed"},
+		{name: "terminal-with-pending-attempt", parent: accounting.StatusFailed, attempt: &pending, requestID: "failed-pending"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newObservationFixture(t)
+			defer fixture.db.Close()
+			at := governanceStart.Add(7*time.Hour + time.Minute)
+			fixture.admit(test.requestID, at, shadowObservationScope("policy", 1, 100, 0, ""))
+			fixture.beginAccountingRequest(test.requestID, at)
+			if test.attempt != nil {
+				if *test.attempt == accounting.StatusPending {
+					price := observationPrice("", 0, 1)
+					if err := fixture.ledger.BeginAttempt(context.Background(), accounting.AttemptStart{
+						ID: test.requestID + ":attempt", RequestID: test.requestID, AccountID: "account-1",
+						Provider: accounting.ProviderOpenAICompatible, Dispatch: accounting.DispatchPrimary, StartedAt: at, Price: price,
+					}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					fixture.finishNamedAttempt(test.requestID+":attempt", test.requestID, at, *test.attempt, knownObservationUsage(1, 0), "", 0)
+				}
+			}
+			finishedAt := at.Add(2 * time.Second)
+			if err := fixture.ledger.FinishRequest(context.Background(), accounting.RequestFinish{
+				ID: test.requestID, Status: test.parent, FinishedAt: finishedAt,
+			}); !errors.Is(err, accounting.ErrConflict) {
+				t.Fatalf("Ledger accepted invalid parent/child state: %v", err)
+			}
+			if _, err := fixture.db.Exec(`UPDATE accounting_requests SET status=?,finished_at=? WHERE id=?`,
+				string(test.parent), finishedAt.Format(time.RFC3339Nano), test.requestID); err != nil {
+				t.Fatal(err)
+			}
+			if err := runFinish(t, fixture.db, fixture.core, Finish{RequestID: test.requestID, Status: test.parent, FinishedAt: finishedAt}); err != nil {
+				t.Fatal(err)
+			}
+			assertObservationQueryError(t, fixture.core, context.Background(), ObservationQuery{
+				Limit: 10, ObservedAt: at.Add(3 * time.Second),
+			}, ObservationSchema)
+		})
+	}
+}
+
+func TestObservationAllowsFailedAccountingParentWithoutAttempt(t *testing.T) {
+	fixture := newObservationFixture(t)
+	defer fixture.db.Close()
+	at := governanceStart.Add(7*time.Hour + 2*time.Minute)
+	fixture.admit("failed-zero", at, shadowObservationScope("policy", 1, 100, 0, ""))
+	fixture.beginAccountingRequest("failed-zero", at)
+	fixture.finishAccountingAndGovernance("failed-zero", accounting.StatusFailed, at.Add(time.Second))
+
+	page := fixture.query(ObservationQuery{Limit: 10, ObservedAt: at.Add(2 * time.Second)})
+	if len(page.Items) != 1 {
+		t.Fatalf("items=%d", len(page.Items))
+	}
+	assertTPMTotals(t, page.Items[0].ScopeTotals.TPM, "0", "0", "0", "0", "0", "0", "1")
+	if page.Items[0].Interpretation.TPMState == nil || *page.Items[0].Interpretation.TPMState != ObservationBelow {
+		t.Fatalf("interpretation=%+v", page.Items[0].Interpretation)
+	}
+}
+
 func TestObservationMultiScopeLateSettlementAndRecovery(t *testing.T) {
 	t.Run("multi-scope", func(t *testing.T) {
 		fixture := newObservationFixture(t)
