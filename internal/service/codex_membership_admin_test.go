@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cpacloud.local/server/internal/egress"
 )
 
 func TestCodexMembershipAdminImportReplacementAndFeatureFlag(t *testing.T) {
@@ -374,6 +376,7 @@ func TestCodexMembershipLegacyUpstreamMigrationRollbackRetryAndReopen(t *testing
 	if err != nil {
 		t.Fatalf("retry migration: %v", err)
 	}
+	defer migrated.close()
 	assertMigratedLegacyData(t, migrated, secretStore)
 	assertMigratedLegacyRoute(t, migrated, secretStore)
 	if err := migrated.close(); err != nil {
@@ -643,6 +646,24 @@ func assertMigratedLegacyRoute(t *testing.T, migrated *store, secretStore *secre
 		cfg: Config{AllowLoopbackUpstream: true}, store: migrated, secrets: secretStore,
 		http: newUpstreamClient(true), codex: newProductionCodexExecutor(), logins: make(map[string]*loginAttempt),
 	}
+	// This migration-only fixture constructs App directly, so initialize the
+	// same egress and authorization coordinators that Open now requires. The
+	// old database and its legacy employee key still drive the real HTTP path.
+	app.outboundProxies = newOutboundProxyStore(migrated.db, secretStore, true)
+	if err := app.outboundProxies.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	app.proxyClients, err = egress.NewClientCache(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.proxyClients.Close()
+	app.accountPool, err = newAccountPoolRuntime(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.accountPool.Close()
 	server := httptest.NewServer(app.Handler())
 	defer server.Close()
 	response := employeeRequest(t, http.MethodPost, server.URL+"/v1/chat/completions",

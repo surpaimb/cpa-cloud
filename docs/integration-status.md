@@ -1,5 +1,16 @@
 # 集成状态
 
+## 2026-09-23：API Key 出站代理与持久握手检查
+
+- 首批按本仓[代理契约](outbound-proxy-contract.md)、[管理接口](outbound-proxy-admin-contract.md)和[握手契约](outbound-proxy-test-contract.md)独立实现。覆盖 HTTPS CONNECT、代理独立 AEAD 凭据、管理/连接 revision、绑定账号版本原子递增、管理员网页、四协议生成/目录/测试/恢复的共享出口。根任务负责最终派发屏障、Codex 变更锁兼容、取消记账及 App 生命周期；GPT-5.6 Sol 子任务分别负责组件与专项测试。
+- 两层 TLS 均验证，CONNECT 使用本地校验的目标字面地址，代理认证不进入模型头，不读取环境代理。绑定失效、停用、坏密文/证书都不自动直连；预检失败仅沿用原账号池一次安全换号，最终派发后不重放。目录每页重查同一版本；Codex 暂拒绝绑定，仍保留原刷新和请求行为。
+- `outbound_proxy_http_integration_test.go` 使用真实 App/HTTP handler 与进程内合成双层 TLS：四协议 JSON/SSE、count_tokens、三类分页目录/目录健康检查、实际恢复执行、凭据隔离、失效出口拒绝、在途停用仍用原连接。根独立执行相关 HTTP/最终派发/取消测试 PASS（7.276s），另独立运行实际刷新竞争与 Chat/Responses 刷新前派发回归 PASS（16.871s）。没有真实供应商凭据或调用。
+- 握手 `ce0089b`、修订 `340458b`/`5dcd7dc`，根接线 `888ea51`。持久操作最多四活动/每代理一项/一万历史，重复 UUID 不重复连接；只做 CONNECT/目标 TLS、零目标 HTTP。完成配置变化、提交响应丢失、固定结算、Close 等实际 worker、启动 interrupted 均有专项。根初版独立专项 PASS（10.793s），修订子任务全组 PASS（11.045s）；修订纳入下面全量回归。Gemini 生产握手目标再次固定官方 origin，不能靠数据库地址漂移调用其他主机。
+- 网页根独立执行 TypeScript、92 项测试和生产构建，均 PASS。子任务用真实隔离 Go 程序 + Playwright 验收创建响应丢失/同号恢复、PATCH/绑定核对、认证替换清除、停用保留绑定和主动解绑；握手 POST 响应丢失后只有一次提交/一次代理连接，查询原操作得到坏证书的固定 `internal_failure`，目标 HTTP 为零、页面异常为零，DOM/storage/logs 未见合成秘密。根已查看桌面、手机和握手结果截图：`C:/Users/apple/.codex/visualizations/2026/09/22/01a0c7c1-71ab-7842-b70a-4558fc3360c8/outbound-proxy-handshake/`。浏览器没有验证真实公网代理或成功证书；成功双 TLS 由 Go 子进程测试验证。
+- 根完整 `go test -p 1 ./...` 首轮只有旧 Codex 迁移夹具失败：它直接创建 App，缺少新出口/授权协调器，不是 Open 启动路径。补齐同样的初始化和失败路径清理，未放宽产品校验；原迁移/回滚/重开/旧 Key 真实 HTTP 测试独立 PASS（2.071s）。其他包及 service 其余测试在该轮通过；最终完整组合交给 Linux CI 复验，不能把这次带失败的首轮称为全量成功。最终全仓 vet 与 Go 编译 PASS。
+- 新 `scripts/smoke-outbound-proxy.mjs` 在根构建程序上实际 PASS：先用旧 `dist/recovery-smoke.exe` 创建不含代理表的数据库与员工 Key，升级后 Key/模型保留、创建幂等/冲突、CSRF/员工拒绝、加密落盘、绑定版本、停用不解绑、主动解绑及重启 pending→interrupted/原号查询零重连。另按 CI 无旧二进制模式实际 PASS。首轮合成夹具使用不可解析域名、随后非规范纳秒时间而被严格拒绝，已修成仅回环目标和规范时间；未修改验证规则。临时程序/数据均清理。
+- 轻量 CI 已加入 egress race 和上述进程 smoke；本机没有 C 编译器，不宣称 Windows race 通过，Linux 结果待本批实际运行。不新建 tag/安装包，preview.3 保持不变。HTTP/SOCKS、自动代理轮换、出口 IP、Codex 全生命周期出口仍待实现；治理在独立分支集成，不属于本批完成范围。
+
 ## 2026-09-23：默认关闭的账号生成恢复协调器
 
 - 本批按[协调器契约](account-recovery-coordinator-contract.md)独立实现，承接下面已验收的基础模块。员工实际失败快照 `a4ce167`、Codex 刷新保护 `f0c9b86`/`7cd485b` 与后台协调器由原 GPT-5.6 Sol 子任务负责；根任务集成 App/CLI、管理入口、维护结算、网页和进程验收。不是参考产品源码移植，不代表完整 Sub2API 能力已经对齐。

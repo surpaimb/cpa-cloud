@@ -1,6 +1,6 @@
 # 出站代理首批契约
 
-状态：下一批独立规格，尚未实现。对应功能矩阵 PROXY-01/SEC-02；不把本文件或管理页面存在当作代理已可用。
+状态：首批源码已实现，2026-09-23；独立验收与未完成边界见[集成状态](integration-status.md)。对应 PROXY-01/SEC-02，不包含 Codex、HTTP/SOCKS、轮换或出口 IP 探测。
 来源为本仓需求与公开标准，未使用参考产品源码作为实现模板。2026-09-23 核对的协议依据：
 [RFC 9110 CONNECT](https://www.rfc-editor.org/rfc/rfc9110.html#name-connect)、
 [Go 1.26.6 HTTP Transport](https://pkg.go.dev/net/http@go1.26.6#Transport)、
