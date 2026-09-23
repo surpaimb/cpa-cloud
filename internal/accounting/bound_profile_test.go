@@ -74,7 +74,7 @@ func TestProveBoundProfileEndpointAndRouteIdentity(t *testing.T) {
 		name   string
 		mutate func(*BoundProfileInput)
 	}{
-		{name: "compatible provider", mutate: func(input *BoundProfileInput) { input.Provider = ProviderOpenAICompatible }},
+		{name: "non service provider identity", mutate: func(input *BoundProfileInput) { input.Provider = ProviderOpenAI }},
 		{name: "responses protocol", mutate: func(input *BoundProfileInput) { input.Protocol = ProtocolOpenAIResponses }},
 		{name: "model alias", mutate: func(input *BoundProfileInput) { input.ActualModel = "gpt-4.1" }},
 		{name: "http", mutate: func(input *BoundProfileInput) { input.Endpoint = "http://api.openai.com/v1/chat/completions" }},
@@ -234,7 +234,7 @@ func validBoundProfileInput(payload []byte) BoundProfileInput {
 	return BoundProfileInput{
 		Payload:     payload,
 		Protocol:    ProtocolOpenAIChatCompletions,
-		Provider:    ProviderOpenAI,
+		Provider:    ProviderOpenAICompatible,
 		Endpoint:    "https://api.openai.com:443/v1/chat/completions",
 		ActualModel: boundProfileModel,
 	}

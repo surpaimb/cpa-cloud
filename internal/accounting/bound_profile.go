@@ -54,7 +54,7 @@ type BoundProfileProof struct {
 // Completions profile. The bound is a conditional engineering capacity bound,
 // not an unconditional provider billing guarantee.
 func ProveBoundProfile(input BoundProfileInput) (BoundProfileProof, error) {
-	if input.Provider != ProviderOpenAI || input.Protocol != ProtocolOpenAIChatCompletions ||
+	if input.Provider != ProviderOpenAICompatible || input.Protocol != ProtocolOpenAIChatCompletions ||
 		input.ActualModel != boundProfileModel || !isBoundProfileEndpoint(input.Endpoint) {
 		return BoundProfileProof{}, ErrBoundProfileUnsupported
 	}

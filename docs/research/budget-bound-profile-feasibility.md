@@ -53,6 +53,11 @@ reservation/settlement、生产派发冻结接线和专项故障测试。
 OutputMax:M}`。route/profile 不匹配只返回固定 unsupported；JSON、类型或 allowlist 不合法只返回固定 invalid。返回值和错误
 不含正文、字段值、正文 hash 或 Token 估算，解析不会修改输入 bytes，也不执行网络、重定向、schema 或账本写入。
 
+服务和账本把 API Key Chat route 持久化为 `ProviderOpenAICompatible`，即使 endpoint 是 OpenAI 官方地址；parser 因此要求
+这个实际 provider 值，再用精确 `https://api.openai.com[:443]/v1/chat/completions` endpoint 收窄 profile。这个枚举匹配
+不表示任意 `openai-compatible` URL、代理、Azure、区域域名或自建服务获得同一 proof；它们都因 endpoint 不匹配而固定
+unsupported。
+
 当前 parser 没有注册到 App 或任何员工 handler；根集成仍须从最终 prepared upstream request 的可重读 body 取字节，并把
 真实 target URL 和 route 身份交给 parser，在 proof 后阻止任何 payload/route 变更。本文所述 profile-aware GPT-4.1 usage
 归一化已由根集成分支的独立 accumulator 实现，通用 usage parser 口径不因本 parser 改变。合成测试验证严格 JSON、
