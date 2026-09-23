@@ -5,6 +5,31 @@ import { Button, Dialog, Field, FormError } from './ui'
 
 const POLL_INTERVAL_MS = 1_500
 const MAX_POLL_ATTEMPTS = 120
+const oauthStatuses = new Set(['pending', 'exchanging', 'succeeded', 'failed', 'cancelled', 'expired'])
+
+function validSessionID(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 512 && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value)
+}
+
+function validExpiry(value: unknown) {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value))
+}
+
+function validCreatedPayload(value: unknown): value is CodexOAuthSession {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<CodexOAuthSession>
+  return validSessionID(candidate.session_id) && validExpiry(candidate.expires_at) && typeof candidate.authorization_url === 'string'
+}
+
+function validStatusPayload(value: unknown, expectedSessionID: string): value is CodexOAuthSessionStatus {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<CodexOAuthSessionStatus>
+  return validSessionID(candidate.session_id)
+    && candidate.session_id === expectedSessionID
+    && validExpiry(candidate.expires_at)
+    && typeof candidate.status === 'string'
+    && oauthStatuses.has(candidate.status)
+}
 
 export function isSafeCodexAuthorizationURL(value: string) {
   try {
@@ -44,6 +69,12 @@ export function CodexOAuthAuthorization({ csrf, onClose, onUpstreamsChanged, onS
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const generation = useRef(0)
+  const terminal = status === 'failed' || status === 'cancelled' || status === 'expired'
+  const calloutTitle = status === 'succeeded' ? '授权凭据已保存'
+    : status === 'failed' ? '授权未完成'
+      : status === 'cancelled' ? '授权已取消'
+        : status === 'expired' ? '授权会话已过期'
+          : '等待 OpenAI 授权'
 
   useEffect(() => {
     if (!session) return
@@ -68,6 +99,16 @@ export function CodexOAuthAuthorization({ csrf, onClose, onUpstreamsChanged, onS
       try {
         const next = await api.codexOAuthSession(session.session_id, controller.signal)
         if (generation.current !== current) return
+        if (!validStatusPayload(next, session.session_id)) {
+          setStatus('failed')
+          setError('授权状态响应无效或会话不匹配。请重新开始授权。')
+          return
+        }
+        if (Date.now() >= Date.parse(next.expires_at)) {
+          setStatus('expired')
+          setError('授权会话已过期。请重新开始授权。')
+          return
+        }
         setStatus(next.status)
         setError(null)
         if (next.status === 'succeeded') {
@@ -120,6 +161,14 @@ export function CodexOAuthAuthorization({ csrf, onClose, onUpstreamsChanged, onS
       setError(null)
       try {
         const created = await api.createCodexOAuthSession({ name: name.trim(), operation_id: operationID }, csrf)
+        if (!validCreatedPayload(created)) {
+          setError('服务返回了无效的授权会话信息。请检查 OAuth 服务配置。')
+          return
+        }
+        if (Date.now() >= Date.parse(created.expires_at)) {
+          setError('服务返回的授权会话已过期。请重新创建授权会话。')
+          return
+        }
         if (!isSafeCodexAuthorizationURL(created.authorization_url)) {
           setError('服务返回了不安全的授权地址。请检查 OAuth 服务配置。')
           return
@@ -145,17 +194,19 @@ export function CodexOAuthAuthorization({ csrf, onClose, onUpstreamsChanged, onS
       <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button><Button type="submit" disabled={busy}>{busy ? '正在创建会话…' : '创建授权会话'}</Button></div>
     </form> : <div className="oauth-flow">
       <div className="oauth-callout">
-        <strong>{status === 'succeeded' ? '授权凭据已保存' : '等待 OpenAI 授权'}</strong>
+        <strong>{calloutTitle}</strong>
         {status === 'succeeded'
           ? <p>此连接尚未验证。首次真实请求成功后，凭据状态才会变为“已验证”。接下来可同步模型并手动选择要创建的路由。</p>
-          : <p>请点击下方按钮打开官方授权页。若浏览器阻止新窗口，请再次点击此链接。</p>}
+          : terminal
+            ? <p>此会话不会继续查询或复用。请重新开始授权，或关闭窗口后检查服务配置。</p>
+            : <p>请点击下方按钮打开官方授权页。若浏览器阻止新窗口，请再次点击此链接。</p>}
       </div>
-      {status !== 'succeeded' ? <a className="button button--primary oauth-open-link" href={session.authorization_url} target="_blank" rel="noopener noreferrer">打开 OpenAI 官方授权页</a> : null}
+      {status === 'pending' || status === 'exchanging' ? <a className="button button--primary oauth-open-link" href={session.authorization_url} target="_blank" rel="noopener noreferrer">打开 OpenAI 官方授权页</a> : null}
       {!pollPaused && (status === 'pending' || status === 'exchanging') ? <div className="oauth-progress" role="status"><span className="spinner" />{status === 'exchanging' ? '正在交换并保存授权凭据…' : '正在等待授权结果…'}</div> : null}
       <FormError error={error} />
       <div className="dialog__actions">
         {pollPaused ? <Button type="button" variant="secondary" onClick={() => { setPollPaused(false); setError(null); setSession({ ...session }) }}>继续查询</Button> : null}
-        {status === 'failed' || status === 'cancelled' || status === 'expired' ? <Button type="button" variant="secondary" onClick={restart}>重新开始</Button> : null}
+        {terminal ? <Button type="button" variant="secondary" onClick={restart}>重新开始</Button> : null}
         <Button type="button" variant="secondary" onClick={onClose}>关闭</Button>
         {status === 'succeeded' && createdUpstream ? <Button type="button" onClick={() => onSync(createdUpstream)}>同步模型</Button> : null}
       </div>

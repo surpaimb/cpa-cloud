@@ -86,6 +86,71 @@ describe('Codex OAuth authorization', () => {
     expect(document.body).not.toHaveTextContent('token=secret')
   })
 
+  it('hides the stale authorization link and shows accurate recovery actions after a terminal failure', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/upstreams/codex-oauth-sessions') && init?.method === 'POST') return json(session)
+      return json({ session_id: session.session_id, status: 'failed', expires_at: session.expires_at, error_code: 'codex_oauth_source_mismatch' })
+    }))
+    render(<CodexOAuthAuthorization csrf="csrf" onClose={() => undefined} onUpstreamsChanged={async () => undefined} onSync={() => undefined} />)
+    await userEvent.click(screen.getByRole('button', { name: '创建授权会话' }))
+
+    expect(await screen.findByText('授权未完成')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('授权来源与当前服务不匹配')
+    expect(screen.queryByRole('link', { name: '打开 OpenAI 官方授权页' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新开始' })).toBeEnabled()
+    expect(screen.getAllByRole('button', { name: '关闭' })).toHaveLength(2)
+  })
+
+  it.each([
+    ['cancelled', '授权已取消'],
+    ['expired', '授权会话已过期'],
+  ] as const)('renders the %s terminal state without the old authorization link', async (terminalStatus, title) => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/upstreams/codex-oauth-sessions') && init?.method === 'POST') return json(session)
+      return json({ session_id: session.session_id, status: terminalStatus, expires_at: session.expires_at })
+    }))
+    render(<CodexOAuthAuthorization csrf="csrf" onClose={() => undefined} onUpstreamsChanged={async () => undefined} onSync={() => undefined} />)
+    await userEvent.click(screen.getByRole('button', { name: '创建授权会话' }))
+
+    expect(await screen.findByText(title, { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '打开 OpenAI 官方授权页' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新开始' })).toBeEnabled()
+  })
+
+  it.each([
+    [{ ...session, session_id: '' }, '无效的授权会话信息'],
+    [{ ...session, expires_at: 'not-a-date' }, '无效的授权会话信息'],
+    [{ ...session, expires_at: '2020-01-01T00:00:00Z' }, '授权会话已过期'],
+  ])('rejects an invalid creation payload without starting a poll', async (payload, expected) => {
+    const fetchMock = vi.fn(() => json(payload))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<CodexOAuthAuthorization csrf="csrf" onClose={() => undefined} onUpstreamsChanged={async () => undefined} onSync={() => undefined} />)
+    await userEvent.click(screen.getByRole('button', { name: '创建授权会话' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(expected)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('link', { name: '打开 OpenAI 官方授权页' })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    [{ status: 'pending', expires_at: session.expires_at }],
+    [{ session_id: 'different-session', status: 'pending', expires_at: session.expires_at }],
+    [null],
+  ])('stops polling when the status payload is invalid or has a mismatched session ID', async (statusPayload) => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/upstreams/codex-oauth-sessions') && init?.method === 'POST') return json(session)
+      return json(statusPayload)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<CodexOAuthAuthorization csrf="csrf" onClose={() => undefined} onUpstreamsChanged={async () => undefined} onSync={() => undefined} />)
+    await userEvent.click(screen.getByRole('button', { name: '创建授权会话' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('授权状态响应无效或会话不匹配')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole('link', { name: '打开 OpenAI 官方授权页' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新开始' })).toBeEnabled()
+  })
+
   it('ignores a late poll response after the dialog is closed', async () => {
     let resolvePoll!: (response: Response) => void
     const pendingPoll = new Promise<Response>((resolve) => { resolvePoll = resolve })
