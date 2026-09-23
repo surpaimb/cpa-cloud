@@ -1,17 +1,21 @@
 # 集成状态
 
-## 2026-09-23：员工请求治理源码集成（验收进行中）
+## 2026-09-23：员工请求治理源码集成（本机验收完成，Linux CI 待复验）
 
 - 原 GPT-5.6 Sol 任务交付独立治理核心、management `4066d18`、网页 `6650528`/`f9d4063` 及运行时修正 `5be1506`。根集成 App、四协议准入、用量四表原子终结和启动恢复。总开关持久默认关闭；硬限制只有 employee/key/group 的 RPM 与并发。TPM/成本目前只有配置和历史准入快照，没有观测统计或预算拒绝；不能把整项 LIMIT-01 标为完成。
 - 根审查补组 revision/全量成员同事务读取、更新策略同事务重验多态 scope，避免并发读出混合版本或修改悬空策略。两项新专项 PASS（3.032s）。管理操作的主体配置、全局 UUID 回执与无正文审计同事务提交；慢请求正文和慢响应不持有 admission 锁。根最终管理/续租/取消/元数据组合测试非缓存 PASS（19.958s）。
 - 终结声明早于冻结首个账本快照，续租在锁外停止并等待；续租失败、Close 或客户取消先赢时，不提交成功，也不让失败的 success 尝试阻止 cancelled 清理。终结先赢后按冻结时间/status 有界重试；四表任一失败全部回滚，租约不提前释放。错误 X-CPA-Session 在四协议治理前拒绝，零 RPM/请求/attempt/网络。
 - 根构建真实 Go 程序并运行 `scripts/smoke-governance.mjs` 两种模式均 PASS：旧 `egress-final-test.exe` 创建没有治理表的库后升级，以及 CI 新库模式。验证原员工 Key 保留、默认关闭/开启、RPM/并发拒绝零派发、幂等/原回执/旧 revision 冲突、员工/Key/组策略、成本大整数字符串、shadow 不阻断、取消/释放、关闭后重启、撤销和数据库/日志秘密隔离。仅回环模拟上游，临时程序/数据均清理。
-- 网页根独立 TypeScript、100 项测试和生产构建 PASS。子任务 `scripts/smoke-governance-ui.cjs` 在真实 Go 临时实例通过：已提交后丢响应只发一次组 POST；发送前失败的 Key 策略原回执 404 保持未知、同 UUID/内容重试；三个 scope、大整数成本、真实 r1→r2 冲突确认后 r3、最终关闭、0 页面异常。根已查看桌面与移动截图：`C:/Users/apple/.codex/visualizations/2026/09/22/01a0c7c1-71ab-7842-b70a-4558fc3360c8/governance-ui/`。完整四协议 HTTP 交叉验收、全量 Go 与 Linux race 仍待下方追加实际结果。
+- 网页根独立 TypeScript、100 项测试和生产构建 PASS。子任务 `scripts/smoke-governance-ui.cjs` 在真实 Go 临时实例通过：已提交后丢响应只发一次组 POST；发送前失败的 Key 策略原回执 404 保持未知、同 UUID/内容重试；三个 scope、大整数成本、真实 r1→r2 冲突确认后 r3、最终关闭、0 页面异常。根已查看桌面与移动截图：`C:/Users/apple/.codex/visualizations/2026/09/22/01a0c7c1-71ab-7842-b70a-4558fc3360c8/governance-ui/`。完整四协议 HTTP 交叉验收与全量 Go 结果见下文；本批治理 Linux race 待实际 CI，不能复用不含治理代码的上一批结果。
 
-### 出站代理 CI 修复进展
+根完整非缓存 `go test -p 1 ./... -count=1 -timeout=10m` 及全仓 `go vet -p 1 ./...` 已通过：service 412.398s、accounting 18.905s、egress 0.820s、governance 8.309s、membership 0.385s、scheduling 0.139s。该轮包含运行时 `43326a5`；稍后新增的四协议/Codex 交叉测试另列专项结果。121 个相对文档链接、6 项 CI 路径测试通过，中英文 PowerShell 命令与 `14be3c6` 完全一致。本机没有 CGO 工具链，Linux race 仍以真实 CI 结果为准。
+
+- 四协议 HTTP 测试 `0db1a51` 与 Codex 专项 `d538db4` 已由根任务审查合入，根独立非缓存运行 `TestGovernance(HTTP|Codex)` PASS（19.921s），service vet PASS。覆盖 JSON/SSE 成功、employee/key/group 共享 RPM/并发、429 零派发、失败事件、取消传递与四表 cancelled、撤销、count_tokens 不占用，以及终结故障四表原子回滚后按同一冻结快照结算。Codex 首个 Chat 请求实际执行合成 Token 刷新 revision 1→2；四条 Chat/Responses JSON/SSE 请求共享计数，刷新后没有多建治理父请求，第五条 429 无执行器、刷新或 attempt 增量。
+
+### 出站代理 CI 修复结果
 
 - `460b133` 的 [CI 35870865294](https://github.com/surpaimb/cpa-cloud/actions/runs/35870865294) 中网页通过、普通 Linux service 111.765s 通过，egress 在测试代理隧道清理超时。原因是测试夹具仅关闭客户端侧，反向 copy 仍等待持久上游连接；生产 transport 没有同类双连接 relay。
-- `14be3c6` 仅修测试夹具：任一 copy 结束都关闭两端并等待另一方向，补双端关闭回归。子任务原场景及新用例连续 100 次通过、整个 egress 测试/vet 通过；根整个 egress 非缓存 5 次 PASS（1.637s）。已推 main，跟踪 [CI 35872618889](https://github.com/surpaimb/cpa-cloud/actions/runs/35872618889)，普通全 Go 步骤已成功，Linux race 正在运行。没有提高超时、跳过测试或触发安装打包。
+- `14be3c6` 仅修测试夹具：任一 copy 结束都关闭两端并等待另一方向，补双端关闭回归。子任务原场景及新用例连续 100 次通过、整个 egress 测试/vet 通过；根整个 egress 非缓存 5 次 PASS（1.637s）。已推 main，[CI 35872618889](https://github.com/surpaimb/cpa-cloud/actions/runs/35872618889) 全部成功。根读取实际 core job 日志：普通 service 112.795s；完整 race service 1089.602s、membership 1.856s、scheduling 1.089s、accounting 56.440s、egress 1.354s 全部通过，随后 vet、编译及代理存储、目录健康、恢复基础、自动恢复四组进程 smoke 全部 PASS。web 和三个安装 job skipped。该轮不含治理，治理仍需新 CI；没有提高超时、跳过测试或触发安装打包。
 
 ## 2026-09-23：API Key 出站代理与持久握手检查
 
