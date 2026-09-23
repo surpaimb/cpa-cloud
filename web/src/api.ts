@@ -70,6 +70,45 @@ export type Upstream = {
     state: 'ready' | 'refreshing' | 'paused' | 'reauth_required' | 'unavailable'
     reason_code?: string
   }
+  latest_observation?: UpstreamObservation | null
+  cooldown?: UpstreamCooldown | null
+}
+export type UpstreamHealthScope = 'local_credential' | 'catalog'
+export type UpstreamObservation = {
+  operation_id: string
+  scope: UpstreamHealthScope
+  result_code: string
+  account_revision: number
+  checked_at: string
+  latency_ms: number | null
+}
+export type UpstreamCooldown = {
+  event_id: string
+  failure_class: string
+  cooldown_until: string
+  updated_at: string
+  active: boolean
+}
+export type UpstreamTestOperation = {
+  operation_id: string
+  upstream_id: string
+  provider_kind: Upstream['provider_kind']
+  requested_revision: number
+  tested_revision: number | null
+  scope: UpstreamHealthScope
+  state: 'pending' | 'in_progress' | 'completed'
+  result_code: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  latency_ms: number | null
+}
+export type UpstreamsResponse = { items: Upstream[]; server_time?: string }
+export type CooldownClearResult = {
+  result: 'cleared' | 'already_clear'
+  upstream_id: string
+  revision: number
+  server_time: string
 }
 export type CodexOAuthSession = {
   session_id: string
@@ -259,7 +298,7 @@ export const api = {
     }, csrf),
   revokeKey: (keyId: string, csrf: string) =>
     request<{ ok: true }>(`/keys/${encodeURIComponent(keyId)}/revoke`, { method: 'POST', body: '{}' }, csrf),
-  upstreams: (signal?: AbortSignal) => request<{ items: Upstream[] }>('/upstreams', { signal }),
+  upstreams: (signal?: AbortSignal) => request<UpstreamsResponse>('/upstreams', { signal }),
   createUpstream: (body: Record<string, unknown>, csrf: string) =>
     request<Upstream>('/upstreams', { method: 'POST', body: JSON.stringify(body) }, csrf),
   batchImportUpstreams: (body: { operation_id: string; items: UpstreamBatchItem[] }, csrf: string) =>
@@ -278,6 +317,12 @@ export const api = {
     request<Upstream>(`/upstreams/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
   discoverUpstreamModels: (id: string, csrf: string) =>
     request<{ items: DiscoveredModel[] }>(`/upstreams/${encodeURIComponent(id)}/discover-models`, { method: 'POST' }, csrf),
+  startUpstreamTest: (id: string, body: { operation_id: string; expected_revision: number; scope: UpstreamHealthScope }, csrf: string, signal?: AbortSignal) =>
+    request<UpstreamTestOperation>(`/upstreams/${encodeURIComponent(id)}/tests`, { method: 'POST', body: JSON.stringify(body), signal }, csrf),
+  upstreamTest: (id: string, operationId: string, signal?: AbortSignal) =>
+    request<UpstreamTestOperation>(`/upstreams/${encodeURIComponent(id)}/tests/${encodeURIComponent(operationId)}`, { signal }),
+  clearUpstreamCooldown: (id: string, body: { expected_revision: number; expected_cooldown_event_id: string }, csrf: string, signal?: AbortSignal) =>
+    request<CooldownClearResult>(`/upstreams/${encodeURIComponent(id)}/cooldown/clear`, { method: 'POST', body: JSON.stringify(body), signal }, csrf),
   models: () => request<{ items: ModelRoute[] }>('/models'),
   createModel: (body: Record<string, unknown>, csrf: string) =>
     request<ModelRoute>('/models', { method: 'POST', body: JSON.stringify(body) }, csrf),

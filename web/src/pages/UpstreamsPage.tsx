@@ -4,6 +4,7 @@ import { CodexOAuthAuthorization } from '../CodexOAuth'
 import { membershipMessageFor, messageFor, refreshMessageFor, useResource } from '../hooks'
 import { ModelDiscovery } from '../ModelDiscovery'
 import { UpstreamBatchImport } from '../UpstreamBatchImport'
+import { UpstreamHealth } from '../UpstreamHealth'
 import { presetForEndpoint, providerPreset, providerPresets, type ProviderChoice, type ProviderPresetId } from '../providerPresets'
 import { Button, Dialog, EmptyState, Field, FormError, Icon, PageState } from '../ui'
 import { PageHeader } from './EmployeesPage'
@@ -32,7 +33,7 @@ export function UpstreamsPage({ csrf }: { csrf: string }) {
     <MembershipFeaturePanel importEnabled={membershipEnabled} oauthEnabled={oauthEnabled} autoRefreshEnabled={autoRefreshEnabled} loading={statusLoading} error={statusError} onRetry={() => void reloadStatus()} onImport={() => setImporting(true)} onOAuth={() => setAuthorizing(true)} />
     <div className="content-panel"><PageState loading={loading} error={error} onRetry={() => void reload()} />
       {!loading && !error && data?.items.length === 0 ? <EmptyState title="还没有上游连接" body="添加 API Key 上游或授权 Codex 会员，再配置模型路由。" action={<Button onClick={() => setCreating(true)}>添加上游</Button>} /> : null}
-      {data?.items.length ? <div className="table-scroll"><table className="upstreams-table"><thead><tr><th>名称</th><th>提供商</th><th>端点</th><th>凭据</th><th>状态</th><th>操作</th></tr></thead><tbody>{data.items.map((item) => <UpstreamRow key={item.id} item={item} csrf={csrf} membershipEnabled={membershipEnabled} autoRefreshEnabled={autoRefreshEnabled} onSync={() => setSyncing(item)} onReimport={() => setReimporting(item)} onDone={() => void reload()} />)}</tbody></table></div> : null}
+      {data?.items.length ? <div className="table-scroll"><table className="upstreams-table"><thead><tr><th>名称</th><th>提供商</th><th>端点</th><th>凭据</th><th>状态</th><th>测试与冷却</th><th>操作</th></tr></thead><tbody>{data.items.map((item) => <UpstreamRow key={item.id} item={item} csrf={csrf} serverTime={data.server_time} membershipEnabled={membershipEnabled} autoRefreshEnabled={autoRefreshEnabled} onSync={() => setSyncing(item)} onReimport={() => setReimporting(item)} onDone={reload} />)}</tbody></table></div> : null}
     </div>
     {creating ? <CreateUpstream csrf={csrf} onClose={() => setCreating(false)} onSaved={() => void reload()} /> : null}
     {batchImporting ? <UpstreamBatchImport csrf={csrf} membershipEnabled={membershipEnabled} onClose={() => setBatchImporting(false)} onImported={reload} /> : null}
@@ -79,7 +80,7 @@ function refreshStateCopy(item: Upstream, autoRefreshEnabled: boolean) {
   return { label: 'OAuth 刷新不可用', detail: '此凭据不支持 OAuth 刷新；可重新授权或重新导入。', canRefresh: false }
 }
 
-function UpstreamRow({ item, csrf, membershipEnabled, autoRefreshEnabled, onSync, onReimport, onDone }: { item: Upstream; csrf: string; membershipEnabled: boolean; autoRefreshEnabled: boolean; onSync: () => void; onReimport: () => void; onDone: () => void }) {
+function UpstreamRow({ item, csrf, serverTime, membershipEnabled, autoRefreshEnabled, onSync, onReimport, onDone }: { item: Upstream; csrf: string; serverTime?: string; membershipEnabled: boolean; autoRefreshEnabled: boolean; onSync: () => void; onReimport: () => void; onDone: () => Promise<void> }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [refreshBlocked, setRefreshBlocked] = useState(false)
@@ -88,7 +89,7 @@ function UpstreamRow({ item, csrf, membershipEnabled, autoRefreshEnabled, onSync
   const gemini = item.provider_kind === 'gemini-api-key'
   const credential = item.credential_state ? credentialStateCopy[item.credential_state] : null
   const refresh = membership ? refreshStateCopy(item, autoRefreshEnabled) : null
-  return <tr><td><strong>{item.name}</strong></td><td>{membership ? 'Codex 会员' : anthropic ? 'Anthropic API' : gemini ? 'Gemini 原生 API' : 'OpenAI 兼容 API'}</td><td>{membership ? <span className="muted-copy">服务端固定</span> : <code className="endpoint">{item.endpoint}</code>}</td><td>{membership && credential ? <div className="credential-stack"><span className={`status status--${credential.tone}`}><i />{credential.label}</span>{refresh ? <><small>{refresh.label}</small><small>{refresh.detail}</small></> : null}</div> : <span className="muted-copy">API Key</span>}</td><td><span className={`status status--${item.enabled ? 'active' : 'disabled'}`}><i />{item.enabled ? '启用' : '已停用'}</span></td><td><div className="row-actions">{membership ? <><button className="link-button" disabled={busy} onClick={onSync}>同步模型</button>{refresh?.canRefresh ? <button className="link-button" disabled={busy || refreshBlocked} onClick={async () => {
+  return <tr><td><strong>{item.name}</strong></td><td>{membership ? 'Codex 会员' : anthropic ? 'Anthropic API' : gemini ? 'Gemini 原生 API' : 'OpenAI 兼容 API'}</td><td>{membership ? <span className="muted-copy">服务端固定</span> : <code className="endpoint">{item.endpoint}</code>}</td><td>{membership && credential ? <div className="credential-stack"><span className={`status status--${credential.tone}`}><i />{credential.label}</span>{refresh ? <><small>{refresh.label}</small><small>{refresh.detail}</small></> : null}</div> : <span className="muted-copy">API Key</span>}</td><td><span className={`status status--${item.enabled ? 'active' : 'disabled'}`}><i />{item.enabled ? '启用' : '已停用'}</span></td><td className="upstream-health-cell"><UpstreamHealth item={item} csrf={csrf} serverTime={serverTime} onReload={onDone} /></td><td><div className="row-actions">{membership ? <><button className="link-button" disabled={busy} onClick={onSync}>同步模型</button>{refresh?.canRefresh ? <button className="link-button" disabled={busy || refreshBlocked} onClick={async () => {
     setBusy(true); setError(null)
     try { await api.refreshCodexMembership(item.id, { expected_revision: item.revision }, csrf); onDone(); setBusy(false) }
     catch (caught) {
