@@ -53,3 +53,9 @@ version、三位大写币种和价格目录允许范围内的四项非负费率�
 专项测试覆盖 caller sibling 回滚、提交前隔离、成功提交、终结后精确重放与冲突、nil/无效输入、context 取消、commit
 失败后重试，以及以 `math/big` 独立 oracle 验证四桶、向上取整、零费率、`MaxInt64` 边界和溢出拒绝。该验证只证明上述
 事务与算术基础，不证明普通模型请求已有可信 Token 上界或预算执行。
+
+2026-09-23 根任务在 `codex/budget-integration` 独立复核：accounting 全包非缓存测试 PASS（15.844s）；
+service 的 Accounting/Usage/Ledger、治理 HTTP 四协议和 Codex 交叉测试 PASS（67.637s）；两包 vet、实际 Go 编译及
+`scripts/smoke-governance-observations.mjs` 真进程模拟上游验收 PASS。代码为 `bfeddcf` 的独立 cherry-pick。
+验证包含派发时冻结价格、事务故障、取消、未知用量、重启和员工权限；所有数据为合成测试数据，不调用真实供应商。
+本批尚未推送 Linux CI，不借用观测主线 `60ea6f6` 的 CI 结果，也没有发布安装包。
