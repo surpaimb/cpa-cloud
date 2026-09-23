@@ -107,6 +107,7 @@ type ObservationTPMTotals struct {
 	KnownAttempts                 string
 	UnknownTokenAttempts          string
 	PendingAttempts               string
+	PendingRequests               string
 	PendingRequestsWithoutAttempt string
 	ZeroAttemptRequests           string
 }
@@ -115,6 +116,7 @@ type ObservationCostTotals struct {
 	KnownAttempts                 string
 	UnknownCostAttempts           string
 	PendingAttempts               string
+	PendingRequests               string
 	PendingRequestsWithoutAttempt string
 	ZeroAttemptRequests           string
 	ByCurrency                    []ObservationCurrencyTotal
@@ -175,6 +177,7 @@ type observationCounts struct {
 	knownAttempts                 int64
 	unknownAttempts               int64
 	pendingAttempts               int64
+	pendingRequests               int64
 	pendingRequestsWithoutAttempt int64
 	zeroAttemptRequests           int64
 }
@@ -481,17 +484,28 @@ func validObservationRelation(requestID, employeeID, keyID, modelID string, stat
 }
 
 func finishObservationRequest(totals *observationTotals, status accounting.Status, hasAttempt, inTPM bool) error {
-	if hasAttempt {
-		return nil
-	}
 	pending := status == accounting.StatusPending
 	if pending {
+		if err := checkedIncrement(&totals.cost.pendingRequests); err != nil {
+			return err
+		}
+		if inTPM {
+			if err := checkedIncrement(&totals.tpm.pendingRequests); err != nil {
+				return err
+			}
+		}
+		if hasAttempt {
+			return nil
+		}
 		if err := checkedIncrement(&totals.cost.pendingRequestsWithoutAttempt); err != nil {
 			return err
 		}
 		if inTPM {
 			return checkedIncrement(&totals.tpm.pendingRequestsWithoutAttempt)
 		}
+		return nil
+	}
+	if hasAttempt {
 		return nil
 	}
 	if err := checkedIncrement(&totals.cost.zeroAttemptRequests); err != nil {
@@ -569,12 +583,14 @@ func makeObservationItem(snapshot observationSnapshot, totals observationTotals)
 			TPM: ObservationTPMTotals{
 				KnownTokens: canonicalInt(totals.tokens), KnownAttempts: canonicalInt(totals.tpm.knownAttempts),
 				UnknownTokenAttempts: canonicalInt(totals.tpm.unknownAttempts), PendingAttempts: canonicalInt(totals.tpm.pendingAttempts),
+				PendingRequests:               canonicalInt(totals.tpm.pendingRequests),
 				PendingRequestsWithoutAttempt: canonicalInt(totals.tpm.pendingRequestsWithoutAttempt), ZeroAttemptRequests: canonicalInt(totals.tpm.zeroAttemptRequests),
 			},
 			Cost: ObservationCostTotals{
 				KnownAttempts: canonicalInt(totals.cost.knownAttempts), UnknownCostAttempts: canonicalInt(totals.cost.unknownAttempts),
-				PendingAttempts: canonicalInt(totals.cost.pendingAttempts), PendingRequestsWithoutAttempt: canonicalInt(totals.cost.pendingRequestsWithoutAttempt),
-				ZeroAttemptRequests: canonicalInt(totals.cost.zeroAttemptRequests), ByCurrency: make([]ObservationCurrencyTotal, 0, len(totals.currencies)),
+				PendingAttempts: canonicalInt(totals.cost.pendingAttempts), PendingRequests: canonicalInt(totals.cost.pendingRequests),
+				PendingRequestsWithoutAttempt: canonicalInt(totals.cost.pendingRequestsWithoutAttempt),
+				ZeroAttemptRequests:           canonicalInt(totals.cost.zeroAttemptRequests), ByCurrency: make([]ObservationCurrencyTotal, 0, len(totals.currencies)),
 			},
 		},
 	}
@@ -586,7 +602,7 @@ func makeObservationItem(snapshot observationSnapshot, totals observationTotals)
 	}
 	if snapshot.shadowTPM != nil {
 		state := observationState(totals.tokens, *snapshot.shadowTPM,
-			totals.tpm.unknownAttempts, totals.tpm.pendingAttempts, totals.tpm.pendingRequestsWithoutAttempt)
+			totals.tpm.unknownAttempts, totals.tpm.pendingAttempts, totals.tpm.pendingRequests)
 		item.Interpretation.TPMState = &state
 	}
 	if snapshot.shadowCostMicro != nil {
@@ -602,7 +618,7 @@ func makeObservationItem(snapshot observationSnapshot, totals observationTotals)
 			}
 		}
 		state := observationState(configured.cost, *snapshot.shadowCostMicro, totals.cost.unknownAttempts,
-			totals.cost.pendingAttempts, totals.cost.pendingRequestsWithoutAttempt, incomparable)
+			totals.cost.pendingAttempts, totals.cost.pendingRequests, incomparable)
 		item.Interpretation.CostState = &state
 		formatted := canonicalInt(incomparable)
 		item.Interpretation.IncomparableCurrencyAttempts = &formatted

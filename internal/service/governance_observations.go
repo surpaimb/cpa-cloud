@@ -251,6 +251,7 @@ type governanceObservationTPMView struct {
 	KnownAttempts                 string `json:"known_attempts"`
 	UnknownTokenAttempts          string `json:"unknown_token_attempts"`
 	PendingAttempts               string `json:"pending_attempts"`
+	PendingRequests               string `json:"pending_requests"`
 	PendingRequestsWithoutAttempt string `json:"pending_requests_without_attempt"`
 	ZeroAttemptRequests           string `json:"zero_attempt_requests"`
 }
@@ -259,6 +260,7 @@ type governanceObservationCostView struct {
 	KnownAttempts                 string                                   `json:"known_attempts"`
 	UnknownCostAttempts           string                                   `json:"unknown_cost_attempts"`
 	PendingAttempts               string                                   `json:"pending_attempts"`
+	PendingRequests               string                                   `json:"pending_requests"`
 	PendingRequestsWithoutAttempt string                                   `json:"pending_requests_without_attempt"`
 	ZeroAttemptRequests           string                                   `json:"zero_attempt_requests"`
 	ByCurrency                    []governanceObservationCurrencyTotalView `json:"by_currency"`
@@ -295,11 +297,13 @@ func (h *governanceObservationHTTP) pageView(page governance.ObservationPage) (g
 			ScopeTotals: governanceObservationScopeTotalsView{
 				TPM: governanceObservationTPMView{
 					item.ScopeTotals.TPM.KnownTokens, item.ScopeTotals.TPM.KnownAttempts, item.ScopeTotals.TPM.UnknownTokenAttempts,
-					item.ScopeTotals.TPM.PendingAttempts, item.ScopeTotals.TPM.PendingRequestsWithoutAttempt, item.ScopeTotals.TPM.ZeroAttemptRequests,
+					item.ScopeTotals.TPM.PendingAttempts, item.ScopeTotals.TPM.PendingRequests,
+					item.ScopeTotals.TPM.PendingRequestsWithoutAttempt, item.ScopeTotals.TPM.ZeroAttemptRequests,
 				},
 				Cost: governanceObservationCostView{
 					item.ScopeTotals.Cost.KnownAttempts, item.ScopeTotals.Cost.UnknownCostAttempts, item.ScopeTotals.Cost.PendingAttempts,
-					item.ScopeTotals.Cost.PendingRequestsWithoutAttempt, item.ScopeTotals.Cost.ZeroAttemptRequests, currencies,
+					item.ScopeTotals.Cost.PendingRequests, item.ScopeTotals.Cost.PendingRequestsWithoutAttempt,
+					item.ScopeTotals.Cost.ZeroAttemptRequests, currencies,
 				},
 			},
 			Interpretation: governanceObservationInterpretationView{

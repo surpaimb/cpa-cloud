@@ -51,8 +51,8 @@ func TestGovernanceObservationHTTPQueryCursorAndResponse(t *testing.T) {
 					GroupRevision: &groupRevision, ShadowTPM: &shadowTPM, ShadowCostMicro: &shadowCost, ShadowCurrency: "USD", ShadowWindow: governance.ShadowWindowRolling24h,
 				},
 				ScopeTotals: governance.ObservationScopeTotals{
-					TPM: governance.ObservationTPMTotals{KnownTokens: "93000", KnownAttempts: "12", UnknownTokenAttempts: "1", PendingAttempts: "0", PendingRequestsWithoutAttempt: "0", ZeroAttemptRequests: "2"},
-					Cost: governance.ObservationCostTotals{KnownAttempts: "12", UnknownCostAttempts: "1", PendingAttempts: "0", PendingRequestsWithoutAttempt: "0", ZeroAttemptRequests: "2", ByCurrency: []governance.ObservationCurrencyTotal{
+					TPM: governance.ObservationTPMTotals{KnownTokens: "93000", KnownAttempts: "12", UnknownTokenAttempts: "1", PendingAttempts: "0", PendingRequests: "2", PendingRequestsWithoutAttempt: "0", ZeroAttemptRequests: "2"},
+					Cost: governance.ObservationCostTotals{KnownAttempts: "12", UnknownCostAttempts: "1", PendingAttempts: "0", PendingRequests: "2", PendingRequestsWithoutAttempt: "0", ZeroAttemptRequests: "2", ByCurrency: []governance.ObservationCurrencyTotal{
 						{Currency: "EUR", KnownCostMicro: "700000", Attempts: "2"}, {Currency: "USD", KnownCostMicro: "3100000", Attempts: "10"},
 					}},
 				},
@@ -60,8 +60,8 @@ func TestGovernanceObservationHTTPQueryCursorAndResponse(t *testing.T) {
 			}, {
 				Snapshot: governance.ObservationSnapshot{SettingsRevision: "5", ScopeKind: governance.ScopeEmployee, ScopeID: "employee-id", PolicyID: "hard-only", PolicyRevision: "1"},
 				ScopeTotals: governance.ObservationScopeTotals{
-					TPM:  governance.ObservationTPMTotals{KnownTokens: "0", KnownAttempts: "0", UnknownTokenAttempts: "0", PendingAttempts: "0", PendingRequestsWithoutAttempt: "0", ZeroAttemptRequests: "0"},
-					Cost: governance.ObservationCostTotals{KnownAttempts: "0", UnknownCostAttempts: "0", PendingAttempts: "0", PendingRequestsWithoutAttempt: "0", ZeroAttemptRequests: "0"},
+					TPM:  governance.ObservationTPMTotals{KnownTokens: "0", KnownAttempts: "0", UnknownTokenAttempts: "0", PendingAttempts: "0", PendingRequests: "0", PendingRequestsWithoutAttempt: "0", ZeroAttemptRequests: "0"},
+					Cost: governance.ObservationCostTotals{KnownAttempts: "0", UnknownCostAttempts: "0", PendingAttempts: "0", PendingRequests: "0", PendingRequestsWithoutAttempt: "0", ZeroAttemptRequests: "0"},
 				},
 			}},
 			NextCursor: coreCursor,
@@ -92,10 +92,12 @@ func TestGovernanceObservationHTTPQueryCursorAndResponse(t *testing.T) {
 			} `json:"snapshot"`
 			ScopeTotals struct {
 				TPM struct {
-					KnownTokens string `json:"known_tokens"`
+					KnownTokens     string `json:"known_tokens"`
+					PendingRequests string `json:"pending_requests"`
 				} `json:"tpm"`
 				Cost struct {
-					ByCurrency []governanceObservationCurrencyTotalView `json:"by_currency"`
+					PendingRequests string                                   `json:"pending_requests"`
+					ByCurrency      []governanceObservationCurrencyTotalView `json:"by_currency"`
 				} `json:"cost"`
 			} `json:"scope_totals"`
 			Interpretation governanceObservationInterpretationView `json:"interpretation"`
@@ -107,6 +109,7 @@ func TestGovernanceObservationHTTPQueryCursorAndResponse(t *testing.T) {
 	}
 	if len(body.Items) != 2 || body.Items[0].Snapshot.SettingsRevision != "4" || body.Items[0].Snapshot.GroupRevision == nil || *body.Items[0].Snapshot.GroupRevision != "3" ||
 		body.Items[0].Snapshot.ShadowTPM == nil || *body.Items[0].Snapshot.ShadowTPM != "120000" || body.Items[0].ScopeTotals.TPM.KnownTokens != "93000" ||
+		body.Items[0].ScopeTotals.TPM.PendingRequests != "2" || body.Items[0].ScopeTotals.Cost.PendingRequests != "2" ||
 		len(body.Items[0].ScopeTotals.Cost.ByCurrency) != 2 || body.Items[0].Interpretation.CostState == nil || *body.Items[0].Interpretation.CostState != governance.ObservationExceeded ||
 		body.NextCursor == nil || *body.NextCursor == coreCursor || len(*body.NextCursor) > governanceObservationCursorLimit {
 		t.Fatalf("response=%s", first.Body.String())
