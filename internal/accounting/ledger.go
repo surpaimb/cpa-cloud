@@ -91,6 +91,15 @@ type UpperUsage struct {
 	CacheWriteTokens int64
 }
 
+// MutuallyExclusiveInputUpperUsage contains bounds for a profile whose caller
+// has proved that ordinary input, cache-read input, and cache-write input are
+// mutually exclusive accounting categories. InputMax bounds whichever one of
+// those categories is reported; OutputMax independently bounds output.
+type MutuallyExclusiveInputUpperUsage struct {
+	InputMax  int64
+	OutputMax int64
+}
+
 type AttemptFinish struct {
 	ID         string
 	Status     Status
@@ -1023,6 +1032,42 @@ func CalculateUpperCost(usage UpperUsage, price PriceSnapshot) (int64, error) {
 		price.CacheReadPerMillionMicro,
 		price.CacheWritePerMillionMicro,
 	})
+}
+
+// CalculateMutuallyExclusiveInputUpperBound returns token and cost bounds for
+// a caller-proved mutually exclusive input group. It validates and reads the
+// original immutable price snapshot without modifying its identity or rates.
+// It performs arithmetic only and does not create or verify a bound proof.
+func CalculateMutuallyExclusiveInputUpperBound(usage MutuallyExclusiveInputUpperUsage, price PriceSnapshot) (int64, int64, error) {
+	if usage.InputMax < 0 || usage.OutputMax < 0 || !validUpperPrice(price) {
+		return 0, 0, ErrInvalid
+	}
+	tokenUpper, err := checkedNonnegativeAdd(usage.InputMax, usage.OutputMax)
+	if err != nil {
+		return 0, 0, err
+	}
+	inputRate := price.InputPerMillionMicro
+	if price.CacheReadPerMillionMicro > inputRate {
+		inputRate = price.CacheReadPerMillionMicro
+	}
+	if price.CacheWritePerMillionMicro > inputRate {
+		inputRate = price.CacheWritePerMillionMicro
+	}
+	costUpper, err := calculateKnownCost(
+		[4]int64{usage.InputMax, usage.OutputMax, 0, 0},
+		[4]int64{inputRate, price.OutputPerMillionMicro, 0, 0},
+	)
+	if err != nil {
+		return 0, 0, err
+	}
+	return tokenUpper, costUpper, nil
+}
+
+func checkedNonnegativeAdd(left, right int64) (int64, error) {
+	if left < 0 || right < 0 || left > math.MaxInt64-right {
+		return 0, ErrInvalid
+	}
+	return left + right, nil
 }
 
 func calculateKnownCost(values, rates [4]int64) (int64, error) {

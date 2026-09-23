@@ -50,6 +50,33 @@ version、三位大写币种和价格目录允许范围内的四项非负费率�
 浮点数，不做汇率换算，也不把不完整 usage 当作零。是否允许某个 provider/protocol/model 使用 hard budget，仍由未来固定
 版本的 bound profile 和 reservation 运行时决定。
 
+## 已证明互斥输入组的组合算术
+
+```go
+type MutuallyExclusiveInputUpperUsage struct {
+    InputMax  int64
+    OutputMax int64
+}
+
+func CalculateMutuallyExclusiveInputUpperBound(
+    usage MutuallyExclusiveInputUpperUsage,
+    price PriceSnapshot,
+) (tokenUpper int64, costUpper int64, err error)
+```
+
+该接口仅适用于调用者已经证明 ordinary input、cache read 和 cache write 是互斥计量分类的 profile。`InputMax` 是三种
+输入分类中实际出现那一类的共同总上界，而不是每类各自可同时达到的上界；`OutputMax` 独立。函数使用 checked-add 得到
+`InputMax + OutputMax`，成本使用原始不可变 `PriceSnapshot` 计算：
+
+`ceil((InputMax*max(input_rate,cache_read_rate,cache_write_rate) + OutputMax*output_rate) / 1_000_000)`。
+
+函数验证并直接读取传入价格的 version、currency 和全部费率，不改写价格身份，也不构造一份以最大费率替换原费率的
+伪快照。它与四桶 `CalculateUpperCost` 共享 checked 128 位乘加和向上取整实现，但不改变四桶接口的独立相加语义。
+负数、Token 总和溢出、成本溢出和非法价格均返回 `ErrInvalid`。
+
+类型名与函数名故意保留互斥条件。函数不会验证 provider 的 usage 语义，不会生成 bound proof，也不会决定某个真实
+provider、协议、模型或转换版本能否使用该公式。生产 profile、reservation、HTTP 和预算开关仍未实现。
+
 ## 已验证边界
 
 专项测试覆盖 caller sibling 回滚、提交前隔离、成功提交、终结后精确重放与冲突、nil/无效输入、context 取消导致的
@@ -62,3 +89,6 @@ service 的 Accounting/Usage/Ledger、治理 HTTP 四协议和 Codex 交叉测�
 `scripts/smoke-governance-observations.mjs` 真进程模拟上游验收 PASS。代码为 `bfeddcf` 的独立 cherry-pick。
 验证包含派发时冻结价格、事务故障、取消、未知用量、重启和员工权限；所有数据为合成测试数据，不调用真实供应商。
 本批尚未推送 Linux CI，不借用观测主线 `60ea6f6` 的 CI 结果，也没有发布安装包。
+
+互斥输入组专项另以 `math/big` oracle 覆盖三种输入费率分别为最大值、向上取整、Token checked-add、`MaxInt64`、
+成本溢出、非法价格和原始快照不变；同时回归四桶 helper 仍分别累计三类输入桶。该算术验收不等于生产 bound profile。
