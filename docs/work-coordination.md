@@ -9,9 +9,22 @@
 | batch_import_finish | shadow 管理 HTTP、签名分页及 pending 父请求修复已交付；复核查询失败关闭 | core/service observations 文件；根任务挂路由 |
 | scheduler_finish | TPM/成本只读聚合与严格索引迁移已交付；补充硬预算待实现提案 | 核心交付后仅提案文档，不启用硬预算 |
 | gemini_sse_finish | 只读观测网页、UI 测试及真实 Go 浏览器联调已通过 | 仅 web 与独立 UI smoke；不改核心 |
-| 本地总协调 | 代理与治理 Linux CI 完成；观测升级/进程验收通过，收尾全量回归与轻量 CI | 默认关闭、未知用量不当零、不开新发布 |
+| 本地总协调 | 代理与治理 Linux CI 完成；观测全量回归、Linux race、六组进程验收和网页 CI 已通过 | 默认关闭、未知用量不当零、不开新发布 |
 
-这些是当前并行批次，不代表完整 Sub2API 功能已完成。代理与治理管理、执行、持久化、续租恢复及 Linux race 已通过；新观测本地验收与待完成的本轮 CI 分开记录于[集成状态](integration-status.md)。观测三个任务实际共享工作树，已按文件所有权隔离提交，根任务在独立集成树逐项 cherry-pick 和复验；后续任务应优先使用各自工作树。
+这些是当前并行批次，不代表完整 Sub2API 功能已完成。代理与治理管理、执行、持久化、续租恢复及 Linux race 已通过；新观测本地验收与成功的本轮 CI 分开记录于[集成状态](integration-status.md)。观测三个任务实际共享工作树，已按文件所有权隔离提交，根任务在独立集成树逐项 cherry-pick 和复验；后续任务应优先使用各自工作树。
+
+### 下一批预算基础
+
+观测源码 `60ea6f6` 已推 main。预算准备工作独立保存在
+[`codex/budget-integration`](https://github.com/surpaimb/cpa-cloud/tree/codex/budget-integration)，不纳入观测这轮 CI 的通过范围：
+
+- `scheduler_finish` 在独立 budget-accounting 工作树交付 caller-owned `BeginAttemptTx` 与 checked 成本上界算术；
+  根在 budget-integration 分支审查，并独立通过 accounting 全包、service 用量/治理四协议/Codex 专项、vet 与真实进程观测 smoke。
+- `gemini_sse_finish` 在独立 budget-profile 工作树核实首个固定模型候选；根再次读取官方模型、context、Token 与缓存说明，
+  收紧为有条件的工程推断。研究结论不是 profile 已实现，也不是实际供应商账单保证。
+- 根协调器保留预算预留 schema、派发/结算/恢复接线和最终集成职责。当前没有 reservation 表、可调用的 bound profile、
+  hard TPM/成本开关或真实供应商兼容证据，预算总目标仍未完成。独立分支尚未合入 main 或运行其自身 Linux CI；合并应与
+  下一项完整预算增量统一安排，不为这组基础接口打新包。观测 CI 已于 2026-09-23 完成；独立分支的互斥输入组上界算术与持久核心接口核查继续进行。
 
 ## 2026-09-23 完整功能对齐首批
 

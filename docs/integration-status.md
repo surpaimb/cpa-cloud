@@ -1,16 +1,17 @@
 # 集成状态
 
-## 2026-09-23：治理用量观测本地集成
+## 2026-09-23：治理用量观测集成（轻量 CI 已通过）
 
 - 按[只读观测契约](governance-observation-contract.md)独立实现核心 `7e015dc`、管理员 HTTP `1ff03c2`、网页 `e328acf`。根任务挂 App 路由并审查签名 cursor、稳定 scope 跨 revision 汇总、半开时间窗、整数溢出和索引迁移；不启用 TPM/成本硬拒绝，不新增收费或正文记录。
 - 审查发现合法的“父请求 pending、已有 terminal attempt”会遗漏不确定性，修复 `4b35556` 增加两窗口 `pending_requests`，每个父请求只计一次。known usage 保留；有待完成父请求时不能返回 below，已知值严格超过阈值仍 exceeded。真实 Ledger 多 attempt 回归覆盖父请求终结前后变化；网页 `596ada8` 同步计数并明确读取失败时保留的是上次成功结果。
 - 根独立非缓存专项 `Test(QueryObservations|Observation|GovernanceObservation)` PASS：governance 13.194s、service 1.755s。最终网页 TypeScript、治理相关 14 项测试和生产构建 PASS；子任务完整网页 106 项测试 PASS。根全量 Go/vet 与本批 Linux race 另列最终结果，不能复用下方不含观测的 CI。
 - 根全仓非缓存 Go 与全仓 vet PASS：cmd 2.310s、accounting 14.666s、egress 1.659s、governance 21.566s、membership 0.394s、scheduling 0.148s、service 429.810s。该轮已经包含 pending 父请求修复及最终网页接线；随后发现的存量父子终态问题另做增量复验。
 - 存量表可被写成 accounting succeeded 零成功 attempt，或 terminal 父仍有 pending child；表级约束不足以证明其合法。修复 `9326187` 在每请求汇总终结时验证 Ledger 同样的父子约束，固定 `ObservationSchema`，避免错误的零用量或宽松 unknown。回归先证明真实 Ledger 拒绝该状态，再注入坏库值；合法 failed 零 attempt、无 accounting 父的治理终结与 pending 父已有 terminal 子均保留。
-- 根在最终修复后独立专项再次 PASS：governance 16.301s、service 1.568s，两包 vet、最终程序编译与观察进程 smoke 全 PASS。138 个相对文档链接和 6 个 CI 路径测试通过；双语 PowerShell 块与 `f55774d` 完全一致。本轮路径只选择 core/web，三平台安装均不应触发；实际 Linux CI 尚待推送后运行。
+- 根在最终修复后独立专项再次 PASS：governance 16.301s、service 1.568s，两包 vet、最终程序编译与观察进程 smoke 全 PASS。138 个相对文档链接和 6 个 CI 路径测试通过；双语 PowerShell 块与 `f55774d` 完全一致。本轮路径只选择 core/web，实际 Linux CI 结果如下，三平台安装均已跳过。
 - 根新建隔离 Go 程序，实际运行 `scripts/smoke-governance-observations.mjs` 两种模式均 PASS：使用旧 `dist/governance-test.exe` 创建治理账本再升级，以及 CI 同版本新库模式。覆盖默认关闭不追溯、pending/revision 变化、稳定 scope 总计、unknown、多币种、派发时不可变价格、分页/HMAC 篡改拒绝、重启 cursor、管理员隔离、Key 撤销。最终每 scope known Token 600、unknown attempt 1；USD 748 micro、EUR 187 micro；不同历史阈值解释同一完整总计。临时库/日志未出现合成秘密或正文，测试进程和数据已清理。
 - 子任务在根最终程序和 `web/dist` 上运行 `scripts/smoke-governance-observations-ui.cjs` PASS：随机端口与合成上游，3 次真实 HTTP 派发；21 条历史快照实际分页 20+1；三种 scope/kind-only 筛选、刷新首屏与空结果均通过。known Token 300、unknown attempt 1，EUR/USD 各 187 micro；0 页面异常、0 console error、无横向溢出，DOM/storage/logs 无合成密码/Key/正文。根查看桌面及手机截图，路径 `C:/Users/apple/AppData/Local/Temp/cpac-governance-observations-ui-20260923-231526/`，同目录 `result.json` 保存统计。未访问真实 8787 服务或真实上游凭据。
 - 新增只读索引与现有治理迁移同事务；专项证明旧历史保留、同名 view/错误列序/partial index 拒绝并回滚、修复重试。每页只读事务；cursor 冻结窗口而非数据库历史快照，晚到结算与新快照必须刷新第一页才能重新取得完整结果。
+- 最终源码 `60ea6f663b76350e4ac7bc7aaca9d97369761d37` 的 [Code validation 35881635695](https://github.com/surpaimb/cpa-cloud/actions/runs/35881635695) 已全部成功。根读取 core job `107251327905` 实际日志：普通 Linux service 116.868s；完整 race 的 service 1122.106s、membership 1.930s、scheduling 1.088s、accounting 52.858s、egress 1.311s、governance 4.747s 全 PASS；vet、编译及治理、治理观测、代理、上游健康、恢复基础、自动恢复六组隔离进程 smoke 均 PASS。web job `107251327829` 的 TypeScript、13 文件/106 项测试与生产构建通过；Windows/Linux/macOS 安装 job 全部 skipped。独立预算分支未包含在此证据范围内。
 - 硬预算只有[待实现提案](budget-admission-proposal.md)，不能把 shadow 聚合当作派发前预留。下载版仍为 preview.3，本轮不创建 tag、安装包或部署。
 
 ## 2026-09-23：员工请求治理源码集成（轻量 CI 已通过）
