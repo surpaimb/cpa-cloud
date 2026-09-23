@@ -7,8 +7,9 @@
 - OAuth 竞争修复 `a5dee0f` 已复核：重导入、启停与刷新共用账号锁；交换前、明确 429 重试及旋转写入均检查当前来源、client ID 和 revision。主任务专项 `TestCodex(OAuth|Refresh|Catalog)` 非缓存通过（40.681s）。
 - 新一轮接线包含权限变更唤醒排队请求和四协议账本 hook。主任务 `Test(AccountPool|ModelAdmission|UsageLedger)` 非缓存通过（69.847s）；最终 `go test -p 1 ./... -count=1 -timeout=5m` 全部通过（service 215.888s），`go vet -p 1 ./...` 和 Windows 本机编译通过。用量 HTTP 专项 `e822783`、流式终帧修复 `e824d7e` 均纳入这轮完整回归。
 - 用量终结 `2244367`/`fe68ed1` 用同一事务更新 attempt、accounting request 和旧请求状态；SQL trigger 注入验证任一失败全部回滚、不返回成功正文/结束帧、重启后恢复 interrupted。四协议 JSON/SSE、重复快照、未知用量/价格 NULL、Codex 用量转换、取消、零 attempt、撤销、协议不匹配和内存关联清理已自动验收。Gemini 多候选从首个结束标记开始缓冲，Responses 的 failed/incomplete/EOF 分别归类并保留合法 incomplete 用量。
-- 主任务对最终新编译程序执行 `smoke-native-providers.mjs`、`smoke-responses.mjs` 与 `smoke-account-pool.mjs` 均通过；此前账本接线版本的 `smoke-preview.mjs --discover-models`、`smoke-codex-import.mjs` 也通过。没有访问真实供应商凭据或模型端点。本机工具链没有可用 C 编译器，Linux race 由随后轻量 CI 验证，结果待追加。
+- 主任务对最终新编译程序执行 `smoke-native-providers.mjs`、`smoke-responses.mjs` 与 `smoke-account-pool.mjs` 均通过；此前账本接线版本的 `smoke-preview.mjs --discover-models`、`smoke-codex-import.mjs` 也通过。没有访问真实供应商凭据或模型端点。本机工具链没有可用 C 编译器，Linux race 已由下述轻量 CI 完成。
 - 本批 CI 路径计划核对为 core/web=true，windows/linux/macos=false，6 项计划测试通过；两份 README 各 5 个 PowerShell 命令块与修改前一致，更新文档的本地链接检查通过。
+- `aee9493d9414d599385e2317eae4ed9fbf6a9ad3` 已推 main，[Code validation 35821133704](https://github.com/surpaimb/cpa-cloud/actions/runs/35821133704) 全部通过。Linux 全部 Go 普通测试（service 60.910s）、service/membership/scheduling/accounting 的完整 race（service 554.160s）、vet 和编译通过；网页 TypeScript、58 项测试和 Vite 构建通过。已读取实际 job 日志核对，三个系统安装 job 均为 skipped。本条记录为文档收尾，不触发新打包。
 - 此批仅源码；没有新 tag、安装包或真实供应商账号测试。Claude/Gemini 会员、自动换号、代理池、完整预算与运营功能继续未完成。
 
 ## 2026-09-22 16:20（Asia/Shanghai）
