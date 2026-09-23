@@ -1,6 +1,6 @@
 # 内部用量与尝试账本核心契约
 
-状态：源码开发预览，2026-09-23。`internal/accounting` 已通过[服务协调器](usage-service-contract.md)接入四协议模型请求及启动恢复；HTTP 用量、事务回滚和失败恢复专项通过。管理统计 API、网页、价格配置、预算和账单流程尚未实现，不能据此宣称正式计费。
+状态：源码开发预览，2026-09-23。`internal/accounting` 已通过[服务协调器](usage-service-contract.md)接入四协议模型请求及启动恢复；HTTP 用量、事务回滚和失败恢复专项通过。管理统计 API、网页和成本价格版本已按[用量管理契约](usage-management-contract.md)接入；预算与账单流程尚未实现，不能据此宣称正式计费。
 
 ## 范围与接口
 

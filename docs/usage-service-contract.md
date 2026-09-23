@@ -1,7 +1,8 @@
 # 服务用量账本协调契约
 
 状态：源码开发预览，2026-09-23。协调器已接入 `App`、四种协议 handler 和转发器，
-进程回归、HTTP 用量/故障专项及完整 Go 回归通过。尚无价格配置、预算、统计页面或正式账单。
+进程回归、HTTP 用量/故障专项及完整 Go 回归通过。价格版本、管理员统计和网页已按
+[用量管理契约](usage-management-contract.md) 接入；预算和正式账单仍未实现。
 
 ## 生命周期接口
 
@@ -16,20 +17,23 @@
   记录 `requestID:1` 尝试。进入 adapter 后发生的本地校验失败仍属于一次真实执行尝试；
   adapter 尚未执行前的路由或准备失败调用 `finishWithoutAttempt`，请求可以失败、取消或
   中断并保持零 attempt。
+- 服务接线调用 `beginPricedAttempt(ctx, accountID, startedAt, price)`：先通过启动时注入的
+  价格查询器读取实际账号与上游模型的当前不可变快照，再记录 attempt。旧 `beginAttempt`
+  是无价格的内部包装接口。价格目录查询失败拒绝 dispatch，不把失败解释为未配置。
 - `attempt.observe(dataJSON)` 只接受协议转发器已经验证和接受的完整 JSON 或单个 SSE
   `data:` JSON，交给 `accounting.UsageAccumulator`。协调层只保留四个 nullable 计数，
   不保留或输出正文、工具参数、提示词、响应或原始错误。
 - `attempt.finish(ctx, status, finishedAt)` 固定先结束 attempt，再结束 request。
   `finishWithoutAttempt` 只结束无 attempt 的 request，且拒绝成功状态。
 
-协调器没有 HTTP 接口、后台队列、价格目录、预算或计费入口，也不执行上游请求。
+协调器没有 HTTP 接口或后台队列，不自行管理价格目录、预算或账单，也不执行上游请求。
 一次请求对象最多创建一个上游 attempt，调度固定为 `primary`，不会重试或创建
-`retry`/`failover` attempt。价格尚未配置，因此 `BeginAttempt.Price` 固定为 `nil`；
-即使用量已知，成本仍为 SQL `NULL`，不能伪造零价格或精确账单。
+`retry`/`failover` attempt。未配置或已停用时 `BeginAttempt.Price` 为 `nil`；
+即使用量已知，成本仍为 SQL `NULL`。配置价格只提供内部估算，不能冒充供应商账单。
 
 ## 服务接线
 
-服务启动先迁移并恢复账本；路由和权限检查通过后记录 request，在调用 HTTP transport
+服务启动先迁移价格目录，再迁移并恢复账本；路由和权限检查通过后记录 request，在调用 HTTP transport
 或会员 adapter 前记录 attempt。`count_tokens` 是估算接口，不写入生成用量账本。
 入口拒绝、未找到路由等尚未接纳的请求不计为上游尝试。
 

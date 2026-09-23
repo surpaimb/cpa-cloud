@@ -8,7 +8,9 @@
 - 子任务网页 64 项测试及 TypeScript/Vite 构建通过。主任务使用真实 Go + Playwright Chrome（Browser plugin not available），隔离地址 `http://127.0.0.1:64038`，桌面 1440×1000、手机 390×844：价格创建→模型调用→0.000187 USD 汇总/尝试详情，真实保存响应丢失→原 payload/operation 重试仅追加一次，最大安全整数无损展示，后台竞争409→保留输入→重新加载→停用，员工筛选与未知费用全部通过。
 - 浏览器发现同值上游选择导致加载状态不结束，已由 `e33cc15` 修复并重跑原操作路径通过。页面身份、非空内容、无构建错误覆盖层、截图与实际交互均核对；0 JavaScript 页面异常。控制台仅预期未登录401、注入的响应丢失 ERR_FAILED 和版本冲突409。两次模型请求只到合成回环上游；正常进程/浏览器验收临时数据已清理。
 - 截图已查看：`C:/Users/apple/.codex/visualizations/2026/09/23/cpa-cloud-usage/usage-dashboard-desktop.png`、`usage-price-mobile.png`；同目录 `result.json` 保存无秘密的验收摘要，浏览器脚本在 `C:/TopC9-QA/cpa-cloud-usage-browser.cjs`。初次 Go 路由 panic 留下的合成测试目录清理被自动审批拒绝，未绕过该限制；不是用户数据或生产实例。
-- 两份 README 新增配置/单位/限制说明，原有 PowerShell 命令块保持不变，本地文档链接检查通过。CI 路径计划及6项计划测试通过：core/web=true，windows/linux/macos=false。由于前次 race 已耗时554秒且新增服务测试，本批 race 超时预算从10增至15分钟、core job从20增至25分钟，保留完整 race 套件和所有断言。Linux CI 待本批推送后核实，不将本机 Windows 测试表述为 race 通过。
+- 两份 README 新增配置/单位/限制说明，原有 PowerShell 命令块保持不变，本地文档链接检查通过。CI 路径计划及6项计划测试通过：core/web=true，windows/linux/macos=false。由于前次 race 已耗时554秒且新增服务测试，本批 race 超时预算从10增至15分钟、core job从20增至25分钟，保留完整 race 套件和所有断言。
+- `4a2b52593a3ba3b4264b812802c2051ffbeb97cc` 已推 main，[Code validation 35827300394](https://github.com/surpaimb/cpa-cloud/actions/runs/35827300394) 全部通过。已读取实际 job 日志：Linux 全部 Go 普通测试（service 81.799s），完整 service/membership/scheduling/accounting race（service 845.135s），vet 和编译通过；网页 TypeScript、64 项测试及 Vite 构建通过。三个平台安装 job 均为 skipped。后续仅提交本文和契约说明，不触发新安装包构建。
+- 已修正旧用量契约中的价格/管理页面状态；下一批[安全换号契约](account-pool-failover-contract.md)明确标为待实现，只允许模型 dispatch 前的账号特定预检失败切换一次，进入 HTTP/Codex 执行器后禁止自动重放。
 - 此批为源码增量，不发布新 tag/安装包。成本为管理员配置的内部估算，不是供应商账单；售价、余额、预算、报表导出、支付、自动换号、代理池以及 Claude/Gemini 会员等仍在总计划内，尚未完成。
 
 ## 2026-09-23：账号池执行、网页配置与共享刷新
