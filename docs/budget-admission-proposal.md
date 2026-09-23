@@ -173,16 +173,22 @@ reservation。
 
 - 四桶和价格完整时写 actual Token/cost；actual 小于上界后释放差额，actual 大于上界仍如实写 overage，并把该
   bound profile 标为异常，后续请求 fail closed，不能截断账本；
-- usage 不完整、价格异常、响应丢失、取消、EOF、HTTP 结果不确定或显式 failed/incomplete 均结算为 unknown，保留上界；
+- 结算只由四桶 usage 与价格是否完整可信决定，不由请求结果名称决定。即使结果为 failed、incomplete、取消、EOF 或
+  响应丢失，只要已取得完整可信的四桶 usage 和价格，仍按 actual 结算 known；任一项缺失或不可信才结算 unknown 并
+  保留上界；
 - 401/429/5xx 已进入 transport，同样不能推断零 usage；首批不为任何上游状态码建立“必定零消耗”例外；
 - 派发前本地失败没有 reservation；若已 reserve 但尚未 `may_have_sent`，必须凭正向阶段证据原子释放；
 - 终结事务失败时，attempt、父 request、治理释放和 budget settlement 全部保持旧状态。JSON 返回固定 503；SSE 不发送
   正常 success 终帧。已有语义输出绝不重放；后台仅以冻结快照重试持久化；
 - 客户端取消不等于供应商停止。只要可能已发送就保留上界；完整 usage 仍可正常结算 known。
 
-启动恢复联合读取 accounting pending attempt、治理 pending request 和 budget reservation。`reserved` 且没有任何
-may-have-sent 证据可以释放；`may_have_sent` 一律转 `interrupted_unknown`，不调用上游、不重放。恢复事务失败则服务
-不 ready，不能只恢复 accounting 而丢预算。正常 `App.Close` 停止新预留，等待有界终结；超时后持久状态留给重启恢复。
+启动恢复联合读取 accounting pending attempt、治理 pending request 和 budget reservation。只有 reserve、durable
+`may_have_sent` 标记、scheduler `MarkDispatch`、transport 这一固定顺序，以及相关数据库行的完整一致关系，能正向证明
+崩溃点仍在 durable mark 之前时，`reserved` 才能释放。仅仅查不到 may-have-sent 证据不足以证明没有进入 transport。
+缺行、孤儿行、状态矛盾或无法验证顺序时不得按零释放：可完整保守表示时转 `interrupted_unknown` 并保留上界；连保守
+关系也无法建立时启动失败且服务不 ready。`may_have_sent` 一律转 `interrupted_unknown`，不调用上游、不重放。恢复事务
+失败同样不 ready，不能只恢复 accounting 而丢预算。正常 `App.Close` 停止新预留，等待有界终结；超时后持久状态留给
+重启恢复。
 
 ## 员工错误与管理员可见性
 
