@@ -71,6 +71,9 @@ const scopesDDL = `CREATE TABLE IF NOT EXISTS governance_request_scopes (
 const scopesIndexDDL = `CREATE INDEX IF NOT EXISTS governance_request_scopes_scope_idx
 	ON governance_request_scopes(scope_kind,scope_id,request_id)`
 
+const requestsEffectiveIndexDDL = `CREATE INDEX IF NOT EXISTS governance_requests_effective_idx
+	ON governance_requests(effective_started_at,id)`
+
 const initialSettingsTime = "1970-01-01T00:00:00.000000000Z"
 
 func (c *Coordinator) Migrate(ctx context.Context) error {
@@ -82,7 +85,7 @@ func (c *Coordinator) Migrate(ctx context.Context) error {
 		return ErrUnavailable
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{settingsDDL, requestsDDL, scopesDDL, scopesIndexDDL} {
+	for _, statement := range []string{settingsDDL, requestsDDL, scopesDDL, scopesIndexDDL, requestsEffectiveIndexDDL} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return ErrUnavailable
 		}
@@ -124,12 +127,21 @@ func validateSchema(ctx context.Context, tx *sql.Tx) error {
 			return ErrSchema
 		}
 	}
-	var indexType, indexTable, indexDefinition string
-	if err := tx.QueryRowContext(ctx, `SELECT type,tbl_name,sql FROM sqlite_master WHERE name='governance_request_scopes_scope_idx'`).Scan(&indexType, &indexTable, &indexDefinition); err != nil {
-		return ErrSchema
+	indexes := map[string]struct {
+		table      string
+		definition string
+	}{
+		"governance_request_scopes_scope_idx": {table: "governance_request_scopes", definition: scopesIndexDDL},
+		"governance_requests_effective_idx":   {table: "governance_requests", definition: requestsEffectiveIndexDDL},
 	}
-	if indexType != "index" || indexTable != "governance_request_scopes" || normalizeDDL(indexDefinition) != normalizeDDL(storedDDL(scopesIndexDDL)) {
-		return ErrSchema
+	for name, expected := range indexes {
+		var indexType, indexTable, indexDefinition string
+		if err := tx.QueryRowContext(ctx, `SELECT type,tbl_name,sql FROM sqlite_master WHERE name=?`, name).Scan(&indexType, &indexTable, &indexDefinition); err != nil {
+			return ErrSchema
+		}
+		if indexType != "index" || indexTable != expected.table || normalizeDDL(indexDefinition) != normalizeDDL(storedDDL(expected.definition)) {
+			return ErrSchema
+		}
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT name,sql FROM sqlite_master
 		WHERE type='index' AND tbl_name IN ('governance_settings','governance_requests','governance_request_scopes') AND sql IS NOT NULL`)
@@ -142,7 +154,8 @@ func validateSchema(ctx context.Context, tx *sql.Tx) error {
 		if err := rows.Scan(&name, &definition); err != nil {
 			return ErrUnavailable
 		}
-		if name != "governance_request_scopes_scope_idx" || normalizeDDL(definition) != normalizeDDL(storedDDL(scopesIndexDDL)) {
+		expected, ok := indexes[name]
+		if !ok || normalizeDDL(definition) != normalizeDDL(storedDDL(expected.definition)) {
 			return ErrSchema
 		}
 		count++
@@ -152,7 +165,7 @@ func validateSchema(ctx context.Context, tx *sql.Tx) error {
 	if iterationErr != nil || closeErr != nil {
 		return ErrUnavailable
 	}
-	if count != 1 {
+	if count != len(indexes) {
 		return ErrSchema
 	}
 	var triggers int
