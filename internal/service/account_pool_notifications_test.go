@@ -84,11 +84,12 @@ func TestAccountPoolRuntimeCooldownWinnerPersistsOneEventAcrossRestart(t *testin
 		name          string
 		first         scheduling.FailureClass
 		second        scheduling.FailureClass
+		advance       time.Duration
 		wantUntilFrom time.Duration
 		wantUpdatedAt time.Duration
 	}{
-		{name: "long then short", first: scheduling.FailureRateLimit, second: scheduling.FailureTransient, wantUntilFrom: 12 * time.Second},
-		{name: "short then long", first: scheduling.FailureTransient, second: scheduling.FailureRateLimit, wantUntilFrom: 13 * time.Second, wantUpdatedAt: time.Second},
+		{name: "same-clock long then short", first: scheduling.FailureRateLimit, second: scheduling.FailureTransient, wantUntilFrom: 12 * time.Second},
+		{name: "short then long", first: scheduling.FailureTransient, second: scheduling.FailureRateLimit, advance: time.Second, wantUntilFrom: 13 * time.Second, wantUpdatedAt: time.Second},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -105,9 +106,17 @@ func TestAccountPoolRuntimeCooldownWinnerPersistsOneEventAcrossRestart(t *testin
 			if ok, result := first.Lease.Release(context.Background(), scheduling.ReleaseResult{Failure: test.first}); !ok || result.Code != accountPoolReleased {
 				t.Fatalf("first release=%+v ok=%v", result, ok)
 			}
-			f.clock.Advance(time.Second)
+			firstEvent, _, _ := readCooldownState(t, f.base.app.store.db, accountID)
+			f.clock.Advance(test.advance)
 			if ok, result := second.Lease.Release(context.Background(), scheduling.ReleaseResult{Failure: test.second}); !ok || result.Code != accountPoolReleased {
 				t.Fatalf("second release=%+v ok=%v", result, ok)
+			}
+			secondEvent, _, _ := readCooldownState(t, f.base.app.store.db, accountID)
+			if secondEvent == firstEvent {
+				t.Fatalf("later failure reused event %q", firstEvent)
+			}
+			if _, _, code := f.rt.clearCooldown(context.Background(), accountID, 1, firstEvent); code != cooldownEventConflict {
+				t.Fatalf("stale event clear code=%s", code)
 			}
 
 			wantUntil := started.Add(test.wantUntilFrom)
@@ -155,8 +164,8 @@ func assertRuntimeAcquireStillWaiting(t *testing.T, result <-chan accountPoolAcq
 
 func assertStoredRuntimeCooldown(t *testing.T, f *runtimeFixture, accountID string, wantClass scheduling.FailureClass, wantUntil, wantUpdated time.Time) {
 	t.Helper()
-	var failureClass, untilText, updatedText string
-	if err := f.base.app.store.db.QueryRow(`SELECT failure_class,cooldown_until,updated_at FROM account_pool_runtime_cooldowns WHERE account_id=?`, accountID).Scan(&failureClass, &untilText, &updatedText); err != nil {
+	var eventID, failureClass, untilText, updatedText string
+	if err := f.base.app.store.db.QueryRow(`SELECT event_id,failure_class,cooldown_until,updated_at FROM account_pool_runtime_cooldowns WHERE account_id=?`, accountID).Scan(&eventID, &failureClass, &untilText, &updatedText); err != nil {
 		t.Fatal(err)
 	}
 	until, err := parseTime(untilText)
@@ -167,7 +176,7 @@ func assertStoredRuntimeCooldown(t *testing.T, f *runtimeFixture, accountID stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failureClass != string(wantClass) || !until.Equal(wantUntil) || !updated.Equal(wantUpdated) {
-		t.Fatalf("stored cooldown class=%q until=%s updated=%s; want class=%q until=%s updated=%s", failureClass, until, updated, wantClass, wantUntil, wantUpdated)
+	if eventID == "" || failureClass != string(wantClass) || !until.Equal(wantUntil) || !updated.Equal(wantUpdated) {
+		t.Fatalf("stored cooldown event=%q class=%q until=%s updated=%s; want class=%q until=%s updated=%s", eventID, failureClass, until, updated, wantClass, wantUntil, wantUpdated)
 	}
 }

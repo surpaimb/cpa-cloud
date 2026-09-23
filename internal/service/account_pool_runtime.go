@@ -51,20 +51,23 @@ type accountPoolReleaseResult struct {
 }
 
 type accountPoolRuntime struct {
-	app           *App
-	scheduler     *scheduling.Scheduler
-	clock         scheduling.Clock
-	leaseTTL      time.Duration
-	cooldowns     map[scheduling.FailureClass]time.Duration
-	ctx           context.Context
-	cancel        context.CancelFunc
-	mu            sync.Mutex
-	closed        bool
-	wg            sync.WaitGroup
-	active        map[*accountPoolLease]struct{}
-	changeEpoch   uint64
-	changeContext context.Context
-	changeCancel  context.CancelFunc
+	app       *App
+	scheduler *scheduling.Scheduler
+	clock     scheduling.Clock
+	leaseTTL  time.Duration
+	cooldowns map[scheduling.FailureClass]time.Duration
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mu        sync.Mutex
+	// cooldownTransition serializes the persistent and in-memory halves of a
+	// cooldown Release with an administrator clear operation.
+	cooldownTransition sync.Mutex
+	closed             bool
+	wg                 sync.WaitGroup
+	active             map[*accountPoolLease]struct{}
+	changeEpoch        uint64
+	changeContext      context.Context
+	changeCancel       context.CancelFunc
 }
 
 type accountPoolLease struct {
@@ -97,11 +100,12 @@ type accountPoolAcquireOptions struct {
 }
 
 type poolCandidate struct {
-	configured modelAccountView
-	provider   string
-	revision   int64
-	capacity   int
-	cooldown   time.Time
+	configured    modelAccountView
+	provider      string
+	revision      int64
+	capacity      int
+	cooldownEvent string
+	cooldown      time.Time
 }
 
 type poolSnapshot struct {
@@ -129,14 +133,7 @@ func (s *store) migrateAccountPoolRuntime(ctx context.Context) error {
 			expires_at TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS account_pool_runtime_cooldowns (
-			account_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
-			failure_class TEXT NOT NULL,
-			cooldown_until TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		)`,
 		`CREATE INDEX IF NOT EXISTS account_pool_runtime_lease_expiry_idx ON account_pool_runtime_leases(expires_at)`,
-		`CREATE INDEX IF NOT EXISTS account_pool_runtime_cooldown_expiry_idx ON account_pool_runtime_cooldowns(cooldown_until)`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -148,9 +145,12 @@ func (s *store) migrateAccountPoolRuntime(ctx context.Context) error {
 		[]string{"references upstreams(id)", "references models(id)", "references employees(id)", "references access_keys(id)"}); err != nil {
 		return err
 	}
+	if err := migrateAccountPoolCooldownSchema(ctx, tx); err != nil {
+		return err
+	}
 	if err := verifyAccountPoolTable(ctx, tx, accountPoolCooldownTable,
-		[]string{"account_id", "failure_class", "cooldown_until", "updated_at"},
-		[]string{"references upstreams(id) on delete cascade"}); err != nil {
+		[]string{"account_id", "event_id", "failure_class", "cooldown_until", "updated_at"},
+		[]string{"references upstreams(id) on delete cascade", "event_id text not null unique", "check(failure_class in ('rate_limited','overloaded','transient','authentication','permanent'))"}); err != nil {
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
@@ -254,20 +254,27 @@ func newAccountPoolRuntimeWithConfig(app *App, config accountPoolRuntimeConfig) 
 	restored = activeRestored
 	type storedCooldown struct {
 		accountID string
+		eventID   string
+		failure   scheduling.FailureClass
 		until     time.Time
 		updated   time.Time
 	}
-	cooldownRows, err := tx.Query(`SELECT account_id,cooldown_until,updated_at FROM account_pool_runtime_cooldowns ORDER BY account_id`)
+	cooldownRows, err := tx.Query(`SELECT account_id,event_id,failure_class,cooldown_until,updated_at FROM account_pool_runtime_cooldowns ORDER BY account_id`)
 	if err != nil {
 		return nil, err
 	}
 	storedCooldowns := make([]storedCooldown, 0)
 	for cooldownRows.Next() {
 		var item storedCooldown
-		var until, updated string
-		if err := cooldownRows.Scan(&item.accountID, &until, &updated); err != nil {
+		var failure, until, updated string
+		if err := cooldownRows.Scan(&item.accountID, &item.eventID, &failure, &until, &updated); err != nil {
 			cooldownRows.Close()
 			return nil, err
+		}
+		item.failure = scheduling.FailureClass(failure)
+		if item.eventID == "" || !validCooldownFailure(item.failure) {
+			cooldownRows.Close()
+			return nil, errors.New("account pool cooldown contains invalid metadata")
 		}
 		item.updated, err = parseTime(updated)
 		if err != nil {
@@ -299,6 +306,14 @@ func newAccountPoolRuntimeWithConfig(app *App, config accountPoolRuntimeConfig) 
 			return nil, err
 		}
 	}
+	restoredCooldowns := make([]scheduling.CooldownSnapshot, 0, len(storedCooldowns))
+	for _, item := range storedCooldowns {
+		if item.until.After(now) {
+			restoredCooldowns = append(restoredCooldowns, scheduling.CooldownSnapshot{
+				AccountID: item.accountID, EventID: item.eventID, Failure: item.failure, Until: item.until,
+			})
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -315,7 +330,7 @@ func newAccountPoolRuntimeWithConfig(app *App, config accountPoolRuntimeConfig) 
 		changeContext: changeContext,
 		changeCancel:  changeCancel,
 	}
-	rt.scheduler = scheduling.New(scheduling.Config{Clock: config.Clock, Random: config.Random, LeaseTTL: config.LeaseTTL, StickyTTL: config.StickyTTL, MaxSticky: config.MaxSticky, MaxWaiters: config.MaxWaiters, Cooldowns: config.Cooldowns, RestoredLeases: restored})
+	rt.scheduler = scheduling.New(scheduling.Config{Clock: config.Clock, Random: config.Random, LeaseTTL: config.LeaseTTL, StickyTTL: config.StickyTTL, MaxSticky: config.MaxSticky, MaxWaiters: config.MaxWaiters, Cooldowns: config.Cooldowns, RestoredLeases: restored, RestoredCooldowns: restoredCooldowns})
 	return rt, nil
 }
 
@@ -428,9 +443,22 @@ func (rt *accountPoolRuntime) AcquireWithOptions(ctx context.Context, publicMode
 		if inner == nil {
 			return accountPoolAcquireResult{Code: mapSchedulingCode(decision.Code)}
 		}
+		// A Release or clear can change cooldown state after scheduler selection.
+		// Serialize the final database revalidation with those transitions so a
+		// lease selected from an old candidate snapshot is never published.
+		rt.cooldownTransition.Lock()
+		if !rt.changeIsCurrent(epoch) {
+			rt.cooldownTransition.Unlock()
+			inner.Release(scheduling.ReleaseResult{})
+			if opContext.Err() != nil {
+				return accountPoolAcquireResult{Code: accountPoolCancelled}
+			}
+			continue
+		}
 		rt.app.admission.RLock()
 		selected, code := rt.persistRevalidatedLease(opContext, publicModel, auth, allowedProviders, pool, options, inner)
 		rt.app.admission.RUnlock()
+		rt.cooldownTransition.Unlock()
 		if code != "" {
 			inner.Release(scheduling.ReleaseResult{})
 			return accountPoolAcquireResult{Code: code}
@@ -505,7 +533,7 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 	for _, provider := range allowedProviders {
 		allowed[provider] = true
 	}
-	rows, err := rt.app.store.db.QueryContext(ctx, `SELECT r.upstream_id,r.upstream_model,r.priority,r.weight,r.max_concurrency,u.provider_kind,u.enabled,u.revision,u.credential_state,c.cooldown_until,
+	rows, err := rt.app.store.db.QueryContext(ctx, `SELECT r.upstream_id,r.upstream_model,r.priority,r.weight,r.max_concurrency,u.provider_kind,u.enabled,u.revision,u.credential_state,c.event_id,c.cooldown_until,
 		(SELECT MIN(global_route.max_concurrency) FROM model_account_pool_routes global_route JOIN models global_model ON global_model.id=global_route.model_id WHERE global_route.upstream_id=r.upstream_id AND global_model.enabled=1)
 		FROM model_account_pool_routes r JOIN upstreams u ON u.id=r.upstream_id
 		LEFT JOIN account_pool_runtime_cooldowns c ON c.account_id=u.id
@@ -518,8 +546,8 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 	for rows.Next() {
 		var item poolCandidate
 		var enabled int
-		var state, cooldown sql.NullString
-		if err := rows.Scan(&item.configured.UpstreamID, &item.configured.UpstreamModel, &item.configured.Priority, &item.configured.Weight, &item.configured.MaxConcurrency, &item.provider, &enabled, &item.revision, &state, &cooldown, &item.capacity); err != nil {
+		var state, cooldownEvent, cooldown sql.NullString
+		if err := rows.Scan(&item.configured.UpstreamID, &item.configured.UpstreamModel, &item.configured.Priority, &item.configured.Weight, &item.configured.MaxConcurrency, &item.provider, &enabled, &item.revision, &state, &cooldownEvent, &cooldown, &item.capacity); err != nil {
 			return poolSnapshot{}, false, accountPoolStorageUnavailable
 		}
 		if pool.provider == "" {
@@ -530,9 +558,13 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 		if !allowed[item.provider] || enabled == 0 || item.provider == codexMembershipProvider && (!rt.app.cfg.ExperimentalCodexMembership || state.String == codexStateReauth) {
 			continue
 		}
+		if cooldown.Valid != cooldownEvent.Valid {
+			return poolSnapshot{}, false, accountPoolStorageUnavailable
+		}
 		if cooldown.Valid {
+			item.cooldownEvent = cooldownEvent.String
 			item.cooldown, err = parseTime(cooldown.String)
-			if err != nil {
+			if err != nil || item.cooldownEvent == "" {
 				return poolSnapshot{}, false, accountPoolStorageUnavailable
 			}
 		}
@@ -585,10 +617,11 @@ func (rt *accountPoolRuntime) persistRevalidatedLease(ctx context.Context, model
 	var selected route
 	var enabled int
 	var effectiveCapacity int
-	err = tx.QueryRowContext(ctx, `SELECT u.id,u.endpoint,r.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version,u.enabled,
+	var cooldownEvent, cooldownUntil sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT u.id,u.endpoint,r.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version,u.enabled,c.event_id,c.cooldown_until,
 		(SELECT MIN(global_route.max_concurrency) FROM model_account_pool_routes global_route JOIN models global_model ON global_model.id=global_route.model_id WHERE global_route.upstream_id=r.upstream_id AND global_model.enabled=1)
-		FROM model_account_pool_routes r JOIN upstreams u ON u.id=r.upstream_id
-		WHERE r.model_id=? AND r.upstream_id=?`, model, inner.AccountID()).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion, &enabled, &effectiveCapacity)
+		FROM model_account_pool_routes r JOIN upstreams u ON u.id=r.upstream_id LEFT JOIN account_pool_runtime_cooldowns c ON c.account_id=u.id
+		WHERE r.model_id=? AND r.upstream_id=?`, model, inner.AccountID()).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion, &enabled, &cooldownEvent, &cooldownUntil, &effectiveCapacity)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return route{}, accountPoolAccountChanged
@@ -597,6 +630,18 @@ func (rt *accountPoolRuntime) persistRevalidatedLease(ctx context.Context, model
 	}
 	if effectiveCapacity != expected.capacity {
 		return route{}, accountPoolConfigurationChanged
+	}
+	if cooldownEvent.Valid != cooldownUntil.Valid || cooldownEvent.Valid != (expected.cooldownEvent != "") {
+		return route{}, accountPoolConfigurationChanged
+	}
+	if cooldownEvent.Valid {
+		currentUntil, parseErr := parseTime(cooldownUntil.String)
+		if parseErr != nil {
+			return route{}, accountPoolStorageUnavailable
+		}
+		if cooldownEvent.String != expected.cooldownEvent || !currentUntil.Equal(expected.cooldown) {
+			return route{}, accountPoolConfigurationChanged
+		}
 	}
 	if enabled == 0 || selected.Revision != expected.revision || selected.ProviderKind != expected.provider || selected.UpstreamModel != expected.configured.UpstreamModel || !providerAllowed(selected.ProviderKind, allowedProviders) || selected.ProviderKind == codexMembershipProvider && (!rt.app.cfg.ExperimentalCodexMembership || selected.CredentialState.String == codexStateReauth) {
 		return route{}, accountPoolAccountChanged
@@ -689,6 +734,9 @@ func (l *accountPoolLease) Release(ctx context.Context, result scheduling.Releas
 	if l.stopRuntime != nil {
 		l.stopRuntime()
 	}
+	l.runtime.cooldownTransition.Lock()
+	defer l.runtime.cooldownTransition.Unlock()
+	now := l.runtime.clock.Now()
 	tx, err := l.runtime.app.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
@@ -706,7 +754,7 @@ func (l *accountPoolLease) Release(ctx context.Context, result scheduling.Releas
 	if err != nil {
 		return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
 	}
-	if !expiry.After(l.runtime.clock.Now()) {
+	if !expiry.After(now) {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM account_pool_runtime_leases WHERE lease_id=?`, l.inner.ID()); err != nil || tx.Commit() != nil {
 			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
 		}
@@ -714,11 +762,35 @@ func (l *accountPoolLease) Release(ctx context.Context, result scheduling.Releas
 		return false, accountPoolReleaseResult{Code: accountPoolAlreadyReleased}
 	}
 	if duration := l.runtime.cooldowns[result.Failure]; duration > 0 {
-		until := formatAccountPoolTime(l.runtime.clock.Now().Add(duration))
-		_, err = tx.ExecContext(ctx, `INSERT INTO account_pool_runtime_cooldowns(account_id,failure_class,cooldown_until,updated_at) VALUES(?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET failure_class=excluded.failure_class,cooldown_until=excluded.cooldown_until,updated_at=excluded.updated_at WHERE excluded.cooldown_until>account_pool_runtime_cooldowns.cooldown_until`, l.inner.AccountID(), string(result.Failure), until, rtNow(l.runtime))
+		eventID, idErr := newID("cool")
+		if idErr != nil {
+			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
+		}
+		until := formatAccountPoolTime(now.Add(duration))
+		updated := formatAccountPoolTime(now)
+		// Each effective failure advances event_id. The deadline never shrinks;
+		// when the existing deadline wins, its failure class remains the reason
+		// for that retained deadline while updated_at records this new event.
+		_, err = tx.ExecContext(ctx, `INSERT INTO account_pool_runtime_cooldowns(account_id,event_id,failure_class,cooldown_until,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
+			event_id=excluded.event_id,
+			failure_class=CASE WHEN excluded.cooldown_until>account_pool_runtime_cooldowns.cooldown_until THEN excluded.failure_class ELSE account_pool_runtime_cooldowns.failure_class END,
+			cooldown_until=CASE WHEN excluded.cooldown_until>account_pool_runtime_cooldowns.cooldown_until THEN excluded.cooldown_until ELSE account_pool_runtime_cooldowns.cooldown_until END,
+			updated_at=excluded.updated_at`, l.inner.AccountID(), eventID, string(result.Failure), until, updated)
 		if err != nil {
 			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
 		}
+		var stored scheduling.CooldownSnapshot
+		var failure, storedUntil string
+		stored.AccountID = l.inner.AccountID()
+		if err := tx.QueryRowContext(ctx, `SELECT event_id,failure_class,cooldown_until FROM account_pool_runtime_cooldowns WHERE account_id=?`, stored.AccountID).Scan(&stored.EventID, &failure, &storedUntil); err != nil {
+			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
+		}
+		stored.Failure = scheduling.FailureClass(failure)
+		stored.Until, err = parseTime(storedUntil)
+		if err != nil || stored.EventID == "" || !validCooldownFailure(stored.Failure) {
+			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
+		}
+		result.Cooldown = &stored
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM account_pool_runtime_leases WHERE lease_id=?`, l.inner.ID()); err != nil {
 		return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}

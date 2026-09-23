@@ -83,6 +83,10 @@ type Decision struct {
 type ReleaseResult struct {
 	Failure FailureClass
 	Phase   DispatchPhase
+	// Cooldown, when non-nil, is an authoritative state already committed by
+	// the caller. It lets a persistence adapter publish one event and deadline
+	// to storage and the in-memory scheduler without reading the clock twice.
+	Cooldown *CooldownSnapshot
 	// Deprecated: retained for source compatibility. False zero values are not
 	// evidence that dispatch was safe, so these fields never authorize retry.
 	StreamCommitted    bool
@@ -95,6 +99,13 @@ type LeaseSnapshot struct {
 	ExpiresAt time.Time
 }
 
+type CooldownSnapshot struct {
+	AccountID string
+	EventID   string
+	Failure   FailureClass
+	Until     time.Time
+}
+
 type Clock interface {
 	Now() time.Time
 	After(time.Duration) <-chan time.Time
@@ -105,14 +116,15 @@ type Random interface {
 }
 
 type Config struct {
-	Clock          Clock
-	Random         Random
-	LeaseTTL       time.Duration
-	StickyTTL      time.Duration
-	MaxSticky      int
-	MaxWaiters     int
-	Cooldowns      map[FailureClass]time.Duration
-	RestoredLeases []LeaseSnapshot
+	Clock             Clock
+	Random            Random
+	LeaseTTL          time.Duration
+	StickyTTL         time.Duration
+	MaxSticky         int
+	MaxWaiters        int
+	Cooldowns         map[FailureClass]time.Duration
+	RestoredLeases    []LeaseSnapshot
+	RestoredCooldowns []CooldownSnapshot
 }
 
 type Scheduler struct {
@@ -129,7 +141,7 @@ type Scheduler struct {
 	notify    chan struct{}
 	leases    map[string]LeaseSnapshot
 	inUse     map[string]int
-	cooldown  map[string]time.Time
+	cooldown  map[string]CooldownSnapshot
 	sticky    map[string]stickyBinding
 }
 
@@ -229,7 +241,7 @@ func New(config Config) *Scheduler {
 	if config.MaxWaiters < 0 {
 		config.MaxWaiters = 0
 	}
-	s := &Scheduler{clock: config.Clock, random: config.Random, leaseTTL: config.LeaseTTL, stickyTTL: config.StickyTTL, maxSticky: config.MaxSticky, maxWaiter: config.MaxWaiters, cooldowns: map[FailureClass]time.Duration{}, notify: make(chan struct{}), leases: map[string]LeaseSnapshot{}, inUse: map[string]int{}, cooldown: map[string]time.Time{}, sticky: map[string]stickyBinding{}}
+	s := &Scheduler{clock: config.Clock, random: config.Random, leaseTTL: config.LeaseTTL, stickyTTL: config.StickyTTL, maxSticky: config.MaxSticky, maxWaiter: config.MaxWaiters, cooldowns: map[FailureClass]time.Duration{}, notify: make(chan struct{}), leases: map[string]LeaseSnapshot{}, inUse: map[string]int{}, cooldown: map[string]CooldownSnapshot{}, sticky: map[string]stickyBinding{}}
 	for k, v := range config.Cooldowns {
 		if v > 0 {
 			s.cooldowns[k] = v
@@ -245,6 +257,14 @@ func New(config Config) *Scheduler {
 		}
 		s.leases[snapshot.LeaseID] = snapshot
 		s.inUse[snapshot.AccountID]++
+	}
+	for _, snapshot := range config.RestoredCooldowns {
+		if snapshot.AccountID == "" || snapshot.EventID == "" || snapshot.Failure == FailureNone || !snapshot.Until.After(now) {
+			continue
+		}
+		if current, exists := s.cooldown[snapshot.AccountID]; !exists || snapshot.Until.After(current.Until) {
+			s.cooldown[snapshot.AccountID] = snapshot
+		}
 	}
 	return s
 }
@@ -404,8 +424,8 @@ func (s *Scheduler) availableLocked(request Request, allowed, excluded map[strin
 			continue
 		}
 		until := c.CooldownUntil
-		if internal := s.cooldown[c.ID]; internal.After(until) {
-			until = internal
+		if internal := s.cooldown[c.ID]; internal.Until.After(until) {
+			until = internal.Until
 		}
 		if until.After(now) {
 			if next.IsZero() || until.Before(next) {
@@ -534,11 +554,21 @@ func (s *Scheduler) release(id string, result ReleaseResult) (bool, Decision) {
 	} else {
 		delete(s.inUse, snapshot.AccountID)
 	}
-	if duration := s.cooldowns[result.Failure]; duration > 0 {
-		until := now.Add(duration)
-		if until.After(s.cooldown[snapshot.AccountID]) {
-			s.cooldown[snapshot.AccountID] = until
+	if result.Cooldown != nil {
+		committed := *result.Cooldown
+		if committed.AccountID == snapshot.AccountID && committed.EventID != "" && committed.Failure != FailureNone && committed.Until.After(now) {
+			s.cooldown[snapshot.AccountID] = committed
 		}
+	} else if duration := s.cooldowns[result.Failure]; duration > 0 {
+		candidate := CooldownSnapshot{AccountID: snapshot.AccountID, EventID: snapshot.LeaseID, Failure: result.Failure, Until: now.Add(duration)}
+		if current, exists := s.cooldown[snapshot.AccountID]; exists && !candidate.Until.After(current.Until) {
+			candidate.Failure = current.Failure
+			candidate.Until = current.Until
+		}
+		// Every effective failure advances the event even when an earlier event
+		// retains the longer deadline. A stale observer can therefore never
+		// clear a later failure merely because the deadline did not move.
+		s.cooldown[snapshot.AccountID] = candidate
 	}
 	s.signalLocked()
 	retry := result.Phase == DispatchNotStarted && !result.StreamCommitted && !result.ExecutionUncertain && (result.Failure == FailureRateLimit || result.Failure == FailureOverloaded || result.Failure == FailureTransient || result.Failure == FailureAuth || result.Failure == FailurePermanent)
@@ -555,6 +585,31 @@ func (s *Scheduler) Snapshot() []LeaseSnapshot {
 	}
 	return out
 }
+
+func (s *Scheduler) Cooldown(accountID string) (CooldownSnapshot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanupExpiredLocked(s.clock.Now())
+	snapshot, ok := s.cooldown[accountID]
+	return snapshot, ok
+}
+
+// ClearCooldown removes only the event the caller observed. A newer release
+// remains intact even when its deadline happens to equal the old deadline.
+func (s *Scheduler) ClearCooldown(accountID, eventID string) bool {
+	if accountID == "" || eventID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot, ok := s.cooldown[accountID]
+	if !ok || snapshot.EventID != eventID {
+		return false
+	}
+	delete(s.cooldown, accountID)
+	s.signalLocked()
+	return true
+}
 func (s *Scheduler) cleanupExpiredLocked(now time.Time) {
 	changed := false
 	for id, l := range s.leases {
@@ -568,8 +623,8 @@ func (s *Scheduler) cleanupExpiredLocked(now time.Time) {
 			changed = true
 		}
 	}
-	for id, until := range s.cooldown {
-		if !until.After(now) {
+	for id, snapshot := range s.cooldown {
+		if !snapshot.Until.After(now) {
 			delete(s.cooldown, id)
 			changed = true
 		}

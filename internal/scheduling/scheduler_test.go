@@ -489,3 +489,52 @@ func TestSchedulerCooldownRecoveryAndSafeRetryAdvice(t *testing.T) {
 		t.Fatal("external cooldown wait stuck")
 	}
 }
+
+func TestSchedulerAuthoritativeCooldownRestoreAndEventCAS(t *testing.T) {
+	clock := newFakeClock()
+	want := CooldownSnapshot{AccountID: "a", EventID: "cool_exact", Failure: FailureRateLimit, Until: clock.Now().Add(time.Minute)}
+	s := New(Config{Clock: clock, LeaseTTL: time.Minute, RestoredCooldowns: []CooldownSnapshot{want}})
+	if got, ok := s.Cooldown("a"); !ok || got != want {
+		t.Fatalf("restored cooldown=%+v ok=%v", got, ok)
+	}
+	if s.ClearCooldown("a", "cool_stale") {
+		t.Fatal("stale event cleared authoritative cooldown")
+	}
+	if got, ok := s.Cooldown("a"); !ok || got != want {
+		t.Fatalf("stale clear changed cooldown=%+v ok=%v", got, ok)
+	}
+	if !s.ClearCooldown("a", want.EventID) {
+		t.Fatal("matching event did not clear cooldown")
+	}
+	if _, ok := s.Cooldown("a"); ok {
+		t.Fatal("matching event remained after clear")
+	}
+
+	lease, decision := s.Acquire(context.Background(), request(candidate("a")))
+	if lease == nil || decision.Code != ReasonAcquired {
+		t.Fatalf("acquire=%v %+v", lease, decision)
+	}
+	want = CooldownSnapshot{AccountID: "a", EventID: "cool_committed", Failure: FailureTransient, Until: clock.Now().Add(17 * time.Second)}
+	if ok, _ := lease.Release(ReleaseResult{Failure: FailureRateLimit, Cooldown: &want}); !ok {
+		t.Fatal("release failed")
+	}
+	if got, ok := s.Cooldown("a"); !ok || got != want {
+		t.Fatalf("committed cooldown=%+v ok=%v want=%+v", got, ok, want)
+	}
+
+	shared := candidate("shared")
+	shared.Capacity = 2
+	s = New(Config{Clock: clock, LeaseTTL: time.Minute, Cooldowns: map[FailureClass]time.Duration{FailureRateLimit: 30 * time.Second, FailureTransient: 10 * time.Second}})
+	first, _ := s.Acquire(context.Background(), request(shared))
+	second, _ := s.Acquire(context.Background(), request(shared))
+	first.Release(ReleaseResult{Failure: FailureRateLimit})
+	longer, _ := s.Cooldown("shared")
+	second.Release(ReleaseResult{Failure: FailureTransient})
+	later, _ := s.Cooldown("shared")
+	if later.EventID == longer.EventID || later.Failure != longer.Failure || !later.Until.Equal(longer.Until) {
+		t.Fatalf("shorter same-clock failure did not advance only event: before=%+v after=%+v", longer, later)
+	}
+	if s.ClearCooldown("shared", longer.EventID) {
+		t.Fatal("stale event cleared a later failure")
+	}
+}
