@@ -185,6 +185,7 @@ func TestAnthropicMessagesPreservesNativePayloadAndCountsTokens(t *testing.T) {
 }
 
 func TestAnthropicMessagesSSETerminationErrorsCancellationAndRevocation(t *testing.T) {
+	const streamSecret = "anthropic-stream-secret-sentinel"
 	cancelReached := make(chan struct{}, 1)
 	fixture := newAnthropicFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]json.RawMessage
@@ -202,7 +203,26 @@ func TestAnthropicMessagesSSETerminationErrorsCancellationAndRevocation(t *testi
 		case "interrupted":
 			_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
 		case "error":
-			_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n")
+			_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\""+streamSecret+"\"}}\n\n")
+		case "multiline":
+			_, _ = io.WriteString(w, "event: message_start\r\ndata: {\"type\":\"message_start\",\r\ndata: \"message\":{\"id\":\"msg_multi\"}}\r\n\r\n")
+			_, _ = io.WriteString(w, "event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n")
+		case "split":
+			stream := "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_split\",\"name\":\"weather\",\"input\":{}}}\n\n" +
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}\n\n" +
+				"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+			for index := range stream {
+				_, _ = io.WriteString(w, stream[index:index+1])
+				flusher.Flush()
+			}
+		case "forged-stop":
+			_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"ping\"}\n\n")
+		case "half-frame":
+			_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}")
+		case "malformed":
+			_, _ = io.WriteString(w, "event: message_stop\ndata: not-json\n\n")
+		case "oversized":
+			_, _ = io.WriteString(w, "event: content_block_delta\ndata: "+strings.Repeat("x", anthropicMaxSSELine+1)+"\n\n")
 		default:
 			_, _ = io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n")
 			_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"opaque\"}}\n\n")
@@ -227,10 +247,32 @@ func TestAnthropicMessagesSSETerminationErrorsCancellationAndRevocation(t *testi
 	assertLatestAnthropicOutcome(t, fixture.app, "interrupted")
 
 	errorResponse := request(context.Background(), "error")
-	if body := readBody(errorResponse); !strings.Contains(body, "event: error") {
-		t.Fatalf("stream error was not preserved: %s", body)
+	if body := readBody(errorResponse); !strings.Contains(body, "event: error") || !strings.Contains(body, "Upstream request failed") || strings.Contains(body, streamSecret) || strings.Contains(body, "overloaded_error") {
+		t.Fatalf("stream error was not safely redacted: %s", body)
 	}
 	assertLatestAnthropicOutcome(t, fixture.app, "failed")
+
+	multiline := request(context.Background(), "multiline")
+	multilineBody := readBody(multiline)
+	if !strings.Contains(multilineBody, `"id":"msg_multi"`) || !strings.Contains(multilineBody, "event: message_stop") {
+		t.Fatalf("multiline CRLF event was not preserved: %s", multilineBody)
+	}
+	assertLatestAnthropicOutcome(t, fixture.app, "succeeded")
+
+	split := request(context.Background(), "split")
+	splitBody := readBody(split)
+	if !strings.Contains(splitBody, "toolu_split") || !strings.Contains(splitBody, "input_json_delta") || !strings.Contains(splitBody, "event: message_stop") {
+		t.Fatalf("split tool stream was not preserved: %s", splitBody)
+	}
+	assertLatestAnthropicOutcome(t, fixture.app, "succeeded")
+
+	for _, marker := range []string{"forged-stop", "half-frame", "malformed", "oversized"} {
+		invalid := request(context.Background(), marker)
+		_ = readBody(invalid)
+		if got := latestAnthropicOutcome(t, fixture.app); got != "failed" {
+			t.Fatalf("%s stream outcome=%q want failed", marker, got)
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancelled := request(ctx, "cancel")

@@ -18,7 +18,7 @@
 - 非流式成功响应在有界大小内保留 Anthropic JSON 响应，包括 `content` 中的文本、工具使用和思考块，以及上游提供的 `usage`。
 - `stream:true` 时只接受 `text/event-stream`。以 SSE 帧边界转发已知和未知事件；`message_start`、内容块事件、`message_delta`、`ping`、思考/签名增量和工具 JSON 增量均不转换。
 - 看到 `message_stop` 才记为流式成功；看到 `event: error` 记为失败；上游 EOF 时未看到终止事件记为 `interrupted`；客户端断开会取消上游 context 并记为 `cancelled`。不合成伪 `message_stop`。
-- 在尚未发送 HTTP 200 时，本地和上游错误返回 Anthropic 风格的脱敏 error envelope，不回显上游正文或凭据。已经开始 SSE 后的上游 `error` 事件原样传给客户端并记录失败。
+- 在尚未发送 HTTP 200 时，本地和上游错误返回 Anthropic 风格的脱敏 error envelope，不回显上游正文或凭据。已经开始 SSE 后，上游 `error` 事件也替换为固定的本地 Anthropic error 事件并记录失败；不转发上游错误正文、错误类型或其他非白名单细节。
 - `count_tokens` 是独立调用，它不生成 Message，不记为成功模型生成请求，不将未知用量填成 0。
 
 ## 安全与可验收行为

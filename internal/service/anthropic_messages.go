@@ -16,6 +16,7 @@ const (
 	anthropicAPIKeyProvider = "anthropic-api-key"
 	anthropicMaxResponse    = 16 << 20
 	anthropicMaxSSELine     = 1 << 20
+	anthropicMaxSSEEvent    = 2 << 20
 )
 
 func (a *App) messages(w http.ResponseWriter, r *http.Request) {
@@ -311,47 +312,142 @@ func (a *App) forwardAnthropicStream(w http.ResponseWriter, r *http.Request, res
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	reader := bufio.NewReaderSize(response.Body, 64<<10)
+	limited := &io.LimitedReader{R: response.Body, N: anthropicMaxResponse + 1}
+	reader := bufio.NewReaderSize(limited, 64<<10)
 	outcome := "interrupted"
-	sawStop := false
-	sawError := false
-	eventName := ""
+	var frame anthropicSSEFrame
 	for {
 		line, err := readBoundedSSELine(reader, anthropicMaxSSELine)
 		if len(line) > 0 {
-			trimmed := strings.TrimRight(string(line), "\r\n")
-			if strings.HasPrefix(trimmed, "event:") {
-				eventName = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
-			}
-			if trimmed == "" {
-				switch eventName {
-				case "message_stop":
-					sawStop = true
-				case "error":
-					sawError = true
-				}
-				eventName = ""
-			}
-			if _, writeErr := w.Write(line); writeErr != nil {
-				outcome = "cancelled"
+			if frame.size+len(line) > anthropicMaxSSEEvent {
+				outcome = "failed"
 				break
 			}
-			flusher.Flush()
+			frame.size += len(line)
+			frame.raw.Write(line)
+			trimmed := strings.TrimSuffix(strings.TrimSuffix(string(line), "\n"), "\r")
+			if trimmed == "" {
+				kind, frameErr := frame.validate()
+				if frameErr != nil {
+					outcome = "failed"
+					break
+				}
+				var outgoing []byte
+				if kind == "error" {
+					outgoing = anthropicRedactedSSEError(reqID)
+				} else {
+					outgoing = bytes.Clone(frame.raw.Bytes())
+				}
+				if len(outgoing) > 0 {
+					if _, writeErr := w.Write(outgoing); writeErr != nil {
+						outcome = "cancelled"
+						break
+					}
+					flusher.Flush()
+				}
+				frame.reset()
+				if kind == "error" {
+					outcome = "failed"
+					break
+				}
+				if kind == "message_stop" {
+					outcome = "succeeded"
+					break
+				}
+				continue
+			}
+			if parseErr := frame.addLine(trimmed); parseErr != nil {
+				outcome = "failed"
+				break
+			}
 		}
 		if err != nil {
 			if r.Context().Err() != nil {
 				outcome = "cancelled"
-			} else if !errors.Is(err, io.EOF) {
+			} else if limited.N <= 0 || !errors.Is(err, io.EOF) {
 				outcome = "failed"
-			} else if eventName == "error" || sawError {
+			} else if frame.size != 0 {
+				// A final event without its blank-line delimiter is incomplete and
+				// is never forwarded or treated as a terminal event.
 				outcome = "failed"
-			} else if eventName == "message_stop" || sawStop {
-				outcome = "succeeded"
 			}
 			break
 		}
 	}
 	a.finishRequest(reqID, outcome, response.StatusCode)
+}
+
+type anthropicSSEFrame struct {
+	raw       bytes.Buffer
+	data      bytes.Buffer
+	eventName string
+	size      int
+}
+
+func (f *anthropicSSEFrame) addLine(line string) error {
+	if line == "" || strings.HasPrefix(line, ":") {
+		return nil
+	}
+	field, value, found := strings.Cut(line, ":")
+	if !found {
+		field, value = line, ""
+	} else if strings.HasPrefix(value, " ") {
+		value = value[1:]
+	}
+	switch field {
+	case "event":
+		if f.eventName != "" || value == "" {
+			return errors.New("invalid SSE event name")
+		}
+		f.eventName = value
+	case "data":
+		if f.data.Len()+len(value)+1 > anthropicMaxSSEEvent {
+			return errors.New("SSE data exceeds limit")
+		}
+		f.data.WriteString(value)
+		f.data.WriteByte('\n')
+	case "id", "retry":
+		// Preserve standard SSE metadata without interpreting it.
+	default:
+		return errors.New("invalid SSE field")
+	}
+	return nil
+}
+
+func (f *anthropicSSEFrame) validate() (string, error) {
+	if f.size == 0 {
+		return "", nil
+	}
+	if f.eventName == "" && f.data.Len() == 0 {
+		return "", nil
+	}
+	if f.eventName == "" || f.data.Len() == 0 {
+		return "", errors.New("incomplete SSE event")
+	}
+	raw := bytes.TrimSuffix(f.data.Bytes(), []byte("\n"))
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if !json.Valid(raw) || json.Unmarshal(raw, &envelope) != nil || envelope.Type == "" || envelope.Type != f.eventName {
+		return "", errors.New("invalid SSE data event")
+	}
+	return envelope.Type, nil
+}
+
+func (f *anthropicSSEFrame) reset() {
+	f.raw.Reset()
+	f.data.Reset()
+	f.eventName = ""
+	f.size = 0
+}
+
+func anthropicRedactedSSEError(reqID string) []byte {
+	payload, _ := json.Marshal(map[string]any{
+		"type":       "error",
+		"error":      map[string]string{"type": "api_error", "message": "Upstream request failed."},
+		"request_id": reqID,
+	})
+	return []byte("event: error\ndata: " + string(payload) + "\n\n")
 }
 
 func readBoundedSSELine(reader *bufio.Reader, limit int) ([]byte, error) {
