@@ -1,9 +1,9 @@
-# 生成恢复探测：下一批执行边界
+# 生成恢复探测：执行边界
 
-状态：**基础模块已通过源码集成和 Linux CI 验收，自动恢复仍未启用**。独立账本、维护租约/隔离、固定 runner 和内部
-事务桥的本批边界见[基础模块契约](system-probe-foundations-contract.md)。后台开关、失败快照与定时调度
-继续按下文完成；不能把底层模块视为完整后台恢复交付。
-后台协调器的开关、失败快照、Codex adoption 和重试接口见[细化实施契约](account-recovery-coordinator-contract.md)，明确仍待实现。
+状态：**基础模块已通过源码与 Linux CI 验收，默认关闭的后台协调器已接入源码并完成本地进程验收**。
+独立账本、维护租约/隔离、固定 runner 和内部事务桥见[基础模块契约](system-probe-foundations-contract.md)。
+后台开关、失败快照、Codex adoption 和重试接口见[细化实施契约](account-recovery-coordinator-contract.md)；
+最终回归与最新 CI 结果见[集成状态](integration-status.md)。下载版仍不包含本批功能，合成测试不等于真实供应商验收。
 依据本仓[上游测试与恢复契约](upstream-health-contract.md)、账号运行时和用量源码独立设计；不复制参考产品实现。
 
 ## 已确定的实现选择

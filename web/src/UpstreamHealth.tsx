@@ -8,6 +8,7 @@ import {
   type UpstreamTestOperation,
 } from './api'
 import { Button, Dialog, Field, FormError } from './ui'
+import { RecoveryStateSummary } from './AccountRecovery'
 
 type TestWrite = { operation_id: string; expected_revision: number; scope: UpstreamHealthScope }
 
@@ -64,7 +65,7 @@ function testErrorMessage(error: unknown) {
     invalid_request: '测试参数无效，请刷新列表后重新开始。',
     not_found: '账号已不存在，请刷新列表。',
   }
-  return messages[error.code] ?? '账号测试失败，服务未返回可展示的测试结果。'
+  return messages[error.code] ?? '测试结果未确认。请查询原操作，服务未返回可展示的最终结果。'
 }
 
 function clearErrorMessage(error: unknown) {
@@ -184,10 +185,11 @@ export function UpstreamHealth({ item, csrf, serverTime, onReload }: {
     <div className="upstream-health__summary">
       {latest ? <><span className={`status status--${latest.tone}`}><i />{latest.title}</span><small>{item.latest_observation?.scope === 'catalog' ? '目录观测，不代表生成可用' : '本地检查，不代表上游认证'}</small></> : <><span className="status"><i />尚无测试观测</span><small>未检查不代表不可用。</small></>}
       {item.cooldown ? <div className="cooldown-summary"><strong>{item.cooldown.active ? `冷却中：${cooldownCopy[item.cooldown.failure_class] ?? '暂不可调度'}` : '服务端标记冷却已到期'}</strong><small>{item.cooldown.active ? `截至 ${displayTime(item.cooldown.cooldown_until)}` : '请刷新列表确认最新调度状态。'}</small></div> : <small>当前列表没有冷却记录。</small>}
+      {item.recovery ? <RecoveryStateSummary state={item.recovery} /> : null}
     </div>
     <div className="upstream-health__actions">
       <button className="link-button" onClick={() => setOpen(true)}>账号测试</button>
-      {item.cooldown?.active ? <button className="link-button" disabled={clearBusy} onClick={() => void clearCooldown()}>{clearBusy ? '清除中…' : '清除冷却'}</button> : item.cooldown ? <button className="link-button" disabled={clearBusy} onClick={() => void onReload()}>刷新冷却状态</button> : null}
+      {item.cooldown && (item.cooldown.active || item.recovery) ? <button className="link-button" disabled={clearBusy} onClick={() => void clearCooldown()}>{clearBusy ? '清除中…' : item.recovery ? '清除冷却与隔离' : '清除冷却'}</button> : item.cooldown ? <button className="link-button" disabled={clearBusy} onClick={() => void onReload()}>刷新冷却状态</button> : null}
     </div>
     {clearError ? <span className="health-action-error" role="alert">{clearError}<button className="link-button" onClick={() => void onReload()}>刷新列表</button></span> : null}
     {open ? <Dialog title={`测试 ${item.name}`} description="测试结果是带范围的观测，不会启用账号，也不表示模型生成健康。" onClose={() => setOpen(false)} closeDisabled={busy}>

@@ -55,6 +55,8 @@ jobs:
         run: node scripts/smoke-upstream-health.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test recovery storage and isolation without an automatic generation worker
         run: node scripts/smoke-recovery-foundations.mjs "$RUNNER_TEMP/cpa-cloud"
+      - name: Test opt-in automatic recovery with isolated synthetic providers
+        run: node scripts/smoke-account-recovery.mjs "$RUNNER_TEMP/cpa-cloud"
 
   web:
     needs: changes

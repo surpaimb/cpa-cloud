@@ -72,6 +72,37 @@ export type Upstream = {
   }
   latest_observation?: UpstreamObservation | null
   cooldown?: UpstreamCooldown | null
+  recovery?: AccountRecoveryState | null
+}
+export type AccountRecoveryStatus = {
+  cli_allowed: boolean
+  enabled: boolean
+  setting_revision: number
+  running: boolean
+  next_wake_at: string | null
+  history_count: number
+  history_full: boolean
+  server_time: string
+}
+export type AccountRecoveryState = {
+  account_id: string
+  cooldown_event_id: string
+  operation_id: string
+  recovery_revision: number
+  account_revision: number
+  pool_revision: number
+  public_model: string
+  upstream_model: string
+  protocol: string
+  state: 'required' | 'in_progress' | 'interrupted'
+  next_probe_at: string
+  due: boolean
+  last_result_code: string | null
+  last_finished_at: string | null
+  attempt_count: number
+  auto_eligible: boolean
+  attention_code: string | null
+  checked_at: string | null
 }
 export type UpstreamHealthScope = 'local_credential' | 'catalog'
 export type UpstreamObservation = {
@@ -171,6 +202,7 @@ export type SystemStatus = {
   storage: string
   limitations: string[]
   features?: {
+    account_recovery?: boolean
     codex_membership_import?: boolean
     codex_membership_oauth?: boolean
     codex_membership_auto_refresh?: boolean
@@ -349,4 +381,8 @@ export const api = {
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
     request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   status: () => request<SystemStatus>('/system/status'),
+  accountRecovery: () => request<AccountRecoveryStatus>('/account-recovery'),
+  accountRecoveryAccounts: () => request<{items: AccountRecoveryState[]; server_time: string}>('/account-recovery/accounts'),
+  setAccountRecovery: (enabled: boolean, revision: number, csrf: string) =>
+    request<AccountRecoveryStatus>('/account-recovery', { method: 'PUT', body: JSON.stringify({ enabled, expected_revision: revision }) }, csrf),
 }

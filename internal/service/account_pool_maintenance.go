@@ -40,6 +40,8 @@ type accountMaintenanceAcquireRequest struct {
 	ExpectedPoolRevision     int64
 	ExpectedAccountRevision  int64
 	ExpectedRecoveryRevision int64
+	// CapacityWait bounds only queueing, not the lifetime of an admitted lease.
+	CapacityWait time.Duration
 }
 
 type accountMaintenanceBegin func(context.Context, *sql.Tx, accountRecoveryState) error
@@ -154,6 +156,10 @@ func (rt *accountPoolRuntime) AcquireMaintenance(ctx context.Context, req accoun
 	opCtx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(rt.ctx, cancel)
 	defer func() { stop(); cancel() }()
+	var capacityDeadline time.Time
+	if req.CapacityWait > 0 {
+		capacityDeadline = time.Now().Add(req.CapacityWait)
+	}
 
 	for {
 		epoch, changed := rt.changeSnapshot()
@@ -162,6 +168,10 @@ func (rt *accountPoolRuntime) AcquireMaintenance(ctx context.Context, req accoun
 			return accountMaintenanceAcquireResult{Code: code}
 		}
 		waitCtx, cancelWait := context.WithCancel(opCtx)
+		if req.CapacityWait > 0 {
+			cancelWait()
+			waitCtx, cancelWait = context.WithDeadline(opCtx, capacityDeadline)
+		}
 		stopChange := context.AfterFunc(changed, cancelWait)
 		if !rt.changeIsCurrent(epoch) {
 			stopChange()
@@ -170,6 +180,7 @@ func (rt *accountPoolRuntime) AcquireMaintenance(ctx context.Context, req accoun
 		}
 		candidate := scheduling.Candidate{ID: snapshot.AccountID, Provider: snapshot.ProviderKind, Models: []string{snapshot.PublicModel}, Enabled: true, Priority: 0, Weight: 1, Capacity: capacity}
 		inner, decision := rt.scheduler.Acquire(waitCtx, scheduling.Request{Provider: snapshot.ProviderKind, Model: snapshot.PublicModel, AllowedAccountIDs: []string{snapshot.AccountID}, Candidates: []scheduling.Candidate{candidate}})
+		waitExpired := errors.Is(waitCtx.Err(), context.DeadlineExceeded) && opCtx.Err() == nil
 		stopChange()
 		cancelWait()
 		if !rt.changeIsCurrent(epoch) {
@@ -182,6 +193,9 @@ func (rt *accountPoolRuntime) AcquireMaintenance(ctx context.Context, req accoun
 			continue
 		}
 		if inner == nil {
+			if waitExpired {
+				return accountMaintenanceAcquireResult{Code: accountPoolCapacityUnavailable}
+			}
 			return accountMaintenanceAcquireResult{Code: mapSchedulingCode(decision.Code)}
 		}
 		rt.cooldownTransition.Lock()
@@ -202,7 +216,13 @@ func (rt *accountPoolRuntime) AcquireMaintenance(ctx context.Context, req accoun
 		unlockMutation()
 		rt.cooldownTransition.Unlock()
 		if code != "" {
-			inner.Release(scheduling.ReleaseResult{})
+			// A failed Commit response may still have stored the lease and
+			// pending attempt. Reserve this capacity through its TTL until the
+			// coordinator can prove settlement; never admit a parallel probe
+			// by assuming that every storage error was a rollback.
+			if code != accountPoolStorageUnavailable {
+				inner.Release(scheduling.ReleaseResult{})
+			}
 			return accountMaintenanceAcquireResult{Code: code}
 		}
 		leaseCtx, cancelLease := context.WithCancel(ctx)
@@ -512,6 +532,46 @@ func (l *accountMaintenanceLease) Finalize(ctx context.Context, callback account
 	if err := tx.Commit(); err != nil {
 		return accountPoolStorageUnavailable
 	}
+	return l.completeReleaseLocked(remaining)
+}
+
+// ResolveSettlement never writes metadata or performs network I/O. It only
+// releases memory after the caller proves that its immutable receipt already
+// committed atomically, including the terminal ledger and isolation outcome.
+func (l *accountMaintenanceLease) ResolveSettlement(ctx context.Context, proof accountMaintenanceTxCallback) accountPoolRuntimeCode {
+	if l == nil || proof == nil {
+		return accountPoolInvalid
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.finished {
+		return accountPoolAlreadyReleased
+	}
+	l.runtime.cooldownTransition.Lock()
+	defer l.runtime.cooldownTransition.Unlock()
+	tx, err := l.runtime.app.store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return accountPoolStorageUnavailable
+	}
+	defer tx.Rollback()
+	var count, remaining int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_pool_maintenance_leases WHERE lease_id=? OR operation_id=?`, l.inner.ID(), l.state.OperationID).Scan(&count); err != nil || count != 0 {
+		return accountPoolStorageUnavailable
+	}
+	if err := proof(ctx, tx); err != nil {
+		return accountPoolStorageUnavailable
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_pool_runtime_cooldowns WHERE account_id=? AND event_id=?`, l.state.AccountID, l.state.CooldownEventID).Scan(&remaining); err != nil {
+		return accountPoolStorageUnavailable
+	}
+	if err := tx.Commit(); err != nil {
+		return accountPoolStorageUnavailable
+	}
+	return l.completeReleaseLocked(remaining)
+}
+
+// Both callers hold lease.mu and cooldownTransition until memory publication.
+func (l *accountMaintenanceLease) completeReleaseLocked(remaining int) accountPoolRuntimeCode {
 	l.finished = true
 	close(l.done)
 	l.cancel()

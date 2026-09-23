@@ -371,3 +371,22 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .health-test-result dl { grid-template-columns: 1fr; }
   .health-dialog-actions .button { flex: 1 1 100%; width: 100%; }
 }
+:root .recovery-panel { margin-top: 24px; padding: 24px; }
+.recovery-panel h2, .recovery-panel h3 { margin-top: 0; }
+.recovery-panel h3 { margin-top: 24px; }
+.recovery-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; }
+.recovery-facts dt { color: #61758a; font-size: 14px; }
+.recovery-facts dd { margin: 4px 0 0; font-weight: 600; }
+.recovery-state { display: flex; flex-direction: column; gap: 5px; min-width: 180px; max-width: 440px; }
+.recovery-state strong { color: #a65f07; }
+.recovery-panel td { overflow-wrap: anywhere; }
+@media (max-width: 540px) {
+  :root .recovery-panel { padding: 18px; }
+  .recovery-panel .page-header-buttons { flex-wrap: wrap; }
+  .recovery-panel table { min-width: 0; }
+  .recovery-panel thead { display: none; }
+  .recovery-panel table, .recovery-panel tbody, .recovery-panel tr, .recovery-panel td { display: block; width: 100%; }
+  .recovery-panel tr { border-top: 1px solid var(--border); }
+  .recovery-panel td { border-top: 0; padding: 12px; }
+  .recovery-panel .recovery-state { min-width: 0; }
+}

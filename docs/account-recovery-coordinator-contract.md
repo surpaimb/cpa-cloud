@@ -1,8 +1,8 @@
 # 生成恢复后台协调器：实施契约
 
-状态：待实现。本契约承接 `c9dc95f` 的[基础模块](system-probe-foundations-contract.md)，
-根据本仓源码与三个任务的只读集成审阅独立制定。当前没有下述后台开关、自动触发或网页控制，
-不能将本文或内部 runner 测试当作自动恢复已可用。
+状态：源码已接线，正在完成本批故障回归与 CI 验收；证据见[集成状态](integration-status.md)。本契约承接
+`c9dc95f` 的[基础模块](system-probe-foundations-contract.md)，根据本仓独立规格实现。默认关闭，
+preview.3 下载版不包含本批功能，合成验收不代表真实提供商或完整 Sub2API 功能对齐。
 
 ## 开关、权限与运行期
 
@@ -32,7 +32,7 @@ legacy 请求不凭空创建账号池维护租约，但已有账号隔离仍阻�
 账号租约需要保存实际路由快照。协议在公共 preflight 入口绑定，首选与仅一次安全换号后的新租约
 都必须绑定，避免四个 handler 各自遗漏。Codex 请求前刷新可能改变真正使用的账号 revision，
 因此“初选 revision”不能冒充“实际执行 revision”；绑定最终路由时再次核对来源与版本。
-当前 preflight callback 只返回错误，须调整为返回最终 actual route 及错误。公共 preflight 在
+preflight callback 返回最终 actual route 及错误。公共 preflight 在
 初选或备用路径准备成功后统一绑定协议与最终路由；绑定失败必须在 MarkDispatch 前结束，不能
 要求各 handler 自行记住回填 Codex 刷新后的版本。
 count_tokens 不作为生成失败快照，不为客户端参数错误、存储错误或权限拒绝建立生成恢复任务。
@@ -104,8 +104,8 @@ next_probe_at 及租约到期。receipt 使用原始结果和结束时间，重�
 
 准入失败尚未建立 attempt 时不伪造消耗；需要持久化下一次检查时间或可诊断的阻塞状态，避免
 每轮扫描同一项。旧事件被手工 clear 或新失败取代后，旧 worker 不得重新建立隔离或 cooldown。
-现有三态表没有保存准入前诊断的字段，后续实现须增加有界 attention code/检查时间的持久化
-结构，绑定相同事件、operation 和 recovery revision；迁移覆盖当前 schema 的升级和失败回滚。
+三态表新增有界 attention code/检查时间的持久化字段，绑定相同事件、operation 和 recovery
+revision；迁移覆盖旧 schema 的升级和失败回滚。
 不能把只存在于进程内的错误缓存当作重启后仍可信的管理状态，也不能把零派发失败混入用量。
 
 持久接口应分别支持同 operation 延后、条件人工阻塞及已终态操作轮换，不滥用总是递增 revision
@@ -116,8 +116,8 @@ next_probe_at 及租约到期。receipt 使用原始结果和结束时间，重�
 提交结果不确定与明确回滚分开处理。若 Commit 实际已完成但返回错误，receipt 重试可能看到
 自身维护租约已消失；须通过只读事务核对同 operation 的完整账本终态及对应隔离/cooldown 状态，
 证明原原子结算已经完成后才释放内存容量。不能仅凭“lease 不存在”宣称成功，也不补发网络。
-无法证明时继续保守阻塞并显示 settlement_pending。当前基础模块还没有此解析接口，不能声称
-已经完整覆盖不确定 Commit 的在线恢复。
+无法证明时继续保守阻塞并显示 settlement_pending。本批通过只读结算核对接口处理已提交但
+确认丢失的路径；未决账本、错误结束时间或仍存在的旧 cooldown 都不能作为释放容量的证明。
 
 ## 管理接口与网页投影
 
@@ -144,4 +144,19 @@ cooldown 是否到期、恢复隔离是否存在及本地/目录/生成观测。
 - 总协调：共享接口与迁移、App/CLI、管理/网页投影、四协议接线及隔离进程验收。Go fake clock
   与真实临时进程分别验证，不读取真实账号；最新完整 Linux race 通过后才记录该批验收。
 
-这些环节均是后续实际交付项。普通提交仍只运行轻量 CI，达到可用里程碑再统一安排安装包。
+普通提交仍只运行轻量 CI，达到可用里程碑再统一安排安装包。
+
+## 已接线的管理入口
+
+- 启动许可：`--allow-account-recovery`（默认 false）；网页入口：“系统状态 → 账号自动恢复”。
+- `GET /admin/api/v1/account-recovery`：返回 `cli_allowed`、`enabled`、`setting_revision`、
+  `running`、`next_wake_at`、`history_count`、`history_full`、`server_time`。
+- `PUT /admin/api/v1/account-recovery`：仅接受 `enabled` 与正整数 `expected_revision`。
+  不具备启动许可而启用返回 403，旧 revision 返回 409，无效参数返回 400；存储不确定返回 503，
+  调用者应查询实际设置。关闭仍保留历史与隔离。
+- `GET /admin/api/v1/account-recovery/accounts`：批量返回隔离快照、时间、尝试次数、固定诊断码。
+  同一投影也作为上游列表的 `recovery` 字段返回。`auto_eligible` 不表示已获得容量或正在调用上游。
+
+三个入口都需要管理员会话；PUT 另须 CSRF/Origin。没有手工 retry-now、任意输入或任意目标接口。
+升级会在迁移事务中把旧恢复表复制到含诊断字段的新 schema，增加设置单行和查询索引；非法存量失败
+会回滚。降级前应停止进程，并恢复升级前**完整数据目录**与匹配版本程序，不把新 schema 直接交旧版本读取。

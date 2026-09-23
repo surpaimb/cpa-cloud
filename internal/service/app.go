@@ -37,6 +37,7 @@ type App struct {
 	accountPool   *accountPoolRuntime
 	healthTests   *upstreamHealthCoordinator
 	systemProbes  *accounting.SystemProbeLedger
+	recovery      *accountRecoveryCoordinator
 	usage         *usageLedgerCoordinator
 	usageRequests sync.Map
 	loginMu       sync.Mutex
@@ -115,10 +116,21 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		s.close()
 		return nil, err
 	}
+	app.recovery = newAccountRecoveryCoordinator(app)
+	if err := app.recovery.Start(ctx); err != nil {
+		app.healthTests.Close()
+		app.accountPool.Close()
+		app.refresh.Close()
+		s.close()
+		return nil, err
+	}
 	return app, nil
 }
 
 func (a *App) Close() error {
+	if a.recovery != nil {
+		a.recovery.Close()
+	}
 	if a.healthTests != nil {
 		a.healthTests.Close()
 	}
@@ -137,6 +149,7 @@ func (a *App) Handler() http.Handler {
 	a.registerPricingHandlers(mux)
 	a.registerUsageHandlers(mux)
 	a.registerSystemProbeHandlers(mux)
+	a.registerAccountRecoveryHandlers(mux)
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("POST /admin/api/v1/sessions", a.login)
 	mux.HandleFunc("DELETE /admin/api/v1/sessions", a.requireAdmin(a.logout, true))
@@ -212,7 +225,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 	limitations := []string{
 		"development preview; not production hardened",
 		"Responses resources, background execution, failover after upstream dispatch, and reliable billing-grade usage are not implemented; Messages is available only for Anthropic API-key routes",
-		"account tests cover local credentials or model catalogs only; automatic generation recovery probes are not implemented",
+		"manual account tests check local credentials or catalogs; generation recovery requires both startup allowance and administrator opt-in, uses bounded synthetic prompts, and consumes upstream usage",
 		"backup/restore automation, production key custody, and multi-process storage are not implemented",
 		"the host administrator can access runtime secrets and must protect the data directory and master key",
 		"single process and single SQLite database only",
@@ -247,6 +260,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"usage_reporting":                 true,
 			"versioned_cost_prices":           true,
 			"system_probe_accounting":         a.systemProbes != nil,
+			"account_recovery":                a.recovery != nil,
 			"codex_membership_auto_refresh":   a.refresh != nil && a.refresh.enabled(),
 		},
 		"limitations": limitations,

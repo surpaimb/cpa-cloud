@@ -1,5 +1,16 @@
 # 集成状态
 
+## 2026-09-23：默认关闭的账号生成恢复协调器
+
+- 本批按[协调器契约](account-recovery-coordinator-contract.md)独立实现，承接下面已验收的基础模块。员工实际失败快照 `a4ce167`、Codex 刷新保护 `f0c9b86`/`7cd485b` 与后台协调器由原 GPT-5.6 Sol 子任务负责；根任务集成 App/CLI、管理入口、维护结算、网页和进程验收。不是参考产品源码移植，不代表完整 Sub2API 能力已经对齐。
+- 仅在 `--allow-account-recovery` 与持久管理员设置同时开启时运行一个后台 worker。显式账号池失败保存实际协议、模型、账号与版本；旧凭据的迟到结果不冷却新凭据。每事件最多三次持久尝试，下一次至少间隔五分钟；未知结算、认证/协议问题和历史满额停止自动尝试。默认关闭、重启、管理响应丢失和取消均保留持久隔离，不能把 cooldown 到期视为账号已经恢复。
+- 根任务结算专项非缓存 PASS（service 40.572s）：完整账本与原子隔离状态证明实际提交后才释放内存容量；pending、错误完成时间、旧 cooldown 仍存在均拒绝释放；短容量等待不取消已获得的维护租约。Codex 子任务证明只有本次刷新可承接 N→N+1，刷新后重导入阻止生成；仅合成凭据与注入 transport。
+- 根任务在最终源码编译真实 Go 程序并运行 `scripts/smoke-account-recovery.mjs`：默认关闭/双门控、管理员/CSRF/revision、员工失败捕获、隔离拒绝、一条成功生成探测、取消后保留隔离、关闭后重启零重放、两个独立探测和三个员工请求分别入账、无 pending 及落盘日志无秘密，均 PASS。既有 `smoke-recovery-foundations.mjs` 使用旧 `dist/health-smoke.exe` 初始化隔离库后升级，`smoke-upstream-health.mjs` 也均 PASS。临时进程、随机端口与模拟上游，测试数据已清理；这不是不确定 Commit 的进程故障证据，该路径由 Go 故障注入测试覆盖。
+- 网页 TypeScript、74 项测试及生产构建通过。根任务用真实 Go + Playwright Chrome 验证开启/关闭、员工失败后隔离展示、服务器已保存但浏览器丢失响应后查询实际设置、桌面 1440×1080 和手机 390×844。修正手机隔离列表横向滚动后再次通过；0 页面 JavaScript 异常，仅预期 session401 与主动注入 ERR_FAILED。最终截图已查看：`C:/Users/apple/.codex/visualizations/2026/09/23/cpa-recovery/desktop.png`、`mobile.png`。所有模型调用只到合成回环上游。
+- 后台子任务 `074a91a` 专项通过（恢复 service 29.912s、探测 accounting 7.502s），运行时 `a4ce167` 专项 44.922s 通过。根任务完整非缓存 `go test -p 1 ./... -count=1 -timeout=10m` PASS：service 404.179s、accounting 14.477s、membership 0.403s、scheduling 0.148s。最终全仓 `go vet -p 1 ./...` 和编译 PASS。补充时钟回拨后的固定结算时间测试通过，未改变重试的原始结果；网页文案收尾后相关 10 项测试、TypeScript/构建和真实浏览器流程再次 PASS。
+- README PowerShell 块与基线保持一致，104 个本地文档链接、6 项 CI 路径测试及 diff 检查通过。当前变更只触发 core/web，三个安装平台不触发；本机无 C 编译器，完整 Linux race 待本批 CI，不冒充已经通过。
+- 本批仍仅源码，preview.3 不含本功能；没有新 tag、安装包、真实供应商/会员账号或生产部署。预算、代理池、商业化及其他功能矩阵待办继续保留。
+
 ## 2026-09-23：生成恢复基础模块与独立探测账本
 
 - 账本 `45bafe9`、维护租约/隔离 `3cf737e`、固定协议 runner `b54cb5d` 已由 GPT-5.6 Sol 子任务交付，根任务负责 App 初始化、管理员汇总、内部单次执行事务桥、legacy 路由隔离及进程验收。独立规格见[基础模块契约](system-probe-foundations-contract.md)。入口、执行、持久化、生命周期分别列明：只读管理入口已接线；内部执行有测试；三张独立表已迁移；启动中断与容量恢复已接线；自动创建隔离/触发探测的 worker 和配置仍未实现。

@@ -23,6 +23,10 @@ func TestRecoveryExecutionAtomicSettlementAndStaleIsolation(t *testing.T) {
 	a.accountPool = f.rt
 	a.cfg.AllowLoopbackUpstream = true
 	a.http = newUpstreamClient(true)
+	a.cfg.AccountRecoveryEnabled = true
+	if _, err := a.store.db.Exec(`UPDATE account_recovery_settings SET enabled=1 WHERE singleton=1`); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	for caseIndex, kind := range []string{"success", "stale", "rollback", "dispatch_failure", "cancel", "deadline", "close"} {
 		t.Run(kind, func(t *testing.T) {

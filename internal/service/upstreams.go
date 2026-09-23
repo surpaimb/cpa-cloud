@@ -20,17 +20,18 @@ const (
 )
 
 type upstreamView struct {
-	ID                string                   `json:"id"`
-	Name              string                   `json:"name"`
-	ProviderKind      string                   `json:"provider_kind"`
-	Endpoint          string                   `json:"endpoint"`
-	Enabled           bool                     `json:"enabled"`
-	Revision          int64                    `json:"revision"`
-	CredentialState   *string                  `json:"credential_state"`
-	VerifiedAt        *string                  `json:"verified_at"`
-	OAuthRefresh      *codexOAuthRefreshView   `json:"oauth_refresh,omitempty"`
-	LatestObservation *upstreamObservationView `json:"latest_observation"`
-	Cooldown          *upstreamCooldownView    `json:"cooldown"`
+	ID                string                          `json:"id"`
+	Name              string                          `json:"name"`
+	ProviderKind      string                          `json:"provider_kind"`
+	Endpoint          string                          `json:"endpoint"`
+	Enabled           bool                            `json:"enabled"`
+	Revision          int64                           `json:"revision"`
+	CredentialState   *string                         `json:"credential_state"`
+	VerifiedAt        *string                         `json:"verified_at"`
+	OAuthRefresh      *codexOAuthRefreshView          `json:"oauth_refresh,omitempty"`
+	LatestObservation *upstreamObservationView        `json:"latest_observation"`
+	Cooldown          *upstreamCooldownView           `json:"cooldown"`
+	Recovery          *accountRecoveryAccountSnapshot `json:"recovery,omitempty"`
 }
 
 type codexOAuthRefreshView struct {
@@ -88,6 +89,20 @@ func (a *App) listUpstreams(w http.ResponseWriter, r *http.Request, _ adminSessi
 	if err := a.decorateUpstreamCooldowns(r.Context(), items, now); err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
+	}
+	if a.recovery != nil {
+		states, err := a.recovery.AccountSnapshots(r.Context())
+		if err != nil {
+			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+		byAccount := make(map[string]*accountRecoveryAccountSnapshot, len(states))
+		for i := range states {
+			byAccount[states[i].AccountID] = &states[i]
+		}
+		for i := range items {
+			items[i].Recovery = byAccount[items[i].ID]
+		}
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "server_time": now.Format(time.RFC3339Nano)})
 }

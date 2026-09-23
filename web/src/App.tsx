@@ -72,7 +72,7 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
     upstreams: <UpstreamsPage csrf={session.csrf_token} />,
     models: <ModelsPage csrf={session.csrf_token} />,
     usage: <UsagePage csrf={session.csrf_token} />,
-    status: <StatusPage />,
+    status: <StatusPage csrf={session.csrf_token} />,
   }[page]
 
   return <div className="app-shell">
