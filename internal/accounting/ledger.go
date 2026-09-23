@@ -82,6 +82,15 @@ type Usage struct {
 	CacheWriteTokens *int64
 }
 
+// UpperUsage contains caller-proven, non-null token upper bounds. It does not
+// derive those bounds from a model request.
+type UpperUsage struct {
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+}
+
 type AttemptFinish struct {
 	ID         string
 	Status     Status
@@ -278,12 +287,33 @@ func (l *Ledger) BeginAttempt(ctx context.Context, input AttemptStart) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := beginAttemptTx(ctx, tx, input, startedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// BeginAttemptTx participates in a caller-owned dispatch transaction. It does
+// not commit or roll back, so sibling reservation metadata can be atomic with
+// the attempt start.
+func (l *Ledger) BeginAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptStart) error {
+	if l == nil || l.db == nil || ctx == nil || tx == nil {
+		return ErrInvalid
+	}
+	startedAt, err := validateAttemptStart(input)
+	if err != nil {
+		return err
+	}
+	return beginAttemptTx(ctx, tx, input, startedAt)
+}
+
+func beginAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptStart, startedAt string) error {
 	matched, err := sameAttemptStart(ctx, tx, input, startedAt)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
 	if matched {
-		return tx.Commit()
+		return nil
 	}
 	if !errors.Is(err, ErrNotFound) {
 		return fmt.Errorf("%w: attempt start differs", ErrConflict)
@@ -338,7 +368,7 @@ func (l *Ledger) BeginAttempt(ctx context.Context, input AttemptStart) error {
 			return fmt.Errorf("%w: attempt start differs", ErrConflict)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (l *Ledger) FinishAttempt(ctx context.Context, input AttemptFinish) error {
@@ -943,34 +973,82 @@ func calculateCost(usage Usage, price *PriceSnapshot) (*int64, error) {
 			return nil, nil
 		}
 	}
-	rates := []int64{price.InputPerMillionMicro, price.OutputPerMillionMicro, price.CacheReadPerMillionMicro, price.CacheWritePerMillionMicro}
+	cost, err := calculateKnownCost(
+		[4]int64{*values[0], *values[1], *values[2], *values[3]},
+		[4]int64{price.InputPerMillionMicro, price.OutputPerMillionMicro, price.CacheReadPerMillionMicro, price.CacheWritePerMillionMicro},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &cost, nil
+}
+
+// CalculateUpperCost applies a validated immutable price snapshot to token
+// bounds proved elsewhere. It performs arithmetic only; it does not inspect a
+// request or claim that the supplied values are safe bounds.
+func CalculateUpperCost(usage UpperUsage, price PriceSnapshot) (int64, error) {
+	values := [4]int64{usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens}
+	if !validUpperUsage(values) || !validUpperPrice(price) {
+		return 0, ErrInvalid
+	}
+	return calculateKnownCost(values, [4]int64{
+		price.InputPerMillionMicro,
+		price.OutputPerMillionMicro,
+		price.CacheReadPerMillionMicro,
+		price.CacheWritePerMillionMicro,
+	})
+}
+
+func calculateKnownCost(values, rates [4]int64) (int64, error) {
 	var high, low uint64
 	for index, value := range values {
-		productHigh, productLow := bits.Mul64(uint64(*value), uint64(rates[index]))
+		if value < 0 || rates[index] < 0 {
+			return 0, ErrInvalid
+		}
+		productHigh, productLow := bits.Mul64(uint64(value), uint64(rates[index]))
 		var carry uint64
 		low, carry = bits.Add64(low, productLow, 0)
 		var overflow uint64
 		high, overflow = bits.Add64(high, productHigh, carry)
 		if overflow != 0 {
-			return nil, ErrInvalid
+			return 0, ErrInvalid
 		}
 	}
 	if high == 0 && low == 0 {
-		zero := int64(0)
-		return &zero, nil
+		return 0, nil
 	}
 	var carry uint64
 	low, carry = bits.Add64(low, 999_999, 0)
 	high, carry = bits.Add64(high, 0, carry)
 	if carry != 0 || high >= 1_000_000 {
-		return nil, ErrInvalid
+		return 0, ErrInvalid
 	}
 	quotient, _ := bits.Div64(high, low, 1_000_000)
 	if quotient > math.MaxInt64 {
-		return nil, ErrInvalid
+		return 0, ErrInvalid
 	}
-	cost := int64(quotient)
-	return &cost, nil
+	return int64(quotient), nil
+}
+
+func validUpperUsage(values [4]int64) bool {
+	for _, value := range values {
+		if value < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func validUpperPrice(price PriceSnapshot) bool {
+	if !validPrice(&price) {
+		return false
+	}
+	for _, rate := range []int64{price.InputPerMillionMicro, price.OutputPerMillionMicro, price.CacheReadPerMillionMicro, price.CacheWritePerMillionMicro} {
+		if rate > MaxPriceRate {
+			return false
+		}
+	}
+	return true
 }
 
 func sameUsage(left, right Usage) bool {
