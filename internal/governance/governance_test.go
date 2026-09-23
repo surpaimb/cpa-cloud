@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -89,6 +90,38 @@ func TestMigrateRejectsChangedCheckLiteralsAndRollsBack(t *testing.T) {
 	}
 }
 
+func TestMigrateRejectsPreSnapshotScopeSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-scope.db")
+	db := openGovernanceDB(t, path, 1)
+	defer db.Close()
+	for _, statement := range []string{settingsDDL, requestsDDL, `CREATE TABLE governance_request_scopes (
+		request_id TEXT NOT NULL REFERENCES governance_requests(id) ON DELETE CASCADE,
+		scope_kind TEXT NOT NULL CHECK(scope_kind IN ('employee','key','group')),
+		scope_id TEXT NOT NULL,
+		policy_id TEXT NOT NULL,
+		policy_revision INTEGER NOT NULL CHECK(typeof(policy_revision)='integer' AND policy_revision BETWEEN 1 AND 9007199254740991),
+		rpm_limit INTEGER CHECK(rpm_limit IS NULL OR (typeof(rpm_limit)='integer' AND rpm_limit>0)),
+		concurrency_limit INTEGER CHECK(concurrency_limit IS NULL OR (typeof(concurrency_limit)='integer' AND concurrency_limit>0)),
+		PRIMARY KEY(request_id,scope_kind,scope_id),
+		CHECK(rpm_limit IS NOT NULL OR concurrency_limit IS NOT NULL)
+	)`} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	coordinator := newTestCoordinator(t, db)
+	if err := coordinator.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+		t.Fatalf("old scope schema error=%v", err)
+	}
+	assertObjectCount(t, db, "governance_request_scopes_scope_idx", 0)
+	if _, err := db.Exec(`DROP TABLE governance_request_scopes`); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); err != nil {
+		t.Fatalf("retry after scope schema repair: %v", err)
+	}
+}
+
 func TestMigrateValidatesStoredRowsAndForeignKeys(t *testing.T) {
 	db, coordinator := openMigratedCoordinator(t, filepath.Join(t.TempDir(), "stored.db"), 1)
 	defer db.Close()
@@ -171,13 +204,28 @@ func TestMigrateValidatesStoredRowsAndForeignKeys(t *testing.T) {
 	if _, err := db.Exec(`UPDATE governance_request_scopes SET policy_revision=1 WHERE request_id=?`, input.RequestID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE governance_request_scopes SET shadow_currency='usd' WHERE request_id=?`, input.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+		t.Fatalf("orphan shadow metadata error=%v", err)
+	}
+	if _, err := db.Exec(`UPDATE governance_request_scopes SET shadow_currency='' WHERE request_id=?`, input.RequestID); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO governance_request_scopes(
-		request_id,scope_kind,scope_id,policy_id,policy_revision,rpm_limit
-	) VALUES('missing-request','group','group-orphan','policy-orphan',1,1)`); err != nil {
+		request_id,scope_kind,scope_id,policy_id,policy_revision,group_revision,rpm_limit,shadow_currency,shadow_window
+	) VALUES('missing-request','group','group-orphan','policy-orphan',1,1,1,'','')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
@@ -304,7 +352,17 @@ func TestInvalidScopeSnapshotFailsClosed(t *testing.T) {
 		{Kind: ScopeEmployee, ID: "employee-1", PolicyID: "policy", PolicyRevision: 1},
 		{Kind: ScopeEmployee, ID: "other-employee", PolicyID: "policy", PolicyRevision: 1, ConcurrencyLimit: int64Pointer(1)},
 		{Kind: ScopeKey, ID: "key-1", PolicyID: "policy", PolicyRevision: 0, RPMLimit: int64Pointer(1)},
-		{Kind: ScopeGroup, ID: "group-1", PolicyID: "policy", PolicyRevision: 1, RPMLimit: int64Pointer(-1)},
+		{Kind: ScopeGroup, ID: "group-1", PolicyID: "policy", PolicyRevision: 1, GroupRevision: int64Pointer(1), RPMLimit: int64Pointer(-1)},
+		{Kind: ScopeGroup, ID: "group-1", PolicyID: "policy", PolicyRevision: 1, RPMLimit: int64Pointer(1)},
+		{Kind: ScopeEmployee, ID: "employee-1", PolicyID: "policy", PolicyRevision: 1, GroupRevision: int64Pointer(1), RPMLimit: int64Pointer(1)},
+		{Kind: ScopeGroup, ID: "group-1", PolicyID: "policy", PolicyRevision: 1, GroupRevision: int64Pointer(0), ShadowTPM: int64Pointer(1)},
+		{Kind: ScopeGroup, ID: "group-1", PolicyID: "policy", PolicyRevision: 1, GroupRevision: int64Pointer(MaxRevision + 1), ShadowTPM: int64Pointer(1)},
+		{Kind: ScopeEmployee, ID: "employee-1", PolicyID: "policy", PolicyRevision: 1, ShadowTPM: int64Pointer(0)},
+		{Kind: ScopeEmployee, ID: "employee-1", PolicyID: "policy", PolicyRevision: 1, ShadowCostMicro: int64Pointer(-1), ShadowCurrency: "USD", ShadowWindow: ShadowWindowRolling24h},
+		{Kind: ScopeEmployee, ID: "employee-1", PolicyID: "policy", PolicyRevision: 1, ShadowCurrency: "USD", ShadowWindow: ShadowWindowRolling24h, RPMLimit: int64Pointer(1)},
+		{Kind: ScopeEmployee, ID: "employee-1", PolicyID: "policy", PolicyRevision: 1, ShadowCostMicro: int64Pointer(1), ShadowCurrency: "usd", ShadowWindow: ShadowWindowRolling24h},
+		{Kind: ScopeEmployee, ID: "employee-1", PolicyID: "policy", PolicyRevision: 1, ShadowCostMicro: int64Pointer(1), ShadowCurrency: "USDD", ShadowWindow: ShadowWindowRolling24h},
+		{Kind: ScopeEmployee, ID: "employee-1", PolicyID: "policy", PolicyRevision: 1, ShadowCostMicro: int64Pointer(1), ShadowCurrency: "USD", ShadowWindow: "rolling_1h"},
 	}
 	for index, scope := range invalid {
 		input := testAdmission("invalid-"+string(rune('a'+index)), governanceStart, scope)
@@ -326,6 +384,82 @@ func TestInvalidScopeSnapshotFailsClosed(t *testing.T) {
 		t.Fatalf("non-UTC observed clock error=%v", err)
 	}
 	assertRequestCount(t, db, 0)
+}
+
+func TestShadowOnlySnapshotPersistsAndCountsStableScopeEvents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shadow.db")
+	db, coordinator := openMigratedCoordinator(t, path, 1)
+	setEnabled(t, db, coordinator, 1, true, governanceStart)
+
+	shadow := ScopeSnapshot{
+		Kind:            ScopeGroup,
+		ID:              "group-shadow",
+		PolicyID:        "shadow-policy",
+		PolicyRevision:  7,
+		GroupRevision:   int64Pointer(MaxRevision),
+		ShadowTPM:       int64Pointer(math.MaxInt64),
+		ShadowCostMicro: int64Pointer(math.MaxInt64),
+		ShadowCurrency:  "USD",
+		ShadowWindow:    ShadowWindowRolling24h,
+	}
+	first := testAdmission("shadow-first", governanceStart, shadow)
+	first.SettingsRevision = 2
+	lease, decision, err := runAdmit(t, db, coordinator, first)
+	if err != nil || !decision.Allowed || lease == nil {
+		t.Fatalf("first lease=%+v decision=%+v err=%v", lease, decision, err)
+	}
+	var groupRevision, shadowTPM, shadowCost int64
+	var currency, window, groupKind, tpmKind, costKind string
+	if err := db.QueryRow(`SELECT group_revision,shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window,
+		typeof(group_revision),typeof(shadow_tpm),typeof(shadow_cost_micro)
+		FROM governance_request_scopes WHERE request_id=?`, first.RequestID).Scan(
+		&groupRevision, &shadowTPM, &shadowCost, &currency, &window, &groupKind, &tpmKind, &costKind); err != nil {
+		t.Fatal(err)
+	}
+	if groupRevision != MaxRevision || shadowTPM != math.MaxInt64 || shadowCost != math.MaxInt64 ||
+		currency != "USD" || window != ShadowWindowRolling24h || groupKind != "integer" || tpmKind != "integer" || costKind != "integer" {
+		t.Fatalf("stored shadow group_revision=%d tpm=%d cost=%d currency=%q window=%q types=%q/%q/%q",
+			groupRevision, shadowTPM, shadowCost, currency, window, groupKind, tpmKind, costKind)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, coordinator = openMigratedCoordinator(t, path, 1)
+	defer db.Close()
+	lease, decision, err = runAdmit(t, db, coordinator, first)
+	if err != nil || !decision.Allowed || lease == nil {
+		t.Fatalf("replay lease=%+v decision=%+v err=%v", lease, decision, err)
+	}
+	changedGroup := first
+	changedGroup.Scopes = append([]ScopeSnapshot(nil), first.Scopes...)
+	changedGroup.Scopes[0].GroupRevision = int64Pointer(MaxRevision - 1)
+	if _, _, err := runAdmit(t, db, coordinator, changedGroup); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed group revision error=%v", err)
+	}
+	changedShadow := first
+	changedShadow.Scopes = append([]ScopeSnapshot(nil), first.Scopes...)
+	changedShadow.Scopes[0].ShadowCostMicro = int64Pointer(math.MaxInt64 - 1)
+	if _, _, err := runAdmit(t, db, coordinator, changedShadow); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed shadow cost error=%v", err)
+	}
+
+	second := testAdmission("shadow-second", governanceStart.Add(time.Second), shadow)
+	second.SettingsRevision = 2
+	if lease, decision, err = runAdmit(t, db, coordinator, second); err != nil || !decision.Allowed || lease == nil {
+		t.Fatalf("second shadow-only lease=%+v decision=%+v err=%v", lease, decision, err)
+	}
+
+	hard := shadow
+	hard.PolicyID = "hard-policy"
+	hard.PolicyRevision = 8
+	hard.RPMLimit = int64Pointer(2)
+	third := testAdmission("shadow-hard-third", governanceStart.Add(2*time.Second), hard)
+	third.SettingsRevision = 2
+	lease, decision, err = runAdmit(t, db, coordinator, third)
+	if err != nil || lease != nil || decision.Code != DecisionRPMExceeded || decision.Allowed {
+		t.Fatalf("stable-scope RPM lease=%+v decision=%+v err=%v", lease, decision, err)
+	}
 }
 
 func TestRPMWindowPersistsAcrossRevisionClockRollbackAndRestart(t *testing.T) {
@@ -893,6 +1027,9 @@ func keyScope(revision, rpm, concurrency int64) ScopeSnapshot {
 
 func scope(kind ScopeKind, id, policy string, revision, rpm, concurrency int64) ScopeSnapshot {
 	item := ScopeSnapshot{Kind: kind, ID: id, PolicyID: policy, PolicyRevision: revision}
+	if kind == ScopeGroup {
+		item.GroupRevision = int64Pointer(revision)
+	}
 	if rpm > 0 {
 		item.RPMLimit = int64Pointer(rpm)
 	}

@@ -27,6 +27,8 @@ var (
 
 const MaxRevision int64 = 9007199254740991
 
+const ShadowWindowRolling24h = "rolling_24h"
+
 type ScopeKind string
 
 const (
@@ -83,8 +85,13 @@ type ScopeSnapshot struct {
 	ID               string
 	PolicyID         string
 	PolicyRevision   int64
+	GroupRevision    *int64
 	RPMLimit         *int64
 	ConcurrencyLimit *int64
+	ShadowTPM        *int64
+	ShadowCostMicro  *int64
+	ShadowCurrency   string
+	ShadowWindow     string
 }
 
 type AdmissionStart struct {
@@ -279,9 +286,11 @@ func (c *Coordinator) AdmitTx(ctx context.Context, tx *sql.Tx, input AdmissionSt
 	}
 	for _, scope := range scopes {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO governance_request_scopes(
-			request_id,scope_kind,scope_id,policy_id,policy_revision,rpm_limit,concurrency_limit
-		) VALUES(?,?,?,?,?,?,?)`, input.RequestID, string(scope.Kind), scope.ID, scope.PolicyID, scope.PolicyRevision,
-			nullableLimit(scope.RPMLimit), nullableLimit(scope.ConcurrencyLimit)); err != nil {
+			request_id,scope_kind,scope_id,policy_id,policy_revision,group_revision,rpm_limit,concurrency_limit,
+			shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, input.RequestID, string(scope.Kind), scope.ID, scope.PolicyID, scope.PolicyRevision,
+			nullableLimit(scope.GroupRevision), nullableLimit(scope.RPMLimit), nullableLimit(scope.ConcurrencyLimit),
+			nullableLimit(scope.ShadowTPM), nullableLimit(scope.ShadowCostMicro), scope.ShadowCurrency, scope.ShadowWindow); err != nil {
 			return nil, Decision{}, ErrUnavailable
 		}
 	}
@@ -400,7 +409,9 @@ func validateAdmission(input AdmissionStart) ([]ScopeSnapshot, error) {
 	})
 	for index, scope := range scopes {
 		if !validScopeKind(scope.Kind) || !validMetadata(scope.ID, 256) || !validMetadata(scope.PolicyID, 256) || !validRevision(scope.PolicyRevision) ||
-			scope.RPMLimit == nil && scope.ConcurrencyLimit == nil || !validLimit(scope.RPMLimit) || !validLimit(scope.ConcurrencyLimit) {
+			!validScopeGroupRevision(scope) || !validLimit(scope.RPMLimit) || !validLimit(scope.ConcurrencyLimit) ||
+			!validLimit(scope.ShadowTPM) || !validLimit(scope.ShadowCostMicro) || !validShadowCost(scope) ||
+			scope.RPMLimit == nil && scope.ConcurrencyLimit == nil && scope.ShadowTPM == nil && scope.ShadowCostMicro == nil {
 			return nil, ErrInvalid
 		}
 		if scope.Kind == ScopeEmployee && scope.ID != input.Subject.EmployeeID || scope.Kind == ScopeKey && scope.ID != input.Subject.KeyID {
@@ -425,8 +436,10 @@ func sameScopes(left, right []ScopeSnapshot) bool {
 	}
 	for index := range left {
 		if left[index].Kind != right[index].Kind || left[index].ID != right[index].ID || left[index].PolicyID != right[index].PolicyID ||
-			left[index].PolicyRevision != right[index].PolicyRevision || !sameLimit(left[index].RPMLimit, right[index].RPMLimit) ||
-			!sameLimit(left[index].ConcurrencyLimit, right[index].ConcurrencyLimit) {
+			left[index].PolicyRevision != right[index].PolicyRevision || !sameLimit(left[index].GroupRevision, right[index].GroupRevision) ||
+			!sameLimit(left[index].RPMLimit, right[index].RPMLimit) || !sameLimit(left[index].ConcurrencyLimit, right[index].ConcurrencyLimit) ||
+			!sameLimit(left[index].ShadowTPM, right[index].ShadowTPM) || !sameLimit(left[index].ShadowCostMicro, right[index].ShadowCostMicro) ||
+			left[index].ShadowCurrency != right[index].ShadowCurrency || left[index].ShadowWindow != right[index].ShadowWindow {
 			return false
 		}
 	}
@@ -438,6 +451,28 @@ func sameLimit(left, right *int64) bool {
 }
 
 func validLimit(value *int64) bool { return value == nil || *value > 0 }
+
+func validScopeGroupRevision(scope ScopeSnapshot) bool {
+	if scope.Kind == ScopeGroup {
+		return scope.GroupRevision != nil && validRevision(*scope.GroupRevision)
+	}
+	return scope.GroupRevision == nil
+}
+
+func validShadowCost(scope ScopeSnapshot) bool {
+	if scope.ShadowCostMicro == nil {
+		return scope.ShadowCurrency == "" && scope.ShadowWindow == ""
+	}
+	if len(scope.ShadowCurrency) != 3 || scope.ShadowWindow != ShadowWindowRolling24h {
+		return false
+	}
+	for index := 0; index < len(scope.ShadowCurrency); index++ {
+		if scope.ShadowCurrency[index] < 'A' || scope.ShadowCurrency[index] > 'Z' {
+			return false
+		}
+	}
+	return true
+}
 
 func validRevision(value int64) bool { return value >= 1 && value <= MaxRevision }
 
@@ -613,7 +648,8 @@ func loadRequest(ctx context.Context, tx *sql.Tx, id string) (storedRequest, boo
 }
 
 func loadScopes(ctx context.Context, tx *sql.Tx, requestID string) ([]ScopeSnapshot, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT scope_kind,scope_id,policy_id,policy_revision,rpm_limit,concurrency_limit
+	rows, err := tx.QueryContext(ctx, `SELECT scope_kind,scope_id,policy_id,policy_revision,group_revision,rpm_limit,concurrency_limit,
+		shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window
 		FROM governance_request_scopes WHERE request_id=? ORDER BY scope_kind,scope_id`, requestID)
 	if err != nil {
 		return nil, ErrUnavailable
@@ -622,24 +658,29 @@ func loadScopes(ctx context.Context, tx *sql.Tx, requestID string) ([]ScopeSnaps
 	scopes := make([]ScopeSnapshot, 0)
 	for rows.Next() {
 		var scope ScopeSnapshot
-		var rpm, concurrency sql.NullInt64
-		if err := rows.Scan(&scope.Kind, &scope.ID, &scope.PolicyID, &scope.PolicyRevision, &rpm, &concurrency); err != nil {
+		var groupRevision, rpm, concurrency, shadowTPM, shadowCost sql.NullInt64
+		if err := rows.Scan(&scope.Kind, &scope.ID, &scope.PolicyID, &scope.PolicyRevision, &groupRevision, &rpm, &concurrency,
+			&shadowTPM, &shadowCost, &scope.ShadowCurrency, &scope.ShadowWindow); err != nil {
 			return nil, ErrUnavailable
 		}
-		if rpm.Valid {
-			value := rpm.Int64
-			scope.RPMLimit = &value
-		}
-		if concurrency.Valid {
-			value := concurrency.Int64
-			scope.ConcurrencyLimit = &value
-		}
+		setOptionalInt64(&scope.GroupRevision, groupRevision)
+		setOptionalInt64(&scope.RPMLimit, rpm)
+		setOptionalInt64(&scope.ConcurrencyLimit, concurrency)
+		setOptionalInt64(&scope.ShadowTPM, shadowTPM)
+		setOptionalInt64(&scope.ShadowCostMicro, shadowCost)
 		scopes = append(scopes, scope)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, ErrUnavailable
 	}
 	return scopes, nil
+}
+
+func setOptionalInt64(target **int64, value sql.NullInt64) {
+	if value.Valid {
+		copy := value.Int64
+		*target = &copy
+	}
 }
 
 func rpmState(ctx context.Context, tx *sql.Tx, scope ScopeSnapshot, effective time.Time) (int64, time.Time, error) {

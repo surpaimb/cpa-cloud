@@ -50,10 +50,22 @@ const scopesDDL = `CREATE TABLE IF NOT EXISTS governance_request_scopes (
 	scope_id TEXT NOT NULL,
 	policy_id TEXT NOT NULL,
 	policy_revision INTEGER NOT NULL CHECK(typeof(policy_revision)='integer' AND policy_revision BETWEEN 1 AND 9007199254740991),
+	group_revision INTEGER CHECK(
+		(scope_kind='group' AND typeof(group_revision)='integer' AND group_revision BETWEEN 1 AND 9007199254740991)
+		OR (scope_kind IN ('employee','key') AND group_revision IS NULL)
+	),
 	rpm_limit INTEGER CHECK(rpm_limit IS NULL OR (typeof(rpm_limit)='integer' AND rpm_limit>0)),
 	concurrency_limit INTEGER CHECK(concurrency_limit IS NULL OR (typeof(concurrency_limit)='integer' AND concurrency_limit>0)),
+	shadow_tpm INTEGER CHECK(shadow_tpm IS NULL OR (typeof(shadow_tpm)='integer' AND shadow_tpm>0)),
+	shadow_cost_micro INTEGER CHECK(shadow_cost_micro IS NULL OR (typeof(shadow_cost_micro)='integer' AND shadow_cost_micro>0)),
+	shadow_currency TEXT NOT NULL,
+	shadow_window TEXT NOT NULL,
 	PRIMARY KEY(request_id,scope_kind,scope_id),
-	CHECK(rpm_limit IS NOT NULL OR concurrency_limit IS NOT NULL)
+	CHECK(rpm_limit IS NOT NULL OR concurrency_limit IS NOT NULL OR shadow_tpm IS NOT NULL OR shadow_cost_micro IS NOT NULL),
+	CHECK(
+		(shadow_cost_micro IS NULL AND shadow_currency='' AND shadow_window='')
+		OR (shadow_cost_micro IS NOT NULL AND length(shadow_currency)=3 AND shadow_currency GLOB '[A-Z][A-Z][A-Z]' AND shadow_window='rolling_24h')
+	)
 )`
 
 const scopesIndexDDL = `CREATE INDEX IF NOT EXISTS governance_request_scopes_scope_idx
@@ -234,23 +246,33 @@ func validateStoredData(ctx context.Context, tx *sql.Tx) error {
 		return ErrUnavailable
 	}
 
-	scopeRows, err := tx.QueryContext(ctx, `SELECT s.request_id,s.scope_kind,s.scope_id,s.policy_id,s.policy_revision,
-		s.rpm_limit,s.concurrency_limit,r.employee_id,r.key_id
+	scopeRows, err := tx.QueryContext(ctx, `SELECT s.request_id,s.scope_kind,s.scope_id,s.policy_id,s.policy_revision,s.group_revision,
+		s.rpm_limit,s.concurrency_limit,s.shadow_tpm,s.shadow_cost_micro,s.shadow_currency,s.shadow_window,r.employee_id,r.key_id
 		FROM governance_request_scopes s JOIN governance_requests r ON r.id=s.request_id
 		ORDER BY s.request_id,s.scope_kind,s.scope_id`)
 	if err != nil {
 		return ErrUnavailable
 	}
 	for scopeRows.Next() {
-		var requestID, kind, scopeID, policyID, employeeID, keyID string
+		var requestID, kind, scopeID, policyID, currency, window, employeeID, keyID string
 		var policyRevision int64
-		var rpm, concurrency sql.NullInt64
-		if err := scopeRows.Scan(&requestID, &kind, &scopeID, &policyID, &policyRevision, &rpm, &concurrency, &employeeID, &keyID); err != nil {
+		var groupRevision, rpm, concurrency, shadowTPM, shadowCost sql.NullInt64
+		if err := scopeRows.Scan(&requestID, &kind, &scopeID, &policyID, &policyRevision, &groupRevision, &rpm, &concurrency,
+			&shadowTPM, &shadowCost, &currency, &window, &employeeID, &keyID); err != nil {
 			scopeRows.Close()
 			return ErrSchema
 		}
+		storedScope := ScopeSnapshot{Kind: ScopeKind(kind), ID: scopeID, PolicyID: policyID, PolicyRevision: policyRevision,
+			ShadowCurrency: currency, ShadowWindow: window}
+		setOptionalInt64(&storedScope.GroupRevision, groupRevision)
+		setOptionalInt64(&storedScope.RPMLimit, rpm)
+		setOptionalInt64(&storedScope.ConcurrencyLimit, concurrency)
+		setOptionalInt64(&storedScope.ShadowTPM, shadowTPM)
+		setOptionalInt64(&storedScope.ShadowCostMicro, shadowCost)
 		if !validScopeKind(ScopeKind(kind)) || !validMetadata(scopeID, 256) || !validMetadata(policyID, 256) || !validRevision(policyRevision) ||
-			!validStoredLimit(rpm) || !validStoredLimit(concurrency) || !rpm.Valid && !concurrency.Valid ||
+			!validScopeGroupRevision(storedScope) || !validStoredLimit(rpm) || !validStoredLimit(concurrency) ||
+			!validStoredLimit(shadowTPM) || !validStoredLimit(shadowCost) || !validShadowCost(storedScope) ||
+			!rpm.Valid && !concurrency.Valid && !shadowTPM.Valid && !shadowCost.Valid ||
 			kind == string(ScopeEmployee) && scopeID != employeeID || kind == string(ScopeKey) && scopeID != keyID {
 			scopeRows.Close()
 			return ErrSchema
