@@ -3,13 +3,14 @@ package service
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"cpacloud.local/server/internal/scheduling"
 )
 
 const (
@@ -67,7 +68,50 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		return
 	}
 	modelRequestID := requestID(r.Context())
-	route, lease, failure := a.selectModelRoute(r, auth, model, []string{anthropicAPIKeyProvider}, !countTokens)
+	var upstreamReq *http.Request
+	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{anthropicAPIKeyProvider}, !countTokens, func(candidateRequest *http.Request, candidate route) *modelPreflightError {
+		if candidate.KeyVersion != 1 {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		credential, err := a.secrets.decryptCredential(candidate.AccountID, candidate.Ciphertext)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailureAuth)
+		}
+		candidatePayload := make(map[string]json.RawMessage, len(payload))
+		for key, value := range payload {
+			candidatePayload[key] = value
+		}
+		candidatePayload["model"], _ = json.Marshal(candidate.UpstreamModel)
+		outgoing, err := json.Marshal(candidatePayload)
+		if err != nil {
+			return requestPreflightFailure(http.StatusBadRequest, "invalid_request_error", "Invalid request.")
+		}
+		endpoint, err := validateEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailurePermanent)
+		}
+		target, err := upstreamAnthropicURL(endpoint, countTokens)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailurePermanent)
+		}
+		prepared, err := http.NewRequestWithContext(candidateRequest.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
+		if err != nil {
+			return accountPreflightFailure(http.StatusBadGateway, "api_error", "Upstream is unavailable.", scheduling.FailurePermanent)
+		}
+		prepared.Header.Set("Authorization", "Bearer "+credential)
+		prepared.Header.Set("Anthropic-Version", version)
+		if beta != "" {
+			prepared.Header.Set("Anthropic-Beta", beta)
+		}
+		prepared.Header.Set("Content-Type", "application/json")
+		if stream {
+			prepared.Header.Set("Accept", "text/event-stream")
+		} else {
+			prepared.Header.Set("Accept", "application/json")
+		}
+		upstreamReq = prepared
+		return nil
+	})
 	if failure != nil {
 		if r.Context().Err() != nil {
 			return
@@ -79,78 +123,21 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		r = r.WithContext(lease.Context())
 	}
 	defer a.releaseModelLease(lease, modelRequestID, !countTokens)
-	if route.KeyVersion != 1 {
-		if !countTokens {
+	if !countTokens {
+		if err := a.beginRouteUpstreamUsage(r.Context(), modelRequestID, selected); err != nil {
 			a.finishRequest(modelRequestID, "failed", 0)
+			writeAnthropicError(w, 503, "api_error", "Service is temporarily unavailable.", modelRequestID)
+			return
 		}
-		writeAnthropicError(w, 503, "api_error", "No available route for this model.", modelRequestID)
-		return
 	}
-
-	credential, err := a.secrets.decryptCredential(route.AccountID, route.Ciphertext)
-	if err != nil {
-		if !countTokens {
-			a.finishRequest(modelRequestID, "failed", 0)
-		}
-		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", modelRequestID)
-		return
-	}
-	payload["model"], _ = json.Marshal(route.UpstreamModel)
-	outgoing, err := json.Marshal(payload)
-	if err != nil {
-		if !countTokens {
-			a.finishRequest(modelRequestID, "failed", 0)
-		}
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request.", modelRequestID)
-		return
-	}
-	endpoint, err := validateEndpoint(r.Context(), route.Endpoint, a.cfg.AllowLoopbackUpstream)
-	if err != nil {
-		if !countTokens {
-			a.finishRequest(modelRequestID, "failed", 0)
-		}
-		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", modelRequestID)
-		return
-	}
-	target, err := upstreamAnthropicURL(endpoint, countTokens)
-	if err != nil {
-		if !countTokens {
-			a.finishRequest(modelRequestID, "failed", 0)
-		}
-		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", modelRequestID)
-		return
-	}
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
-	if err != nil {
-		if !countTokens {
-			a.finishRequest(modelRequestID, "failed", 0)
-		}
-		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Upstream is unavailable.", modelRequestID)
-		return
-	}
-	upstreamReq.Header.Set("Authorization", "Bearer "+credential)
-	upstreamReq.Header.Set("Anthropic-Version", version)
-	if beta != "" {
-		upstreamReq.Header.Set("Anthropic-Beta", beta)
-	}
-	upstreamReq.Header.Set("Content-Type", "application/json")
-	if stream {
-		upstreamReq.Header.Set("Accept", "text/event-stream")
-	} else {
-		upstreamReq.Header.Set("Accept", "application/json")
-	}
-	if err := a.beginUpstreamUsage(r.Context(), modelRequestID, route.AccountID); err != nil {
-		if !countTokens {
-			a.finishRequest(modelRequestID, "failed", 0)
-		}
-		writeAnthropicError(w, 503, "api_error", "Service is temporarily unavailable.", modelRequestID)
-		return
+	if lease != nil {
+		lease.MarkDispatch()
 	}
 	response, err := a.http.Do(upstreamReq)
 	if err != nil {
 		if !countTokens {
 			outcome := "failed"
-			if errors.Is(r.Context().Err(), context.Canceled) {
+			if r.Context().Err() != nil {
 				outcome = "cancelled"
 			}
 			a.finishRequest(modelRequestID, outcome, 0)

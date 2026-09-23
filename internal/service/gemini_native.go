@@ -3,7 +3,6 @@ package service
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +10,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"cpacloud.local/server/internal/scheduling"
 )
 
 const (
@@ -143,7 +144,40 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	modelRequestID := requestID(r.Context())
-	route, lease, failure := a.selectModelRoute(r, auth, model, []string{geminiAPIKeyProvider}, true)
+	var upstreamReq *http.Request
+	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{geminiAPIKeyProvider}, true, func(candidateRequest *http.Request, candidate route) *modelPreflightError {
+		if candidate.KeyVersion != 2 {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		credential, err := a.secrets.decryptGeminiAPIKey(candidate.AccountID, candidate.Ciphertext)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.", scheduling.FailureAuth)
+		}
+		endpoint, err := validateGeminiEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		if !validGeminiUpstreamModel(candidate.UpstreamModel) {
+			return requestPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.")
+		}
+		target, err := geminiGenerateURL(endpoint, candidate.UpstreamModel, stream)
+		if err != nil {
+			return accountPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		prepared, err := http.NewRequestWithContext(candidateRequest.Context(), http.MethodPost, target, bytes.NewReader(body))
+		if err != nil {
+			return accountPreflightFailure(http.StatusBadGateway, "UNAVAILABLE", "Upstream is unavailable.", scheduling.FailurePermanent)
+		}
+		prepared.Header.Set("x-goog-api-key", credential)
+		prepared.Header.Set("Content-Type", "application/json")
+		if stream {
+			prepared.Header.Set("Accept", "text/event-stream")
+		} else {
+			prepared.Header.Set("Accept", "application/json")
+		}
+		upstreamReq = prepared
+		return nil
+	})
 	if failure != nil {
 		if r.Context().Err() != nil {
 			return
@@ -155,54 +189,18 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(lease.Context())
 	}
 	defer a.releaseModelLease(lease, modelRequestID, true)
-	if route.KeyVersion != 2 {
-		if true {
-			a.finishRequest(modelRequestID, "failed", 0)
-		}
-		writeGeminiError(w, 503, "UNAVAILABLE", "No available route for this model.")
-		return
-	}
-
-	credential, err := a.secrets.decryptGeminiAPIKey(route.AccountID, route.Ciphertext)
-	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeGeminiError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.")
-		return
-	}
-	endpoint, err := validateGeminiEndpoint(r.Context(), route.Endpoint, a.cfg.AllowLoopbackUpstream)
-	if err != nil || !validGeminiUpstreamModel(route.UpstreamModel) {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeGeminiError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.")
-		return
-	}
-	target, err := geminiGenerateURL(endpoint, route.UpstreamModel, stream)
-	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeGeminiError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.")
-		return
-	}
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
-	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeGeminiError(w, http.StatusBadGateway, "UNAVAILABLE", "Upstream is unavailable.")
-		return
-	}
-	upstreamReq.Header.Set("x-goog-api-key", credential)
-	upstreamReq.Header.Set("Content-Type", "application/json")
-	if stream {
-		upstreamReq.Header.Set("Accept", "text/event-stream")
-	} else {
-		upstreamReq.Header.Set("Accept", "application/json")
-	}
-	if err := a.beginUpstreamUsage(r.Context(), modelRequestID, route.AccountID); err != nil {
+	if err := a.beginRouteUpstreamUsage(r.Context(), modelRequestID, selected); err != nil {
 		a.finishRequest(modelRequestID, "failed", 0)
 		writeGeminiError(w, 503, "UNAVAILABLE", "Service is temporarily unavailable.")
 		return
 	}
+	if lease != nil {
+		lease.MarkDispatch()
+	}
 	response, err := a.http.Do(upstreamReq)
 	if err != nil {
 		outcome := "failed"
-		if errors.Is(r.Context().Err(), context.Canceled) {
+		if r.Context().Err() != nil {
 			outcome = "cancelled"
 		}
 		a.finishRequest(modelRequestID, outcome, 0)
