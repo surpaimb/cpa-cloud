@@ -15,13 +15,14 @@ import (
 )
 
 type activeUsageRequest struct {
-	mu       sync.Mutex
-	request  *usageLedgerRequest
-	attempt  *usageLedgerAttempt
-	outcome  string
-	status   int
-	endedAt  time.Time
-	finished bool
+	mu          sync.Mutex
+	request     *usageLedgerRequest
+	actualModel string
+	attempt     *usageLedgerAttempt
+	outcome     string
+	status      int
+	endedAt     time.Time
+	finished    bool
 }
 
 func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string, selected route) error {
@@ -48,7 +49,7 @@ func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string
 	if err != nil {
 		return err
 	}
-	a.usageRequests.Store(requestID(r.Context()), &activeUsageRequest{request: request})
+	a.usageRequests.Store(requestID(r.Context()), &activeUsageRequest{request: request, actualModel: selected.UpstreamModel})
 	return nil
 }
 
@@ -63,7 +64,15 @@ func (a *App) beginUpstreamUsage(ctx context.Context, id, accountID string) erro
 	if active.attempt != nil || active.outcome != "" {
 		return errUsageLedgerConflict
 	}
-	attempt, err := active.request.beginAttempt(ctx, accountID, time.Now().UTC())
+	var price *accounting.PriceSnapshot
+	if lookup := active.request.coordinator.priceLookup; lookup != nil {
+		var err error
+		price, err = lookup(ctx, accountID, active.actualModel)
+		if err != nil {
+			return errUsageLedgerUnavailable
+		}
+	}
+	attempt, err := active.request.beginPricedAttempt(ctx, accountID, time.Now().UTC(), price)
 	if err == nil {
 		active.attempt = attempt
 	}

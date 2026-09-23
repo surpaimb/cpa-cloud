@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cpacloud.local/server/internal/accounting"
 )
 
 const (
@@ -74,7 +76,13 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		logins: make(map[string]*loginAttempt),
 	}
 	app.refresh = newCodexRefreshCoordinator(app)
+	prices := accounting.NewPriceCatalog(s.db)
+	if err := prices.Migrate(ctx); err != nil {
+		s.close()
+		return nil, errUsageLedgerUnavailable
+	}
 	app.usage = newUsageLedgerCoordinator(s.db)
+	app.usage.priceLookup = prices.Current
 	if err := app.usage.start(ctx); err != nil {
 		s.close()
 		return nil, err
@@ -110,6 +118,8 @@ func (a *App) Close() error {
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	a.registerAccountPoolHandlers(mux)
+	a.registerPricingHandlers(mux)
+	a.registerUsageHandlers(mux)
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("POST /admin/api/v1/sessions", a.login)
 	mux.HandleFunc("DELETE /admin/api/v1/sessions", a.requireAdmin(a.logout, true))
@@ -210,6 +220,8 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"upstream_batch_import":         true,
 			"account_pool_configuration":    true,
 			"account_pool_routing":          a.accountPool != nil,
+			"usage_reporting":               true,
+			"versioned_cost_prices":         true,
 			"codex_membership_auto_refresh": a.refresh != nil && a.refresh.enabled(),
 		},
 		"limitations": limitations,

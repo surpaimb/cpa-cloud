@@ -39,7 +39,9 @@ OAuth binding 和账本。相同 operation_id 与相同规范请求重放返回�
 
 所有费率 JSON 值都是规范十进制字符串（0 或无前导零正整数），禁止负数、小数、指数。
 price 字段必须显式存在，可为 null。expected_revision 必须显式存在，为非负安全整数。
-模型约束与 ledger 模型一致。未知字段、缺字段、重复 JSON 键应拒绝 400。
+实际模型为 1–256 UTF-8 字节，拒绝控制字符与首尾空白，允许内部空格；不同于公开模型的
+128 字节限制。Current 读取兼容已有实际模型（1–256 字节、无 NUL），旧路由无价时仍返回
+nil，不能因新增价格能力收紧现有模型请求范围。未知字段、缺字段、重复 JSON 键应拒绝 400。
 invalid_request 400、not_found 404、revision_conflict/operation_conflict 409、storage_unavailable 503；
 固定脱敏错误。管理员可为停用账号预配置价格，不改变账号启用或模型权限。
 

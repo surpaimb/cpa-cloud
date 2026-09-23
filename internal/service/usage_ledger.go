@@ -22,9 +22,10 @@ var (
 // executors and accounting. It does not select a route, retry an upstream, or
 // retain protocol bodies.
 type usageLedgerCoordinator struct {
-	db     *sql.DB
-	ledger *accounting.Ledger
-	now    func() time.Time
+	db          *sql.DB
+	ledger      *accounting.Ledger
+	now         func() time.Time
+	priceLookup func(context.Context, string, string) (*accounting.PriceSnapshot, error)
 }
 
 type usageRequestStart struct {
@@ -130,6 +131,10 @@ func (c *usageLedgerCoordinator) beginRequest(ctx context.Context, input usageRe
 // executed. Adapter-local validation after this point is still a real attempt;
 // a routing failure before this point is finished through finishWithoutAttempt.
 func (r *usageLedgerRequest) beginAttempt(ctx context.Context, accountID string, startedAt time.Time) (*usageLedgerAttempt, error) {
+	return r.beginPricedAttempt(ctx, accountID, startedAt, nil)
+}
+
+func (r *usageLedgerRequest) beginPricedAttempt(ctx context.Context, accountID string, startedAt time.Time, price *accounting.PriceSnapshot) (*usageLedgerAttempt, error) {
 	if r == nil || r.coordinator == nil || ctx == nil {
 		return nil, errUsageLedgerInvalid
 	}
@@ -162,7 +167,7 @@ func (r *usageLedgerRequest) beginAttempt(ctx context.Context, accountID string,
 		Provider:  r.provider,
 		Dispatch:  accounting.DispatchPrimary,
 		StartedAt: startedAt,
-		Price:     nil,
+		Price:     price,
 	}); err != nil {
 		return nil, classifyUsageLedgerError(err)
 	}
