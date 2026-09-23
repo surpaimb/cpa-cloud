@@ -331,6 +331,26 @@ func (l *Ledger) FinishAttempt(ctx context.Context, input AttemptFinish) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := finishAttemptTx(ctx, tx, input, finishedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// FinishAttemptTx finishes an attempt inside a caller-owned transaction. It
+// neither commits nor rolls back tx.
+func (l *Ledger) FinishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish) error {
+	if l == nil || l.db == nil || tx == nil {
+		return ErrInvalid
+	}
+	finishedAt, err := validateAttemptFinish(input)
+	if err != nil {
+		return err
+	}
+	return finishAttemptTx(ctx, tx, input, finishedAt)
+}
+
+func finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finishedAt string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE accounting_attempts SET status=status WHERE id=?`, input.ID); err != nil {
 		return err
 	}
@@ -349,7 +369,7 @@ func (l *Ledger) FinishAttempt(ctx context.Context, input AttemptFinish) error {
 		if row.status != input.Status || row.finishedAt.String != finishedAt || !sameUsage(row.usage, input.Usage) || !sameNullableInt(row.cost, cost) {
 			return fmt.Errorf("%w: attempt finish differs", ErrConflict)
 		}
-		return tx.Commit()
+		return nil
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE accounting_attempts SET
 		status=?,finished_at=?,input_tokens=?,output_tokens=?,cache_read_tokens=?,cache_write_tokens=?,cost_micro=?
@@ -365,7 +385,7 @@ func (l *Ledger) FinishAttempt(ctx context.Context, input AttemptFinish) error {
 	if updated != 1 {
 		return fmt.Errorf("%w: attempt was already finished", ErrConflict)
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (l *Ledger) FinishRequest(ctx context.Context, input RequestFinish) error {
@@ -378,6 +398,26 @@ func (l *Ledger) FinishRequest(ctx context.Context, input RequestFinish) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := finishRequestTx(ctx, tx, input, finishedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// FinishRequestTx finishes a request inside a caller-owned transaction. It
+// neither commits nor rolls back tx.
+func (l *Ledger) FinishRequestTx(ctx context.Context, tx *sql.Tx, input RequestFinish) error {
+	if l == nil || l.db == nil || tx == nil {
+		return ErrInvalid
+	}
+	finishedAt, err := validateRequestFinish(input)
+	if err != nil {
+		return err
+	}
+	return finishRequestTx(ctx, tx, input, finishedAt)
+}
+
+func finishRequestTx(ctx context.Context, tx *sql.Tx, input RequestFinish, finishedAt string) error {
 	result, err := tx.ExecContext(ctx, `UPDATE accounting_requests SET status=status WHERE id=?`, input.ID)
 	if err != nil {
 		return err
@@ -402,7 +442,7 @@ func (l *Ledger) FinishRequest(ctx context.Context, input RequestFinish) error {
 		if status != input.Status || !storedFinished.Valid || storedFinished.String != finishedAt {
 			return fmt.Errorf("%w: request finish differs", ErrConflict)
 		}
-		return tx.Commit()
+		return nil
 	}
 	pendingAttempts, succeededAttempts, err := requestAttemptState(ctx, tx, input.ID, input.FinishedAt)
 	if err != nil {
@@ -414,7 +454,7 @@ func (l *Ledger) FinishRequest(ctx context.Context, input RequestFinish) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE accounting_requests SET status=?,finished_at=? WHERE id=? AND status='pending'`, string(input.Status), finishedAt, input.ID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (l *Ledger) RecoverInterrupted(ctx context.Context, at time.Time) (RecoveryResult, error) {
