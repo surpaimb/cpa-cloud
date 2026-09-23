@@ -75,6 +75,10 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if failure := a.validatePoolSession(r, auth, model); failure != nil {
+		writeModelError(w, failure.status, failure.code, failure.message, requestID(r.Context()))
+		return
+	}
 	if stream {
 		if _, ok := w.(http.Flusher); !ok {
 			writeModelError(w, http.StatusInternalServerError, "streaming_unavailable", "Streaming is unavailable.", requestID(r.Context()))

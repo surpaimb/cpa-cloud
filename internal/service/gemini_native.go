@@ -144,6 +144,10 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
 	}
+	if failure := a.validatePoolSession(r, auth, model); failure != nil {
+		writeGeminiError(w, failure.status, geminiAdmissionStatus(failure.status), failure.message)
+		return
+	}
 	modelRequestID := requestID(r.Context())
 	governed, guard, governanceFailure := a.admitGovernedModel(r, auth, model, accounting.ProtocolGeminiGenerateContent)
 	if governanceFailure != nil {

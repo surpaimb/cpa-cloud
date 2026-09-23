@@ -52,11 +52,11 @@ func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string
 	if a.usage == nil {
 		return tx.Commit() // Isolated legacy fixtures have no usage coordinator.
 	}
-	_, governed := r.Context().Value(governedRequestKey{}).(*governedRequest)
+	guard, governed := r.Context().Value(governedRequestKey{}).(*governedRequest)
 	request, err := a.usage.beginRequestTx(r.Context(), tx, usageRequestStart{
 		RequestID: requestID(r.Context()), EmployeeID: auth.EmployeeID, KeyID: auth.KeyID,
 		PublicModel: model, ProviderKind: selected.ProviderKind, Protocol: protocol, StartedAt: startedAt,
-		Governed: governed,
+		Governed: governed, guard: guard,
 	})
 	if err != nil {
 		return err
@@ -165,7 +165,17 @@ func (a *App) finishRequestUsage(ctx context.Context, id, outcome string, status
 		return errUsageLedgerConflict
 	}
 	if active.outcome == "" {
-		active.outcome, active.status, active.endedAt = outcome, status, time.Now().UTC()
+		terminalStatus := accounting.Status(outcome)
+		if !validUsageTerminalStatus(terminalStatus) || terminalStatus == accounting.StatusSucceeded && active.attempt == nil {
+			return errUsageLedgerInvalid
+		}
+		endedAt := time.Now().UTC()
+		if active.request.guard != nil {
+			if err := active.request.guard.claimTerminal(terminalStatus); err != nil {
+				return err
+			}
+		}
+		active.outcome, active.status, active.endedAt = outcome, status, endedAt
 	}
 	if active.finished {
 		return nil
@@ -194,6 +204,9 @@ func (a *App) cleanupRequestUsage(id string) {
 	}
 	if outcome == "" {
 		outcome = "interrupted"
+		if active.request.guard != nil && active.request.guard.cancellationWon() {
+			outcome = "cancelled"
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -235,7 +248,12 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 			return errUsageLedgerConflict
 		}
 	}
-	return r.coordinator.persist(ctx, func(writeCtx context.Context) error {
+	if r.guard != nil {
+		if err := r.guard.claimTerminal(snapshot.status); err != nil {
+			return err
+		}
+	}
+	err := r.coordinator.persist(ctx, func(writeCtx context.Context) error {
 		tx, err := r.coordinator.db.BeginTx(writeCtx, nil)
 		if err != nil {
 			return err
@@ -281,4 +299,11 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 		}
 		return tx.Commit()
 	})
+	if err != nil {
+		return err
+	}
+	if r.guard != nil {
+		return r.guard.terminalCommitted(snapshot.status)
+	}
+	return nil
 }

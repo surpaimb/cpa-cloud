@@ -70,6 +70,10 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 	}
 	modelRequestID := requestID(r.Context())
 	if !countTokens {
+		if failure := a.validatePoolSession(r, auth, model); failure != nil {
+			writeAnthropicError(w, failure.status, anthropicAdmissionType(failure.status), failure.message, modelRequestID)
+			return
+		}
 		governed, guard, governanceFailure := a.admitGovernedModel(r, auth, model, accounting.ProtocolAnthropicMessages)
 		if governanceFailure != nil {
 			if r.Context().Err() == nil {

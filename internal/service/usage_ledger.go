@@ -39,6 +39,7 @@ type usageRequestStart struct {
 	Protocol     accounting.UsageProtocol
 	StartedAt    time.Time
 	Governed     bool
+	guard        *governedRequest
 }
 
 type usageLedgerRequest struct {
@@ -48,6 +49,7 @@ type usageLedgerRequest struct {
 	protocol    accounting.UsageProtocol
 	startedAt   time.Time
 	governance  *governance.Coordinator
+	guard       *governedRequest
 
 	mu             sync.Mutex
 	attempt        *usageLedgerAttempt
@@ -125,7 +127,7 @@ func (c *usageLedgerCoordinator) beginRequestInTransaction(ctx context.Context, 
 	}
 	var governanceCore *governance.Coordinator
 	if input.Governed {
-		if c.governance == nil {
+		if c.governance == nil || input.guard == nil {
 			return nil, errUsageLedgerUnavailable
 		}
 		governanceCore = c.governance
@@ -153,6 +155,7 @@ func (c *usageLedgerCoordinator) beginRequestInTransaction(ctx context.Context, 
 		protocol:    input.Protocol,
 		startedAt:   input.StartedAt,
 		governance:  governanceCore,
+		guard:       input.guard,
 	}, nil
 }
 

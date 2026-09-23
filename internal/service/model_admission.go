@@ -157,6 +157,14 @@ func (a *App) poolSessionDigest(r *http.Request, auth employeeAuth, model string
 	return hex.EncodeToString(a.secrets.digest(purpose, values[0])), nil
 }
 
+// validatePoolSession performs the metadata-only part of sticky routing before
+// governance admission. It must remain free of database and network effects;
+// selectModelRoute recomputes the same digest after admission for routing.
+func (a *App) validatePoolSession(r *http.Request, auth employeeAuth, model string) *modelAdmissionError {
+	_, failure := a.poolSessionDigest(r, auth, model)
+	return failure
+}
+
 func poolAdmissionFailure(code accountPoolRuntimeCode) *modelAdmissionError {
 	switch code {
 	case accountPoolInvalid:
