@@ -150,4 +150,139 @@ describe('upstream batch import', () => {
     await waitFor(() => expect(bodies).toHaveLength(2))
     expect(bodies[1].operation_id).not.toBe(bodies[0].operation_id)
   })
+
+  it('rejects secret-bearing endpoint components and previews only the endpoint origin', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    render(<UpstreamBatchImport csrf="csrf" membershipEnabled onClose={() => undefined} onImported={() => undefined} />)
+    const textarea = screen.getByLabelText('或粘贴 JSON')
+    const secretEndpoint = { ...apiItem, endpoint: 'https://user:password@gateway.example/private?token=query-secret-sentinel#fragment' }
+    fireEvent.change(textarea, { target: { value: inputFor([secretEndpoint]) } })
+    await userEvent.click(screen.getByRole('button', { name: '检查并预览' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('不能包含用户名、密码、查询参数或片段')
+    expect(document.body).not.toHaveTextContent('query-secret-sentinel')
+
+    const pathEndpoint = { ...apiItem, endpoint: 'https://gateway.example/private-path-secret-sentinel/v1' }
+    fireEvent.change(textarea, { target: { value: inputFor([pathEndpoint]) } })
+    await userEvent.click(screen.getByRole('button', { name: '检查并预览' }))
+    expect(await screen.findByText('安全预览')).toBeInTheDocument()
+    expect(screen.getByText('https://gateway.example')).toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent('private-path-secret-sentinel')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('locks modification and closing while submission is in flight', async () => {
+    let resolveRequest!: (response: Response) => void
+    const pending = new Promise<Response>((resolve) => { resolveRequest = resolve })
+    const onClose = vi.fn()
+    vi.stubGlobal('fetch', vi.fn(() => pending))
+    render(<UpstreamBatchImport csrf="csrf" membershipEnabled onClose={onClose} onImported={() => undefined} />)
+    await preview([apiItem])
+    await userEvent.click(screen.getByRole('button', { name: '确认批量导入' }))
+
+    expect(screen.getByRole('button', { name: '返回修改' })).toBeDisabled()
+    expect(screen.getAllByRole('button', { name: '关闭' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: '关闭' }).every((button) => button.hasAttribute('disabled'))).toBe(true)
+    fireEvent.mouseDown(document.querySelector('.dialog-backdrop')!)
+    expect(onClose).not.toHaveBeenCalled()
+
+    resolveRequest(new Response(JSON.stringify({ items: [{ item_id: apiItem.item_id, status: 'created', upstream_id: 'ups-1' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('已创建')).toBeInTheDocument()
+  })
+
+  it('ignores a late submission response after a forced unmount without aborting the request', async () => {
+    let resolveRequest!: (response: Response) => void
+    const pending = new Promise<Response>((resolve) => { resolveRequest = resolve })
+    const onImported = vi.fn()
+    vi.stubGlobal('fetch', vi.fn(() => pending))
+    const rendered = render(<UpstreamBatchImport csrf="csrf" membershipEnabled onClose={() => undefined} onImported={onImported} />)
+    await preview([apiItem])
+    await userEvent.click(screen.getByRole('button', { name: '确认批量导入' }))
+    rendered.unmount()
+
+    resolveRequest(new Response(JSON.stringify({ items: [{ item_id: apiItem.item_id, status: 'created', upstream_id: 'ups-late' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await Promise.resolve()
+    expect(onImported).not.toHaveBeenCalled()
+  })
+
+  it('keeps only the latest file read and lets manual input invalidate a pending read', async () => {
+    let resolveA!: (value: string) => void
+    let resolveB!: (value: string) => void
+    let resolveC!: (value: string) => void
+    const fileA = new File([''], 'a.json', { type: 'application/json' })
+    const fileB = new File([''], 'b.json', { type: 'application/json' })
+    const fileC = new File([''], 'c.json', { type: 'application/json' })
+    Object.defineProperty(fileA, 'text', { value: () => new Promise<string>((resolve) => { resolveA = resolve }) })
+    Object.defineProperty(fileB, 'text', { value: () => new Promise<string>((resolve) => { resolveB = resolve }) })
+    Object.defineProperty(fileC, 'text', { value: () => new Promise<string>((resolve) => { resolveC = resolve }) })
+    render(<UpstreamBatchImport csrf="csrf" membershipEnabled onClose={() => undefined} onImported={() => undefined} />)
+    const fileInput = screen.getByLabelText('选择 JSON 文件')
+    await userEvent.upload(fileInput, fileA)
+    await userEvent.upload(fileInput, fileB)
+    const sourceB = inputFor([{ ...apiItem, item_id: 'from-b' }])
+    const sourceA = inputFor([{ ...apiItem, item_id: 'from-a' }])
+    resolveB(sourceB)
+    await waitFor(() => expect(screen.getByLabelText('或粘贴 JSON')).toHaveValue(sourceB))
+    resolveA(sourceA)
+    await Promise.resolve()
+    expect(screen.getByLabelText('或粘贴 JSON')).toHaveValue(sourceB)
+
+    await userEvent.upload(fileInput, fileC)
+    const manual = inputFor([{ ...apiItem, item_id: 'manual-input' }])
+    fireEvent.change(screen.getByLabelText('或粘贴 JSON'), { target: { value: manual } })
+    resolveC(inputFor([{ ...apiItem, item_id: 'from-c' }]))
+    await Promise.resolve()
+    expect(screen.getByLabelText('或粘贴 JSON')).toHaveValue(manual)
+  })
+
+  it('repairs only failed items without resubmitting successful siblings', async () => {
+    const failedItem = { item_id: 'retry-gemini', name: 'Retry Gemini', provider_kind: 'gemini-api-key', api_key: 'retry-only-secret' }
+    const bodies: Array<{ operation_id: string; items: Array<{ item_id: string }> }> = []
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body))
+      bodies.push(body)
+      return bodies.length === 1
+        ? jsonResponse({ items: [{ item_id: apiItem.item_id, status: 'created', upstream_id: 'ups-1' }, { item_id: failedItem.item_id, status: 'failed', error_code: 'storage_unavailable' }] })
+        : jsonResponse({ items: [{ item_id: failedItem.item_id, status: 'created', upstream_id: 'ups-2' }] })
+    }))
+    render(<UpstreamBatchImport csrf="csrf" membershipEnabled onClose={() => undefined} onImported={() => undefined} />)
+    await preview([apiItem, failedItem])
+    await userEvent.click(screen.getByRole('button', { name: '确认批量导入' }))
+    expect(await screen.findByText('失败')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '修复失败项' }))
+
+    const repairedSource = (screen.getByLabelText('或粘贴 JSON') as HTMLTextAreaElement).value
+    expect(repairedSource).toContain('retry-only-secret')
+    expect(repairedSource).not.toContain('mock-api-key-never-render')
+    await userEvent.click(screen.getByRole('button', { name: '检查并预览' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认批量导入' }))
+    await waitFor(() => expect(bodies).toHaveLength(2))
+    expect(bodies[1].operation_id).toBe(bodies[0].operation_id)
+    expect(bodies[1].items.map((item) => item.item_id)).toEqual([failedItem.item_id])
+  })
+
+  it('validates item IDs and names by UTF-8 bytes and rejects control characters', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    render(<UpstreamBatchImport csrf="csrf" membershipEnabled onClose={() => undefined} onImported={() => undefined} />)
+    const textarea = screen.getByLabelText('或粘贴 JSON')
+
+    fireEvent.change(textarea, { target: { value: inputFor([{ ...apiItem, item_id: '中'.repeat(60) }]) } })
+    await userEvent.click(screen.getByRole('button', { name: '检查并预览' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('item_id 必须为 1–120 个 UTF-8 字节')
+
+    fireEvent.change(textarea, { target: { value: inputFor([{ ...apiItem, name: '中'.repeat(60) }]) } })
+    await userEvent.click(screen.getByRole('button', { name: '检查并预览' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('显示名称必须为 1–120 个 UTF-8 字节')
+
+    fireEvent.change(textarea, { target: { value: inputFor([{ ...apiItem, name: `Bad${String.fromCharCode(1)}Name` }]) } })
+    await userEvent.click(screen.getByRole('button', { name: '检查并预览' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('不能包含控制字符')
+
+    const boundary = '中'.repeat(40)
+    fireEvent.change(textarea, { target: { value: inputFor([{ ...apiItem, item_id: boundary, name: boundary }]) } })
+    await userEvent.click(screen.getByRole('button', { name: '检查并预览' }))
+    expect(await screen.findByText('安全预览')).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
 })

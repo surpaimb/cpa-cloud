@@ -20,12 +20,12 @@ export function Button({ variant = 'primary', children, ...props }: ButtonHTMLAt
   return <button className={`button button--${variant}`} {...props}>{children}</button>
 }
 
-export function Dialog({ title, description, children, onClose, wide = false }: { title: string; description?: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+export function Dialog({ title, description, children, onClose, wide = false, closeDisabled = false }: { title: string; description?: string; children: ReactNode; onClose: () => void; wide?: boolean; closeDisabled?: boolean }) {
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (!closeDisabled && event.target === event.currentTarget) onClose() }}>
     <section className={`dialog ${wide ? 'dialog--wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="dialog-title">
       <header className="dialog__header">
         <div><h2 id="dialog-title">{title}</h2>{description ? <p>{description}</p> : null}</div>
-        <button className="icon-button" aria-label="关闭" onClick={onClose}><Icon name="close" /></button>
+        <button className="icon-button" aria-label="关闭" disabled={closeDisabled} onClick={onClose}><Icon name="close" /></button>
       </header>
       {children}
     </section>

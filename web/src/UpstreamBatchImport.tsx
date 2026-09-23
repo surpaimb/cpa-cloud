@@ -1,4 +1,4 @@
-import { useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { ApiError, api, type UpstreamBatchItem, type UpstreamBatchResult } from './api'
 import { Button, Dialog, Field, FormError } from './ui'
 
@@ -47,6 +47,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+function byteLength(value: string) {
+  return new TextEncoder().encode(value).byteLength
+}
+
+function validText(value: string, maxBytes: number) {
+  return value.length > 0 && byteLength(value) <= maxBytes && !/[\u0000-\u001f\u007f]/.test(value)
+}
+
+class SensitiveEndpointError extends Error {}
+
+function validatedEndpoint(value: string, row: number) {
+  try {
+    const parsed = new URL(value)
+    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || !parsed.host || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error('invalid')
+    return value
+  } catch {
+    throw new SensitiveEndpointError(`第 ${row} 项的 API 端点无效，且不能包含用户名、密码、查询参数或片段。`)
+  }
+}
+
+function endpointPreview(value: string) {
+  try { return new URL(value).origin } catch { return '自定义端点' }
+}
+
 function parseBatchSource(source: string): UpstreamBatchItem[] {
   let parsed: unknown
   try { parsed = JSON.parse(source) } catch { throw new Error('JSON 格式无效，请检查括号、引号和逗号。') }
@@ -57,13 +81,16 @@ function parseBatchSource(source: string): UpstreamBatchItem[] {
   return parsed.items.map((raw, index) => {
     const row = index + 1
     if (!isRecord(raw) || Object.keys(raw).some((key) => !allowedItemFields.has(key))) throw new Error(`第 ${row} 项包含不支持的字段。`)
-    const itemID = raw.item_id
-    const name = raw.name
+    const rawItemID = raw.item_id
+    const rawName = raw.name
     const providerKind = raw.provider_kind
-    if (typeof itemID !== 'string' || itemID.length < 1 || itemID.length > 120 || itemID.trim() !== itemID) throw new Error(`第 ${row} 项的 item_id 必须为 1–120 个非空字符。`)
+    if (typeof rawItemID !== 'string') throw new Error(`第 ${row} 项的 item_id 必须为 1–120 个 UTF-8 字节，且不能包含控制字符。`)
+    const itemID = rawItemID.trim()
+    if (!validText(itemID, 120)) throw new Error(`第 ${row} 项的 item_id 必须为 1–120 个 UTF-8 字节，且不能包含控制字符。`)
     if (ids.has(itemID)) throw new Error(`第 ${row} 项的 item_id 与其他条目重复。`)
     ids.add(itemID)
-    if (typeof name !== 'string' || !name.trim()) throw new Error(`第 ${row} 项缺少显示名称。`)
+    if (typeof rawName !== 'string' || !validText(rawName.trim(), 120)) throw new Error(`第 ${row} 项的显示名称必须为 1–120 个 UTF-8 字节，且不能包含控制字符。`)
+    const name = rawName.trim()
     if (typeof providerKind !== 'string' || !providerKinds.has(providerKind)) throw new Error(`第 ${row} 项的 provider_kind 不受支持。`)
 
     const kind = providerKind as UpstreamBatchItem['provider_kind']
@@ -78,7 +105,7 @@ function parseBatchSource(source: string): UpstreamBatchItem[] {
     if (typeof apiKey !== 'string' || !apiKey.trim() || apiKey.startsWith('REPLACE_WITH_') || authJSON !== undefined) throw new Error(`第 ${row} 项必须提供已替换占位符的 API Key，且不能包含 auth_json。`)
     if (kind !== 'gemini-api-key' && (typeof endpoint !== 'string' || !endpoint.trim())) throw new Error(`第 ${row} 项必须提供 API 端点。`)
     const item: UpstreamBatchItem = { item_id: itemID, name: name.trim(), provider_kind: kind, api_key: apiKey }
-    if (typeof endpoint === 'string' && endpoint.trim()) item.endpoint = endpoint.trim()
+    if (typeof endpoint === 'string' && endpoint.trim()) item.endpoint = validatedEndpoint(endpoint.trim(), row)
     return item
   })
 }
@@ -120,8 +147,17 @@ export function UpstreamBatchImport({ csrf, membershipEnabled, onClose, onImport
   const [canRetry, setCanRetry] = useState(false)
   const [copied, setCopied] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const readGeneration = useRef(0)
+  const submitGeneration = useRef(0)
+
+  useEffect(() => () => {
+    readGeneration.current += 1
+    submitGeneration.current += 1
+  }, [])
 
   function clearSensitive(newOperation = false) {
+    readGeneration.current += 1
+    submitGeneration.current += 1
     setSource('')
     setRevealed(false)
     setPayload(null)
@@ -134,11 +170,13 @@ export function UpstreamBatchImport({ csrf, membershipEnabled, onClose, onImport
   }
 
   function close() {
+    if (busy) return
     clearSensitive()
     onClose()
   }
 
   async function chooseFile(event: ChangeEvent<HTMLInputElement>) {
+    const generation = ++readGeneration.current
     const file = event.currentTarget.files?.[0]
     setError(null)
     if (!file) return
@@ -152,10 +190,12 @@ export function UpstreamBatchImport({ csrf, membershipEnabled, onClose, onImport
     setPayload(null)
     setResults(null)
     try {
-      setSource(await readText(file))
+      const text = await readText(file)
+      if (readGeneration.current !== generation) return
+      setSource(text)
       setRevealed(false)
     } catch {
-      setError('无法读取所选文件，请重新选择。')
+      if (readGeneration.current === generation) setError('无法读取所选文件，请重新选择。')
     }
   }
 
@@ -168,31 +208,53 @@ export function UpstreamBatchImport({ csrf, membershipEnabled, onClose, onImport
       setPayload(items)
       setRevealed(false)
     } catch (caught) {
+      if (caught instanceof SensitiveEndpointError) {
+        readGeneration.current += 1
+        setSource('')
+        if (fileRef.current) fileRef.current.value = ''
+      }
       setError(caught instanceof Error ? caught.message : '无法解析批次内容。')
     }
   }
 
   async function submit() {
     if (!payload || busy) return
+    const generation = ++submitGeneration.current
     setBusy(true)
     setError(null)
     setCanRetry(false)
     try {
       const response = await api.batchImportUpstreams({ operation_id: operationID, items: payload }, csrf)
+      if (submitGeneration.current !== generation) return
       if (!validBatchResults(response, payload)) throw new Error('invalid_response')
       if (response.items.some((item) => item.status === 'created' || item.status === 'existing')) await onImported()
+      if (submitGeneration.current !== generation) return
       setResults(response.items)
       setSource('')
     } catch (caught) {
+      if (submitGeneration.current !== generation) return
       const retryable = !(caught instanceof ApiError) || caught.status >= 500
       setCanRetry(retryable)
       setError(batchErrorMessage(caught))
     } finally {
-      setBusy(false)
+      if (submitGeneration.current === generation) setBusy(false)
     }
   }
 
-  return <Dialog title="批量导入上游" description="支持 OpenAI 兼容、Anthropic、Gemini 原生和 Codex 会员；单批最多 100 条。" onClose={close} wide>
+  function repairFailedItems() {
+    if (!payload || !results) return
+    const failedIDs = new Set(results.filter((item) => item.status === 'failed').map((item) => item.item_id))
+    const failedItems = payload.filter((item) => failedIDs.has(item.item_id))
+    readGeneration.current += 1
+    setSource(JSON.stringify({ items: failedItems }, null, 2))
+    setRevealed(false)
+    setPayload(null)
+    setResults(null)
+    setError(null)
+    setCanRetry(false)
+  }
+
+  return <Dialog title="批量导入上游" description="支持 OpenAI 兼容、Anthropic、Gemini 原生和 Codex 会员；单批最多 100 条。" onClose={close} closeDisabled={busy} wide>
     {!payload ? <>
       <div className="batch-import-notice"><strong>敏感信息处理</strong><p>内容默认遮掩，只保存在当前弹窗内，不写入浏览器存储，也不会在预览或结果中回显 API Key、Token 或 auth.json。请选择你明确提供的本地文件；页面不会读取服务器路径。导入不会联系提供商或在线验证，也不会自动创建模型路由或员工权限。</p></div>
       {!membershipEnabled ? <div className="membership-limitations"><strong>Codex 会员功能未开启</strong>批次仍可导入三种 API Key 上游；Codex 条目会返回“功能未开启”，且导入本身不代表在线验证成功。</div> : null}
@@ -201,7 +263,7 @@ export function UpstreamBatchImport({ csrf, membershipEnabled, onClose, onImport
       }}>{copied ? '已复制示例' : '复制示例'}</Button></details>
       <div className="form-grid batch-import-editor">
         <Field label="选择 JSON 文件" hint="仅在你选择后读取；文件上限 8 MiB。"><input ref={fileRef} type="file" accept=".json,application/json" onChange={(event) => void chooseFile(event)} /></Field>
-        <Field label="或粘贴 JSON" hint="顶层只写 items；operation_id 由页面生成。auth_json 必须是 JSON 字符串文本。"><textarea className={revealed ? '' : 'sensitive-textarea'} rows={10} value={source} onChange={(event) => { setSource(event.target.value); setError(null) }} autoComplete="off" spellCheck={false} /></Field>
+        <Field label="或粘贴 JSON" hint="顶层只写 items；operation_id 由页面生成。auth_json 必须是 JSON 字符串文本。"><textarea className={revealed ? '' : 'sensitive-textarea'} rows={10} value={source} onChange={(event) => { readGeneration.current += 1; setSource(event.target.value); setError(null) }} autoComplete="off" spellCheck={false} /></Field>
         <button type="button" className="link-button batch-reveal" onClick={() => setRevealed((value) => !value)}>{revealed ? '重新遮掩编辑内容' : '临时显示编辑内容'}</button>
       </div>
       <FormError error={error} />
@@ -209,17 +271,17 @@ export function UpstreamBatchImport({ csrf, membershipEnabled, onClose, onImport
     </> : results ? <>
       <BatchResults results={results} />
       <div className="success-note">批次已分类完成。已创建或已存在的上游列表已重新载入；尚未创建任何模型路由或员工权限。</div>
-      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={close}>关闭</Button><Button type="button" onClick={() => clearSensitive(true)}>新建批次</Button></div>
+      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={close}>关闭</Button>{results.some((item) => item.status === 'failed') ? <Button type="button" variant="secondary" onClick={repairFailedItems}>修复失败项</Button> : null}<Button type="button" onClick={() => clearSensitive(true)}>新建批次</Button></div>
     </> : <>
       <div className="batch-preview-heading"><div><strong>安全预览</strong><p>共 {payload.length} 项。预览不显示凭据，确认后才发送。</p></div><code>{operationID}</code></div>
       {!membershipEnabled && payload.some((item) => item.provider_kind === 'codex-membership') ? <div className="membership-limitations">此批次包含 Codex 条目，但会员功能未开启；这些条目预计会逐项失败，其他提供商仍可处理。</div> : null}
-      <div className="batch-table-scroll"><table className="batch-table"><thead><tr><th>条目 ID</th><th>名称</th><th>提供商</th><th>端点</th></tr></thead><tbody>{payload.map((item) => <tr key={item.item_id}><td><code>{item.item_id}</code></td><td>{item.name}</td><td>{providerLabels[item.provider_kind]}</td><td>{item.endpoint ? <code>{item.endpoint}</code> : <span className="muted-copy">服务端固定</span>}</td></tr>)}</tbody></table></div>
+      <div className="batch-table-scroll"><table className="batch-table"><thead><tr><th>条目 ID</th><th>名称</th><th>提供商</th><th>端点</th></tr></thead><tbody>{payload.map((item) => <tr key={item.item_id}><td><code>{item.item_id}</code></td><td>{item.name}</td><td>{providerLabels[item.provider_kind]}</td><td>{item.endpoint ? <code>{endpointPreview(item.endpoint)}</code> : <span className="muted-copy">服务端固定</span>}</td></tr>)}</tbody></table></div>
       <FormError error={error} />
       {error && canRetry ? <div className="batch-uncertain" role="status">保留了原始条目与操作编号。重试将发送完全相同的批次，以便服务端返回 created 或 existing，而不是重复创建。</div> : null}
       <div className="dialog__actions">
-        {!error ? <Button type="button" variant="secondary" onClick={() => { setPayload(null); setError(null) }}>返回修改</Button> : null}
-        {error && !canRetry ? <Button type="button" variant="secondary" onClick={() => error.includes('操作编号') ? clearSensitive(true) : setPayload(null)}>{error.includes('操作编号') ? '新建批次' : '返回修改'}</Button> : null}
-        <Button type="button" variant="secondary" onClick={close}>关闭</Button>
+        {!error ? <Button type="button" variant="secondary" disabled={busy} onClick={() => { setPayload(null); setError(null) }}>返回修改</Button> : null}
+        {error && !canRetry ? <Button type="button" variant="secondary" disabled={busy} onClick={() => error.includes('操作编号') ? clearSensitive(true) : setPayload(null)}>{error.includes('操作编号') ? '新建批次' : '返回修改'}</Button> : null}
+        <Button type="button" variant="secondary" disabled={busy} onClick={close}>关闭</Button>
         <Button type="button" disabled={busy} onClick={() => void submit()}>{busy ? '正在导入…' : error && canRetry ? '使用同一操作编号重试' : '确认批量导入'}</Button>
       </div>
     </>}
