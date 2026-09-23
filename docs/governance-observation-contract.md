@@ -21,31 +21,46 @@ attempt 都分别贡献。`count_tokens` 没有治理生成请求和真实 attem
 没有 attempt。查询必须把这两种情况与损坏关联区分开：terminal 零 attempt 是已证明的零，pending 零 attempt
 仍可能派发而保持 unknown。
 
-观测按准入快照分组，最小分组键为：
+真实窗口计量的稳定身份固定为：
+
+`scope_kind + scope_id`。
+
+该 scope 在窗口内的总计必须包含所有带有该 scope 的适用历史请求，不受 settings、policy 或 group revision
+变化影响。修改策略、治理组或总开关不能清零已有 scope 的窗口计量，也不能只取当前 revision 的子集来判断
+`below`。
+
+为了展示历史阈值如何解释同一个稳定 scope 总计，响应可以按准入快照列出解释行。解释行的最小身份为：
 
 `settings_revision + scope_kind + scope_id + policy_id + policy_revision + nullable group_revision`。
 
-返回该快照保存的 shadow TPM、shadow cost、currency 和 window。管理员之后修改或停用策略、变更治理组成员、
-关闭总开关、撤销 Key 或停用员工，均不得用当前配置重写历史分组。组名称、员工名称等当前展示字段可由网页另行
-读取，但不是观测身份，也不能替代稳定 ID/revision。
+每个解释行返回该快照保存的 shadow TPM、shadow cost、currency 和 window，但引用该稳定 scope 的完整窗口总计。
+因此同一 scope 的不同 revision 行可以展示不同阈值状态，底层 Token、成本和 unknown counts 必须相同。状态只表示
+“这个历史阈值如何解释当前冻结窗口中的 scope 总计”，不是该历史请求当时的 `would_block` 结论。若额外展示
+revision contribution，它只能作为构成明细，不能用该子集直接判断 `below`。
 
-若相同分组键在库中出现不同阈值快照、accounting request 的 employee/Key/model 与 governance request 不一致，
+管理员之后修改或停用策略、变更治理组成员、关闭总开关、撤销 Key 或停用员工，均不得用当前配置重写历史阈值
+身份。组名称、员工名称等当前展示字段可由网页另行读取，但不是观测身份，也不能替代稳定 ID/revision。
+
+若相同解释行键在库中出现不同阈值快照、accounting request 的 employee/Key/model 与 governance request 不一致，
 或存在其他违反既有 schema 的关系，查询固定返回存储失败；不得任选一行、按当前策略修补或把异常值当成零。
 
 ## 时间口径
 
-TPM 固定窗口为治理 effective time 的半开区间 `(as_of-60s, as_of]`；成本固定为
-`(as_of-24h, as_of]`。attempt 归属使用其 governance request 的 `effective_started_at`，不使用客户端时间、
+TPM 固定窗口为治理 effective time 的半开区间 `(window_end-60s, window_end]`；成本固定为
+`(window_end-24h, window_end]`。attempt 归属使用其 governance request 的 `effective_started_at`，不使用客户端时间、
 attempt 完成时间或可能回拨的墙钟字符串。长请求因此归入其准入窗口；这是首批稳定口径，后续若改为派发或结算
 窗口必须新增版本化契约，不能静默改变历史解释。
 
-首次当前查询在一个只读事务中读取
-`as_of = max(server UTC now, governance_settings.last_effective_admission_at)`。这样系统时钟回拨不会漏掉已写入的
-未来 effective time。分页 cursor 固定首次 `as_of`，后续页不得重新取时钟。
+首页查询在一个只读事务中读取
+`window_end = max(server UTC now, governance_settings.last_effective_admission_at)`。这样系统时钟回拨不会漏掉已写入的
+未来 effective time。分页 cursor 固定首页的 `window_end`，后续页不得重新取时钟。首版不接受客户端指定的历史
+时间，只提供服务器当前窗口。
 
-可选历史 `as_of` 必须是整秒 UTC RFC3339，且位于当前 effective time 之前最多 31 天；查询窗口本身仍只有
-60 秒和 24 小时。cursor 查询不再接受新的 `as_of`。所有库内时间比较使用固定九位 UTC 排序键或既有
-governance 固定九位格式，不能依赖可变小数 RFC3339 的字典序，也不能用 `julianday` 丢失纳秒边界。
+`window_end` 只固定准入时间过滤边界，不构成数据库的历史时点快照。晚到的 terminal attempt 可以改变同一个
+`window_end` 下的总计；各页也在不同的只读事务中读取。每页另返回 `observed_at`，表示该页实际读取的服务器时间。
+新写入的快照身份可能排在已使用 cursor 的 key 之前，因此跨页不保证完整复现某个历史数据库状态；需要最新或
+完整结果时，管理员必须从第一页刷新。所有库内时间比较使用固定九位 UTC 排序键或既有 governance 固定九位格式，
+不能依赖可变小数 RFC3339 的字典序，也不能用 `julianday` 丢失纳秒边界。
 
 总开关关闭期间的新请求没有 governance scope，因此不会被追溯加入观测。关闭前的历史请求、仍在途的租约和
 关闭后完成的 attempt 继续按原快照出现，直至各自查询窗口自然移出。重启不得清空窗口或把 interrupted 改成零用量。
@@ -85,14 +100,17 @@ terminal attempt 进入 `unknown_cost_attempts`。已知成本按币种分别汇
 - `limit=1..100`，默认 50；
 - `cursor`，最大 2048 字节；
 - 可选 `scope_kind=employee|key|group` 与 `scope_id`，`scope_id` 只能与 kind 同时提供且最大 200 字节；
-- 可选 `policy_id`，最大 200 字节；
-- 首页可选 `as_of`，使用上一节边界；带 cursor 时禁止再传。
+- 可选 `policy_id`，最大 200 字节。
+
+这些 filters 只选择返回哪些历史阈值解释行。某行的 `scope_totals` 始终覆盖该稳定 scope 在窗口内的全部适用请求；
+`policy_id`、revision 或其他展示筛选不得下推成总计过滤条件。
 
 响应形状：
 
 ```json
 {
-  "as_of": "2026-09-23T12:00:00.000000000Z",
+  "window_end": "2026-09-23T12:00:00.000000000Z",
+  "observed_at": "2026-09-23T12:00:02.000000000Z",
   "tpm_from": "2026-09-23T11:59:00.000000000Z",
   "cost_from": "2026-09-22T12:00:00.000000000Z",
   "items": [{
@@ -108,25 +126,30 @@ terminal attempt 进入 `unknown_cost_attempts`。已知成本按币种分别汇
       "shadow_currency": "USD",
       "shadow_window": "rolling_24h"
     },
-    "tpm": {
-      "state": "unknown",
-      "known_tokens": "93000",
-      "known_attempts": "12",
-      "unknown_token_attempts": "1",
-      "pending_attempts": "0",
-      "pending_requests_without_attempt": "0",
-      "zero_attempt_requests": "2"
+    "scope_totals": {
+      "tpm": {
+        "known_tokens": "93000",
+        "known_attempts": "12",
+        "unknown_token_attempts": "1",
+        "pending_attempts": "0",
+        "pending_requests_without_attempt": "0",
+        "zero_attempt_requests": "2"
+      },
+      "cost": {
+        "known_attempts": "12",
+        "unknown_cost_attempts": "1",
+        "pending_attempts": "0",
+        "pending_requests_without_attempt": "0",
+        "zero_attempt_requests": "2",
+        "by_currency": [
+          {"currency":"EUR","known_cost_micro":"700000","attempts":"2"},
+          {"currency":"USD","known_cost_micro":"3100000","attempts":"10"}
+        ]
+      }
     },
-    "cost": {
-      "state": "unknown",
-      "currency": "USD",
-      "known_cost_micro": "3100000",
-      "known_attempts": "10",
-      "unknown_cost_attempts": "1",
-      "pending_attempts": "0",
-      "pending_requests_without_attempt": "0",
-      "zero_attempt_requests": "2",
-      "other_currencies": [{"currency":"EUR","known_cost_micro":"700000","attempts":"2"}],
+    "interpretation": {
+      "tpm_state": "unknown",
+      "cost_state": "unknown",
       "incomparable_currency_attempts": "2"
     }
   }],
@@ -134,13 +157,17 @@ terminal attempt 进入 `unknown_cost_attempts`。已知成本按币种分别汇
 }
 ```
 
-不存在的 TPM 或成本阈值对应字段为 JSON `null`，而不是 state=below。aggregate counts、revision、Token 和金额
-全部用规范十进制字符串返回，避免浏览器安全整数损失；nullable group revision 保持 null。数组固定按币种排序。
+不存在的 TPM 或成本阈值对应 interpretation state 为 JSON `null`，而不是 `below`。`scope_totals` 是
+`scope_kind + scope_id` 的完整窗口总计；同一 scope 的多个快照解释行必须引用相同总计，不得按 revision 过滤。
+aggregate counts、revision、Token 和金额全部用规范十进制字符串返回，避免浏览器安全整数损失；nullable group
+revision 保持 null。数组固定按币种排序。
 响应不包含策略名称、员工 Key、Authorization、请求正文、响应、原始错误、上游凭据或数据库路径。
 
-cursor 使用版本、固定 `as_of`、最后一个完整分组键和规范 filters fingerprint；分组键按
+cursor 使用版本、固定 `window_end`、最后一个完整解释行键和规范 filters fingerprint；解释行按
 `scope_kind,scope_id,policy_id,policy_revision,group_revision,settings_revision` 升序 keyset 分页。cursor 形状、
-filters 或时间不匹配均为 400，不能退回第一页。每页所有 items 必须来自同一个 SQLite 只读事务快照。
+filters 或时间不匹配均为 400，不能退回第一页。每页所有 items 必须来自同一个 SQLite 只读事务快照并共用该页的
+`observed_at`。keyset 不会重复已经遍历的解释行键，但并发插入排在 cursor 之前的新键可能遗漏，且晚到结算可以使
+不同页看到不同的 scope 总计；cursor 不得被描述为跨页数据库快照。
 
 管理员 session 是唯一权限入口，员工 Key 返回 401/403 固定错误。请求 context 上限 5 秒；取消、DB busy、
 扫描错误、SQL integer overflow、Go checked-add overflow 或 rows close 错误统一返回固定 503，不能返回部分页。
@@ -153,11 +180,13 @@ filters 或时间不匹配均为 400，不能退回第一页。每页所有 item
 
 首批采用现有事实表的实时只读聚合，不新增异步投影：
 
-1. 在只读事务中冻结 effective `as_of`；
-2. 先按窗口和分组键选择最多 `limit+1` 个不同快照；
-3. 仅为本页快照 LEFT JOIN governance request、accounting request 和真实 attempts，分别聚合 60 秒与 24 小时；
+1. 首页在只读事务中冻结 effective `window_end`，后续页从 cursor 读取同一个边界；
+2. 先按窗口和解释行键选择最多 `limit+1` 个不同阈值快照；
+3. 对本页涉及的每个唯一 `(scope_kind,scope_id)`，LEFT JOIN 该稳定 scope 在对应 60 秒或 24 小时窗口中的所有
+   governance request、accounting request 和真实 attempts；不能按 settings/policy/group revision 限制总计；
 4. SQL 分别 SUM 四个已知 Token 桶，再在 Go 中 checked-add，避免 SQL 行内四桶相加溢出或转成浮点；
-5. 成本按 currency GROUP BY，SQLite SUM overflow 视为存储错误；在 Go 中计算固定三态。
+5. 成本按 currency GROUP BY，SQLite SUM overflow 视为存储错误；在 Go 中把稳定 scope 总计与每个解释行保存的
+   历史阈值组合，计算固定三态。
 
 现有 usage summary 只能按 accounting request/attempt 聚合，缺少 policy/group/settings 快照，不能直接作为治理
 结果或按当前策略二次归因。实时关联的优点是以 immutable ledger 为单一事实来源，天然继承相同 finish 事务与
@@ -165,7 +194,8 @@ filters 或时间不匹配均为 400，不能退回第一页。每页所有 item
 
 若数据量以后使 5 秒查询无法满足，可新增同步幂等投影，但它必须：
 
-- 以 `(attempt_id,scope_kind,scope_id,policy_revision,group_revision)` 为唯一键；
+- 以 `(attempt_id,scope_kind,scope_id)` 为稳定 scope contribution 唯一键；阈值快照身份另行关联，不能用 revision
+  分区后的 contribution 子集计算总计；
 - 在 accounting attempt、accounting request、model request 与 governance FinishTx 的同一事务写入；
 - 为既有 ledger 提供可验证回填和水位，不能只投影上线后的成功请求；
 - 单独表达 pending request 和 zero-attempt terminal request；
@@ -189,15 +219,17 @@ index 使启动失败并完整回滚，修复后可重试。首批不删除或�
 
 ## 必须证明的测试
 
-- 精确 60 秒与 24 小时半开边界、整秒与不同纳秒长度、时钟前跳后回拨、cursor 后续页冻结 as_of；
-- employee、Key、多治理组同时归因，group/policy/settings revision 变化分成历史快照，不读取当前阈值倒推；
+- 精确 60 秒与 24 小时半开边界、整秒与不同纳秒长度、时钟前跳后回拨、cursor 后续页冻结 `window_end`；
+- employee、Key、多治理组同时归因；group/policy/settings revision 变化生成历史阈值解释行，但每个稳定 scope 的
+  总计包含全部适用 revision，不因编辑清零，也不读取当前阈值倒推；
 - 四桶全 known、任一桶 NULL、无价格、其他币种、已知部分已 exceeded 且仍有 unknown 的三态真值表；
 - terminal 零 attempt、pending 零 attempt、失败/取消完整 usage、半帧/EOF、重启 interrupted 与保守未知；
 - 派发前换号零失败候选、一个真实 attempt；未来多个真实 attempts 各贡献一次但逻辑 request 不重复；
 - usage 重复快照与相同 FinishTx 重试不加倍，终结事务任一 sibling 写失败时观测保持旧快照；
 - 总开关默认关闭无新行，关闭后旧 in-flight 正常结算、历史仍可查，重新启用不追溯关闭期请求；
 - Token 四桶逐步相加、SQL SUM、counts 和成本溢出固定 503，无浮点或饱和；
-- 分页 keyset 无重复/遗漏，filters/cursor 绑定，严格 query、limit、ID 长度、31 天历史边界和 5 秒取消；
+- 单页只读事务一致；分页 keyset 不重复已遍历键，cursor/filter/window 绑定；构造并发新键排在 cursor 前和晚到
+  terminal 时允许遗漏或页间总计变化，并要求刷新第一页；严格 query、limit、ID 长度和 5 秒取消；
 - 管理员成功、员工 Key/无 session/错误 Origin 拒绝，响应、错误、日志和数据库不含秘密或正文；
 - 新索引的坏 schema、同名 view、迁移回滚和修复后重试；普通旧库、OAuth、账号池及 usage 查询保持可用。
 
