@@ -183,6 +183,16 @@ func TestRuntimeFixtureDirectSessionKeepsAuthorizationBoundaries(t *testing.T) {
 		t.Fatalf("direct session was not authorized: status=%d body=%s", response.StatusCode, readBody(response))
 	}
 	response.Body.Close()
+	missingCookie := requestJSON(t, http.MethodGet, fixture.server.URL+"/admin/api/v1/session", "", nil, "", fixture.server.URL)
+	if missingCookie.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("request without administrator cookie status=%d body=%s", missingCookie.StatusCode, readBody(missingCookie))
+	}
+	missingCookie.Body.Close()
+	wrongOrigin := requestJSON(t, http.MethodDelete, fixture.server.URL+"/admin/api/v1/sessions", "", fixture.cookie, fixture.csrf, "http://wrong-origin.invalid")
+	if wrongOrigin.StatusCode != http.StatusForbidden {
+		t.Fatalf("write with wrong Origin status=%d body=%s", wrongOrigin.StatusCode, readBody(wrongOrigin))
+	}
+	wrongOrigin.Body.Close()
 	withoutCSRF := requestJSON(t, http.MethodDelete, fixture.server.URL+"/admin/api/v1/sessions", "", fixture.cookie, "", fixture.server.URL)
 	if withoutCSRF.StatusCode != http.StatusForbidden {
 		t.Fatalf("write without CSRF status=%d body=%s", withoutCSRF.StatusCode, readBody(withoutCSRF))
