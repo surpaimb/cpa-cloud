@@ -124,3 +124,14 @@
 - 主任务重新构建 `dist/cpa-cloud-responses-verify.exe`，实际执行 `scripts/smoke-responses.mjs` PASS：工具定义/结果双回合、拆包/CRLF/多行 SSE、失败/未完成/提前 EOF/畸形 completed、HTTP 401/429/坏 JSON 脱敏、状态引用拒绝、员工模型权限、上游头与凭据隔离、未知 usage 不伪造、重启与撤销持久化、数据/日志秘密扫描。全部使用随机端口、合成秘密及临时目录，结束清理。
 - 同一程序配合现有 `web/dist` 运行 `scripts/smoke-preview.mjs ... --discover-models` 与 `scripts/smoke-codex-import.mjs ...` 均 PASS。后者首次调用因漏传必需的网页目录参数而在启动前退出，补齐参数后实际完成导入/CSRF/幂等/替换冲突/加密落盘/重启/关闭阻止调用验收。未改正在运行的用户实例或读取真实凭据。
 - 中英文 README 与员工说明已更新，原有 PowerShell 命令块逐块比对未变，相关文档本地链接及 diff 检查通过。只推送源码并执行轻量 CI，不创建新 tag 或全平台包；preview.3 不包含本批功能。三家会员生命周期和其他能力仍按 [完整计划](feature-parity-plan.md) 继续，任务创建及所有权见 [分工记录](work-coordination.md)。
+
+## 2026-09-23：Codex 后台 OAuth 与手动刷新集成
+
+- 原独立任务提交 `c261adc`、`e8429d2`、修正 `62ec2f1`；集成分支对应 `5abad6a`、`37d992c`、`dabd415`。`app.go` 冲突已人工核对，保留主线 Responses 执行器、入口、能力标志和已实现范围说明。
+- 授权码单次交换；刷新仅明确 429 可有界重试，不确定的网络/响应读取/5xx 失败不自动重放旧 Token。`Retry-After` 在乘法前截断，测试包含巨大整数，防止 duration 溢出。凭据来源使用 `codex_oauth_bindings` 同事务绑定 client ID；来源未知/不匹配拒绝刷新且不改状态。重导入原子删除来源绑定。授权会话的 AEAD 密文保存 client ID/redirect 快照，配置漂移时不消费 state。无效 revision 明确返回 400。
+- 主任务独立执行 `go test ./... -count=1 -timeout=2m` PASS（service 72.538s，含新 OAuth 专项、Chat/Responses 刷新集成及现有取消/失败/revision 竞争测试）；`go vet ./...` PASS。没有新增第三方依赖。
+- 新增 `TestCodexOAuthRefreshFeedsBothEmployeeProtocolsAcrossRestart`：真实管理 HTTP API + 注入模拟 Token 端点创建账号和刷新，检查新凭据进入 Chat/Responses 非流与流式执行器、上游模型映射、消息/工具参数保留、verified 状态、重启持久化，以及原员工 Key 的使用和撤销拒绝。每次 App/HTTP server 创建即登记失败路径清理。
+- 主任务构建 `dist/cpa-cloud-oauth-verify.exe` 并实际运行四组脚本，全部 PASS：`smoke-codex-oauth.mjs`、`smoke-codex-import.mjs`、`smoke-responses.mjs`、`smoke-preview.mjs --discover-models`。需要网页参数的脚本使用 `C:/workspace/cpa-cloud/web/dist`；本批没有网页变更。
+- 新 OAuth 进程脚本使用随机端口/临时数据、合成管理员密码，验证默认关闭、缺配置、CSRF、PKCE URL、会话幂等、无效 revision、同配置重启、改 client ID 拒绝及恢复原配置后 state 仍有效、数据库/日志无明文 state；不发送任何供应商授权交换或模型请求。全部临时进程和测试目录正常清理，未接触真实账号或当前用户运行实例。
+- 本机缺少 gcc/clang，Windows race 未通过环境前置条件；原任务此前的 race PASS 报告已撤回。轻量 Linux `core` CI 新增显式 `CGO_ENABLED=1` 的 `go test -race ./internal/service ./internal/membership -count=1 -timeout=5m`，运行结果在下方另记，不能用普通测试替代 race 证据。
+- 中英文 README、导入/生命周期契约、功能矩阵和分工说明同步为“源码实验、后台授权及手动刷新”。原 PowerShell 命令块逐块比对未变，文档本地链接、6 个 CI 路径分类测试及 diff 检查通过。默认关闭，无网页授权入口、后台自动刷新或真实会员验证，不新建 tag 或安装包，下载版仍为 preview.3。

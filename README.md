@@ -11,7 +11,7 @@
 | 已实现 | 尚未实现或验证 |
 | --- | --- |
 | 网页后台、管理员会话、员工启停、模型权限 | 多租户、SSO、管理员密码重置命令 |
-| 一人多个 Key、默认永久有效、可选到期、撤销 | 会员网页登录/自动刷新、Claude/Gemini 会员接入及真实账号验证 |
+| 一人多个 Key、默认永久有效、可选到期、撤销 | 网页会员授权入口、自动刷新、Claude/Gemini 会员接入及真实账号验证 |
 | OpenAI-compatible API Key 上游、已核实服务商预设、模型同步与手动映射 | Anthropic Messages、Gemini 原生协议 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
 | 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE | Responses 有状态会话、后台任务、托管工具与完整客户端兼容性 |
@@ -29,9 +29,28 @@
 4. 员工仍使用 CPA Cloud Key，通过 `/v1/chat/completions` 调用。当前只接收 `user`/`assistant` 字符串文本，以及可选的 `stream` 布尔字段；支持文本非流式与 SSE。system/developer、工具、图片及其他未支持参数会明确拒绝。
 5. 上游请求成功完成后状态变为“已验证”；凭据过期或上游返回 401 时提示重新导入。使用现有上游行的“重新导入”替换文件，员工 Key 不变。关闭实验开关会阻止会员导入及调用，普通 API Key 上游不受影响。
 
-会员实验另支持下节的原生 Responses 子集。此阶段没有网页登录授权或自动刷新，也没有 Claude/Gemini 会员接入。自动验收使用合成凭据和假上游，**尚未用真实会员账号验证**；不应据此认定 Codex CLI、Claude Code 或 CC Switch 所配置的所有工具均可使用。员工侧 Messages 协议仍未实现。
+会员实验另支持下文的后台 OAuth 授权与手动刷新、原生 Responses 子集；网页授权入口、自动刷新及 Claude/Gemini 会员接入仍未实现。自动验收使用合成凭据和假上游，**尚未用真实会员账号验证**；不应据此认定 Codex CLI、Claude Code 或 CC Switch 所配置的所有工具均可使用。员工侧 Messages 协议仍未实现。
 
 升级前停止服务并备份整个数据目录（包含数据库及主密钥），保护备份访问权限。源码首次打开旧数据库会事务化扩展上游表；迁移失败会回滚。回退旧程序时应同时恢复升级前的整份备份，勿让新旧进程同时使用同一目录。
+
+## Codex 后台授权与手动刷新（源码实验）
+
+此批提供管理 API，**没有网页授权按钮或自动刷新，不在 preview.3 下载包中**。默认关闭；需同时配置 `--experimental-codex-membership`、`--codex-oauth-client-id` 和 `--codex-oauth-redirect-uri`。管理员须提供自己获准使用的 OAuth client ID，并确认其回调地址与 scope 获供应商支持；项目不内置其他产品的 client ID，也未验证真实第三方注册是否可用。
+
+回调路径必须为 `/admin/api/v1/codex/oauth/callback`，使用部署的完整 HTTPS 地址；仅本机开发允许字面回环地址的 HTTP。创建授权会话和手动刷新均要求管理员会话、同源请求与 CSRF Token；授权回调要求发起授权的同一个管理员浏览器会话。
+
+| 管理 API | 请求及行为 |
+| --- | --- |
+| `POST /admin/api/v1/upstreams/codex-oauth-sessions` | `{ "name": "Team Codex", "operation_id": "uuid" }`，返回授权 URL 和有效期；会话有效期 10 分钟，重试复用同一 operation ID |
+| `GET /admin/api/v1/codex/oauth/callback` | 接收供应商回调；验证 state、会话与 PKCE，授权码最多交换一次，凭据加密保存 |
+| `POST /admin/api/v1/upstreams/{id}/codex-refresh` | `{ "expected_revision": 3 }`，显式刷新并原子替换凭据；员工 Key 保持不变 |
+
+- 仅本服务通过 OAuth 创建、且创建时 client ID 与当前配置一致的账号允许刷新。来源不明的导入文件或 client ID 错配返回 `409 codex_refresh_not_bound`，不修改现有凭据和状态。重新导入文件会清除此前 OAuth 来源绑定。
+- 授权会话保存创建时的 client ID 和回调地址；重启更改配置后，旧会话要求重新发起授权，不会用新配置消费旧会话。
+- 刷新网络失败、响应丢失或服务器错误时不会自动重放旧 Token；仅明确收到 429 才有界退避重试。失败结果未确认时不能据此认定旧 Token 仍有效。无效的 `expected_revision` 返回 400；并发版本冲突返回 409。
+- 授权或刷新成功仅表示凭据已保存，不等于模型可用或账号已在线验证。模型仍需手动配置；过期账号可重新授权，原文件导入路径可继续重新导入。后台定时刷新、网页授权体验与供应商侧撤销另行交付。
+
+接口与失败语义详见 [OAuth 生命周期契约](docs/codex-lifecycle-contract.md)。
 
 ## 原生 Responses 与函数工具（仅最新源码）
 
@@ -304,6 +323,8 @@ unset CPA_EMPLOYEE_KEY
 | `--web-dir` | 空；不设置则没有网页 |
 | `--init` | 读取 stdin 初始化，然后退出 |
 | `--tls-cert` / `--tls-key` | 必须成对设置；非回环监听必需 |
+| `--experimental-codex-membership` | 仅最新源码；默认关闭 Codex 文件导入、会员请求及 OAuth 实验 |
+| `--codex-oauth-client-id` / `--codex-oauth-redirect-uri` | 仅最新源码；同时设置才启用后台 OAuth 授权与手动刷新，另需开启会员实验 |
 | `--allow-loopback-upstream` | 默认关闭，仅本机开发测试 |
 
 用 `cpa-cloud --help` 查看二进制参数。
@@ -385,6 +406,12 @@ node scripts/smoke-preview.mjs <absolute-executable-path> <absolute-web-director
 
 ```bash
 node scripts/smoke-responses.mjs <absolute-executable-path>
+```
+
+后台 OAuth 的进程级验收只检查开关、CSRF、授权会话幂等、配置变更与重启、无效 revision 及加密落盘；不访问供应商授权或 Token 端点。模拟授权交换、刷新与员工 Chat/Responses 调用由 Go 测试覆盖：
+
+```bash
+node scripts/smoke-codex-oauth.mjs <absolute-executable-path>
 ```
 
 ## 文档与许可证

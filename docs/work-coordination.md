@@ -15,15 +15,17 @@ agent 执行状态不等于功能通过验收；后续阶段列表不代表持�
 
 ## 后续三个独立任务
 
-均属于 Codex 的 `cpa-cloud` 项目，模型为 `gpt-5.6-sol`、推理强度 high，使用独立 Git worktree。当前创建工具返回排队标识，三个工作目录已创建；收到正式任务 ID 后再记录运行与验收状态，不能把创建请求当作功能完成。
+均属于 Codex 的 `cpa-cloud` 项目，模型为 `gpt-5.6-sol`、推理强度 high，使用独立 Git worktree。Codex 任务已取得正式 ID；另外两项保留创建标识，不能把创建请求当作功能完成。
 
 | 任务 | 创建标识 | 交付范围 |
 | --- | --- | --- |
-| Codex 授权与自动刷新 | client-new-thread:6aabee85-ddac-4fc8-b494-f7985886a028 | 可配置 OAuth、PKCE/state、凭据轮换、并发刷新和重新授权状态 |
+| Codex 授权与手动刷新 | 01a0cb65-9940-7f93-9408-10c57904dbd2 | 可配置 OAuth、PKCE/state、手动轮换、来源绑定和会话配置快照；自动刷新另行交付 |
 | Claude Messages 与账号接入 | client-new-thread:2a548610-cf73-4931-a752-44721ed024ae | 原生 Messages、函数工具与 SSE、API Key 及有协议依据的会员接入 |
 | Gemini 协议与账号接入 | client-new-thread:dca21846-1bf5-4af5-b967-1d34be848ab5 | generateContent/streamGenerateContent、函数工具与模型发现、区分官方账号体系 |
 
 本会话负责需求依赖、接口冲突、独立验证和合并。子任务提交代码与测试证据，不自行 push、发布、部署或打包。会员流程必须列明协议依据和实际可用条件，不将 API Key 接入或 mock 测试称为真实会员验证。后续账号池、配额、用量与运营模块按功能矩阵在依赖就绪后派发，避免多个任务重复重构同一执行路径。
+
+Codex OAuth 当前集成分支为 `codex/oauth-integration`。原任务在 `codex-membership-lifecycle` 独立修正，主任务保留主线 Responses 执行器/路由/能力标志，并负责 `scripts/smoke-codex-oauth.mjs` 与跨协议刷新集成测试。合入后仅推轻量 CI，不新增 tag 或安装包。测试与提交证据记录在 [集成状态](integration-status.md)。
 
 ## 首轮任务（历史记录）
 

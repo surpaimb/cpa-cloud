@@ -2,7 +2,7 @@
 
 状态：源码实验实现及验收契约，尚未发布下载包或验证真实会员账号。2026-09-23。
 
-沿用单 Go 服务与员工 Key，不引入第二个 HTTP 代理或官方 CLI 子进程。协议依据 `codex-direct-protocol.md` 与内部 `membership` 包。仅接受管理员主动上传的 Codex `auth.json`；不扫描本机配置。浏览器授权、自动刷新、Claude/Gemini 接入仍是后续目标。
+沿用单 Go 服务与员工 Key，不引入第二个 HTTP 代理或官方 CLI 子进程。协议依据 `codex-direct-protocol.md` 与内部 `membership` 包。本文件定义管理员主动上传 Codex `auth.json` 的导入路径；不扫描本机配置。后续后台 OAuth 授权与手动刷新扩展见 [生命周期契约](codex-lifecycle-contract.md)，网页授权入口、自动刷新与 Claude/Gemini 接入仍是后续目标。
 
 ## 开关与管理接口
 

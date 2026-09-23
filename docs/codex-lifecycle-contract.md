@@ -74,6 +74,12 @@ returns a small no-store HTML success/failure page. It never places a token,
 authorization code, upstream body, account identifier or provider description
 in that page or a log.
 
+The administrator cookie uses `SameSite=Lax` to accompany that top-level GET
+redirect. It remains HttpOnly and Secure on the supported server-TLS deployment;
+JSON mutations retain Origin and CSRF-token validation. The existing global
+middleware already sets `Cache-Control: no-store` and `Referrer-Policy:
+no-referrer`, including on callback responses.
+
 `POST /admin/api/v1/upstreams/{id}/codex-refresh`
 
 ```json
@@ -81,7 +87,9 @@ in that page or a log.
 ```
 
 Requests one explicit refresh. The response is the ordinary redacted upstream
-view. Missing OAuth configuration returns `codex_oauth_not_configured` and
+view. Missing, null, zero, or negative `expected_revision` returns HTTP 400
+with `invalid_request`; it never produces an empty successful response.
+Missing OAuth configuration returns `codex_oauth_not_configured` and
 names the required process flags without exposing secret material. Only
 `codex-membership` upstreams are accepted.
 
