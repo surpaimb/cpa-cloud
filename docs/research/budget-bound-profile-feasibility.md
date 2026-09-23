@@ -23,19 +23,22 @@ Chat Completions 支持和固定 snapshot `gpt-4.1-2025-04-14`；页面同时把
 non-reasoning model。[GPT-4.1 model page](https://developers.openai.com/api/docs/models/gpt-4.1)
 
 官方上下文说明把 context window 定义为单次请求可使用的最大 Token 数，并明确它包含 input、output，以及适用模型的
-reasoning Token。[Conversation state: managing the context window](https://developers.openai.com/api/docs/guides/conversation-state#managing-the-context-window)
-因此，对这个固定 snapshot，任何被服务接受并执行的单次请求都有：
+reasoning Token；同一页面也提示超出 context window 的生成内容可能在响应中被截断。
+[Conversation state: managing the context window](https://developers.openai.com/api/docs/guides/conversation-state#managing-the-context-window)
+这些文字支持把 `C` 当成输入容量的保守工程上界，但不是供应商对每种错误、截断、计费字段和未来后端行为作出的形式化
+不变量。首版不依赖 `prompt_tokens + completion_tokens <= C` 这一更紧的共同约束，而独立预留：
 
 ```text
 C = 1,047,576
-0 <= completion_tokens <= M <= 32,768
-0 <= prompt_tokens
-prompt_tokens + completion_tokens <= C
+InputMax = C
+1 <= OutputMax = M <= 32,768
+TPMUpper = checked_add(InputMax, OutputMax) = C + M
 ```
 
-这允许 hard TPM 直接预留 `C`，而不必估算员工正文会被哪个 tokenizer 分成多少 Token。代价是极其保守：即使请求
-很短，也会占用整个 context window。它只能支持阈值至少能容纳一个完整窗口的策略；较小 hard TPM 仍必须等待经过
-验证的精确 bounder 或 tokenizer，不能因“通常提示很短”降低预留。
+这仍不需要估算员工正文会被哪个 tokenizer 分成多少 Token。代价是极其保守：即使请求很短，也会预留
+`1,080,344` Token。它只能支持阈值至少能容纳这项独立上界的策略；较小 hard TPM 仍必须等待经过验证的精确
+bounder 或 tokenizer，不能因“通常提示很短”降低预留。该 profile 的成立还依赖真实响应 usage 与上述官方容量和
+输出上限语义一致；这项兼容性尚未用真实 provider 验证。
 
 这项结论是**有条件可上线的工程子集**，不是当前代码已经可上线。上线前仍须实现预算总开关、reservation/settlement、
 本文的 strict profile parser、组合上界成本算法，以及下文所述 usage parser 修正和专项故障测试。
@@ -74,34 +77,35 @@ ordinary_input = input_tokens - cached_tokens - cache_write_tokens
 
 并说明一个 input Token 使用 ordinary、cache-read 或 cache-write 费率之一，cache-write 不是叠加费用。
 [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
-因此这三个输入类别是 `prompt_tokens` 的互斥分区，不是三个各自可以再达到 `C` 的独立集合。缓存会复用完整 rendered
-context 的前缀，包括 OpenAI 提供的隐藏指令、developer messages、工具定义和对话历史；缓存不会在请求之外凭空增加
-第二份计费用量。隐藏内容虽然不适合由本地 tokenizer 估算，仍受官方 context window 的全局上界约束。
+在这个固定 profile 中，只有经过专项测试确认 usage 遵守该公式后，才能把三个输入类别作为 `prompt_tokens` 的互斥
+分区使用。缓存会复用完整 rendered context 的前缀，包括 OpenAI 提供的隐藏指令、developer messages、工具定义和
+对话历史；缓存不是额外追加的会话输入。隐藏内容不适合由本地 tokenizer 估算，所以首版只把官方 context 容量作为
+`InputMax=C` 的保守工程推断，并在运行时核对真实 usage。
 
 当前 [budget admission proposal](../budget-admission-proposal.md) 建议在 proof 中分别保存 ordinary input、cache read、
-cache write、output 四个独立上界。如果分别把 `C` 写入三个输入桶，再加 `M`，虽然安全，却会把同一组 input 最多
-计算三次，首个 profile 几乎不可用。实现前应加入一个不可混淆的组合约束，例如：
+cache write、output 四个独立上界。这个通用 helper 必须保留，未知 profile 不能擅自假设输入桶互斥。固定 profile
+通过公式与专项验收后，可以额外使用不可混淆的输入 group bound，例如：
 
 ```go
 type DispatchBoundProof struct {
     // 既有 route/profile/revision 字段省略。
-    ContextTokensMax int64 // C；input + output 的共同上界
-    OutputTokensMax  int64 // M；C 内的子上界
-    InputBucketsAreExclusive bool // 只能由固定 profile 设置
+    InputTokensMax  int64 // C；三个输入收费桶的组合上界
+    OutputTokensMax int64 // M；独立输出上界
+    InputBucketMode string // 只能由固定 profile 设置的版本化 exclusive-group 证明
 }
 ```
 
-hard TPM 的 reservation 使用 `C`。成本上界不能先猜命中哪个缓存桶，而应从本次冻结的管理员价格快照取：
+hard TPM 的 reservation 使用 checked `C+M`。成本上界不能先猜命中哪个缓存桶，而应从本次冻结的管理员价格快照取：
 
 ```text
 Rin = max(input_rate, cache_read_rate, cache_write_rate)
-Rmax = max(Rin, output_rate)
-cost_upper_micro = ceil(C * Rmax / 1,000,000)
+cost_upper_micro = ceil((C * Rin + M * output_rate) / 1,000,000)
 ```
 
-乘法、比较和向上取整必须复用 accounting 的宽整数 checked helper。这个公式故意放弃 `M` 带来的收紧，但对任何合法
-input/cache/output 分配都安全，也不依赖官方实时价格。以后可用 `M` 解一个更紧的两段最大值，但需单独证明和测试；
-首版不需要。管理员配置的 price snapshot 仍是唯一内部成本来源，不能把网页上的 OpenAI 当前标价硬编码进账本。
+乘法、加法、比较和向上取整必须复用 accounting 的宽整数 checked helper。公式把 input 与 output 当成两个独立最大值，
+不依赖共同 context 的更紧约束；三个输入桶只有在该 profile 的 `exclusive-group` 证据成立时才共用 `C`。否则回退到
+proposal 的通用四桶独立上界 helper，不能为了减少预留而启用 group bound。管理员配置的 price snapshot 仍是唯一
+内部成本来源，不能把网页上的 OpenAI 当前标价硬编码进账本。
 
 OpenAI 当前说明 GPT-4.1 所属的 earlier models 没有额外 cache-write charge；GPT-4.1 model page也只列 ordinary input、
 cached input 和 output 三类价格。这个事实可用于管理员价格模板，但不能改变上述取最高费率的安全公式，也不能当作
@@ -148,8 +152,8 @@ OpenAI 的迁移指南说明 Chat Completions 的会话状态由调用方手动�
   agentic loop；本文特意选择 Chat 严格子集，不把这种循环的工具次数或额外费用塞进 Token 预算。
 
 Prompt caching 仍可能由 OpenAI 对 eligible prefix 自动执行。它不是隐式对话追加：官方说明它复用本次 rendered
-context 的匹配前缀，并通过 usage 的输入细分报告实际复用。由于 profile 的成本上界对三个输入费率取最大值，cache hit、
-miss 或 write 都不能突破 reservation。
+context 的匹配前缀，并通过 usage 的输入细分报告实际复用。在 profile 互斥证据成立的前提下，成本上界对三个输入
+费率取最大值，因此 cache hit、miss 或 write 的收费分类不会突破 reservation；证据不成立时不得使用该结论。
 
 ## 当前 usage parser 的上线阻塞
 
@@ -165,43 +169,50 @@ bounder 仍不足以上线：常见成功响应可能被结算为 unknown，导�
 
 1. `prompt_tokens`、`completion_tokens` 必须存在、非负，且 `total_tokens`（若存在）与二者一致；
 2. `cached_tokens` 缺失时保持 unknown，不能猜零；
-3. 对 `gpt-4.1-2025-04-14`，若 `cache_write_tokens` 缺失，可把没有额外 write charge 的部分合并进 ordinary：
-   `ordinary = prompt_tokens - cached_tokens`、effective `cache_write = 0`；这是一项 profile-specific billing bucket
-   归一化，不得改变通用 OpenAI/GPT-5.6 解析；
+3. 对 `gpt-4.1-2025-04-14`，若 `cache_write_tokens` 缺失，可以提出版本化的 effective billing 归一化：把
+   `prompt_tokens - cached_tokens` 全部归入 ordinary 收费桶。这里的 effective `cache_write=0` 只表示内部收费分类，
+   **不表示物理上没有写入缓存，也不声称知道真实写入 Token 数**；该规则尚未实现，不得改变通用 OpenAI/GPT-5.6
+   parser；
 4. 若响应显式给出 `cache_write_tokens`，继续按三桶互斥关系验证并保存真实值；
 5. 任一负数、溢出、子桶大于 prompt、协议错误、半响应或持久化失败仍 settlement unknown，并保留上界。
 
-第 3 条依赖官方对 earlier models “no additional cache-write charge”的当前说明。若工程审阅认为该说明不足以把缺失字段
-规范化为 effective ordinary，则 profile 仍可安全运行，但只能永远按 bound 做 unknown settlement；在这种模式通过
-24 小时成本窗口前，它不具备实用性，不能称为首个可上线 profile。
+第 3 条依赖官方对 earlier models “no additional cache-write charge”的当前说明，并且必须由 profile revision 与专项
+provider 兼容测试绑定。真实 provider 兼容目前未测。若工程审阅或测试认为该说明不足以把剩余部分归入 effective
+ordinary，则 profile 仍可保守运行，但只能按 bound 做 unknown settlement；在这种模式通过 24 小时成本窗口前，它不
+具备实用性，不能称为首个可上线 profile。
 
 ## 必须实现和证明的最小批次
 
 1. 新 profile registry 只注册上述 exact host/path/model/protocol/transform revision；unknown profile fail closed。
 2. strict JSON parser 和冻结 payload；proof 后任何字段修改、route/account/model revision 改变都取消派发。
 3. 预算总开关仍默认 `false`；只有 proposal 规定的 budget 开关与 `deny_unknown` 双门控才执行 hard 拒绝。
-4. reservation schema 保存 `C`、`M`、profile/bounder revision、实际 route 和不可变 price version；不保存正文、正文 hash、
-   Authorization、响应或原始错误。
-5. hard TPM 使用 context scalar bound；hard cost 使用四费率最大值和 `C` 的 checked 计算。价格缺失、币种不符、溢出、
-   profile 不匹配或 DB 失败时零网络调用。
+4. reservation schema 保存独立 `InputMax=C`、`OutputMax=M`、输入 group-bound 版本、profile/bounder revision、实际 route
+   和不可变 price version；不保存正文、正文 hash、Authorization、响应或原始错误。
+5. hard TPM 使用 checked `C+M`；hard cost 使用 `C*max(三个输入费率)+M*output_rate` 的 checked 计算。价格缺失、
+   币种不符、溢出、profile 不匹配或 DB 失败时零网络调用。
 6. `may_have_sent`、取消、timeout、未知终态、重启、续租和结算沿用 proposal 的保守 reservation 状态机；不能因上游返回
    4xx/5xx 或员工断开就提前释放可能已消耗的上界。
 7. profile-aware GPT-4.1 usage 归一化完成后，实际四桶替换上界；解析无法证明时保留上界，不把 NULL 当零。
+8. 任何真实 usage 超过已记录的 `InputMax`、`OutputMax` 或其 checked 总上界，都必须如实保存 overage 事实、保守结算并
+   自动停用该 profile；不能截断、饱和或改写 usage 来维持 proof 成立。停用后的新请求固定 fail closed，直到管理员升级
+   profile revision 并通过重新验收。
 
 专项测试至少覆盖 exact snapshot/alias、host 大小写规范化与伪后缀、端口、redirect、所有拒绝字段、重复 JSON key、
 `M=1/32768/越界`、`n=1/2/缺失`、多模态、工具、store/background/state 引用、缓存三桶每种分配、缺失与显式
 cache-write、最高费率分别落在四个桶、宽整数溢出、stream 拒绝，以及 proof 后 payload/route 变化。测试使用合成
-transport，不调用 OpenAI。
+transport，不调用 OpenAI。上线验收还需用无真实员工数据的受控官方账号验证 usage 字段兼容；本文没有执行该步骤。
 
 ## 不在结论中的保证
 
 - 固定 snapshot 页面说明它锁定模型版本的行为与性能，但不保证任意账号已有访问权限、固定价格、永久可用或当前 rate
   limit；这些失败由正常上游错误与保守 settlement 处理。
-- `C` 是模型级安全上界，不是准确预估，也不证明请求一定会被上游接受；过长输入可在上游拒绝或截断。
+- 把 `C` 用作 `InputMax` 是依赖官方容量语义的工程推断，不是无条件供应商计费保证，也不证明请求一定会被上游接受；
+  过长输入可在上游拒绝或截断。独立 `C+M` 预留与 overage 停用是对这种不确定性的保守处理。
 - 本结论不扩展到 GPT-4.1 alias、其他 snapshot、Responses、Azure、第三方兼容服务、工具、图片、文件、音频、多个
   choices、streaming 或后台执行。每次扩展都必须新增 profile revision 和独立官方证据。
 - 本结论只证明内部 Token/价格快照的最坏情况 reservation，不等于供应商账单、余额、收费或汇率功能。
 
-综上，官方固定 context window 加显式输出上限足以构造一个安全、极保守的 hard budget profile；它不能直接套入当前
-四个独立 bucket-max 字段，也不能绕过 GPT-4.1 cache-write 缺失字段的结算问题。完成组合上界、strict allowlist 和
-profile-aware usage 归一化前，应继续保持计划状态与默认关闭。
+综上，官方固定 context window 加显式输出上限支持构造一个有条件、极保守的 hard budget profile 工程推断。首版必须
+独立预留 `InputMax=C` 与 `OutputMax=M`，只在固定 profile 证据成立时把三个输入桶作为 group bound；它不能改变通用
+四桶 helper，也不能绕过 GPT-4.1 cache-write 缺失字段的结算问题。完成 strict allowlist、profile-aware usage 归一化、
+真实 provider 兼容验收和 overage 自动停用前，应继续保持计划状态与默认关闭。
