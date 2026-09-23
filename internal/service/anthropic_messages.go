@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 
+	"cpacloud.local/server/internal/accounting"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -69,13 +70,17 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 	}
 	modelRequestID := requestID(r.Context())
 	var upstreamReq *http.Request
-	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{anthropicAPIKeyProvider}, !countTokens, func(candidateRequest *http.Request, candidate route) *modelPreflightError {
+	protocol := accounting.ProtocolAnthropicMessages
+	if countTokens {
+		protocol = ""
+	}
+	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{anthropicAPIKeyProvider}, protocol, !countTokens, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {
 		if candidate.KeyVersion != 1 {
-			return accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available route for this model.", scheduling.FailurePermanent)
+			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available route for this model.", scheduling.FailurePermanent)
 		}
 		credential, err := a.secrets.decryptCredential(candidate.AccountID, candidate.Ciphertext)
 		if err != nil {
-			return accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailureAuth)
+			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailureAuth)
 		}
 		candidatePayload := make(map[string]json.RawMessage, len(payload))
 		for key, value := range payload {
@@ -84,19 +89,19 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		candidatePayload["model"], _ = json.Marshal(candidate.UpstreamModel)
 		outgoing, err := json.Marshal(candidatePayload)
 		if err != nil {
-			return requestPreflightFailure(http.StatusBadRequest, "invalid_request_error", "Invalid request.")
+			return route{}, requestPreflightFailure(http.StatusBadRequest, "invalid_request_error", "Invalid request.")
 		}
 		endpoint, err := validateEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
 		if err != nil {
-			return accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailurePermanent)
+			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailurePermanent)
 		}
 		target, err := upstreamAnthropicURL(endpoint, countTokens)
 		if err != nil {
-			return accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailurePermanent)
+			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailurePermanent)
 		}
 		prepared, err := http.NewRequestWithContext(candidateRequest.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
 		if err != nil {
-			return accountPreflightFailure(http.StatusBadGateway, "api_error", "Upstream is unavailable.", scheduling.FailurePermanent)
+			return route{}, accountPreflightFailure(http.StatusBadGateway, "api_error", "Upstream is unavailable.", scheduling.FailurePermanent)
 		}
 		prepared.Header.Set("Authorization", "Bearer "+credential)
 		prepared.Header.Set("Anthropic-Version", version)
@@ -110,7 +115,7 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 			prepared.Header.Set("Accept", "application/json")
 		}
 		upstreamReq = prepared
-		return nil
+		return candidate, nil
 	})
 	if failure != nil {
 		if r.Context().Err() != nil {

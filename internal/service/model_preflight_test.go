@@ -47,7 +47,7 @@ func TestModelPreflightCoordinator(t *testing.T) {
 			r.Header.Set("X-CPA-Session", "synthetic-session")
 			var candidates []string
 			var oldContext context.Context
-			selected, lease, failed := a.prepareModelRoute(r, auth, model, []string{"openai-compatible"}, true, func(candidate *http.Request, selected route) *modelPreflightError {
+			selected, lease, failed := a.prepareModelRoute(r, auth, model, []string{"openai-compatible"}, accounting.ProtocolOpenAIChatCompletions, true, func(candidate *http.Request, selected route) (route, *modelPreflightError) {
 				candidates = append(candidates, selected.AccountID)
 				if candidate.Context().Err() != nil {
 					t.Fatal("prepared candidate has a cancelled lease")
@@ -57,14 +57,14 @@ func TestModelPreflightCoordinator(t *testing.T) {
 						t.Fatal("second lease acquired without releasing the first")
 					}
 					if name == "capped" {
-						return accountPreflightFailure(503, "no_available_route", "No available route.", scheduling.FailurePermanent)
+						return route{}, accountPreflightFailure(503, "no_available_route", "No available route.", scheduling.FailurePermanent)
 					}
-					return nil
+					return selected, nil
 				}
 				oldContext = candidate.Context()
 				switch name {
 				case "request":
-					return requestPreflightFailure(400, "invalid_request_error", "Invalid request.")
+					return route{}, requestPreflightFailure(400, "invalid_request_error", "Invalid request.")
 				case "cancel":
 					cancel()
 				case "revoke":
@@ -85,7 +85,7 @@ func TestModelPreflightCoordinator(t *testing.T) {
 					}
 					t.Cleanup(func() { _, _ = a.store.db.Exec(`DROP TRIGGER preflight_reject_release`) })
 				}
-				return accountPreflightFailure(503, "no_available_route", "No available route.", scheduling.FailurePermanent)
+				return route{}, accountPreflightFailure(503, "no_available_route", "No available route.", scheduling.FailurePermanent)
 			})
 			assertCount := func(table string, attempts bool, wanted int) {
 				t.Helper()
@@ -131,6 +131,9 @@ func TestModelPreflightCoordinator(t *testing.T) {
 			}
 			if failed != nil || lease == nil || selected.AccountID != second || selected.UpstreamModel != "actual-second" || len(candidates) != 2 {
 				t.Fatalf("unexpected preparation: route=%s model=%s failure=%v candidates=%v", selected.AccountID, selected.UpstreamModel, failed, candidates)
+			}
+			if lease.recovery == nil || lease.recovery.AccountID != second || lease.recovery.UpstreamModel != "actual-second" || lease.recovery.Protocol != accounting.ProtocolOpenAIChatCompletions {
+				t.Fatalf("failover lease did not bind actual route: %+v", lease.recovery)
 			}
 			defer a.releaseModelLease(lease, id, true)
 			oldLookup := a.usage.priceLookup

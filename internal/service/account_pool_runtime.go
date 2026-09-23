@@ -83,6 +83,7 @@ type accountPoolLease struct {
 	finished        bool
 	heartbeatFailed bool
 	phase           scheduling.DispatchPhase
+	recovery        *accountRecoverySnapshot
 }
 
 type accountPoolRuntimeConfig struct {
@@ -763,6 +764,16 @@ func (l *accountPoolLease) Release(ctx context.Context, result scheduling.Releas
 	}
 	l.runtime.cooldownTransition.Lock()
 	defer l.runtime.cooldownTransition.Unlock()
+	duration := l.runtime.cooldowns[result.Failure]
+	if duration > 0 && l.recovery != nil {
+		unlockMutation, err := l.runtime.acquireMaintenanceMutationLock(ctx, l.recovery.ProviderKind, l.recovery.AccountID)
+		if err != nil {
+			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
+		}
+		defer unlockMutation()
+		l.runtime.app.admission.RLock()
+		defer l.runtime.app.admission.RUnlock()
+	}
 	now := l.runtime.clock.Now()
 	tx, err := l.runtime.app.store.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -788,36 +799,21 @@ func (l *accountPoolLease) Release(ctx context.Context, result scheduling.Releas
 		l.inner.Release(scheduling.ReleaseResult{})
 		return false, accountPoolReleaseResult{Code: accountPoolAlreadyReleased}
 	}
-	if duration := l.runtime.cooldowns[result.Failure]; duration > 0 {
+	var captured capturedAccountFailure
+	if duration > 0 {
 		eventID, idErr := newID("cool")
 		if idErr != nil {
 			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
 		}
-		until := formatAccountPoolTime(now.Add(duration))
-		updated := formatAccountPoolTime(now)
-		// Each effective failure advances event_id. The deadline never shrinks;
-		// when the existing deadline wins, its failure class remains the reason
-		// for that retained deadline while updated_at records this new event.
-		_, err = tx.ExecContext(ctx, `INSERT INTO account_pool_runtime_cooldowns(account_id,event_id,failure_class,cooldown_until,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
-			event_id=excluded.event_id,
-			failure_class=CASE WHEN excluded.cooldown_until>account_pool_runtime_cooldowns.cooldown_until THEN excluded.failure_class ELSE account_pool_runtime_cooldowns.failure_class END,
-			cooldown_until=CASE WHEN excluded.cooldown_until>account_pool_runtime_cooldowns.cooldown_until THEN excluded.cooldown_until ELSE account_pool_runtime_cooldowns.cooldown_until END,
-			updated_at=excluded.updated_at`, l.inner.AccountID(), eventID, string(result.Failure), until, updated)
+		captured, err = l.captureAccountFailureTx(ctx, tx, result.Failure, eventID, now, now.Add(duration))
 		if err != nil {
 			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
 		}
-		var stored scheduling.CooldownSnapshot
-		var failure, storedUntil string
-		stored.AccountID = l.inner.AccountID()
-		if err := tx.QueryRowContext(ctx, `SELECT event_id,failure_class,cooldown_until FROM account_pool_runtime_cooldowns WHERE account_id=?`, stored.AccountID).Scan(&stored.EventID, &failure, &storedUntil); err != nil {
-			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
+		if captured.Cooldown.EventID != "" {
+			result.Cooldown = &captured.Cooldown
+		} else {
+			result.Failure = scheduling.FailureNone
 		}
-		stored.Failure = scheduling.FailureClass(failure)
-		stored.Until, err = parseTime(storedUntil)
-		if err != nil || stored.EventID == "" || !validCooldownFailure(stored.Failure) {
-			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
-		}
-		result.Cooldown = &stored
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM account_pool_runtime_leases WHERE lease_id=?`, l.inner.ID()); err != nil {
 		return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
@@ -825,9 +821,15 @@ func (l *accountPoolLease) Release(ctx context.Context, result scheduling.Releas
 	if err := tx.Commit(); err != nil {
 		return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
 	}
+	if captured.OldEvent != "" && captured.OldEvent != captured.Cooldown.EventID {
+		l.runtime.cancelMaintenanceLeases(l.inner.AccountID(), captured.OldEvent)
+	}
 	released, decision := l.inner.Release(result)
 	if !released {
 		return false, accountPoolReleaseResult{Code: accountPoolAlreadyReleased}
+	}
+	if captured.Cooldown.EventID != "" {
+		l.runtime.NotifyChanged()
 	}
 	return true, accountPoolReleaseResult{Code: accountPoolReleased, RetrySuggested: decision.RetrySuggested}
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"cpacloud.local/server/internal/accounting"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -29,7 +30,7 @@ func requestPreflightFailure(status int, code, message string) *modelPreflightEr
 // context. It must not write a response, start an accounting attempt, or invoke
 // a model executor. Failed preparation owns disposal of any partial secrets.
 // The returned lease is owned by the caller only on success.
-func (a *App) prepareModelRoute(r *http.Request, auth employeeAuth, model string, providers []string, record bool, prepare func(*http.Request, route) *modelPreflightError) (route, *accountPoolLease, *modelAdmissionError) {
+func (a *App) prepareModelRoute(r *http.Request, auth employeeAuth, model string, providers []string, protocol accounting.UsageProtocol, record bool, prepare func(*http.Request, route) (route, *modelPreflightError)) (route, *accountPoolLease, *modelAdmissionError) {
 	selected, lease, failure := a.selectModelRoute(r, auth, model, providers, record)
 	if failure != nil {
 		return route{}, nil, failure
@@ -45,8 +46,24 @@ func (a *App) prepareModelRoute(r *http.Request, auth employeeAuth, model string
 			candidateRequest = r.WithContext(lease.Context())
 		}
 		var preparationError *modelPreflightError
+		if lease != nil && protocol != "" {
+			if code := lease.BindRecoverySnapshot(candidateRequest.Context(), model, protocol, selected); code != accountPoolAcquired {
+				preparationError = &modelPreflightError{Failure: poolAdmissionFailure(code)}
+			}
+		}
 		if candidateRequest.Context().Err() == nil && prepare != nil {
-			preparationError = prepare(candidateRequest, selected)
+			var actual route
+			if preparationError == nil {
+				actual, preparationError = prepare(candidateRequest, selected)
+			}
+			if actual.AccountID != "" {
+				selected = actual
+				if lease != nil && protocol != "" {
+					if code := lease.BindRecoverySnapshot(candidateRequest.Context(), model, protocol, actual); code != accountPoolAcquired {
+						preparationError = &modelPreflightError{Failure: poolAdmissionFailure(code)}
+					}
+				}
+			}
 		}
 		if candidateRequest.Context().Err() != nil {
 			preparationError = &modelPreflightError{Failure: poolAdmissionFailure(accountPoolCancelled)}
