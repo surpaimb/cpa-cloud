@@ -9,6 +9,8 @@ import (
 	"math/bits"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -284,8 +286,12 @@ func (l *Ledger) BeginAttempt(ctx context.Context, input AttemptStart) error {
 		return fmt.Errorf("%w: request is terminal", ErrConflict)
 	}
 	var parentStarted string
-	if err := tx.QueryRowContext(ctx, `SELECT started_at FROM accounting_requests WHERE id=?`, input.RequestID).Scan(&parentStarted); err != nil {
+	var parentProvider Provider
+	if err := tx.QueryRowContext(ctx, `SELECT started_at,provider FROM accounting_requests WHERE id=?`, input.RequestID).Scan(&parentStarted, &parentProvider); err != nil {
 		return err
+	}
+	if parentProvider != input.Provider {
+		return fmt.Errorf("%w: attempt provider differs from request", ErrConflict)
 	}
 	if err := requireNotBefore(input.StartedAt, parentStarted); err != nil {
 		return err
@@ -707,7 +713,7 @@ func validateRecoveryTime(ctx context.Context, tx *sql.Tx, at time.Time) error {
 }
 
 func validateRequestStart(input RequestStart) (string, error) {
-	if !validID(input.ID) || !validID(input.EmployeeID) || !validID(input.KeyID) || !validID(input.ModelID) || !validProvider(input.Provider) {
+	if !validID(input.ID) || !validID(input.EmployeeID) || !validID(input.KeyID) || !validModelID(input.ModelID) || !validProvider(input.Provider) {
 		return "", ErrInvalid
 	}
 	return canonicalTime(input.StartedAt)
@@ -746,6 +752,18 @@ func validID(value string) bool {
 		case '-', '_', '.', ':', '/', '@', '+':
 			continue
 		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validModelID(value string) bool {
+	if value == "" || len(value) > 128 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) || unicode.IsSpace(character) {
 			return false
 		}
 	}

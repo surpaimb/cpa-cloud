@@ -16,13 +16,13 @@
 
 provider 是固定枚举：`openai`、`openai-compatible`、`anthropic`、`gemini`、`codex`。调度原因是固定枚举：`primary`、`retry`、`failover`。状态是 `pending`、`succeeded`、`failed`、`cancelled`、`interrupted`。所有时间在写入前规范为 UTC RFC3339Nano。
 
-表中没有请求正文、提示词、响应、Authorization、凭据、任意错误正文、任意日志字段或可扩展 JSON。ID 和价格版本只接受有长度上限的标识符字符；错误只通过固定 Go sentinel 分类，不把传入值拼入错误消息。
+表中没有请求正文、提示词、响应、Authorization、凭据、任意错误正文、任意日志字段或可扩展 JSON。请求、员工、Key、attempt、account ID 和价格版本只接受最多 256 bytes 的 ASCII 标识符字符。模型 ID 与服务公开模型约束一致：必须是 1 至 128 bytes 的有效 UTF-8，可以包含 `/` 和中文等标识文本，但拒绝所有 Unicode 空白与控制字符。错误只通过固定 Go sentinel 分类，不把传入值拼入错误消息。
 
 ## 幂等与父子一致性
 
 - Begin 重放若 ID 及全部不可变输入相同则成功；同 ID 的任意不可变输入不同返回 `ErrConflict`。
 - Finish 只允许 `pending` 转为一个终态。相同终态、完成时间、用量的重放成功；不同重放返回 `ErrConflict`，不会再次计费。
-- 尝试必须引用已存在且仍为 `pending` 的请求。请求终态后拒绝新的 attempt ID；已有 attempt 的完全相同 Begin 重放仍保持幂等。
+- 尝试必须引用已存在且仍为 `pending` 的请求，且 attempt provider 必须与父请求 provider 完全相同；不一致时整个事务回滚，不写 attempt。请求终态后拒绝新的 attempt ID；已有 attempt 的完全相同 Begin 重放仍保持幂等，包括父请求已经进入终态后的历史重放。
 - 请求结束前不得有 `pending` 尝试，且请求结束时间不得早于任一终态尝试的结束时间。请求标为 `succeeded` 时，同一事务内必须至少存在一个 `succeeded` 尝试；失败、取消或中断请求可以没有上游尝试。
 - BeginAttempt、FinishRequest、FinishAttempt 和恢复均通过写事务串行化相关状态转换。竞争只有一个转换生效，不产生终态请求下的新尝试，也不重复写成本。
 
