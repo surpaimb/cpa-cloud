@@ -91,7 +91,17 @@ Chat, Responses, Messages (including count_tokens), and Gemini share scheduling.
 
 The optional `X-CPA-Session` header accepts a 1–256-byte identifier. Only an employee/key/model/protocol-scoped HMAC is used for short-lived affinity; the original value is neither stored nor forwarded. Leases renew, release, and conservatively recover across restarts. Rate limits, authentication errors, and temporary failures cool accounts for later independent requests; **the current request is never automatically switched or replayed**. Recovery probes, outbound proxy pools, upstream quota collection, and employee budgets remain unimplemented. See the [runtime contract](docs/account-pool-runtime-contract.md).
 
-The source usage ledger records employee requests separately from upstream attempts. It retains call metadata and explicitly reported token counts, without prompts, replies, or tool arguments. Unknown usage and costs without configured prices remain null, not zero. Usage dashboards, price management, and budget enforcement are not implemented. See the [usage integration contract](docs/usage-service-contract.md).
+The source usage ledger records employee requests separately from upstream attempts. It retains call metadata and explicitly reported token counts, without prompts, replies, or tool arguments. Unknown usage and costs without configured prices remain null, not zero. See the [usage integration contract](docs/usage-service-contract.md).
+
+## Usage and cost management (latest source only)
+
+This feature is **not included in preview.3 downloads**. On “用量与成本” (Usage and cost), administrators can filter by time, employee, key ID, public model, upstream, provider, and status. “查看尝试” shows the actual account, token counters, and price version for each attempt. Requests and attempts are counted separately; currencies are never added together. Queries cover at most 31 days. Pagination pins the selected window; “最近24小时” refreshes the most recent 24 hours.
+
+Under “价格管理”, select an account and enter its **actual upstream model name**, rather than the employee-facing alias. Configure ordinary input, output, cache-read, and cache-write rates in **microcurrency per million tokens**: 1,000,000 microcurrency equals one currency unit. For example, an input rate of `1000000` with USD means USD 1 per million ordinary input tokens. Administrators supply these rates; no provider prices are bundled.
+
+Saving appends an immutable version. Each dispatched attempt snapshots the selected account/model price; subsequent edits cannot reprice in-flight or historical attempts. Clearing “启用价格” appends a disabled version, making subsequent cost unknown. Revision conflicts preserve edits and require a reload before saving. After an uncertain network result, retry the same operation ID.
+
+These are internal **estimated costs**, not provider invoices or employee charges. Missing token buckets do not produce invented complete costs; unpriced and unknown attempts are counted separately. Balances, sale prices, budget enforcement, daily/monthly exports, and payments remain unimplemented. See the [usage and pricing contract](docs/usage-management-contract.md) for APIs and precision rules.
 
 ## 1. Download and installation
 

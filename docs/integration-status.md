@@ -1,5 +1,16 @@
 # 集成状态
 
+## 2026-09-23：用量查询、价格版本与网页管理
+
+- 查询 `1393d81`、价格目录/API `6740804`、网页 `7066620`/`e33cc15` 和请求接线 `507c7d3` 已集成。按实际账号与上游模型锁定价格，保持三表原子终结；无价、停用或部分用量未知时成本为 NULL。接口见 [用量与价格契约](usage-management-contract.md)。
+- 主任务独立 `TestUsagePricing*` 通过（3.861s），覆盖在途改价、公开别名与实际模型分离、查询失败不 dispatch、长模型兼容、迁移失败回滚/重试/重启；`TestPrice*` 通过（1.372s）。完整 `go test -p 1 ./... -count=1 -timeout=5m` 通过（service 248.820s）。价格后续 Rows.Err/严格 UTF-8 小修后再跑 `Test(PricingAdmin|UsagePricing)` 通过（8.500s），完整 `go vet -p 1 ./...` 与 Windows 编译通过。
+- 新 `scripts/smoke-usage-management.mjs` 使用真实临时 Go 进程和合成上游：在途旧价格 187、新价格 374、备用账号实际模型价格 561，历史幂等重放不回退当前价格、CAS 冲突、停用/未知用量、分币种汇总、过滤与分页、管理员/员工隔离、CSRF、重启、撤销及数据库/日志无正文和秘密全部通过。
+- 子任务网页 64 项测试及 TypeScript/Vite 构建通过。主任务使用真实 Go + Playwright Chrome（Browser plugin not available），隔离地址 `http://127.0.0.1:64038`，桌面 1440×1000、手机 390×844：价格创建→模型调用→0.000187 USD 汇总/尝试详情，真实保存响应丢失→原 payload/operation 重试仅追加一次，最大安全整数无损展示，后台竞争409→保留输入→重新加载→停用，员工筛选与未知费用全部通过。
+- 浏览器发现同值上游选择导致加载状态不结束，已由 `e33cc15` 修复并重跑原操作路径通过。页面身份、非空内容、无构建错误覆盖层、截图与实际交互均核对；0 JavaScript 页面异常。控制台仅预期未登录401、注入的响应丢失 ERR_FAILED 和版本冲突409。两次模型请求只到合成回环上游；正常进程/浏览器验收临时数据已清理。
+- 截图已查看：`C:/Users/apple/.codex/visualizations/2026/09/23/cpa-cloud-usage/usage-dashboard-desktop.png`、`usage-price-mobile.png`；同目录 `result.json` 保存无秘密的验收摘要，浏览器脚本在 `C:/TopC9-QA/cpa-cloud-usage-browser.cjs`。初次 Go 路由 panic 留下的合成测试目录清理被自动审批拒绝，未绕过该限制；不是用户数据或生产实例。
+- 两份 README 新增配置/单位/限制说明，原有 PowerShell 命令块保持不变，本地文档链接检查通过。CI 路径计划及6项计划测试通过：core/web=true，windows/linux/macos=false。由于前次 race 已耗时554秒且新增服务测试，本批 race 超时预算从10增至15分钟、core job从20增至25分钟，保留完整 race 套件和所有断言。Linux CI 待本批推送后核实，不将本机 Windows 测试表述为 race 通过。
+- 此批为源码增量，不发布新 tag/安装包。成本为管理员配置的内部估算，不是供应商账单；售价、余额、预算、报表导出、支付、自动换号、代理池以及 Claude/Gemini 会员等仍在总计划内，尚未完成。
+
 ## 2026-09-23：账号池执行、网页配置与共享刷新
 
 - 主任务在 `c8036d1` 构建真实 Go 进程并运行 `scripts/smoke-account-pool.mjs`：四协议映射、默认账号停用后的备用路由、目录一致性、429 不重放当前请求、冷却重启、排队 Key 撤销与会话元数据隔离全部通过。只使用随机临时目录与回环合成上游。
