@@ -135,6 +135,55 @@ export type UpstreamTestOperation = {
   latency_ms: number | null
 }
 export type UpstreamsResponse = { items: Upstream[]; server_time?: string }
+export type OutboundProxy = {
+  id: string
+  name: string
+  scheme: 'https'
+  host: string
+  port: number
+  address_scope: 'public' | 'private'
+  enabled: boolean
+  revision: number
+  connection_revision: number
+  has_credentials: boolean
+  created_at: string
+  updated_at: string
+}
+export type OutboundProxyPage = { items: OutboundProxy[]; next_cursor: string | null }
+export type ProxyCredentials = { username: string; password: string }
+export type CreateOutboundProxy = {
+  operation_id: string
+  name: string
+  scheme: 'https'
+  host: string
+  port: number
+  address_scope: 'public' | 'private'
+  enabled: boolean
+  credentials?: ProxyCredentials
+}
+export type UpdateOutboundProxy = {
+  expected_revision: number
+  name: string
+  scheme: 'https'
+  host: string
+  port: number
+  address_scope: 'public' | 'private'
+  enabled: boolean
+  credential_mode: 'keep' | 'replace' | 'clear'
+  credentials?: ProxyCredentials
+}
+export type UpstreamProxyBinding = {
+  proxy_id: string
+  proxy_revision: number
+  connection_revision: number
+  enabled: boolean
+  name: string
+}
+export type UpstreamProxyState = {
+  upstream_id: string
+  upstream_revision: number
+  binding: UpstreamProxyBinding | null
+}
 export type CooldownClearResult = {
   result: 'cleared' | 'already_clear'
   upstream_id: string
@@ -331,6 +380,21 @@ export const api = {
   revokeKey: (keyId: string, csrf: string) =>
     request<{ ok: true }>(`/keys/${encodeURIComponent(keyId)}/revoke`, { method: 'POST', body: '{}' }, csrf),
   upstreams: (signal?: AbortSignal) => request<UpstreamsResponse>('/upstreams', { signal }),
+  outboundProxies: (afterId?: string, limit = 50, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: String(limit) })
+    if (afterId) query.set('after_id', afterId)
+    return request<OutboundProxyPage>(`/outbound-proxies?${query}`, { signal })
+  },
+  outboundProxy: (id: string, signal?: AbortSignal) =>
+    request<OutboundProxy>(`/outbound-proxies/${encodeURIComponent(id)}`, { signal }),
+  createOutboundProxy: (body: CreateOutboundProxy, csrf: string) =>
+    request<OutboundProxy>('/outbound-proxies', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  updateOutboundProxy: (id: string, body: UpdateOutboundProxy, csrf: string) =>
+    request<OutboundProxy>(`/outbound-proxies/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+  upstreamProxy: (id: string, signal?: AbortSignal) =>
+    request<UpstreamProxyState>(`/upstreams/${encodeURIComponent(id)}/proxy`, { signal }),
+  putUpstreamProxy: (id: string, body: { expected_upstream_revision: number; proxy_id: string; expected_proxy_revision: number; bind: boolean }, csrf: string) =>
+    request<UpstreamProxyState>(`/upstreams/${encodeURIComponent(id)}/proxy`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
   createUpstream: (body: Record<string, unknown>, csrf: string) =>
     request<Upstream>('/upstreams', { method: 'POST', body: JSON.stringify(body) }, csrf),
   batchImportUpstreams: (body: { operation_id: string; items: UpstreamBatchItem[] }, csrf: string) =>

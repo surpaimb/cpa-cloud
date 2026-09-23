@@ -7,12 +7,14 @@ import { UpstreamsPage } from './pages/UpstreamsPage'
 import { ModelsPage } from './pages/ModelsPage'
 import { StatusPage } from './pages/StatusPage'
 import { UsagePage } from './pages/UsagePage'
+import { ProxiesPage } from './pages/ProxiesPage'
 
-type Page = 'employees' | 'upstreams' | 'models' | 'usage' | 'status'
+type Page = 'employees' | 'upstreams' | 'proxies' | 'models' | 'usage' | 'status'
 
 const navigation: { id: Page; label: string; icon: 'people' | 'link' | 'route' | 'status' }[] = [
   { id: 'employees', label: '员工与 Key', icon: 'people' },
   { id: 'upstreams', label: '上游连接', icon: 'link' },
+  { id: 'proxies', label: '出站代理', icon: 'route' },
   { id: 'models', label: '模型路由', icon: 'route' },
   { id: 'usage', label: '用量与成本', icon: 'status' },
   { id: 'status', label: '系统状态', icon: 'status' },
@@ -70,6 +72,7 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
   const content = {
     employees: <EmployeesPage csrf={session.csrf_token} />,
     upstreams: <UpstreamsPage csrf={session.csrf_token} />,
+    proxies: <ProxiesPage csrf={session.csrf_token} />,
     models: <ModelsPage csrf={session.csrf_token} />,
     usage: <UsagePage csrf={session.csrf_token} />,
     status: <StatusPage csrf={session.csrf_token} />,

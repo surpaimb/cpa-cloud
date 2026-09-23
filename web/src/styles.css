@@ -311,6 +311,22 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .toggle-field small { margin-top: 4px; color: var(--muted); line-height: 1.5; }
 .price-unit-note { margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 
+.proxy-notice { margin-bottom: 20px; padding: 18px 21px; color: #31566c; background: #edf6fa; border: 1px solid #c5dee9; border-left: 4px solid var(--teal); border-radius: var(--radius); }
+.proxy-notice strong { display: block; margin-bottom: 6px; color: var(--navy); }
+.proxy-notice p { margin: 3px 0; font-size: 13px; line-height: 1.6; }
+.proxy-panel + .proxy-panel { margin-top: 20px; }
+.proxy-table { min-width: 940px; }
+.proxy-binding-limit { display: block; max-width: 280px; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: normal; }
+.proxy-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.proxy-form-grid .toggle-field { align-self: end; }
+.proxy-uncertain { margin-top: 16px; padding: 12px 14px; color: #734213; background: #fff7e8; border: 1px solid #f1d39b; border-radius: 7px; }
+.proxy-uncertain strong, .proxy-uncertain p { display: block; }
+.proxy-uncertain p { margin: 5px 0 0; font-size: 13px; line-height: 1.55; }
+.proxy-state-summary { margin-bottom: 18px; padding: 13px 15px; background: #f5f8fb; border: 1px solid var(--border); border-radius: 7px; }
+.proxy-state-summary span, .proxy-state-summary strong, .proxy-state-summary small { display: block; }
+.proxy-state-summary span, .proxy-state-summary small { color: var(--muted); font-size: 12px; }
+.proxy-state-summary strong { margin: 5px 0; }
+
 .nav-scrim { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fade { from { opacity: 0; } }
@@ -341,6 +357,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .usage-summary { grid-template-columns: 1fr; }
   .usage-card--requests { grid-column: auto; grid-template-columns: 1fr; }
   .status-breakdown { grid-template-columns: repeat(3, minmax(80px, 1fr)); }
+  .proxy-form-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 540px) {
@@ -370,6 +387,9 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .pagination { justify-content: space-between; }
   .health-test-result dl { grid-template-columns: 1fr; }
   .health-dialog-actions .button { flex: 1 1 100%; width: 100%; }
+  .proxy-notice { padding: 16px; }
+  .proxy-form-grid { grid-template-columns: 1fr; }
+  .proxy-panel .section-heading { flex-direction: column; }
 }
 :root .recovery-panel { margin-top: 24px; padding: 24px; }
 .recovery-panel h2, .recovery-panel h3 { margin-top: 0; }
