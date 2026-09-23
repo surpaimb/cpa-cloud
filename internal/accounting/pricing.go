@@ -121,10 +121,23 @@ func (c *PriceCatalog) Current(ctx context.Context, accountID, actualModel strin
 	if c == nil || c.db == nil || ctx == nil || !validID(accountID) || !validActualModelRead(actualModel) {
 		return nil, ErrInvalid
 	}
+	return currentPrice(ctx, c.db, accountID, actualModel)
+}
+
+// CurrentTx reads the current immutable price snapshot through a caller-owned
+// transaction. It neither commits nor rolls back tx.
+func (c *PriceCatalog) CurrentTx(ctx context.Context, tx *sql.Tx, accountID, actualModel string) (*PriceSnapshot, error) {
+	if c == nil || c.db == nil || ctx == nil || tx == nil || !validID(accountID) || !validActualModelRead(actualModel) {
+		return nil, ErrInvalid
+	}
+	return currentPrice(ctx, tx, accountID, actualModel)
+}
+
+func currentPrice(ctx context.Context, query priceQuery, accountID, actualModel string) (*PriceSnapshot, error) {
 	var version string
 	var currency sql.NullString
 	var inputRate, outputRate, cacheReadRate, cacheWriteRate sql.NullInt64
-	err := c.db.QueryRowContext(ctx, `SELECT v.version,v.currency,v.input_rate,v.output_rate,v.cache_read_rate,v.cache_write_rate
+	err := query.QueryRowContext(ctx, `SELECT v.version,v.currency,v.input_rate,v.output_rate,v.cache_read_rate,v.cache_write_rate
 		FROM account_price_current c JOIN account_price_versions v
 		ON v.version=c.version AND v.upstream_id=c.upstream_id AND v.upstream_model=c.upstream_model AND v.revision=c.revision
 		WHERE c.upstream_id=? AND c.upstream_model=?`, accountID, actualModel).
