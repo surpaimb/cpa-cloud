@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -113,7 +114,8 @@ type outboundProxyTestCoordinator struct {
 	probeTLS func(context.Context, *egress.Client, string, string) error
 	// Tests use this seam to exercise commit uncertainty without changing the
 	// network operation or exposing a production hook.
-	beforeFinalize func(int) error
+	beforeFinalize      func(int) error
+	afterFinalizeCommit func() error
 }
 
 func newOutboundProxyTestCoordinator(a *App) (*outboundProxyTestCoordinator, error) {
@@ -272,7 +274,7 @@ func (c *outboundProxyTestCoordinator) create(ctx context.Context, proxyID strin
 	if forProxy != 0 {
 		return outboundProxyTestOperationView{}, false, errOutboundProxyTestInProgress
 	}
-	if err := validateOutboundProxyTestSelection(ctx, tx, proxyID, input); err != nil {
+	if err := validateOutboundProxyTestSelection(ctx, tx, proxyID, input, c.app.cfg.AllowLoopbackUpstream); err != nil {
 		return outboundProxyTestOperationView{}, false, err
 	}
 	created := c.now().UTC()
@@ -296,7 +298,7 @@ func sameOutboundProxyTestInput(stored outboundProxyTestOperationView, proxyID s
 		stored.ConnectionRevision == input.ExpectedConnectionRevision && stored.UpstreamID == input.UpstreamID && stored.UpstreamRevision == input.ExpectedUpstreamRevision
 }
 
-func validateOutboundProxyTestSelection(ctx context.Context, tx *sql.Tx, proxyID string, input outboundProxyTestInput) error {
+func validateOutboundProxyTestSelection(ctx context.Context, tx *sql.Tx, proxyID string, input outboundProxyTestInput, allowLoopback bool) error {
 	var proxyEnabled, upstreamEnabled int
 	var proxyRevision, connectionRevision, upstreamRevision, boundConnection int64
 	var provider, endpoint, boundProxy string
@@ -310,7 +312,10 @@ func validateOutboundProxyTestSelection(ctx context.Context, tx *sql.Tx, proxyID
 		return errOutboundProxyTestUnavailable
 	}
 	if proxyEnabled != 1 || upstreamEnabled != 1 || proxyRevision != input.ExpectedProxyRevision || connectionRevision != input.ExpectedConnectionRevision ||
-		upstreamRevision != input.ExpectedUpstreamRevision || boundProxy != proxyID || boundConnection != connectionRevision || !validProxyBindingProvider(provider) || !validOutboundProxyTestEndpoint(endpoint) {
+		upstreamRevision != input.ExpectedUpstreamRevision || boundProxy != proxyID || boundConnection != connectionRevision || !validProxyBindingProvider(provider) {
+		return errUpstreamProxyBindingConflict
+	}
+	if _, ok := outboundProxyTestEndpoint(provider, endpoint, allowLoopback); !ok {
 		return errUpstreamProxyBindingConflict
 	}
 	return nil
@@ -327,6 +332,29 @@ func validOutboundProxyTestEndpoint(endpoint string) bool {
 	}
 	value, err := strconv.Atoi(port)
 	return err == nil && value >= 1 && value <= 65535
+}
+
+func outboundProxyTestEndpoint(provider, endpoint string, allowLoopback bool) (string, bool) {
+	if provider != geminiAPIKeyProvider {
+		return endpoint, validOutboundProxyTestEndpoint(endpoint)
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.RawFragment != "" || parsed.Opaque != "" {
+		return "", false
+	}
+	if strings.EqualFold(parsed.Host, "generativelanguage.googleapis.com") && (parsed.Path == "" || parsed.Path == "/") {
+		// The production probe always uses the frozen official origin rather
+		// than trusting an equivalent-looking stored string.
+		return geminiAPIEndpoint, true
+	}
+	if !allowLoopback {
+		return "", false
+	}
+	address := net.ParseIP(parsed.Hostname())
+	if address == nil || !address.IsLoopback() || !validOutboundProxyTestEndpoint(endpoint) {
+		return "", false
+	}
+	return endpoint, true
 }
 
 func (c *outboundProxyTestCoordinator) run(operation outboundProxyTestOperationView) {
@@ -439,19 +467,19 @@ func (c *outboundProxyTestCoordinator) freeze(operation outboundProxyTestOperati
 		return target, outboundProxyTestInternalFailure
 	}
 	defer tx.Rollback()
-	if err := validateOutboundProxyTestSelection(ctx, tx, operation.ProxyID, outboundProxyTestInput{OperationID: operation.OperationID, ExpectedProxyRevision: operation.ProxyRevision, ExpectedConnectionRevision: operation.ConnectionRevision, UpstreamID: operation.UpstreamID, ExpectedUpstreamRevision: operation.UpstreamRevision}); err != nil {
+	if err := validateOutboundProxyTestSelection(ctx, tx, operation.ProxyID, outboundProxyTestInput{OperationID: operation.OperationID, ExpectedProxyRevision: operation.ProxyRevision, ExpectedConnectionRevision: operation.ConnectionRevision, UpstreamID: operation.UpstreamID, ExpectedUpstreamRevision: operation.UpstreamRevision}, c.app.cfg.AllowLoopbackUpstream); err != nil {
 		if errors.Is(err, errUpstreamProxyBindingConflict) {
 			return target, outboundProxyTestConfigurationChanged
 		}
 		return target, outboundProxyTestInternalFailure
 	}
-	var host, scope, endpoint string
+	var host, scope, provider, endpoint string
 	var port int
 	var credentialVersion sql.NullInt64
 	var ciphertext []byte
-	err = tx.QueryRowContext(ctx, `SELECT p.host,p.port,p.address_scope,p.credential_ciphertext,p.credential_key_version,u.endpoint
+	err = tx.QueryRowContext(ctx, `SELECT p.host,p.port,p.address_scope,p.credential_ciphertext,p.credential_key_version,u.provider_kind,u.endpoint
 		FROM outbound_proxies p JOIN upstreams u ON u.id=? WHERE p.id=?`, operation.UpstreamID, operation.ProxyID).
-		Scan(&host, &port, &scope, &ciphertext, &credentialVersion, &endpoint)
+		Scan(&host, &port, &scope, &ciphertext, &credentialVersion, &provider, &endpoint)
 	if err != nil {
 		return target, outboundProxyTestInternalFailure
 	}
@@ -477,8 +505,9 @@ func (c *outboundProxyTestCoordinator) freeze(operation outboundProxyTestOperati
 	if err != nil {
 		return outboundProxyTestTarget{operation: operation}, outboundProxyTestInternalFailure
 	}
+	endpoint, ok := outboundProxyTestEndpoint(provider, endpoint, c.app.cfg.AllowLoopbackUpstream)
 	parsed, err := url.Parse(endpoint)
-	if err != nil || !validOutboundProxyTestEndpoint(endpoint) {
+	if err != nil || !ok {
 		return outboundProxyTestTarget{operation: operation}, outboundProxyTestConfigurationChanged
 	}
 	target.host, target.port = parsed.Hostname(), parsed.Port()
@@ -523,6 +552,10 @@ func (c *outboundProxyTestCoordinator) finalize(operation outboundProxyTestOpera
 	if err != nil {
 		return errOutboundProxyTestUnavailable
 	}
+	if !sameOutboundProxyTestInput(stored, operation.ProxyID, outboundProxyTestInput{OperationID: operation.OperationID, ExpectedProxyRevision: operation.ProxyRevision, ExpectedConnectionRevision: operation.ConnectionRevision, UpstreamID: operation.UpstreamID, ExpectedUpstreamRevision: operation.UpstreamRevision}) ||
+		stored.StartedAt == nil || operation.StartedAt == nil || !stored.StartedAt.Equal(*operation.StartedAt) {
+		return errOutboundProxyTestUnavailable
+	}
 	if stored.State == outboundProxyTestCompleted {
 		// A prior uncertain commit may have atomically replaced the proposed
 		// transport result with configuration_changed after its version check.
@@ -534,10 +567,7 @@ func (c *outboundProxyTestCoordinator) finalize(operation outboundProxyTestOpera
 		}
 		return errOutboundProxyTestUnavailable
 	}
-	if !sameOutboundProxyTestInput(stored, operation.ProxyID, outboundProxyTestInput{OperationID: operation.OperationID, ExpectedProxyRevision: operation.ProxyRevision, ExpectedConnectionRevision: operation.ConnectionRevision, UpstreamID: operation.UpstreamID, ExpectedUpstreamRevision: operation.UpstreamRevision}) {
-		return errOutboundProxyTestUnavailable
-	}
-	if err := validateOutboundProxyTestSelection(ctx, tx, operation.ProxyID, outboundProxyTestInput{OperationID: operation.OperationID, ExpectedProxyRevision: operation.ProxyRevision, ExpectedConnectionRevision: operation.ConnectionRevision, UpstreamID: operation.UpstreamID, ExpectedUpstreamRevision: operation.UpstreamRevision}); err != nil {
+	if err := validateOutboundProxyTestSelection(ctx, tx, operation.ProxyID, outboundProxyTestInput{OperationID: operation.OperationID, ExpectedProxyRevision: operation.ProxyRevision, ExpectedConnectionRevision: operation.ConnectionRevision, UpstreamID: operation.UpstreamID, ExpectedUpstreamRevision: operation.UpstreamRevision}, c.app.cfg.AllowLoopbackUpstream); err != nil {
 		if errors.Is(err, errUpstreamProxyBindingConflict) {
 			proposedCode = outboundProxyTestConfigurationChanged
 		} else {
@@ -554,6 +584,11 @@ func (c *outboundProxyTestCoordinator) finalize(operation outboundProxyTestOpera
 	}
 	if err := tx.Commit(); err != nil {
 		return errOutboundProxyTestUnavailable
+	}
+	if c.afterFinalizeCommit != nil {
+		if err := c.afterFinalizeCommit(); err != nil {
+			return errOutboundProxyTestUnavailable
+		}
 	}
 	return nil
 }

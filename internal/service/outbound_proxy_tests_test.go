@@ -126,7 +126,9 @@ func TestOutboundProxyTestVersionChangeWinsOverHandshake(t *testing.T) {
 	f := newOutboundProxyHandshakeFixture(t)
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	var probes, lostResponses atomic.Int32
 	f.coordinator.probeTLS = func(ctx context.Context, _ *egress.Client, _, _ string) error {
+		probes.Add(1)
 		close(entered)
 		select {
 		case <-release:
@@ -134,6 +136,12 @@ func TestOutboundProxyTestVersionChangeWinsOverHandshake(t *testing.T) {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+	f.coordinator.afterFinalizeCommit = func() error {
+		if lostResponses.Add(1) == 1 {
+			return errors.New("synthetic lost commit response")
+		}
+		return nil
 	}
 	operation := "21000000-0000-4000-8000-000000000004"
 	if _, _, err := f.coordinator.create(context.Background(), f.proxy.ID, f.input(operation)); err != nil {
@@ -146,13 +154,24 @@ func TestOutboundProxyTestVersionChangeWinsOverHandshake(t *testing.T) {
 	}
 	close(release)
 	finished := waitOutboundProxyTest(t, f.coordinator, operation, outboundProxyTestCompleted)
-	if finished.ResultCode == nil || *finished.ResultCode != outboundProxyTestConfigurationChanged {
+	if finished.ResultCode == nil || *finished.ResultCode != outboundProxyTestConfigurationChanged || probes.Load() != 1 || lostResponses.Load() != 1 {
 		t.Fatalf("finished=%+v", finished)
 	}
 	// Resolve the exact row as if the preceding configuration_changed commit
 	// had returned an uncertain error to a worker holding handshake_ok.
 	if err := f.coordinator.finalize(finished, outboundProxyTestHandshakeOK, *finished.FinishedAt, *finished.LatencyMS); err != nil {
 		t.Fatalf("resolve uncertain configuration-changed commit: %v", err)
+	}
+	wrongInput := finished
+	wrongInput.ProxyRevision++
+	if err := f.coordinator.finalize(wrongInput, outboundProxyTestHandshakeOK, *finished.FinishedAt, *finished.LatencyMS); err == nil {
+		t.Fatal("completed operation accepted different fixed input")
+	}
+	wrongStarted := finished
+	changedStart := finished.StartedAt.Add(time.Nanosecond)
+	wrongStarted.StartedAt = &changedStart
+	if err := f.coordinator.finalize(wrongStarted, outboundProxyTestHandshakeOK, *finished.FinishedAt, *finished.LatencyMS); err == nil {
+		t.Fatal("completed operation accepted different start time")
 	}
 }
 
@@ -179,6 +198,9 @@ func TestOutboundProxyTestFinalizeRetriesMetadataWithoutReconnect(t *testing.T) 
 		t.Fatalf("probes=%d finalizes=%d result=%+v", probes.Load(), finalizes.Load(), finished)
 	}
 	originalFinished, originalLatency := *finished.FinishedAt, *finished.LatencyMS
+	if err := f.coordinator.finalize(finished, outboundProxyTestHandshakeOK, originalFinished, originalLatency); err == nil {
+		t.Fatal("different transport result was accepted for a non-configuration terminal result")
+	}
 	if err := f.coordinator.finalize(finished, *finished.ResultCode, originalFinished.Add(time.Second), originalLatency+1); err == nil {
 		t.Fatal("conflicting repeated settlement was accepted")
 	}
@@ -433,6 +455,30 @@ func TestOutboundProxyTestRejectsCodexHTTPAndDoesNotReadUpstreamSecret(t *testin
 	insertProxyTestUpstream(t, f.base.db, "ups_http_test", "openai-compatible", "http://api.example/v1", 1)
 	if _, err := f.base.store.SetBinding(context.Background(), upstreamProxyBindingInput{UpstreamID: "ups_http_test", ExpectedUpstreamRevision: 1, ProxyID: f.proxy.ID, ExpectedProxyRevision: 1, Bind: true}); !errors.Is(err, errOutboundProxyInvalid) {
 		t.Fatalf("store unexpectedly bound HTTP upstream: %v", err)
+	}
+	insertProxyTestUpstream(t, f.base.db, "ups_gemini_test", geminiAPIKeyProvider, geminiAPIEndpoint, 1)
+	geminiBinding, err := f.base.store.SetBinding(context.Background(), upstreamProxyBindingInput{UpstreamID: "ups_gemini_test", ExpectedUpstreamRevision: 1, ProxyID: f.proxy.ID, ExpectedProxyRevision: 1, Bind: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.base.db.Exec(`UPDATE upstreams SET endpoint='https://attacker.invalid' WHERE id='ups_gemini_test'`); err != nil {
+		t.Fatal(err)
+	}
+	geminiInput := outboundProxyTestInput{OperationID: "21000000-0000-4000-8000-000000000013", ExpectedProxyRevision: 1, ExpectedConnectionRevision: 1, UpstreamID: "ups_gemini_test", ExpectedUpstreamRevision: geminiBinding.UpstreamRevision}
+	if _, _, err := f.coordinator.create(context.Background(), f.proxy.ID, geminiInput); !errors.Is(err, errUpstreamProxyBindingConflict) {
+		t.Fatalf("tampered Gemini endpoint error=%v", err)
+	}
+}
+
+func TestOutboundProxyTestGeminiTargetIsFixed(t *testing.T) {
+	if got, ok := outboundProxyTestEndpoint(geminiAPIKeyProvider, "https://generativelanguage.googleapis.com/", false); !ok || got != geminiAPIEndpoint {
+		t.Fatalf("official target=%q ok=%v", got, ok)
+	}
+	if _, ok := outboundProxyTestEndpoint(geminiAPIKeyProvider, "https://attacker.invalid", false); ok {
+		t.Fatal("production Gemini test accepted a configurable target")
+	}
+	if got, ok := outboundProxyTestEndpoint(geminiAPIKeyProvider, "https://127.0.0.1:9443", true); !ok || got != "https://127.0.0.1:9443" {
+		t.Fatalf("synthetic loopback target=%q ok=%v", got, ok)
 	}
 }
 
