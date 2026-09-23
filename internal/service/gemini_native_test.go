@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -367,8 +369,209 @@ func TestGeminiEndpointPolicyAndDiscoveryPagination(t *testing.T) {
 			t.Fatalf("unsafe Gemini endpoint accepted: %s", endpoint)
 		}
 	}
-	if _, err := parseGeminiDiscoveredModels([]byte(`{"models":[],"nextPageToken":"secret-page"}`)); err == nil {
-		t.Fatal("paginated discovery was silently truncated")
+	ids, token, err := parseGeminiDiscoveryPage([]byte(`{"models":[{"name":"models/a","supportedGenerationMethods":["generateContent"]}],"nextPageToken":"secret-page"}`))
+	if err != nil || !reflect.DeepEqual(ids, []string{"a"}) || token != "secret-page" {
+		t.Fatalf("parsed page ids=%v token=%q err=%v", ids, token, err)
+	}
+}
+
+func TestGeminiDiscoveryFollowsPagesDeduplicatesAndRejectsIncompleteResults(t *testing.T) {
+	tests := []struct {
+		name       string
+		handler    http.HandlerFunc
+		wantStatus int
+		wantIDs    []string
+		wantCalls  int32
+	}{
+		{
+			name: "three pages with cross-page duplicates",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("x-goog-api-key") != "gemini-secret" || r.Header.Get("Authorization") != "" || r.URL.Query().Get("pageSize") != geminiDiscoveryPageSize {
+					t.Errorf("unsafe discovery request headers=%v url=%s", r.Header, r.URL)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Query().Get("pageToken") {
+				case "":
+					_, _ = io.WriteString(w, `{"models":[{"name":"models/z","supportedGenerationMethods":["generateContent"]},{"name":"models/embedding","supportedGenerationMethods":["embedContent"]}],"nextPageToken":"page-2"}`)
+				case "page-2":
+					_, _ = io.WriteString(w, `{"models":[{"name":"models/z","supportedGenerationMethods":["generateContent"]},{"name":"models/a","supportedGenerationMethods":["generateContent"]}],"nextPageToken":"page-3"}`)
+				case "page-3":
+					_, _ = io.WriteString(w, `{"models":[{"name":"models/m","supportedGenerationMethods":["generateContent"]}]}`)
+				default:
+					t.Errorf("unexpected page token %q", r.URL.Query().Get("pageToken"))
+				}
+			},
+			wantStatus: http.StatusOK, wantIDs: []string{"a", "m", "z"}, wantCalls: 3,
+		},
+		{
+			name: "repeated page token",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"models":[],"nextPageToken":"loop"}`)
+			},
+			wantStatus: http.StatusBadGateway, wantCalls: 2,
+		},
+		{
+			name: "invalid page token",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"models":[],"nextPageToken":" bad-token "}`)
+			},
+			wantStatus: http.StatusBadGateway, wantCalls: 1,
+		},
+		{
+			name: "middle page failure",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("pageToken") == "next" {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, "private upstream failure")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"models":[{"name":"models/partial","supportedGenerationMethods":["generateContent"]}],"nextPageToken":"next"}`)
+			},
+			wantStatus: http.StatusBadGateway, wantCalls: 2,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				test.handler(w, r)
+			}))
+			defer upstream.Close()
+			server, app, cookie, csrf, configured, _, _ := setupGeminiTest(t, upstream.URL)
+			defer server.Close()
+			defer app.Close()
+			response := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+configured.ID+"/discover-models", "", cookie, csrf, server.URL)
+			if response.StatusCode != test.wantStatus {
+				t.Fatalf("status=%d body=%s", response.StatusCode, readBody(response))
+			}
+			if calls.Load() != test.wantCalls {
+				t.Fatalf("calls=%d want=%d", calls.Load(), test.wantCalls)
+			}
+			if test.wantStatus == http.StatusOK {
+				var result struct {
+					Items []discoveredModel `json:"items"`
+				}
+				decodeResponse(t, response, &result)
+				got := make([]string, 0, len(result.Items))
+				for _, item := range result.Items {
+					got = append(got, item.ID)
+				}
+				if !reflect.DeepEqual(got, test.wantIDs) {
+					t.Fatalf("ids=%v want=%v", got, test.wantIDs)
+				}
+			} else if body := readBody(response); strings.Contains(body, "partial") || strings.Contains(body, "private upstream failure") {
+				t.Fatalf("partial or private result leaked: %s", body)
+			}
+		})
+	}
+}
+
+func TestGeminiDiscoveryAppliesAggregateLimitsAcrossPages(t *testing.T) {
+	t.Run("response bytes", func(t *testing.T) {
+		padding := strings.Repeat("x", modelDiscoveryMaxBody/2)
+		var calls atomic.Int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			call := calls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			next := ""
+			if call == 1 {
+				next = `,"nextPageToken":"second"`
+			}
+			_, _ = io.WriteString(w, `{"models":[],"padding":"`+padding+`"`+next+`}`)
+		}))
+		defer upstream.Close()
+		server, app, cookie, csrf, configured, _, _ := setupGeminiTest(t, upstream.URL)
+		defer server.Close()
+		defer app.Close()
+		response := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+configured.ID+"/discover-models", "", cookie, csrf, server.URL)
+		if response.StatusCode != http.StatusBadGateway || calls.Load() != 2 {
+			t.Fatalf("status=%d calls=%d body=%s", response.StatusCode, calls.Load(), readBody(response))
+		}
+		response.Body.Close()
+	})
+
+	t.Run("unique models", func(t *testing.T) {
+		var calls atomic.Int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			page := int(calls.Add(1)) - 1
+			models := make([]map[string]any, 0, 600)
+			for index := 0; index < 600; index++ {
+				models = append(models, map[string]any{"name": "models/model-" + strconv.Itoa(page*600+index), "supportedGenerationMethods": []string{"generateContent"}})
+			}
+			payload := map[string]any{"models": models}
+			if page == 0 {
+				payload["nextPageToken"] = "second"
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(payload)
+		}))
+		defer upstream.Close()
+		server, app, cookie, csrf, configured, _, _ := setupGeminiTest(t, upstream.URL)
+		defer server.Close()
+		defer app.Close()
+		response := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+configured.ID+"/discover-models", "", cookie, csrf, server.URL)
+		if response.StatusCode != http.StatusBadGateway || calls.Load() != 2 {
+			t.Fatalf("status=%d calls=%d body=%s", response.StatusCode, calls.Load(), readBody(response))
+		}
+		response.Body.Close()
+	})
+}
+
+func TestGeminiDiscoveryCancellationStopsMiddlePage(t *testing.T) {
+	secondPage := make(chan struct{})
+	upstreamCancelled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("pageToken") == "" {
+			_, _ = io.WriteString(w, `{"models":[],"nextPageToken":"second"}`)
+			return
+		}
+		close(secondPage)
+		<-r.Context().Done()
+		close(upstreamCancelled)
+	}))
+	defer upstream.Close()
+	server, app, cookie, csrf, configured, _, _ := setupGeminiTest(t, upstream.URL)
+	defer server.Close()
+	defer app.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+configured.ID+"/discover-models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(cookie)
+	request.Header.Set("Origin", server.URL)
+	request.Header.Set("X-CSRF-Token", csrf)
+	result := make(chan error, 1)
+	go func() {
+		response, requestErr := http.DefaultClient.Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		result <- requestErr
+	}()
+	select {
+	case <-secondPage:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second discovery page was not requested")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("request error=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled discovery did not return")
+	}
+	select {
+	case <-upstreamCancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancellation did not reach upstream page")
 	}
 }
 

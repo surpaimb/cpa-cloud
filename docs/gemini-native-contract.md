@@ -42,8 +42,8 @@ CPA Cloud 只验证本地支持边界、结构上限和函数名；模型相关�
 
 ## 模型发现
 
-- 管理发现调用 `GET /v1beta/models?pageSize=1000`，使用保存的 `x-goog-api-key`，仅采纳 `name` 形如 `models/{id}` 且 `supportedGenerationMethods` 包含 `generateContent` 的项目。
-- 返回值仍是 `{items:[{id}]}`，ID 去掉 `models/` 前缀、去重并排序；响应、项目数和标识符长度有上限。首批不自动跟随 `nextPageToken`，超过一页时返回固定错误而不是悄悄给出不完整目录。
+- 管理发现调用 `GET /v1beta/models?pageSize=1000`，使用保存的 `x-goog-api-key`，并跟随合法 `nextPageToken` 直到完整结束；仅采纳 `name` 形如 `models/{id}` 且 `supportedGenerationMethods` 包含 `generateContent` 的项目。
+- 返回值仍是 `{items:[{id}]}`，ID 去掉 `models/` 前缀、跨页去重并排序。整个分页操作共用一次超时、累计响应字节上限、总唯一模型数上限和页数上限；page token 有长度/字符约束并拒绝重复或循环。取消、中间页失败、畸形/超限响应均返回固定错误或停止响应，绝不把已读取页面伪装成完整目录。
 - 员工 `GET /v1beta/models` 是已配置且获准的本地目录，不暴露未路由的上游发现结果。
 
 ## Google 会员授权边界
