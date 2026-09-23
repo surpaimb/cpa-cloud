@@ -147,19 +147,18 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 	defer a.releaseModelLease(lease, reqID, true)
 	if codexPrepared != nil {
 		defer codexPrepared.Destroy()
-		selected = codexPrepared.selected
 	}
-	if err := a.beginRouteUpstreamUsage(r.Context(), reqID, selected); err != nil {
+	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, true)
+	if dispatchFailure != nil {
 		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.", reqID)
+		writeModelError(w, dispatchFailure.status, dispatchFailure.code, dispatchFailure.message, reqID)
 		return
 	}
-	lease.MarkDispatch()
 	if codexPrepared != nil {
 		a.handleCodexResponses(w, r, stream, codexPrepared, reqID)
 		return
 	}
-	a.handleAPIKeyResponses(w, r, upstreamReq, stream, reqID)
+	a.handleAPIKeyResponses(w, r, upstreamReq, stream, reqID, client)
 }
 
 func rejectsResponsesLifecycle(payload map[string]json.RawMessage) bool {
@@ -183,8 +182,8 @@ func rejectsResponsesLifecycle(payload map[string]json.RawMessage) bool {
 	return false
 }
 
-func (a *App) handleAPIKeyResponses(w http.ResponseWriter, r *http.Request, req *http.Request, stream bool, reqID string) {
-	response, err := a.http.Do(req)
+func (a *App) handleAPIKeyResponses(w http.ResponseWriter, r *http.Request, req *http.Request, stream bool, reqID string, client upstreamHTTPDoer) {
+	response, err := client.Do(req)
 	if err != nil {
 		outcome := "failed"
 		status := http.StatusBadGateway

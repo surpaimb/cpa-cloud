@@ -165,7 +165,12 @@ func (a *App) executeRecoveryOperation(ctx context.Context, request accountMaint
 			if err := a.recoveryDispatchAllowedTx(ctx, tx); err != nil {
 				return err
 			}
-			_, err := a.systemProbes.MarkMayHaveSentTx(ctx, tx, acquired.State.OperationID, a.accountPool.clock.Now().UTC())
+			frozen, err := a.routeEgressTx(ctx, tx, input.Selected)
+			if err != nil {
+				return err
+			}
+			input.client = frozen.client
+			_, err = a.systemProbes.MarkMayHaveSentTx(ctx, tx, acquired.State.OperationID, a.accountPool.clock.Now().UTC())
 			return err
 		})
 		if code == accountPoolAcquired {

@@ -39,6 +39,7 @@ const (
 )
 
 type generationProbeInput struct {
+	client          upstreamHTTPDoer
 	Selected        route
 	Protocol        accounting.UsageProtocol
 	APIKey          []byte
@@ -112,7 +113,14 @@ func (a *App) runAPIKeyGenerationProbe(ctx context.Context, input generationProb
 		}
 		return failedGenerationProbe(generationCodeConfiguration)
 	}
-	response, err := a.http.Do(request)
+	client := input.client
+	if client == nil {
+		if a.store != nil {
+			return failedGenerationProbe(generationCodeConfiguration)
+		}
+		client = a.http // standalone runner unit fixtures have no storage
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		if result, stopped := generationProbeContextResult(ctx); stopped {
 			return result

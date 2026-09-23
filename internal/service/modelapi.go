@@ -22,6 +22,7 @@ type employeeAuth struct {
 	Mode       string
 }
 type route struct {
+	egress          *routeEgress
 	AccountID       string
 	Endpoint        string
 	UpstreamModel   string
@@ -226,19 +227,18 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer a.releaseModelLease(lease, modelRequestID, true)
 	if codexPrepared != nil {
 		defer codexPrepared.Destroy()
-		selected = codexPrepared.selected
 	}
-	if err := a.beginRouteUpstreamUsage(r.Context(), modelRequestID, selected); err != nil {
+	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, true)
+	if dispatchFailure != nil {
 		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
+		writeModelError(w, dispatchFailure.status, dispatchFailure.code, dispatchFailure.message, modelRequestID)
 		return
 	}
-	lease.MarkDispatch()
 	if codexPrepared != nil {
 		a.handleCodexChatCompletion(w, r, model, stream, codexPrepared, modelRequestID)
 		return
 	}
-	response, err := a.http.Do(upstreamReq)
+	response, err := client.Do(upstreamReq)
 	if err != nil {
 		outcome := "failed"
 		if errors.Is(r.Context().Err(), context.Canceled) {

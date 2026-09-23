@@ -17,10 +17,10 @@ const (
 	geminiDiscoveryMaxTokenLen = 4096
 )
 
-func (a *App) discoverGeminiUpstreamModels(w http.ResponseWriter, r *http.Request, upstreamID, endpoint string, keyVersion int, ciphertext []byte) {
+func (a *App) discoverGeminiUpstreamModels(w http.ResponseWriter, r *http.Request, upstreamID, endpoint string, keyVersion int, ciphertext []byte, revision int64) {
 	discoveryContext, cancel := context.WithTimeout(r.Context(), modelDiscoveryTimeout)
 	defer cancel()
-	items, failure := a.runGeminiModelCatalog(discoveryContext, upstreamID, endpoint, keyVersion, ciphertext)
+	items, failure := a.runGeminiModelCatalog(discoveryContext, upstreamID, endpoint, keyVersion, ciphertext, revision)
 	if failure != nil {
 		writeCatalogRunFailure(w, r, failure)
 		return
@@ -30,7 +30,7 @@ func (a *App) discoverGeminiUpstreamModels(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-func (a *App) runGeminiModelCatalog(ctx context.Context, upstreamID, endpoint string, keyVersion int, ciphertext []byte) ([]discoveredModel, *catalogRunFailure) {
+func (a *App) runGeminiModelCatalog(ctx context.Context, upstreamID, endpoint string, keyVersion int, ciphertext []byte, revision int64) ([]discoveredModel, *catalogRunFailure) {
 	if keyVersion != 2 {
 		return nil, &catalogRunFailure{result: "configuration_changed", local: true}
 	}
@@ -41,6 +41,11 @@ func (a *App) runGeminiModelCatalog(ctx context.Context, upstreamID, endpoint st
 	validated, err := validateGeminiEndpoint(ctx, endpoint, a.cfg.AllowLoopbackUpstream)
 	if err != nil {
 		return nil, &catalogRunFailure{result: "configuration_changed"}
+	}
+	selected := route{AccountID: upstreamID, Endpoint: endpoint, ProviderKind: geminiAPIKeyProvider, Revision: revision}
+	frozen, err := a.prepareRouteEgress(ctx, selected)
+	if err != nil {
+		return nil, &catalogRunFailure{result: "configuration_changed", local: true}
 	}
 	seenIDs := make(map[string]struct{})
 	seenTokens := make(map[string]struct{})
@@ -60,7 +65,10 @@ func (a *App) runGeminiModelCatalog(ctx context.Context, upstreamID, endpoint st
 		}
 		req.Header.Set("x-goog-api-key", credential)
 		req.Header.Set("Accept", "application/json")
-		response, err := a.http.Do(req)
+		if !a.catalogEgressCurrent(ctx, selected, frozen) {
+			return nil, &catalogRunFailure{result: "configuration_changed", local: true}
+		}
+		response, err := frozen.client.Do(req)
 		if err != nil {
 			return nil, catalogContextFailure(ctx)
 		}

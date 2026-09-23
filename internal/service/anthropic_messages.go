@@ -128,17 +128,15 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		r = r.WithContext(lease.Context())
 	}
 	defer a.releaseModelLease(lease, modelRequestID, !countTokens)
-	if !countTokens {
-		if err := a.beginRouteUpstreamUsage(r.Context(), modelRequestID, selected); err != nil {
+	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, !countTokens)
+	if dispatchFailure != nil {
+		if !countTokens {
 			a.finishRequest(modelRequestID, "failed", 0)
-			writeAnthropicError(w, 503, "api_error", "Service is temporarily unavailable.", modelRequestID)
-			return
 		}
+		writeAnthropicError(w, dispatchFailure.status, anthropicAdmissionType(dispatchFailure.status), dispatchFailure.message, modelRequestID)
+		return
 	}
-	if lease != nil {
-		lease.MarkDispatch()
-	}
-	response, err := a.http.Do(upstreamReq)
+	response, err := client.Do(upstreamReq)
 	if err != nil {
 		if !countTokens {
 			outcome := "failed"

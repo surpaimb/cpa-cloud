@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/egress"
 )
 
 const (
@@ -25,26 +26,28 @@ const (
 )
 
 type App struct {
-	cfg           Config
-	store         *store
-	secrets       *secrets
-	http          *http.Client
-	codex         codexExecutor
-	responses     codexResponsesExecutor
-	oauthHTTP     *http.Client
-	admission     sync.RWMutex
-	refresh       *codexRefreshCoordinator
-	accountPool   *accountPoolRuntime
-	healthTests   *upstreamHealthCoordinator
-	systemProbes  *accounting.SystemProbeLedger
-	recovery      *accountRecoveryCoordinator
-	usage         *usageLedgerCoordinator
-	usageRequests sync.Map
-	loginMu       sync.Mutex
-	logins        map[string]*loginAttempt
-	catalogMu     sync.Mutex
-	catalogs      map[string]codexCatalogCacheEntry
-	codexCatalog  codexCatalogLister
+	cfg             Config
+	store           *store
+	secrets         *secrets
+	outboundProxies *outboundProxyStore
+	proxyClients    *egress.ClientCache
+	http            *http.Client
+	codex           codexExecutor
+	responses       codexResponsesExecutor
+	oauthHTTP       *http.Client
+	admission       sync.RWMutex
+	refresh         *codexRefreshCoordinator
+	accountPool     *accountPoolRuntime
+	healthTests     *upstreamHealthCoordinator
+	systemProbes    *accounting.SystemProbeLedger
+	recovery        *accountRecoveryCoordinator
+	usage           *usageLedgerCoordinator
+	usageRequests   sync.Map
+	loginMu         sync.Mutex
+	logins          map[string]*loginAttempt
+	catalogMu       sync.Mutex
+	catalogs        map[string]codexCatalogCacheEntry
+	codexCatalog    codexCatalogLister
 }
 
 type loginAttempt struct {
@@ -77,6 +80,16 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		cfg: cfg, store: s, secrets: sec, http: client,
 		oauthHTTP: newCodexOAuthHTTPClient(), codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(),
 		logins: make(map[string]*loginAttempt),
+	}
+	app.outboundProxies = newOutboundProxyStore(s.db, sec, cfg.AllowLoopbackUpstream)
+	if err := app.outboundProxies.Migrate(ctx); err != nil {
+		s.close()
+		return nil, err
+	}
+	app.proxyClients, err = egress.NewClientCache(64)
+	if err != nil {
+		s.close()
+		return nil, err
 	}
 	app.refresh = newCodexRefreshCoordinator(app)
 	prices := accounting.NewPriceCatalog(s.db)
@@ -140,12 +153,16 @@ func (a *App) Close() error {
 	if a.refresh != nil {
 		a.refresh.Close()
 	}
+	if a.proxyClients != nil {
+		a.proxyClients.Close()
+	}
 	return a.store.close()
 }
 
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	a.registerAccountPoolHandlers(mux)
+	a.registerOutboundProxyHandlers(mux)
 	a.registerPricingHandlers(mux)
 	a.registerUsageHandlers(mux)
 	a.registerSystemProbeHandlers(mux)

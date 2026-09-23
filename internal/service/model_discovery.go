@@ -35,10 +35,11 @@ func (a *App) discoverUpstreamModels(w http.ResponseWriter, r *http.Request, _ a
 	var endpoint, providerKind string
 	var enabled int
 	var keyVersion int
+	var revision int64
 	var ciphertext []byte
 	a.admission.RLock()
-	err := a.store.db.QueryRowContext(r.Context(), `SELECT endpoint,enabled,provider_kind,key_version,credential_ciphertext FROM upstreams WHERE id=?`, id).
-		Scan(&endpoint, &enabled, &providerKind, &keyVersion, &ciphertext)
+	err := a.store.db.QueryRowContext(r.Context(), `SELECT endpoint,enabled,provider_kind,key_version,credential_ciphertext,revision FROM upstreams WHERE id=?`, id).
+		Scan(&endpoint, &enabled, &providerKind, &keyVersion, &ciphertext, &revision)
 	a.admission.RUnlock()
 	if errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, http.StatusNotFound, "not_found", "Upstream was not found.")
@@ -57,13 +58,13 @@ func (a *App) discoverUpstreamModels(w http.ResponseWriter, r *http.Request, _ a
 		return
 	}
 	if providerKind == geminiAPIKeyProvider {
-		a.discoverGeminiUpstreamModels(w, r, id, endpoint, keyVersion, ciphertext)
+		a.discoverGeminiUpstreamModels(w, r, id, endpoint, keyVersion, ciphertext, revision)
 		return
 	}
 
 	discoveryContext, cancel := context.WithTimeout(r.Context(), modelDiscoveryTimeout)
 	defer cancel()
-	items, failure := a.runAPIKeyModelCatalog(discoveryContext, id, providerKind, endpoint, keyVersion, ciphertext)
+	items, failure := a.runAPIKeyModelCatalog(discoveryContext, id, providerKind, endpoint, keyVersion, ciphertext, revision)
 	if failure != nil {
 		writeCatalogRunFailure(w, r, failure)
 		return
@@ -100,7 +101,7 @@ func writeCatalogRunFailure(w http.ResponseWriter, r *http.Request, failure *cat
 	}
 }
 
-func (a *App) runAPIKeyModelCatalog(ctx context.Context, upstreamID, provider, endpoint string, keyVersion int, ciphertext []byte) ([]discoveredModel, *catalogRunFailure) {
+func (a *App) runAPIKeyModelCatalog(ctx context.Context, upstreamID, provider, endpoint string, keyVersion int, ciphertext []byte, revision int64) ([]discoveredModel, *catalogRunFailure) {
 	if (provider != "openai-compatible" && provider != anthropicAPIKeyProvider) || keyVersion != 1 {
 		return nil, &catalogRunFailure{result: "configuration_changed", local: true}
 	}
@@ -115,6 +116,11 @@ func (a *App) runAPIKeyModelCatalog(ctx context.Context, upstreamID, provider, e
 	target, err := upstreamModelsURL(validatedEndpoint)
 	if err != nil {
 		return nil, &catalogRunFailure{result: "configuration_changed"}
+	}
+	selected := route{AccountID: upstreamID, Endpoint: endpoint, ProviderKind: provider, Revision: revision}
+	frozen, err := a.prepareRouteEgress(ctx, selected)
+	if err != nil {
+		return nil, &catalogRunFailure{result: "configuration_changed", local: true}
 	}
 	seenIDs := make(map[string]struct{})
 	seenCursors := make(map[string]struct{})
@@ -142,7 +148,10 @@ func (a *App) runAPIKeyModelCatalog(ctx context.Context, upstreamID, provider, e
 			request.Header.Set("Authorization", "Bearer "+credential)
 		}
 		request.Header.Set("Accept", "application/json")
-		response, err := a.http.Do(request)
+		if !a.catalogEgressCurrent(ctx, selected, frozen) {
+			return nil, &catalogRunFailure{result: "configuration_changed", local: true}
+		}
+		response, err := frozen.client.Do(request)
 		if err != nil {
 			return nil, catalogContextFailure(ctx)
 		}

@@ -190,15 +190,13 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(lease.Context())
 	}
 	defer a.releaseModelLease(lease, modelRequestID, true)
-	if err := a.beginRouteUpstreamUsage(r.Context(), modelRequestID, selected); err != nil {
+	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, true)
+	if dispatchFailure != nil {
 		a.finishRequest(modelRequestID, "failed", 0)
-		writeGeminiError(w, 503, "UNAVAILABLE", "Service is temporarily unavailable.")
+		writeGeminiError(w, dispatchFailure.status, geminiAdmissionStatus(dispatchFailure.status), dispatchFailure.message)
 		return
 	}
-	if lease != nil {
-		lease.MarkDispatch()
-	}
-	response, err := a.http.Do(upstreamReq)
+	response, err := client.Do(upstreamReq)
 	if err != nil {
 		outcome := "failed"
 		if r.Context().Err() != nil {

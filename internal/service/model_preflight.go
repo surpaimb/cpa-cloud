@@ -69,6 +69,14 @@ func (a *App) prepareModelRoute(r *http.Request, auth employeeAuth, model string
 			preparationError = &modelPreflightError{Failure: poolAdmissionFailure(accountPoolCancelled)}
 		}
 		if preparationError == nil {
+			frozen, err := a.prepareRouteEgress(candidateRequest.Context(), selected)
+			if err != nil {
+				preparationError = proxyPreflightError(err)
+			} else {
+				selected.egress = frozen
+			}
+		}
+		if preparationError == nil {
 			if switched {
 				if err := a.markRequestUsageFailover(requestID(r.Context())); err != nil {
 					return a.finishModelPreflight(r, lease, record, &modelPreflightError{Failure: poolAdmissionFailure(accountPoolStorageUnavailable)})

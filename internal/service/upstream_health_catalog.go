@@ -8,7 +8,7 @@ import (
 )
 
 func (a *App) runAPIKeyCatalogTest(ctx context.Context, snapshot upstreamHealthSnapshot) string {
-	_, failure := a.runAPIKeyModelCatalog(ctx, snapshot.id, snapshot.provider, snapshot.endpoint, snapshot.keyVersion, snapshot.ciphertext)
+	_, failure := a.runAPIKeyModelCatalog(ctx, snapshot.id, snapshot.provider, snapshot.endpoint, snapshot.keyVersion, snapshot.ciphertext, snapshot.revision)
 	if failure != nil {
 		return failure.result
 	}
@@ -16,7 +16,7 @@ func (a *App) runAPIKeyCatalogTest(ctx context.Context, snapshot upstreamHealthS
 }
 
 func (a *App) runGeminiCatalogTest(ctx context.Context, snapshot upstreamHealthSnapshot) string {
-	_, failure := a.runGeminiModelCatalog(ctx, snapshot.id, snapshot.endpoint, snapshot.keyVersion, snapshot.ciphertext)
+	_, failure := a.runGeminiModelCatalog(ctx, snapshot.id, snapshot.endpoint, snapshot.keyVersion, snapshot.ciphertext, snapshot.revision)
 	if failure != nil {
 		return failure.result
 	}
