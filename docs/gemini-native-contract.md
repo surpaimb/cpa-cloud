@@ -35,10 +35,11 @@ CPA Cloud 只验证本地支持边界、结构上限和函数名；模型相关�
 ## 流式、取消与错误
 
 - 流式请求固定调用上游 `:streamGenerateContent?alt=sse`，仅接受 `text/event-stream`，逐帧转发原生 `data:` JSON 事件，不增加 OpenAI `[DONE]`。
-- 服务限制单个 SSE 事件和总流量；检测到畸形事件、上游提前断流或超限时终止并把请求记为 `failed`/`interrupted`，不能发送伪造成功候选。
+- 服务限制 SSE 单行 256 KiB、单事件 1 MiB、单次流 64 MiB。事件必须以空行完整结束；空事件和注释 keep-alive 不作为响应帧。检测到畸形事件、半帧、上游提前断流或超限时终止并把请求记为 `failed`（员工断连为 `cancelled`），不能发送伪造成功候选。
+- 正常 EOF 本身不代表成功。服务跨帧跟踪 `candidates[].index`，只有所有已出现候选都收到非空且非 `FINISH_REASON_UNSPECIFIED` 的 `finishReason`，或收到非空且非 `BLOCK_REASON_UNSPECIFIED` 的 `promptFeedback.blockReason`，才把完整结束的流记为 `succeeded`。函数调用等未带结束原因的合法候选帧仍原样转发并等待后续结束帧。
 - 员工断连直接取消上游 request context，并将账目结果记为 `cancelled`。撤销/停用与 admission 锁保持现有语义：新请求立即拒绝，已通过准入的在途请求不承诺强制中断。
 - 在尚未发送 2xx 时，CPA Cloud 返回 Gemini 风格 `{error:{code,message,status}}` 固定脱敏错误。员工鉴权失败为 401 `UNAUTHENTICATED`；无权限为 403 `PERMISSION_DENIED`；无可用路由为 503 `UNAVAILABLE`；本地不支持字段为 400 `UNIMPLEMENTED`；上游 400、401/403、429、其他失败分别映射为脱敏的 400、502、429、502。
-- 一旦流式 200 已发送，后续本地失败只能关闭流；不把内部错误、凭据或上游正文作为 SSE 数据发给员工。
+- 一旦流式 200 已发送，后续协议错误、超限或不完整 EOF 发送一个由 CPA Cloud 生成的固定脱敏 Gemini `{error:{code:502,message,status:"UNAVAILABLE"}}` SSE 事件并关闭流；员工已断连或下游写入失败时直接关闭。上游 `error` 事件不原样转发，内部错误、凭据和上游正文均不进入该事件。
 
 ## 模型发现
 
@@ -62,7 +63,7 @@ Google 官方 Gemini CLI 文档区分三条通路：Google 账号登录使用 Ge
 2. 事务迁移保留旧上游、模型、员工 Key；失败回滚。
 3. 员工 Key 鉴权、模型 allowlist、撤销和停用。
 4. 文本、system instruction、函数声明、function call/response 和 generation config 原样转发。
-5. 非流式 finish reason/usage 保留；SSE、多帧、取消、畸形/过大响应和上游错误映射。
+5. 非流式 finish reason/usage 保留；SSE 多帧工具调用、空事件、候选结束确认、取消、半帧/提前 EOF、畸形/过大响应和上游错误脱敏映射。
 6. 管理模型发现和员工模型目录；不得携带员工 Key 探测上游。
 7. 测试只使用回环假上游，不读取真实凭据，不向 Google 发请求，不能据此宣称真实账号已验证。
 

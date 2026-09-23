@@ -242,6 +242,102 @@ func TestGeminiNativeAPIKeyWorkflowStreamingDiscoveryAndRestart(t *testing.T) {
 	}
 }
 
+func TestGeminiNativeSSECompletionBoundsAndRedaction(t *testing.T) {
+	const privateError = "provider-private-stream-error gemini-secret"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch {
+		case bytes.Contains(body, []byte("tools-and-empty")):
+			_, _ = io.WriteString(w, "\n: keep-alive\n\ndata:\n\n")
+			_, _ = io.WriteString(w, "data: {\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"id\":\"call-1\",\"name\":\"weather\",\"args\":{\"city\":\"Paris\"}}}]}}]}\n\n")
+			_, _ = io.WriteString(w, "data: {\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"totalTokenCount\":4}}\n\n")
+		case bytes.Contains(body, []byte("first-error")):
+			_, _ = io.WriteString(w, "data: {\"error\":{\"code\":500,\"message\":"+quoteJSON(privateError)+"}}\n\n")
+		case bytes.Contains(body, []byte("late-error")):
+			_, _ = io.WriteString(w, "data: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n")
+			_, _ = io.WriteString(w, "data: {\"error\":{\"code\":500,\"message\":"+quoteJSON(privateError)+"}}\n\n")
+		case bytes.Contains(body, []byte("clean-eof-without-finish")):
+			_, _ = io.WriteString(w, "data: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n")
+		case bytes.Contains(body, []byte("half-frame")):
+			_, _ = io.WriteString(w, "data: {\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\"}]}")
+		case bytes.Contains(body, []byte("unfinished-candidate")):
+			_, _ = io.WriteString(w, "data: {\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\"},{\"index\":1,\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n")
+		case bytes.Contains(body, []byte("all-candidates-finish")):
+			_, _ = io.WriteString(w, "data: {\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\"},{\"index\":1,\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n")
+			_, _ = io.WriteString(w, "data: {\"candidates\":[{\"index\":1,\"finishReason\":\"MAX_TOKENS\"}]}\n\n")
+		case bytes.Contains(body, []byte("prompt-block")):
+			_, _ = io.WriteString(w, "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n")
+		case bytes.Contains(body, []byte("line-too-large")):
+			_, _ = io.WriteString(w, "data: "+strings.Repeat("x", geminiMaxSSELine)+"\n\n")
+		case bytes.Contains(body, []byte("event-too-large")):
+			line := "data: " + strings.Repeat(" ", geminiMaxSSELine-16) + "\n"
+			for range 5 {
+				_, _ = io.WriteString(w, line)
+			}
+			_, _ = io.WriteString(w, "\n")
+		default:
+			t.Errorf("unexpected request body: %s", body)
+		}
+	}))
+	defer upstream.Close()
+	server, app, _, _, _, _, key := setupGeminiTest(t, upstream.URL)
+	defer server.Close()
+	defer app.Close()
+
+	tests := []struct {
+		name         string
+		marker       string
+		wantStatus   int
+		wantOutcome  string
+		want         []string
+		doNotWant    []string
+		wantSSEError bool
+	}{
+		{name: "tools and empty events", marker: "tools-and-empty", wantStatus: http.StatusOK, wantOutcome: "succeeded", want: []string{`"functionCall"`, `"finishReason":"STOP"`, `"totalTokenCount":4`}, doNotWant: []string{`"error"`}},
+		{name: "first error", marker: "first-error", wantStatus: http.StatusBadGateway, wantOutcome: "failed", want: []string{`"status":"UNAVAILABLE"`}, doNotWant: []string{privateError}},
+		{name: "late error", marker: "late-error", wantStatus: http.StatusOK, wantOutcome: "failed", want: []string{`"text":"partial"`}, doNotWant: []string{privateError}, wantSSEError: true},
+		{name: "clean eof without finish", marker: "clean-eof-without-finish", wantStatus: http.StatusOK, wantOutcome: "failed", want: []string{`"text":"partial"`}, wantSSEError: true},
+		{name: "half frame", marker: "half-frame", wantStatus: http.StatusBadGateway, wantOutcome: "failed", want: []string{`"status":"UNAVAILABLE"`}, doNotWant: []string{`"finishReason"`}},
+		{name: "unfinished candidate", marker: "unfinished-candidate", wantStatus: http.StatusOK, wantOutcome: "failed", want: []string{`"finishReason":"STOP"`}, wantSSEError: true},
+		{name: "all candidates finish", marker: "all-candidates-finish", wantStatus: http.StatusOK, wantOutcome: "succeeded", want: []string{`"finishReason":"STOP"`, `"finishReason":"MAX_TOKENS"`}, doNotWant: []string{`"error"`}},
+		{name: "prompt block completes", marker: "prompt-block", wantStatus: http.StatusOK, wantOutcome: "succeeded", want: []string{`"blockReason":"SAFETY"`}, doNotWant: []string{`"error"`}},
+		{name: "line too large", marker: "line-too-large", wantStatus: http.StatusBadGateway, wantOutcome: "failed", want: []string{`"status":"UNAVAILABLE"`}},
+		{name: "event too large", marker: "event-too-large", wantStatus: http.StatusBadGateway, wantOutcome: "failed", want: []string{`"status":"UNAVAILABLE"`}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:streamGenerateContent",
+				`{"contents":[{"parts":[{"text":`+quoteJSON(test.marker)+`}]}]}`, key.Key, context.Background())
+			requestID := response.Header.Get("X-Request-ID")
+			body := readBody(response)
+			if response.StatusCode != test.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", response.StatusCode, test.wantStatus, body)
+			}
+			for _, expected := range test.want {
+				if !strings.Contains(body, expected) {
+					t.Errorf("response omitted %q: %s", expected, body)
+				}
+			}
+			for _, forbidden := range test.doNotWant {
+				if strings.Contains(body, forbidden) {
+					t.Errorf("response contained %q: %s", forbidden, body)
+				}
+			}
+			if got := strings.Contains(body, `data: {"error":{"code":502,"message":"Upstream returned an invalid stream.","status":"UNAVAILABLE"}}`); got != test.wantSSEError {
+				t.Errorf("SSE error present=%v want=%v body=%s", got, test.wantSSEError, body)
+			}
+			if outcome := waitGeminiRequestOutcome(t, app, requestID); outcome != test.wantOutcome {
+				t.Errorf("outcome=%q want=%q", outcome, test.wantOutcome)
+			}
+		})
+	}
+}
+
 func TestGeminiNativeAuthorizationValidationAndErrorRedaction(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

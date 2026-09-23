@@ -15,6 +15,7 @@ import (
 
 const (
 	geminiMaxResponseBody = 16 << 20
+	geminiMaxSSELine      = 256 << 10
 	geminiMaxSSEEvent     = 1 << 20
 	geminiMaxSSEStream    = 64 << 20
 )
@@ -271,9 +272,21 @@ func (a *App) forwardGeminiStream(w http.ResponseWriter, r *http.Request, respon
 		writeGeminiError(w, http.StatusInternalServerError, "INTERNAL", "Streaming is unavailable.")
 		return
 	}
-	reader := bufio.NewReaderSize(response.Body, 32<<10)
-	first, err := readGeminiSSEEvent(reader)
+	limited := &io.LimitedReader{R: response.Body, N: geminiMaxSSEStream + 1}
+	reader := bufio.NewReaderSize(limited, 32<<10)
+	first, firstProgress, err := readGeminiSSEEvent(reader)
 	if err != nil {
+		outcome := "failed"
+		if errors.Is(r.Context().Err(), context.Canceled) {
+			outcome = "cancelled"
+		}
+		a.finishRequest(modelRequestID, outcome, response.StatusCode)
+		if outcome != "cancelled" {
+			writeGeminiError(w, http.StatusBadGateway, "UNAVAILABLE", "Upstream returned an invalid stream.")
+		}
+		return
+	}
+	if limited.N == 0 {
 		a.finishRequest(modelRequestID, "failed", response.StatusCode)
 		writeGeminiError(w, http.StatusBadGateway, "UNAVAILABLE", "Upstream returned an invalid stream.")
 		return
@@ -282,75 +295,221 @@ func (a *App) forwardGeminiStream(w http.ResponseWriter, r *http.Request, respon
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	total := 0
-	outcome := "succeeded"
+	outcome := "failed"
 	event := first
+	progress := newGeminiSSEProgress()
+	progress.observe(firstProgress)
 	for {
-		total += len(event)
-		if total > geminiMaxSSEStream {
-			outcome = "failed"
-			break
-		}
 		if _, err := w.Write(event); err != nil {
 			outcome = "cancelled"
 			break
 		}
 		flusher.Flush()
-		event, err = readGeminiSSEEvent(reader)
+		nextEvent, nextProgress, err := readGeminiSSEEvent(reader)
 		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			if r.Context().Err() != nil {
+			if errors.Is(r.Context().Err(), context.Canceled) {
 				outcome = "cancelled"
+			} else if limited.N > 0 && progress.complete() {
+				outcome = "succeeded"
 			} else {
-				outcome = "interrupted"
+				if err := writeGeminiStreamError(w); err != nil {
+					outcome = "cancelled"
+				} else {
+					flusher.Flush()
+				}
 			}
 			break
 		}
+		if err != nil {
+			if errors.Is(r.Context().Err(), context.Canceled) {
+				outcome = "cancelled"
+			} else {
+				if err := writeGeminiStreamError(w); err != nil {
+					outcome = "cancelled"
+				} else {
+					flusher.Flush()
+				}
+			}
+			break
+		}
+		if limited.N == 0 {
+			if err := writeGeminiStreamError(w); err != nil {
+				outcome = "cancelled"
+			} else {
+				flusher.Flush()
+			}
+			break
+		}
+		event = nextEvent
+		progress.observe(nextProgress)
 	}
 	a.finishRequest(modelRequestID, outcome, response.StatusCode)
 }
 
-func readGeminiSSEEvent(reader *bufio.Reader) ([]byte, error) {
+type geminiSSEEventProgress struct {
+	candidates    map[int]bool
+	promptBlocked bool
+}
+
+type geminiSSEProgress struct {
+	candidates    map[int]bool
+	promptBlocked bool
+}
+
+func newGeminiSSEProgress() *geminiSSEProgress {
+	return &geminiSSEProgress{candidates: make(map[int]bool)}
+}
+
+func (p *geminiSSEProgress) observe(event geminiSSEEventProgress) {
+	for index, finished := range event.candidates {
+		p.candidates[index] = p.candidates[index] || finished
+	}
+	p.promptBlocked = p.promptBlocked || event.promptBlocked
+}
+
+func (p *geminiSSEProgress) complete() bool {
+	if p.promptBlocked {
+		return true
+	}
+	if len(p.candidates) == 0 {
+		return false
+	}
+	for _, finished := range p.candidates {
+		if !finished {
+			return false
+		}
+	}
+	return true
+}
+
+func readGeminiSSEEvent(reader *bufio.Reader) ([]byte, geminiSSEEventProgress, error) {
 	var event bytes.Buffer
 	var data bytes.Buffer
+	var line bytes.Buffer
+	dataSeen := false
 	for {
-		line, err := reader.ReadString('\n')
-		if len(line) > 0 {
-			if event.Len()+len(line) > geminiMaxSSEEvent {
-				return nil, errors.New("SSE event is too large")
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > 0 {
+			if line.Len()+len(fragment) > geminiMaxSSELine {
+				return nil, geminiSSEEventProgress{}, errors.New("SSE line is too large")
 			}
-			event.WriteString(line)
-			trimmed := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-			if strings.HasPrefix(trimmed, "data:") {
-				value := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-				if data.Len() > 0 {
+			if event.Len()+line.Len()+len(fragment) > geminiMaxSSEEvent {
+				return nil, geminiSSEEventProgress{}, errors.New("SSE event is too large")
+			}
+			line.Write(fragment)
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if line.Len() > 0 {
+			rawLine := line.Bytes()
+			event.Write(rawLine)
+			line.Reset()
+			trimmed := bytes.TrimSuffix(bytes.TrimSuffix(rawLine, []byte{'\n'}), []byte{'\r'})
+			if bytes.HasPrefix(trimmed, []byte("data:")) {
+				value := trimmed[len("data:"):]
+				if len(value) > 0 && value[0] == ' ' {
+					value = value[1:]
+				}
+				if dataSeen {
 					data.WriteByte('\n')
 				}
-				data.WriteString(value)
+				data.Write(value)
+				dataSeen = true
 			}
-			if trimmed == "" {
-				if data.Len() == 0 {
+			if len(trimmed) == 0 {
+				if !dataSeen || len(bytes.TrimSpace(data.Bytes())) == 0 {
 					event.Reset()
+					data.Reset()
+					dataSeen = false
 					continue
 				}
-				if !json.Valid(data.Bytes()) {
-					return nil, errors.New("invalid SSE data")
+				progress, validateErr := validateGeminiSSEData(data.Bytes())
+				if validateErr != nil {
+					return nil, geminiSSEEventProgress{}, validateErr
 				}
-				return event.Bytes(), nil
+				return event.Bytes(), progress, nil
 			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) && event.Len() == 0 {
-				return nil, io.EOF
+				return nil, geminiSSEEventProgress{}, io.EOF
 			}
-			if errors.Is(err, io.EOF) && data.Len() > 0 && json.Valid(data.Bytes()) {
-				return event.Bytes(), nil
+			if errors.Is(err, io.EOF) {
+				return nil, geminiSSEEventProgress{}, io.ErrUnexpectedEOF
 			}
-			return nil, err
+			return nil, geminiSSEEventProgress{}, err
 		}
 	}
+}
+
+func validateGeminiSSEData(data []byte) (geminiSSEEventProgress, error) {
+	invalid := func() (geminiSSEEventProgress, error) {
+		return geminiSSEEventProgress{}, errors.New("invalid SSE data")
+	}
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return invalid()
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &envelope); err != nil || envelope == nil {
+		return invalid()
+	}
+	if raw, ok := envelope["error"]; ok && string(bytes.TrimSpace(raw)) != "null" {
+		return invalid()
+	}
+	progress := geminiSSEEventProgress{candidates: make(map[int]bool)}
+	if raw, ok := envelope["candidates"]; ok {
+		var candidates []json.RawMessage
+		if err := json.Unmarshal(raw, &candidates); err != nil || candidates == nil {
+			return invalid()
+		}
+		for position, rawCandidate := range candidates {
+			var candidate map[string]json.RawMessage
+			candidateBytes := bytes.TrimSpace(rawCandidate)
+			if len(candidateBytes) == 0 || candidateBytes[0] != '{' || json.Unmarshal(candidateBytes, &candidate) != nil || candidate == nil {
+				return invalid()
+			}
+			index := position
+			if rawIndex, ok := candidate["index"]; ok {
+				if json.Unmarshal(rawIndex, &index) != nil || index < 0 {
+					return invalid()
+				}
+			}
+			finished := false
+			if rawReason, ok := candidate["finishReason"]; ok {
+				var reason string
+				if json.Unmarshal(rawReason, &reason) != nil {
+					return invalid()
+				}
+				finished = reason != "" && reason != "FINISH_REASON_UNSPECIFIED"
+			}
+			progress.candidates[index] = progress.candidates[index] || finished
+		}
+	}
+	if raw, ok := envelope["promptFeedback"]; ok && string(bytes.TrimSpace(raw)) != "null" {
+		var feedback map[string]json.RawMessage
+		feedbackBytes := bytes.TrimSpace(raw)
+		if len(feedbackBytes) == 0 || feedbackBytes[0] != '{' || json.Unmarshal(feedbackBytes, &feedback) != nil || feedback == nil {
+			return invalid()
+		}
+		if rawReason, ok := feedback["blockReason"]; ok {
+			var reason string
+			if json.Unmarshal(rawReason, &reason) != nil {
+				return invalid()
+			}
+			progress.promptBlocked = reason != "" && reason != "BLOCK_REASON_UNSPECIFIED"
+		}
+	}
+	return progress, nil
+}
+
+func writeGeminiStreamError(w http.ResponseWriter) error {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"code": http.StatusBadGateway, "message": "Upstream returned an invalid stream.", "status": "UNAVAILABLE",
+	}})
+	_, err := w.Write(append(append([]byte("data: "), payload...), []byte("\n\n")...))
+	return err
 }
 
 func geminiGenerateURL(endpoint, upstreamModel string, stream bool) (string, error) {
