@@ -129,6 +129,75 @@ func TestUpstreamHealthAnthropicPaginationUsesOfficialHeadersAndRejectsCursorLoo
 	}
 }
 
+func TestUpstreamHealthCatalogRejectsSSRFBeforeTransportAndDoesNotFollowRedirect(t *testing.T) {
+	t.Run("metadata and private addresses", func(t *testing.T) {
+		app, server, cookie, csrf := newModelAdmissionApp(t, false)
+		var transportCalls atomic.Int32
+		app.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			transportCalls.Add(1)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":[]}`)), Header: make(http.Header)}, nil
+		})}
+		for index, endpoint := range []string{"http://169.254.169.254/latest/meta-data", "http://10.0.0.7/v1"} {
+			item := createModelAdmissionUpstream(t, server.URL, cookie, csrf, "SSRF", "openai-compatible", "http://127.0.0.1:1", "ssrf-private-secret")
+			if _, err := app.store.db.Exec(`UPDATE upstreams SET endpoint=? WHERE id=?`, endpoint, item.ID); err != nil {
+				t.Fatal(err)
+			}
+			view, status, code, err := app.healthTests.run(context.Background(), item.ID, fmt.Sprintf("21000000-0000-4000-8000-%012d", index), item.Revision, "catalog")
+			if err != nil || status != http.StatusOK || code != "" || view.ResultCode == nil || *view.ResultCode != "configuration_changed" {
+				t.Fatalf("endpoint=%s view=%+v status=%d code=%q err=%v", endpoint, view, status, code, err)
+			}
+			encoded, _ := json.Marshal(view)
+			if strings.Contains(string(encoded), "ssrf-private-secret") || strings.Contains(string(encoded), "169.254") || strings.Contains(string(encoded), "10.0.0.7") {
+				t.Fatalf("SSRF input leaked in response: %s", encoded)
+			}
+		}
+		if transportCalls.Load() != 0 {
+			t.Fatalf("SSRF validation reached transport %d times", transportCalls.Load())
+		}
+	})
+
+	t.Run("redirect", func(t *testing.T) {
+		const secret = "redirect-health-private"
+		const privateBody = "redirect-provider-private-body"
+		var redirectedCalls atomic.Int32
+		redirected := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			redirectedCalls.Add(1)
+		}))
+		defer redirected.Close()
+		var sourceCalls atomic.Int32
+		source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sourceCalls.Add(1)
+			if r.Header.Get("Authorization") != "Bearer "+secret {
+				t.Errorf("source authorization=%q", r.Header.Get("Authorization"))
+			}
+			w.Header().Set("Location", redirected.URL+"/capture")
+			w.WriteHeader(http.StatusFound)
+			_, _ = io.WriteString(w, privateBody)
+		}))
+		defer source.Close()
+		app, server, cookie, csrf := newModelAdmissionApp(t, false)
+		item := createModelAdmissionUpstream(t, server.URL, cookie, csrf, "Redirect", "openai-compatible", source.URL, secret)
+		view, status, code, err := app.healthTests.run(context.Background(), item.ID, "22000000-0000-4000-8000-000000000001", item.Revision, "catalog")
+		if err != nil || status != http.StatusOK || code != "" || view.ResultCode == nil || *view.ResultCode != "internal_failure" {
+			t.Fatalf("redirect view=%+v status=%d code=%q err=%v", view, status, code, err)
+		}
+		if sourceCalls.Load() != 1 || redirectedCalls.Load() != 0 {
+			t.Fatalf("source calls=%d redirected calls=%d", sourceCalls.Load(), redirectedCalls.Load())
+		}
+		encoded, _ := json.Marshal(view)
+		if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), privateBody) || strings.Contains(string(encoded), redirected.URL) {
+			t.Fatalf("redirect secret or response leaked: %s", encoded)
+		}
+		var stored string
+		if err := app.store.db.QueryRow(`SELECT operation_id||'|'||result_code FROM upstream_test_operations WHERE operation_id=?`, view.OperationID).Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(stored, secret) || strings.Contains(stored, privateBody) || strings.Contains(stored, redirected.URL) {
+			t.Fatalf("redirect secret or response persisted: %s", stored)
+		}
+	})
+}
+
 func TestUpstreamHealthCancellationAfterDurableAdmissionFinishesWithoutReplay(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
