@@ -145,6 +145,15 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	modelRequestID := requestID(r.Context())
+	governed, guard, governanceFailure := a.admitGovernedModel(r, auth, model, accounting.ProtocolGeminiGenerateContent)
+	if governanceFailure != nil {
+		if r.Context().Err() == nil {
+			writeGeminiError(w, governanceFailure.status, geminiAdmissionStatus(governanceFailure.status), governanceFailure.message)
+		}
+		return
+	}
+	r = governed
+	defer guard.Close()
 	var upstreamReq *http.Request
 	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{geminiAPIKeyProvider}, accounting.ProtocolGeminiGenerateContent, true, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {
 		if candidate.KeyVersion != 2 {

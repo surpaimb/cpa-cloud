@@ -69,6 +69,17 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		return
 	}
 	modelRequestID := requestID(r.Context())
+	if !countTokens {
+		governed, guard, governanceFailure := a.admitGovernedModel(r, auth, model, accounting.ProtocolAnthropicMessages)
+		if governanceFailure != nil {
+			if r.Context().Err() == nil {
+				writeAnthropicError(w, governanceFailure.status, anthropicAdmissionType(governanceFailure.status), governanceFailure.message, modelRequestID)
+			}
+			return
+		}
+		r = governed
+		defer guard.Close()
+	}
 	var upstreamReq *http.Request
 	protocol := accounting.ProtocolAnthropicMessages
 	if countTokens {

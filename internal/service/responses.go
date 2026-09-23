@@ -82,6 +82,15 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	reqID := requestID(r.Context())
+	governed, guard, governanceFailure := a.admitGovernedModel(r, auth, model, accounting.ProtocolOpenAIResponses)
+	if governanceFailure != nil {
+		if r.Context().Err() == nil {
+			writeModelError(w, governanceFailure.status, governanceFailure.code, governanceFailure.message, reqID)
+		}
+		return
+	}
+	r = governed
+	defer guard.Close()
 	var upstreamReq *http.Request
 	var codexPrepared *codexResponsesPreflight
 	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider}, accounting.ProtocolOpenAIResponses, true, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {

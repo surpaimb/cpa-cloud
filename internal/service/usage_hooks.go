@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/governance"
 )
 
 type activeUsageRequest struct {
@@ -51,9 +52,11 @@ func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string
 	if a.usage == nil {
 		return tx.Commit() // Isolated legacy fixtures have no usage coordinator.
 	}
+	_, governed := r.Context().Value(governedRequestKey{}).(*governedRequest)
 	request, err := a.usage.beginRequestTx(r.Context(), tx, usageRequestStart{
 		RequestID: requestID(r.Context()), EmployeeID: auth.EmployeeID, KeyID: auth.KeyID,
 		PublicModel: model, ProviderKind: selected.ProviderKind, Protocol: protocol, StartedAt: startedAt,
+		Governed: governed,
 	})
 	if err != nil {
 		return err
@@ -197,8 +200,8 @@ func (a *App) cleanupRequestUsage(id string) {
 	_ = a.finishRequestUsage(ctx, id, outcome, status)
 }
 
-// One transaction commits the attempt, accounting request, and legacy request
-// metadata. A rejected write leaves all three pending for a bounded retry or
+// One transaction commits the attempt, accounting request, legacy request,
+// and any governance release. A rejected write leaves all pending for a bounded retry or
 // restart recovery; a successful accounting write alone is never completion.
 func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status accounting.Status, finishedAt time.Time, httpStatus int) error {
 	if r == nil || r.coordinator == nil || r.coordinator.db == nil || ctx == nil {
@@ -269,6 +272,11 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 			}
 			if storedOutcome != string(snapshot.status) || storedTime != snapshot.finishedAt.Format(time.RFC3339Nano) || storedStatus.Valid != (httpStatus != 0) || storedStatus.Valid && storedStatus.Int64 != int64(httpStatus) {
 				return accounting.ErrConflict
+			}
+		}
+		if r.governance != nil {
+			if err := r.governance.FinishTx(writeCtx, tx, governance.Finish{RequestID: r.id, Status: snapshot.status, FinishedAt: snapshot.finishedAt}); err != nil {
+				return err
 			}
 		}
 		return tx.Commit()

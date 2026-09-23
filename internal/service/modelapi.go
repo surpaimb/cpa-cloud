@@ -162,6 +162,15 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	modelRequestID := requestID(r.Context())
+	governed, guard, governanceFailure := a.admitGovernedModel(r, auth, model, accounting.ProtocolOpenAIChatCompletions)
+	if governanceFailure != nil {
+		if r.Context().Err() == nil {
+			writeModelError(w, governanceFailure.status, governanceFailure.code, governanceFailure.message, modelRequestID)
+		}
+		return
+	}
+	r = governed
+	defer guard.Close()
 	var upstreamReq *http.Request
 	var codexPrepared *codexChatPreflight
 	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider}, accounting.ProtocolOpenAIChatCompletions, true, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {

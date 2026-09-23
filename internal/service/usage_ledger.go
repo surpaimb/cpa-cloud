@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/governance"
 )
 
 const usageLedgerShutdownTimeout = 3 * time.Second
@@ -26,6 +27,7 @@ type usageLedgerCoordinator struct {
 	ledger      *accounting.Ledger
 	now         func() time.Time
 	priceLookup func(context.Context, string, string) (*accounting.PriceSnapshot, error)
+	governance  *governance.Coordinator
 }
 
 type usageRequestStart struct {
@@ -36,6 +38,7 @@ type usageRequestStart struct {
 	ProviderKind string
 	Protocol     accounting.UsageProtocol
 	StartedAt    time.Time
+	Governed     bool
 }
 
 type usageLedgerRequest struct {
@@ -44,6 +47,7 @@ type usageLedgerRequest struct {
 	provider    accounting.Provider
 	protocol    accounting.UsageProtocol
 	startedAt   time.Time
+	governance  *governance.Coordinator
 
 	mu             sync.Mutex
 	attempt        *usageLedgerAttempt
@@ -119,6 +123,13 @@ func (c *usageLedgerCoordinator) beginRequestInTransaction(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
+	var governanceCore *governance.Coordinator
+	if input.Governed {
+		if c.governance == nil {
+			return nil, errUsageLedgerUnavailable
+		}
+		governanceCore = c.governance
+	}
 	start := accounting.RequestStart{
 		ID:         input.RequestID,
 		EmployeeID: input.EmployeeID,
@@ -141,6 +152,7 @@ func (c *usageLedgerCoordinator) beginRequestInTransaction(ctx context.Context, 
 		provider:    provider,
 		protocol:    input.Protocol,
 		startedAt:   input.StartedAt,
+		governance:  governanceCore,
 	}, nil
 }
 

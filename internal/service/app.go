@@ -42,6 +42,7 @@ type App struct {
 	systemProbes    *accounting.SystemProbeLedger
 	recovery        *accountRecoveryCoordinator
 	usage           *usageLedgerCoordinator
+	governance      *requestGovernance
 	usageRequests   sync.Map
 	loginMu         sync.Mutex
 	logins          map[string]*loginAttempt
