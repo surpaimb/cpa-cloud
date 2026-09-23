@@ -412,7 +412,11 @@ func (c *codexRefreshCoordinator) persistRotated(ctx context.Context, id string,
 	if changed != 1 {
 		return &codexRefreshFailure{code: "revision_conflict"}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	c.app.notifyAccountPoolChanged()
+	return nil
 }
 
 func (c *codexRefreshCoordinator) requireCurrentAttempt(ctx context.Context, id string, revision int64, enabled int, clientID string) error {
@@ -465,7 +469,11 @@ func (c *codexRefreshCoordinator) markReauthorization(id string, revision int64)
 	if changed != 1 {
 		return &codexRefreshFailure{code: "revision_conflict"}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	c.app.notifyAccountPoolChanged()
+	return nil
 }
 
 func (a *App) refreshCodexRoute(ctx context.Context, selected route) (route, error) {

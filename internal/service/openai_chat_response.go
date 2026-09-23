@@ -46,13 +46,17 @@ func (a *App) forwardJSON(w http.ResponseWriter, r *http.Request, response *http
 		writeModelError(w, 502, "upstream_error", "Upstream returned an invalid response.", id)
 		return
 	}
+	a.observeRequestUsage(id, body)
+	if err := a.finishRequestChecked(id, "succeeded", response.StatusCode); err != nil {
+		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", id)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(response.StatusCode)
 	if _, err := w.Write(body); err != nil {
 		a.finishRequest(id, "cancelled", response.StatusCode)
 		return
 	}
-	a.finishRequest(id, "succeeded", response.StatusCode)
 }
 
 // Read complete SSE events before forwarding: errors never escape in fragments,
@@ -146,6 +150,19 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, response *ht
 			flusher.Flush()
 			return
 		}
+		if !done {
+			a.observeSSEUsage(id, frame)
+		}
+		if done {
+			if err := a.finishRequestChecked(id, "succeeded", response.StatusCode); err != nil {
+				if committed {
+					writeCodexStreamError(w, id, "storage_unavailable", "Service is temporarily unavailable.")
+				} else {
+					writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", id)
+				}
+				return
+			}
+		}
 		if !committed {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache, no-store")
@@ -159,7 +176,6 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, response *ht
 		}
 		flusher.Flush()
 		if done {
-			a.finishRequest(id, "succeeded", response.StatusCode)
 			return
 		}
 	}

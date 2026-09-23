@@ -139,6 +139,13 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 	} else {
 		upstreamReq.Header.Set("Accept", "application/json")
 	}
+	if err := a.beginUpstreamUsage(r.Context(), modelRequestID, route.AccountID); err != nil {
+		if !countTokens {
+			a.finishRequest(modelRequestID, "failed", 0)
+		}
+		writeAnthropicError(w, 503, "api_error", "Service is temporarily unavailable.", modelRequestID)
+		return
+	}
 	response, err := a.http.Do(upstreamReq)
 	if err != nil {
 		if !countTokens {
@@ -268,7 +275,7 @@ func (a *App) forwardAnthropicJSON(w http.ResponseWriter, r *http.Request, respo
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, anthropicMaxResponse+1))
-	if err != nil || len(body) > anthropicMaxResponse || !json.Valid(body) {
+	if err != nil || len(body) > anthropicMaxResponse || !validChatResponseObject(body) {
 		if record {
 			a.finishRequest(reqID, "failed", response.StatusCode)
 		}
@@ -282,7 +289,11 @@ func (a *App) forwardAnthropicJSON(w http.ResponseWriter, r *http.Request, respo
 		return
 	}
 	if record {
-		a.finishRequest(reqID, "succeeded", response.StatusCode)
+		a.observeRequestUsage(reqID, body)
+		if err := a.finishRequestChecked(reqID, "succeeded", response.StatusCode); err != nil {
+			writeAnthropicError(w, 503, "api_error", "Service is temporarily unavailable.", reqID)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -334,6 +345,16 @@ func (a *App) forwardAnthropicStream(w http.ResponseWriter, r *http.Request, res
 				if kind == "error" {
 					outgoing = anthropicRedactedSSEError(reqID)
 				} else {
+					if data := bytes.TrimSpace(frame.data.Bytes()); len(data) > 0 {
+						a.observeRequestUsage(reqID, data)
+					}
+					if kind == "message_stop" {
+						if err := a.finishRequestChecked(reqID, "succeeded", response.StatusCode); err != nil {
+							_, _ = w.Write(anthropicRedactedSSEError(reqID))
+							flusher.Flush()
+							return
+						}
+					}
 					outgoing = bytes.Clone(frame.raw.Bytes())
 				}
 				if len(outgoing) > 0 {
@@ -372,7 +393,9 @@ func (a *App) forwardAnthropicStream(w http.ResponseWriter, r *http.Request, res
 			break
 		}
 	}
-	a.finishRequest(reqID, outcome, response.StatusCode)
+	if outcome != "succeeded" {
+		a.finishRequest(reqID, outcome, response.StatusCode)
+	}
 }
 
 type anthropicSSEFrame struct {

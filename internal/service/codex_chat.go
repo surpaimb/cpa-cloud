@@ -127,6 +127,11 @@ func (a *App) handleCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	defer credential.Destroy()
+	if err := a.beginUpstreamUsage(r.Context(), modelRequestID, selected.AccountID); err != nil {
+		a.finishRequest(modelRequestID, "failed", 0)
+		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
+		return
+	}
 	if stream {
 		a.streamCodexChatCompletion(w, r, publicModel, mapped, credential, selected, modelRequestID)
 		return
@@ -141,7 +146,11 @@ func (a *App) handleCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 		writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
 		return
 	}
-	a.finishRequest(modelRequestID, "succeeded", http.StatusOK)
+	a.observeCodexChatUsage(modelRequestID, codexChatUsage(result.Usage))
+	if err := a.finishRequestChecked(modelRequestID, "succeeded", http.StatusOK); err != nil {
+		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
+		return
+	}
 	response := map[string]any{
 		"id":      localChatCompletionID(modelRequestID),
 		"object":  "chat.completion",
@@ -208,6 +217,7 @@ func (a *App) streamCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 		case membership.CodexEventUsage, membership.CodexEventCompleted:
 			if codexUsageKnown(event.Usage) {
 				usage = event.Usage
+				a.observeCodexChatUsage(modelRequestID, codexChatUsage(usage))
 			}
 		case membership.CodexEventFailed, membership.CodexEventCancelled:
 			// Rendering is decided from the returned normalized error so a
@@ -241,6 +251,10 @@ func (a *App) streamCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	usageObject := codexChatUsage(usage)
+	if err := a.finishRequestChecked(modelRequestID, "succeeded", http.StatusOK); err != nil {
+		writeCodexStreamError(w, modelRequestID, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	finalChunk := codexStreamChunk(modelRequestID, publicModel, created, map[string]any{}, stringPointer("stop"), usageObject)
 	if err := writeSSEJSON(w, finalChunk); err != nil {
 		a.finishRequest(modelRequestID, "cancelled", http.StatusOK)
@@ -251,7 +265,6 @@ func (a *App) streamCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	flusher.Flush()
-	a.finishRequest(modelRequestID, "succeeded", http.StatusOK)
 }
 
 func (a *App) handleCodexRunFailure(w http.ResponseWriter, r *http.Request, selected route, modelRequestID string, runErr *codexRunError, streamCommitted bool) {
@@ -382,7 +395,10 @@ func (a *App) markCodexReauthentication(id string, revision int64) error {
 	if err != nil {
 		return err
 	}
-	_, err = result.RowsAffected()
+	changed, err := result.RowsAffected()
+	if err == nil && changed > 0 {
+		a.notifyAccountPoolChanged()
+	}
 	return err
 }
 

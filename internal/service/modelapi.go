@@ -212,6 +212,11 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		upstreamReq.Header.Set("Accept", "application/json")
 	}
+	if err := a.beginUpstreamUsage(r.Context(), modelRequestID, route.AccountID); err != nil {
+		a.finishRequest(modelRequestID, "failed", 0)
+		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
+		return
+	}
 	response, err := a.http.Do(upstreamReq)
 	if err != nil {
 		outcome := "failed"
@@ -247,6 +252,9 @@ func (a *App) finishRequest(id, outcome string, status int) {
 func (a *App) finishRequestChecked(id, outcome string, status int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	if _, exists := a.usageRequests.Load(id); exists {
+		return a.finishRequestUsage(ctx, id, outcome, status)
+	}
 	var upstream any
 	if status != 0 {
 		upstream = status

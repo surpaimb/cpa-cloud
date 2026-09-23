@@ -23,21 +23,23 @@ const (
 )
 
 type App struct {
-	cfg          Config
-	store        *store
-	secrets      *secrets
-	http         *http.Client
-	codex        codexExecutor
-	responses    codexResponsesExecutor
-	oauthHTTP    *http.Client
-	admission    sync.RWMutex
-	refresh      *codexRefreshCoordinator
-	accountPool  *accountPoolRuntime
-	loginMu      sync.Mutex
-	logins       map[string]*loginAttempt
-	catalogMu    sync.Mutex
-	catalogs     map[string]codexCatalogCacheEntry
-	codexCatalog codexCatalogLister
+	cfg           Config
+	store         *store
+	secrets       *secrets
+	http          *http.Client
+	codex         codexExecutor
+	responses     codexResponsesExecutor
+	oauthHTTP     *http.Client
+	admission     sync.RWMutex
+	refresh       *codexRefreshCoordinator
+	accountPool   *accountPoolRuntime
+	usage         *usageLedgerCoordinator
+	usageRequests sync.Map
+	loginMu       sync.Mutex
+	logins        map[string]*loginAttempt
+	catalogMu     sync.Mutex
+	catalogs      map[string]codexCatalogCacheEntry
+	codexCatalog  codexCatalogLister
 }
 
 type loginAttempt struct {
@@ -72,6 +74,11 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		logins: make(map[string]*loginAttempt),
 	}
 	app.refresh = newCodexRefreshCoordinator(app)
+	app.usage = newUsageLedgerCoordinator(s.db)
+	if err := app.usage.start(ctx); err != nil {
+		s.close()
+		return nil, err
+	}
 	trimExpiredSessions(ctx, s.db)
 	if err := recoverCodexOAuthSessions(ctx, s.db); err != nil {
 		s.close()

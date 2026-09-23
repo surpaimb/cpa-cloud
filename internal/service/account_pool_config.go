@@ -611,6 +611,7 @@ func (a *App) putModelAccounts(w http.ResponseWriter, r *http.Request, session a
 		writeAccountPoolStorageError(w)
 		return
 	}
+	a.notifyAccountPoolChanged()
 	writeJSON(w, http.StatusOK, modelAccountsView{ModelID: r.PathValue("id"), Revision: next, Items: input.Items})
 }
 

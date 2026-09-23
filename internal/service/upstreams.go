@@ -281,6 +281,7 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
+	a.notifyAccountPoolChanged()
 	if err := a.decorateUpstreamOAuthRefresh(r.Context(), &item); err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return

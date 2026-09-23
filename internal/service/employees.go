@@ -165,6 +165,7 @@ func (a *App) updateEmployee(w http.ResponseWriter, r *http.Request, _ adminSess
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
+	a.notifyAccountPoolChanged()
 	item.Models, err = a.employeeModels(r.Context(), item.ID)
 	if err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
@@ -255,6 +256,7 @@ func (a *App) updateModelPolicy(w http.ResponseWriter, r *http.Request, _ adminS
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
+	a.notifyAccountPoolChanged()
 	writeJSON(w, 200, item)
 }
 
@@ -420,6 +422,7 @@ func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, _ adminSession) 
 		writeAdminError(w, 404, "not_found", "Key was not found.")
 		return
 	}
+	a.notifyAccountPoolChanged()
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 

@@ -19,6 +19,14 @@ type modelAdmissionError struct {
 	code, message string
 }
 
+// Called only after a committed authorization or routing change. Waiters reload
+// their snapshot; already-admitted streams retain the established semantics.
+func (a *App) notifyAccountPoolChanged() {
+	if a.accountPool != nil {
+		a.accountPool.NotifyChanged()
+	}
+}
+
 func anthropicAdmissionType(status int) string {
 	switch status {
 	case 400:
@@ -86,6 +94,11 @@ func (a *App) selectModelRoute(r *http.Request, auth employeeAuth, model string,
 				defer cancel()
 				lease.Release(ctx, scheduling.ReleaseResult{ExecutionUncertain: true})
 			}
+			return route{}, nil, poolAdmissionFailure(accountPoolStorageUnavailable)
+		}
+		if err := a.beginRequestUsage(r, auth, model, selected); err != nil {
+			a.finishRequest(requestID(r.Context()), "failed", 0)
+			a.releaseModelLease(lease, requestID(r.Context()), true)
 			return route{}, nil, poolAdmissionFailure(accountPoolStorageUnavailable)
 		}
 	}
@@ -171,6 +184,7 @@ func poolAdmissionFailure(code accountPoolRuntimeCode) *modelAdmissionError {
 // No automatic retry is performed. Failures are used only to cool accounts for
 // later independent requests; output and uncertain execution are never replayed.
 func (a *App) releaseModelLease(lease *accountPoolLease, reqID string, record bool) {
+	defer a.cleanupRequestUsage(reqID)
 	if lease == nil {
 		return
 	}

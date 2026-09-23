@@ -167,6 +167,8 @@ func reduceParityFixtureToBase07357ac(db *sql.DB) error {
 	}
 	defer tx.Rollback()
 	statements := []string{
+		`DROP TABLE IF EXISTS accounting_attempts`,
+		`DROP TABLE IF EXISTS accounting_requests`,
 		`DROP TABLE account_pool_runtime_leases`,
 		`DROP TABLE account_pool_runtime_cooldowns`,
 		`DROP TABLE account_pool_audit`,

@@ -254,6 +254,7 @@ func (a *App) replaceCodexCredential(w http.ResponseWriter, r *http.Request, _ a
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
+	a.notifyAccountPoolChanged()
 	item.OAuthRefresh = a.codexOAuthRefreshView(codexMembershipProvider, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{})
 	writeJSON(w, http.StatusOK, item)
 }

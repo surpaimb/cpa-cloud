@@ -22,6 +22,7 @@ var (
 // executors and accounting. It does not select a route, retry an upstream, or
 // retain protocol bodies.
 type usageLedgerCoordinator struct {
+	db     *sql.DB
 	ledger *accounting.Ledger
 	now    func() time.Time
 }
@@ -71,6 +72,7 @@ type usageAttemptFinishSnapshot struct {
 
 func newUsageLedgerCoordinator(db *sql.DB) *usageLedgerCoordinator {
 	return &usageLedgerCoordinator{
+		db:     db,
 		ledger: accounting.NewLedger(db),
 		now:    time.Now,
 	}
