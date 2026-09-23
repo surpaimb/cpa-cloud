@@ -44,12 +44,14 @@ type codexOAuthSessionResponse struct {
 }
 
 type codexOAuthSessionSecret struct {
-	State    string `json:"state"`
-	Verifier string `json:"verifier"`
+	State       string `json:"state"`
+	Verifier    string `json:"verifier"`
+	ClientID    string `json:"client_id"`
+	RedirectURI string `json:"redirect_uri"`
 }
 
 type codexRefreshRequest struct {
-	ExpectedRevision int64 `json:"expected_revision"`
+	ExpectedRevision *int64 `json:"expected_revision"`
 }
 
 type codexOAuthTokenRequest struct {
@@ -73,6 +75,8 @@ type codexOAuthWireError struct {
 	Retryable bool
 	After     time.Duration
 }
+
+var errCodexOAuthConfigurationChanged = errors.New("Codex OAuth configuration changed")
 
 func newCodexOAuthHTTPClient() *http.Client {
 	client := newUpstreamClient(false)
@@ -151,6 +155,9 @@ func (a *App) createCodexOAuthSession(w http.ResponseWriter, r *http.Request, ad
 	if existing, err := a.loadCodexOAuthSessionByOperation(r.Context(), input.OperationID, admin.SessionID); err == nil {
 		writeJSON(w, http.StatusOK, existing)
 		return
+	} else if errors.Is(err, errCodexOAuthConfigurationChanged) {
+		writeAdminError(w, http.StatusConflict, "codex_oauth_configuration_changed", "Codex OAuth configuration changed; start a new authorization session.")
+		return
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -170,7 +177,8 @@ func (a *App) createCodexOAuthSession(w http.ResponseWriter, r *http.Request, ad
 		writeAdminError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	secretJSON, err := json.Marshal(codexOAuthSessionSecret{State: state, Verifier: verifier})
+	secret := codexOAuthSessionSecret{State: state, Verifier: verifier, ClientID: a.cfg.CodexOAuthClientID, RedirectURI: a.cfg.CodexOAuthRedirectURI}
+	secretJSON, err := json.Marshal(secret)
 	if err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is temporarily unavailable.")
 		return
@@ -191,6 +199,9 @@ func (a *App) createCodexOAuthSession(w http.ResponseWriter, r *http.Request, ad
 			if existing, lookupErr := a.loadCodexOAuthSessionByOperation(r.Context(), input.OperationID, admin.SessionID); lookupErr == nil {
 				writeJSON(w, http.StatusOK, existing)
 				return
+			} else if errors.Is(lookupErr, errCodexOAuthConfigurationChanged) {
+				writeAdminError(w, http.StatusConflict, "codex_oauth_configuration_changed", "Codex OAuth configuration changed; start a new authorization session.")
+				return
 			}
 			writeAdminError(w, http.StatusConflict, "already_exists", "A conflicting authorization session already exists.")
 			return
@@ -198,7 +209,7 @@ func (a *App) createCodexOAuthSession(w http.ResponseWriter, r *http.Request, ad
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	writeJSON(w, http.StatusCreated, codexOAuthSessionResponse{AuthorizationURL: a.codexAuthorizationURL(state, verifier), ExpiresAt: expires.Format(time.RFC3339Nano)})
+	writeJSON(w, http.StatusCreated, codexOAuthSessionResponse{AuthorizationURL: codexAuthorizationURL(secret), ExpiresAt: expires.Format(time.RFC3339Nano)})
 }
 
 func (a *App) loadCodexOAuthSessionByOperation(ctx context.Context, operationID, adminSessionID string) (codexOAuthSessionResponse, error) {
@@ -222,18 +233,21 @@ func (a *App) loadCodexOAuthSessionByOperation(ctx context.Context, operationID,
 	if err := json.Unmarshal(plaintext, &secret); err != nil || secret.State == "" || secret.Verifier == "" {
 		return codexOAuthSessionResponse{}, errors.New("OAuth session is invalid")
 	}
-	return codexOAuthSessionResponse{AuthorizationURL: a.codexAuthorizationURL(secret.State, secret.Verifier), ExpiresAt: expires}, nil
+	if secret.ClientID == "" || secret.RedirectURI == "" || secret.ClientID != a.cfg.CodexOAuthClientID || secret.RedirectURI != a.cfg.CodexOAuthRedirectURI {
+		return codexOAuthSessionResponse{}, errCodexOAuthConfigurationChanged
+	}
+	return codexOAuthSessionResponse{AuthorizationURL: codexAuthorizationURL(secret), ExpiresAt: expires}, nil
 }
 
-func (a *App) codexAuthorizationURL(state, verifier string) string {
+func codexAuthorizationURL(secret codexOAuthSessionSecret) string {
 	u, _ := url.Parse(codexOAuthAuthorizeURL)
-	challenge := sha256.Sum256([]byte(verifier))
+	challenge := sha256.Sum256([]byte(secret.Verifier))
 	query := u.Query()
 	query.Set("response_type", "code")
-	query.Set("client_id", a.cfg.CodexOAuthClientID)
-	query.Set("redirect_uri", a.cfg.CodexOAuthRedirectURI)
+	query.Set("client_id", secret.ClientID)
+	query.Set("redirect_uri", secret.RedirectURI)
 	query.Set("scope", codexOAuthScopes)
-	query.Set("state", state)
+	query.Set("state", secret.State)
 	query.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
 	query.Set("code_challenge_method", "S256")
 	u.RawQuery = query.Encode()
@@ -261,8 +275,24 @@ func (a *App) completeCodexOAuth(w http.ResponseWriter, r *http.Request, admin a
 		a.writeCodexOAuthPage(w, http.StatusBadRequest, false)
 		return
 	}
-	expiry, err := parseTime(expires)
-	if err != nil || !time.Now().UTC().Before(expiry) {
+	expiry, expiryErr := parseTime(expires)
+	plaintext, err := a.secrets.decryptCodexOAuthSession(id, encrypted)
+	if err != nil {
+		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
+		return
+	}
+	defer clear(plaintext)
+	var secret codexOAuthSessionSecret
+	if json.Unmarshal(plaintext, &secret) != nil || subtle.ConstantTimeCompare([]byte(secret.State), []byte(state)) != 1 || secret.Verifier == "" {
+		a.writeCodexOAuthPage(w, http.StatusBadRequest, false)
+		return
+	}
+	if secret.ClientID == "" || secret.RedirectURI == "" || secret.ClientID != a.cfg.CodexOAuthClientID || secret.RedirectURI != a.cfg.CodexOAuthRedirectURI {
+		w.Header().Set("X-CPA-Error-Code", "codex_oauth_configuration_changed")
+		a.writeCodexOAuthPage(w, http.StatusConflict, false)
+		return
+	}
+	if expiryErr != nil || !time.Now().UTC().Before(expiry) {
 		_, _ = a.store.db.ExecContext(r.Context(), `UPDATE codex_oauth_sessions SET used_at=? WHERE id=? AND used_at IS NULL`, utcNow(), id)
 		a.writeCodexOAuthPage(w, http.StatusBadRequest, false)
 		return
@@ -277,17 +307,6 @@ func (a *App) completeCodexOAuth(w http.ResponseWriter, r *http.Request, admin a
 		a.writeCodexOAuthPage(w, http.StatusBadRequest, false)
 		return
 	}
-	plaintext, err := a.secrets.decryptCodexOAuthSession(id, encrypted)
-	if err != nil {
-		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
-		return
-	}
-	defer clear(plaintext)
-	var secret codexOAuthSessionSecret
-	if json.Unmarshal(plaintext, &secret) != nil || subtle.ConstantTimeCompare([]byte(secret.State), []byte(state)) != 1 || secret.Verifier == "" {
-		a.writeCodexOAuthPage(w, http.StatusBadRequest, false)
-		return
-	}
 	if providerError != "" {
 		if !validOAuthAuthorizationError(providerError) {
 			a.writeCodexOAuthPage(w, http.StatusBadRequest, false)
@@ -297,8 +316,8 @@ func (a *App) completeCodexOAuth(w http.ResponseWriter, r *http.Request, admin a
 		return
 	}
 	tokens, wireErr := a.requestCodexOAuthTokens(r.Context(), codexOAuthTokenRequest{
-		GrantType: "authorization_code", ClientID: a.cfg.CodexOAuthClientID, Code: code,
-		RedirectURI: a.cfg.CodexOAuthRedirectURI, CodeVerifier: secret.Verifier,
+		GrantType: "authorization_code", ClientID: secret.ClientID, Code: code,
+		RedirectURI: secret.RedirectURI, CodeVerifier: secret.Verifier,
 	})
 	if wireErr != nil {
 		a.writeCodexOAuthPage(w, http.StatusBadGateway, false)
@@ -326,10 +345,24 @@ func (a *App) completeCodexOAuth(w http.ResponseWriter, r *http.Request, admin a
 		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
 		return
 	}
-	_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO upstreams(
+	tx, err := a.store.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO upstreams(
 		id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at,credential_state,verified_at,operation_id
 	) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)`, upstreamID, name, codexMembershipProvider, codexMembershipEndpoint, 1, ciphertext, 2, 1, utcNow(), codexStateImported, operationID)
 	if err != nil {
+		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO codex_oauth_bindings(upstream_id,client_id,source,created_at) VALUES(?,?,?,?)`, upstreamID, secret.ClientID, "authorization_code", utcNow()); err != nil {
+		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
 		return
 	}
@@ -352,7 +385,11 @@ func (a *App) refreshCodexCredential(w http.ResponseWriter, r *http.Request, _ a
 		return
 	}
 	var input codexRefreshRequest
-	if !decodeJSON(w, r, adminMaxBody, &input) || input.ExpectedRevision < 1 {
+	if !decodeJSON(w, r, adminMaxBody, &input) {
+		return
+	}
+	if input.ExpectedRevision == nil || *input.ExpectedRevision < 1 {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "A valid expected_revision is required.")
 		return
 	}
 	id := r.PathValue("id")
@@ -363,8 +400,10 @@ func (a *App) refreshCodexCredential(w http.ResponseWriter, r *http.Request, _ a
 	var provider, state string
 	var revision int64
 	var ciphertext []byte
-	err := a.store.db.QueryRowContext(r.Context(), `SELECT provider_kind,revision,credential_ciphertext,COALESCE(credential_state,'') FROM upstreams WHERE id=?`, id).
-		Scan(&provider, &revision, &ciphertext, &state)
+	var boundClient, boundSource sql.NullString
+	err := a.store.db.QueryRowContext(r.Context(), `SELECT u.provider_kind,u.revision,u.credential_ciphertext,COALESCE(u.credential_state,''),b.client_id,b.source
+		FROM upstreams u LEFT JOIN codex_oauth_bindings b ON b.upstream_id=u.id WHERE u.id=?`, id).
+		Scan(&provider, &revision, &ciphertext, &state, &boundClient, &boundSource)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, http.StatusNotFound, "not_found", "Upstream was not found.")
 		return
@@ -377,7 +416,11 @@ func (a *App) refreshCodexCredential(w http.ResponseWriter, r *http.Request, _ a
 		writeAdminError(w, http.StatusBadRequest, "invalid_upstream_type", "This upstream does not use Codex membership credentials.")
 		return
 	}
-	if revision != input.ExpectedRevision {
+	if !boundClient.Valid || !boundSource.Valid || boundSource.String != "authorization_code" || boundClient.String != a.cfg.CodexOAuthClientID {
+		writeAdminError(w, http.StatusConflict, "codex_refresh_not_bound", "This Codex credential is not bound to the configured OAuth client.")
+		return
+	}
+	if revision != *input.ExpectedRevision {
 		writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
 		return
 	}
@@ -465,7 +508,12 @@ func (a *App) requestCodexOAuthTokens(ctx context.Context, payload codexOAuthTok
 	if err != nil {
 		return codexOAuthTokenResponse{}, &codexOAuthWireError{}
 	}
-	for attempt := 0; attempt < codexOAuthMaxAttempts; attempt++ {
+	defer clear(encoded)
+	maxAttempts := 1
+	if payload.GrantType == "refresh_token" {
+		maxAttempts = codexOAuthMaxAttempts
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexOAuthTokenURL, bytes.NewReader(encoded))
 		if err != nil {
 			return codexOAuthTokenResponse{}, &codexOAuthWireError{}
@@ -474,37 +522,36 @@ func (a *App) requestCodexOAuthTokens(ctx context.Context, payload codexOAuthTok
 		req.Header.Set("Accept", "application/json")
 		response, requestErr := a.oauthHTTP.Do(req)
 		if requestErr != nil {
-			wireErr := &codexOAuthWireError{Retryable: ctx.Err() == nil}
-			if wireErr.Retryable && attempt+1 < codexOAuthMaxAttempts && sleepContext(ctx, time.Duration(1<<attempt)*250*time.Millisecond) == nil {
-				continue
-			}
-			return codexOAuthTokenResponse{}, wireErr
+			return codexOAuthTokenResponse{}, &codexOAuthWireError{}
 		}
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, codexOAuthMaxBody+1))
 		closeErr := response.Body.Close()
 		if readErr != nil || closeErr != nil || len(body) > codexOAuthMaxBody {
+			clear(body)
 			return codexOAuthTokenResponse{}, &codexOAuthWireError{Status: response.StatusCode}
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			var tokens codexOAuthTokenResponse
-			if json.Unmarshal(body, &tokens) != nil || strings.TrimSpace(tokens.AccessToken) == "" || strings.TrimSpace(tokens.IDToken) == "" || strings.TrimSpace(tokens.RefreshToken) == "" {
+			decodeErr := json.Unmarshal(body, &tokens)
+			clear(body)
+			if decodeErr != nil || strings.TrimSpace(tokens.AccessToken) == "" || strings.TrimSpace(tokens.IDToken) == "" || strings.TrimSpace(tokens.RefreshToken) == "" {
 				return codexOAuthTokenResponse{}, &codexOAuthWireError{Status: response.StatusCode}
 			}
 			return tokens, nil
 		}
-		wireErr := &codexOAuthWireError{Status: response.StatusCode, Retryable: response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500}
+		wireErr := &codexOAuthWireError{Status: response.StatusCode}
 		var envelope struct {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &envelope) == nil && validOAuthErrorCode(envelope.Error) {
 			wireErr.Code = envelope.Error
 		}
-		if response.StatusCode == http.StatusTooManyRequests {
+		clear(body)
+		wireErr.Retryable = payload.GrantType == "refresh_token" && response.StatusCode == http.StatusTooManyRequests && wireErr.Code != "invalid_grant"
+		if wireErr.Retryable {
 			wireErr.After = retryDelay(response.Header.Get("Retry-After"), attempt)
-		} else {
-			wireErr.After = time.Duration(1<<attempt) * 250 * time.Millisecond
 		}
-		if wireErr.Retryable && attempt+1 < codexOAuthMaxAttempts && sleepContext(ctx, wireErr.After) == nil {
+		if wireErr.Retryable && attempt+1 < maxAttempts && sleepContext(ctx, wireErr.After) == nil {
 			continue
 		}
 		return codexOAuthTokenResponse{}, wireErr
@@ -515,10 +562,10 @@ func (a *App) requestCodexOAuthTokens(ctx context.Context, payload codexOAuthTok
 func retryDelay(value string, attempt int) time.Duration {
 	if value != "" {
 		if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
-			delay := time.Duration(seconds) * time.Second
-			if delay > 2*time.Second {
+			if seconds >= 2 {
 				return 2 * time.Second
 			}
+			delay := time.Duration(seconds) * time.Second
 			return delay
 		}
 		if target, err := http.ParseTime(value); err == nil {

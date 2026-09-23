@@ -235,6 +235,10 @@ func (a *App) replaceCodexCredential(w http.ResponseWriter, r *http.Request, _ a
 		writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
 		return
 	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM codex_oauth_bindings WHERE upstream_id=?`, id); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return

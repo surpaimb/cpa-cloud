@@ -53,6 +53,16 @@ verifier are never exposed by a separate read API.
 The operation ID is idempotent for the same active administrator session. An
 authorization session expires after ten minutes.
 
+The encrypted session secret also snapshots the configured client ID and exact
+redirect URI. Idempotent retries and callbacks must match that snapshot. A
+restart with different OAuth configuration returns
+`codex_oauth_configuration_changed`; it neither rebuilds a different
+authorization URL nor consumes state nor calls the token endpoint. Sessions
+created by an older schema without this snapshot must be abandoned and
+recreated. The JSON session endpoint returns that error code in its normal
+error envelope; the browser callback returns the same code in
+`X-CPA-Error-Code` with the fixed failure page.
+
 `GET /admin/api/v1/codex/oauth/callback?code=...&state=...`
 
 The browser callback requires the same administrator login session that
@@ -75,6 +85,14 @@ view. Missing OAuth configuration returns `codex_oauth_not_configured` and
 names the required process flags without exposing secret material. Only
 `codex-membership` upstreams are accepted.
 
+Only an upstream created by this service's successful authorization-code flow
+and still bound to the currently configured client ID can be refreshed. A
+manually imported credential, a legacy row without provenance, a client-ID
+mismatch, or an administrator credential replacement returns fixed `409
+codex_refresh_not_bound` before decrypting a refresh token or contacting the
+token endpoint. Administrator replacement atomically deletes any previous
+OAuth binding.
+
 The status response adds `features.codex_membership_oauth` and a limitation
 when the experiment is enabled but the client configuration is incomplete.
 This backend batch does not claim a complete web UI; the web client may add a
@@ -84,6 +102,9 @@ button and callback status view in a later batch.
 
 - Authorization-code exchange sends JSON with `grant_type=authorization_code`,
   configured `client_id`, one-time code, exact redirect URI, and PKCE verifier.
+- An authorization code causes exactly one token HTTP request. Network errors,
+  timeouts, response read failures, HTTP 429 and server errors are ambiguous
+  because the provider may already have consumed the code, so none are retried.
 - Refresh sends JSON with `grant_type=refresh_token`, configured `client_id`,
   and the latest decrypted refresh token. It uses the same fixed token target.
 - A successful response must contain non-empty access, ID and refresh tokens.
@@ -110,10 +131,12 @@ button and callback status view in a later batch.
   never overwrites it. Success increments the upstream revision once and clears
   `verified_at` to `imported_unverified` because the rotated credential has not
   completed an inference request yet.
-- One HTTP operation makes at most three network attempts. HTTP 429 and
-  temporary transport/server failure use bounded exponential backoff and honor
-  a capped `Retry-After`. Authorization errors and `invalid_grant` are not
-  retried. There is no recursive or background retry generator in this batch.
+- Refresh makes one request for network errors, timeouts, response read
+  failures and HTTP 5xx because a rotated response may have been lost. These
+  failures preserve ciphertext, revision, verified timestamp and credential
+  state. Only an explicit HTTP 429 response, excluding `invalid_grant` and 401,
+  uses bounded backoff with a capped `Retry-After`, for at most three total
+  attempts. There is no recursive or background retry generator in this batch.
 - The refresh endpoint uses the caller's expected revision as an admission
   check. If another refresh or administrator change wins first, the caller gets
   `revision_conflict`; the winning credential remains intact.
@@ -121,9 +144,12 @@ button and callback status view in a later batch.
 ## Persistence and recovery
 
 A transactionally created `codex_oauth_sessions` table stores only state
-digests, AEAD ciphertext for state/PKCE verifier, administrator/session
-bindings, expiry, use time and non-secret metadata. Startup deletes expired or
-used sessions.
+digests, AEAD ciphertext for state/PKCE verifier and the client/redirect
+snapshot, administrator/session bindings, expiry, use time and non-secret
+metadata. Startup deletes expired or used sessions.
+`codex_oauth_bindings` is created in a checked transaction and stores the
+non-secret client ID plus `authorization_code` provenance under an upstream
+foreign key. Legacy credentials intentionally receive no inferred binding.
 Schema initialization and migration are idempotent; any failing statement rolls
 back without modifying existing upstream credentials, routes, employees, keys,
 or request history.
@@ -135,11 +161,18 @@ the current product contract is one Go process and one SQLite database.
 
 Automated tests use synthetic JWTs and an injected mock transport. They cover
 missing configuration, fixed target construction, PKCE/state, session binding,
-CSRF/Origin enforcement, TTL, callback replay, one-time exchange, AEAD at rest,
-token rotation, redaction, invalid-grant/401 reauthorization, bounded 429 and
-network retries, concurrent refresh serialization, re-import races, failed
-save rollback, restart recovery and the existing import path. They do not send
-real credentials or requests to OpenAI.
+CSRF/Origin enforcement, TTL, callback replay, single-attempt code exchange,
+configuration drift without state consumption, AEAD at rest, OAuth provenance,
+token rotation, redaction, invalid-grant/401 reauthorization, bounded 429-only
+retry, ambiguous lost-response preservation, concurrent refresh serialization,
+re-import binding removal, failed-save rollback, binding migration retry,
+restart recovery and the existing import path. They do not send real
+credentials or requests to OpenAI.
+
+The implemented product surface in this batch is backend authorization plus an
+explicit administrator-triggered refresh endpoint. There is no web-console
+entry point, background/automatic refresh scheduler, or real-account
+compatibility verification yet.
 
 ## Public protocol sources
 

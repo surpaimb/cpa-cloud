@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -27,6 +29,13 @@ const (
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+type failingOAuthBody struct{}
+
+func (failingOAuthBody) Read([]byte) (int, error) {
+	return 0, errors.New("synthetic response read failure")
+}
+func (failingOAuthBody) Close() error { return nil }
 
 func TestCodexOAuthConfigurationValidation(t *testing.T) {
 	valid := Config{CodexOAuthClientID: testOAuthClientID, CodexOAuthRedirectURI: testOAuthRedirectURI}
@@ -156,7 +165,7 @@ func TestCodexOAuthAuthorizationSessionCallbackAndReplay(t *testing.T) {
 	}
 	clear(plain)
 	challenge := sha256String(secret.Verifier)
-	if secret.State != query.Get("state") || challenge != query.Get("code_challenge") || bytes.Contains(encrypted, []byte(secret.State)) || bytes.Contains(encrypted, []byte(secret.Verifier)) {
+	if secret.State != query.Get("state") || secret.ClientID != testOAuthClientID || secret.RedirectURI != testOAuthRedirectURI || challenge != query.Get("code_challenge") || bytes.Contains(encrypted, []byte(secret.State)) || bytes.Contains(encrypted, []byte(secret.Verifier)) {
 		t.Fatal("OAuth state/PKCE persistence did not match the encrypted contract")
 	}
 
@@ -191,6 +200,13 @@ func TestCodexOAuthAuthorizationSessionCallbackAndReplay(t *testing.T) {
 	}
 	if state != codexStateImported || revision != 1 || bytes.Contains(storedCiphertext, []byte("oauth-rotated-refresh-secret")) {
 		t.Fatalf("OAuth upstream state=%q revision=%d", state, revision)
+	}
+	var bindingClient, bindingSource string
+	if err := app.store.db.QueryRow(`SELECT client_id,source FROM codex_oauth_bindings WHERE upstream_id=?`, upstreamID).Scan(&bindingClient, &bindingSource); err != nil {
+		t.Fatal(err)
+	}
+	if bindingClient != testOAuthClientID || bindingSource != "authorization_code" {
+		t.Fatalf("OAuth binding client=%q source=%q", bindingClient, bindingSource)
 	}
 	storedAuth, err := app.secrets.decryptCodexAuth(upstreamID, storedCiphertext)
 	if err != nil {
@@ -231,6 +247,47 @@ func TestCodexOAuthAuthorizationSessionCallbackAndReplay(t *testing.T) {
 	deniedBody := readBody(deniedCallback)
 	if deniedCallback.StatusCode != http.StatusBadRequest || tokenCalls.Load() != 1 || strings.Contains(deniedBody, "private-provider-detail") {
 		t.Fatalf("denied callback status=%d calls=%d body=%s", deniedCallback.StatusCode, tokenCalls.Load(), deniedBody)
+	}
+
+	codeFailureResponse := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "Lost code response", "operation_id": "ef10d39c-c56d-4fe9-a8e7-cdc6564fa528",
+	}, cookie, csrf, server.URL)
+	var codeFailureSession codexOAuthSessionResponse
+	decodeResponse(t, codeFailureResponse, &codeFailureSession)
+	codeFailureURL, _ := url.Parse(codeFailureSession.AuthorizationURL)
+	var codeFailureCalls atomic.Int32
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		codeFailureCalls.Add(1)
+		return nil, errors.New("provider may have consumed the authorization code")
+	})}
+	failedCallbackURL := server.URL + codexOAuthCallbackPath + "?state=" + url.QueryEscape(codeFailureURL.Query().Get("state")) + "&code=possibly-consumed-code"
+	failedCallback := requestJSON(t, http.MethodGet, failedCallbackURL, "", cookie, "", "")
+	if failedCallback.StatusCode != http.StatusBadGateway || codeFailureCalls.Load() != 1 {
+		t.Fatalf("lost code response status=%d calls=%d", failedCallback.StatusCode, codeFailureCalls.Load())
+	}
+	failedCallback.Body.Close()
+	failedReplay := requestJSON(t, http.MethodGet, failedCallbackURL, "", cookie, "", "")
+	if failedReplay.StatusCode != http.StatusBadRequest || codeFailureCalls.Load() != 1 {
+		t.Fatalf("lost code replay status=%d calls=%d", failedReplay.StatusCode, codeFailureCalls.Load())
+	}
+	failedReplay.Body.Close()
+
+	replacementAuth := codexAdminAuthJSON(t, time.Now().Add(2*time.Hour), "acct-oauth-test", "administrator-import-refresh")
+	replaced := codexAdminRequest(t, http.MethodPut, server.URL+"/admin/api/v1/upstreams/"+upstreamID+"/codex-auth", map[string]any{
+		"expected_revision": 1, "auth_json": replacementAuth,
+	}, cookie, csrf, server.URL)
+	if replaced.StatusCode != http.StatusOK {
+		t.Fatalf("replace OAuth-created upstream status=%d body=%s", replaced.StatusCode, readBody(replaced))
+	}
+	replaced.Body.Close()
+	var bindingCount int
+	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM codex_oauth_bindings WHERE upstream_id=?`, upstreamID).Scan(&bindingCount); err != nil || bindingCount != 0 {
+		t.Fatalf("administrator replacement retained OAuth binding count=%d err=%v", bindingCount, err)
+	}
+	refreshAfterReplace := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstreamID+"/codex-refresh", map[string]any{"expected_revision": 2}, cookie, csrf, server.URL)
+	assertCodexAdminError(t, refreshAfterReplace, http.StatusConflict, "codex_refresh_not_bound")
+	if codeFailureCalls.Load() != 1 {
+		t.Fatal("unbound administrator import reached the token endpoint")
 	}
 }
 
@@ -274,6 +331,84 @@ func TestCodexOAuthAuthorizationSessionSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestCodexOAuthSessionRejectsChangedOrMissingConfigurationBindingWithoutConsumption(t *testing.T) {
+	dataDir := t.TempDir()
+	app := openOAuthTestApp(t, dataDir)
+	server := httptest.NewServer(app.Handler())
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	operationID := "cbb3a7be-8536-44ba-9c5f-e43aa0bf2f10"
+	createdResponse := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "Configuration snapshot", "operation_id": operationID,
+	}, cookie, csrf, server.URL)
+	var created codexOAuthSessionResponse
+	decodeResponse(t, createdResponse, &created)
+	createdURL, _ := url.Parse(created.AuthorizationURL)
+	state := createdURL.Query().Get("state")
+	server.Close()
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	app, err := Open(context.Background(), Config{
+		DataDir: dataDir, Listen: "127.0.0.1:0", ExperimentalCodexMembership: true,
+		CodexOAuthClientID: "changed-registered-client", CodexOAuthRedirectURI: testOAuthRedirectURI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	var tokenCalls atomic.Int32
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		tokenCalls.Add(1)
+		return nil, errors.New("must not be called")
+	})}
+	server = httptest.NewServer(app.Handler())
+	defer server.Close()
+	retry := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "ignored", "operation_id": operationID,
+	}, cookie, csrf, server.URL)
+	assertCodexAdminError(t, retry, http.StatusConflict, "codex_oauth_configuration_changed")
+	callback := requestJSON(t, http.MethodGet, server.URL+codexOAuthCallbackPath+"?state="+url.QueryEscape(state)+"&code=must-not-exchange", "", cookie, "", "")
+	if callback.StatusCode != http.StatusConflict || callback.Header.Get("X-CPA-Error-Code") != "codex_oauth_configuration_changed" || tokenCalls.Load() != 0 {
+		t.Fatalf("changed config callback status=%d code=%q calls=%d", callback.StatusCode, callback.Header.Get("X-CPA-Error-Code"), tokenCalls.Load())
+	}
+	callback.Body.Close()
+	var used sql.NullString
+	if err := app.store.db.QueryRow(`SELECT used_at FROM codex_oauth_sessions WHERE operation_id=?`, operationID).Scan(&used); err != nil || used.Valid {
+		t.Fatalf("changed configuration consumed state used=%v err=%v", used, err)
+	}
+
+	var sessionID string
+	var encrypted []byte
+	if err := app.store.db.QueryRow(`SELECT id,secret_ciphertext FROM codex_oauth_sessions WHERE operation_id=?`, operationID).Scan(&sessionID, &encrypted); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := app.secrets.decryptCodexOAuthSession(sessionID, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldSecret codexOAuthSessionSecret
+	if json.Unmarshal(plaintext, &oldSecret) != nil {
+		t.Fatal("decode OAuth session secret")
+	}
+	clear(plaintext)
+	oldSecret.ClientID = ""
+	oldSecret.RedirectURI = ""
+	legacyPlaintext, _ := json.Marshal(oldSecret)
+	legacyCiphertext, err := app.secrets.encryptCodexOAuthSession(sessionID, legacyPlaintext)
+	clear(legacyPlaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.db.Exec(`UPDATE codex_oauth_sessions SET secret_ciphertext=? WHERE id=?`, legacyCiphertext, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	legacyRetry := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "legacy", "operation_id": operationID,
+	}, cookie, csrf, server.URL)
+	assertCodexAdminError(t, legacyRetry, http.StatusConflict, "codex_oauth_configuration_changed")
+}
+
 func TestCodexOAuthRefreshRotationRetriesAndReauthorization(t *testing.T) {
 	dataDir := t.TempDir()
 	app := openOAuthTestApp(t, dataDir)
@@ -301,6 +436,20 @@ func TestCodexOAuthRefreshRotationRetriesAndReauthorization(t *testing.T) {
 		}
 		return oauthHTTPResponse(http.StatusOK, map[string]string{"access_token": newAccess, "id_token": newID, "refresh_token": "rotated-refresh-secret"}), nil
 	})}
+	unbound := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 1}, cookie, csrf, server.URL)
+	assertCodexAdminError(t, unbound, http.StatusConflict, "codex_refresh_not_bound")
+	if calls.Load() != 0 {
+		t.Fatal("imported credential without OAuth source binding reached token endpoint")
+	}
+	bindOAuthTestUpstream(t, app, upstream.ID, "different-registered-client")
+	mismatch := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 1}, cookie, csrf, server.URL)
+	assertCodexAdminError(t, mismatch, http.StatusConflict, "codex_refresh_not_bound")
+	if calls.Load() != 0 {
+		t.Fatal("mismatched OAuth client binding reached token endpoint")
+	}
+	if _, err := app.store.db.Exec(`UPDATE codex_oauth_bindings SET client_id=? WHERE upstream_id=?`, testOAuthClientID, upstream.ID); err != nil {
+		t.Fatal(err)
+	}
 	refresh := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 1}, cookie, csrf, server.URL)
 	if refresh.StatusCode != http.StatusOK {
 		t.Fatalf("refresh status=%d body=%s", refresh.StatusCode, readBody(refresh))
@@ -344,6 +493,7 @@ func TestCodexOAuthConcurrentRefreshAndAdministratorReplacement(t *testing.T) {
 	cookie, csrf := loginTestAdmin(t, server.URL)
 	oldAuth := codexAdminAuthJSON(t, time.Now().Add(time.Hour), "acct-race", "race-old-refresh")
 	upstream := importTestCodexUpstream(t, server.URL, cookie, csrf, "d408f811-3cb1-4701-821b-fe85de09c3f1", oldAuth)
+	bindOAuthTestUpstream(t, app, upstream.ID, testOAuthClientID)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -381,14 +531,208 @@ func TestCodexOAuthConcurrentRefreshAndAdministratorReplacement(t *testing.T) {
 	assertRefreshTokenStored(t, app, upstream.ID, "administrator-reimport-wins")
 }
 
-func TestCodexOAuthRefreshNetworkRetriesAreBounded(t *testing.T) {
-	app := &App{cfg: Config{CodexOAuthClientID: testOAuthClientID}, oauthHTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("synthetic network failure with secret marker")
-	})}}
-	started := time.Now()
-	_, err := app.requestCodexOAuthTokens(context.Background(), codexOAuthTokenRequest{GrantType: "refresh_token", ClientID: testOAuthClientID, RefreshToken: "bounded-secret"})
-	if err == nil || !err.Retryable || time.Since(started) > 3*time.Second {
-		t.Fatalf("bounded network retry err=%v elapsed=%s", err, time.Since(started))
+func TestCodexOAuthRefreshLostResponseIsNotRetriedOrMarkedReauth(t *testing.T) {
+	dataDir := t.TempDir()
+	app := openOAuthTestApp(t, dataDir)
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	auth := codexAdminAuthJSON(t, time.Now().Add(time.Hour), "acct-lost-response", "possibly-rotated-refresh")
+	upstream := importTestCodexUpstream(t, server.URL, cookie, csrf, "cc493e19-7846-4e61-94a2-3cf9c9a05672", auth)
+	bindOAuthTestUpstream(t, app, upstream.ID, testOAuthClientID)
+	var before []byte
+	if err := app.store.db.QueryRow(`SELECT credential_ciphertext FROM upstreams WHERE id=?`, upstream.ID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("provider rotated token but response was lost")
+	})}
+	response := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 1}, cookie, csrf, server.URL)
+	assertCodexAdminError(t, response, http.StatusBadGateway, "codex_refresh_failed")
+	var after []byte
+	var revision int64
+	var state string
+	if err := app.store.db.QueryRow(`SELECT credential_ciphertext,revision,credential_state FROM upstreams WHERE id=?`, upstream.ID).Scan(&after, &revision, &state); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 || revision != 1 || state != codexStateImported || !bytes.Equal(before, after) {
+		t.Fatalf("lost response calls=%d revision=%d state=%q credential_equal=%v", calls.Load(), revision, state, bytes.Equal(before, after))
+	}
+}
+
+func TestCodexOAuthRefreshExpectedRevisionValidationAlwaysResponds(t *testing.T) {
+	dataDir := t.TempDir()
+	app := openOAuthTestApp(t, dataDir)
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	auth := codexAdminAuthJSON(t, time.Now().Add(time.Hour), "acct-revision", "revision-refresh")
+	upstream := importTestCodexUpstream(t, server.URL, cookie, csrf, "03bdf09c-c35e-43bf-9399-8941ea0dd5dc", auth)
+	bindOAuthTestUpstream(t, app, upstream.ID, testOAuthClientID)
+	var calls atomic.Int32
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("must not be called")
+	})}
+	for _, body := range []map[string]any{{}, {"expected_revision": nil}, {"expected_revision": 0}, {"expected_revision": -1}} {
+		response := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", body, cookie, csrf, server.URL)
+		assertCodexAdminError(t, response, http.StatusBadRequest, "invalid_request")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("invalid revisions reached token endpoint calls=%d", calls.Load())
+	}
+}
+
+func TestCodexOAuthTokenRetrySafety(t *testing.T) {
+	for _, grantType := range []string{"authorization_code", "refresh_token"} {
+		for _, failure := range []struct {
+			name    string
+			status  int
+			netErr  bool
+			readErr bool
+			code    string
+		}{
+			{name: "network response lost", netErr: true},
+			{name: "response body lost", status: http.StatusOK, readErr: true},
+			{name: "server failure", status: http.StatusInternalServerError, code: "server_error"},
+			{name: "rate limited", status: http.StatusTooManyRequests, code: "temporarily_unavailable"},
+			{name: "rate limited invalid grant", status: http.StatusTooManyRequests, code: "invalid_grant"},
+		} {
+			t.Run(grantType+" "+failure.name, func(t *testing.T) {
+				var calls atomic.Int32
+				app := &App{oauthHTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					calls.Add(1)
+					if failure.netErr {
+						return nil, errors.New("provider may have consumed or rotated the grant")
+					}
+					if failure.readErr {
+						return &http.Response{StatusCode: failure.status, Header: make(http.Header), Body: failingOAuthBody{}}, nil
+					}
+					return oauthHTTPResponse(failure.status, map[string]string{"error": failure.code}), nil
+				})}}
+				payload := codexOAuthTokenRequest{GrantType: grantType, ClientID: testOAuthClientID}
+				if grantType == "authorization_code" {
+					payload.Code = "one-time-code"
+				} else {
+					payload.RefreshToken = "rotating-refresh"
+				}
+				_, wireErr := app.requestCodexOAuthTokens(context.Background(), payload)
+				wantCalls := int32(1)
+				if grantType == "refresh_token" && failure.status == http.StatusTooManyRequests && failure.code != "invalid_grant" {
+					wantCalls = codexOAuthMaxAttempts
+				}
+				if wireErr == nil || calls.Load() != wantCalls {
+					t.Fatalf("wireErr=%v calls=%d want=%d", wireErr, calls.Load(), wantCalls)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexOAuthRetryAfterNumericCapDoesNotOverflow(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  time.Duration
+	}{
+		{value: "0", want: 0},
+		{value: "1", want: time.Second},
+		{value: "9223372036854775807", want: 2 * time.Second},
+	} {
+		if got := retryDelay(test.value, 0); got != test.want {
+			t.Fatalf("Retry-After %q delay=%s want=%s", test.value, got, test.want)
+		}
+	}
+}
+
+func TestCodexOAuthBindingMigrationRollbackRetryAndLegacyData(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := createRootKey(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dataDir, "cpa-cloud.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{
+		`PRAGMA foreign_keys=ON`,
+		`CREATE TABLE upstreams (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			provider_kind TEXT NOT NULL CHECK(provider_kind IN ('openai-compatible','codex-membership')),
+			endpoint TEXT NOT NULL,
+			enabled INTEGER NOT NULL,
+			credential_ciphertext BLOB NOT NULL,
+			key_version INTEGER NOT NULL,
+			revision INTEGER NOT NULL,
+			created_at TEXT NOT NULL,
+			credential_state TEXT CHECK(credential_state IS NULL OR credential_state IN ('imported_unverified','verified','reauth_required')),
+			verified_at TEXT,
+			operation_id TEXT UNIQUE,
+			CHECK((provider_kind='openai-compatible' AND credential_state IS NULL AND verified_at IS NULL AND operation_id IS NULL) OR (provider_kind='codex-membership' AND credential_state IS NOT NULL AND operation_id IS NOT NULL))
+		)`,
+		`CREATE TABLE models (
+			id TEXT PRIMARY KEY,
+			upstream_id TEXT NOT NULL REFERENCES upstreams(id),
+			upstream_model TEXT NOT NULL,
+			enabled INTEGER NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE codex_oauth_bindings (blocking INTEGER)`,
+		`INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at) VALUES('ups_legacy_oauth','Legacy API','openai-compatible','https://api.example.invalid/v1',1,X'0102',1,9,'2026-09-23T00:00:00Z')`,
+		`INSERT INTO models(id,upstream_id,upstream_model,enabled,created_at) VALUES('legacy-oauth-model','ups_legacy_oauth','provider-model',1,'2026-09-23T00:00:00Z')`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if failed, err := openStore(dataDir); err == nil {
+		failed.close()
+		t.Fatal("incompatible OAuth binding table unexpectedly migrated")
+	}
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var upstreamCount, modelCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM upstreams WHERE id='ups_legacy_oauth' AND revision=9`).Scan(&upstreamCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM models WHERE id='legacy-oauth-model' AND upstream_id='ups_legacy_oauth'`).Scan(&modelCount); err != nil {
+		t.Fatal(err)
+	}
+	if upstreamCount != 1 || modelCount != 1 {
+		t.Fatalf("failed binding migration changed legacy data upstreams=%d models=%d", upstreamCount, modelCount)
+	}
+	if _, err := db.Exec(`DROP TABLE codex_oauth_bindings`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := openStore(dataDir)
+	if err != nil {
+		t.Fatalf("binding migration retry: %v", err)
+	}
+	defer migrated.close()
+	columns, err := tableColumns(context.Background(), migrated.db, codexOAuthBindingTable)
+	if err != nil || !columns["upstream_id"] || !columns["client_id"] || !columns["source"] || !columns["created_at"] {
+		t.Fatalf("binding schema columns=%v err=%v", columns, err)
+	}
+	if err := migrated.db.QueryRow(`SELECT COUNT(*) FROM upstreams WHERE id='ups_legacy_oauth' AND revision=9`).Scan(&upstreamCount); err != nil || upstreamCount != 1 {
+		t.Fatalf("legacy upstream after retry count=%d err=%v", upstreamCount, err)
+	}
+	if err := migrated.db.QueryRow(`SELECT COUNT(*) FROM models WHERE id='legacy-oauth-model' AND upstream_id='ups_legacy_oauth'`).Scan(&modelCount); err != nil || modelCount != 1 {
+		t.Fatalf("legacy model after retry count=%d err=%v", modelCount, err)
 	}
 }
 
@@ -449,5 +793,12 @@ func assertRefreshTokenStored(t *testing.T, app *App, upstreamID, expected strin
 	defer credential.Destroy()
 	if credential.RefreshTokenSecret() != expected {
 		t.Fatalf("stored refresh token did not match expected rotation")
+	}
+}
+
+func bindOAuthTestUpstream(t *testing.T, app *App, upstreamID, clientID string) {
+	t.Helper()
+	if _, err := app.store.db.Exec(`INSERT INTO codex_oauth_bindings(upstream_id,client_id,source,created_at) VALUES(?,?,?,?)`, upstreamID, clientID, "authorization_code", utcNow()); err != nil {
+		t.Fatal(err)
 	}
 }

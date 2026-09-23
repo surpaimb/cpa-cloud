@@ -146,7 +146,65 @@ func (s *store) initialize(ctx context.Context) error {
 	if err := s.migrateUpstreamsForCodexMembership(ctx); err != nil {
 		return fmt.Errorf("migrate upstreams: %w", err)
 	}
+	if err := s.migrateCodexOAuthBindings(ctx); err != nil {
+		return fmt.Errorf("migrate Codex OAuth bindings: %w", err)
+	}
 	return nil
+}
+
+const codexOAuthBindingTable = "codex_oauth_bindings"
+
+func (s *store) migrateCodexOAuthBindings(ctx context.Context) error {
+	var existing int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, codexOAuthBindingTable).Scan(&existing); err != nil {
+		return err
+	}
+	if existing != 0 {
+		columns, err := tableColumns(ctx, s.db, codexOAuthBindingTable)
+		if err != nil {
+			return err
+		}
+		var schema string
+		if err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, codexOAuthBindingTable).Scan(&schema); err != nil {
+			return err
+		}
+		normalized := strings.ToLower(strings.Join(strings.Fields(schema), " "))
+		if !columns["upstream_id"] || !columns["client_id"] || !columns["source"] || !columns["created_at"] ||
+			!strings.Contains(normalized, "references upstreams(id) on delete cascade") || !strings.Contains(normalized, "check(source = 'authorization_code')") {
+			return errors.New("existing Codex OAuth binding table has an incompatible schema")
+		}
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE codex_oauth_bindings (
+		upstream_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
+		client_id TEXT NOT NULL,
+		source TEXT NOT NULL CHECK(source = 'authorization_code'),
+		created_at TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	violated := rows.Next()
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	if iterationErr != nil {
+		return iterationErr
+	}
+	if violated {
+		return errors.New("foreign key check failed")
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return tx.Commit()
 }
 
 const upstreamMigrationTable = "_upstreams_membership_migration"
