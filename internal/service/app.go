@@ -31,6 +31,7 @@ type App struct {
 	secrets         *secrets
 	outboundProxies *outboundProxyStore
 	proxyClients    *egress.ClientCache
+	proxyTests      *outboundProxyTestCoordinator
 	http            *http.Client
 	codex           codexExecutor
 	responses       codexResponsesExecutor
@@ -138,10 +139,18 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		s.close()
 		return nil, err
 	}
+	app.proxyTests, err = newOutboundProxyTestCoordinator(app)
+	if err != nil {
+		app.Close()
+		return nil, err
+	}
 	return app, nil
 }
 
 func (a *App) Close() error {
+	if a.proxyTests != nil {
+		a.proxyTests.Close()
+	}
 	if a.recovery != nil {
 		a.recovery.Close()
 	}
@@ -164,6 +173,7 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	a.registerAccountPoolHandlers(mux)
 	a.registerOutboundProxyHandlers(mux)
+	a.proxyTests.Register(mux)
 	a.registerPricingHandlers(mux)
 	a.registerUsageHandlers(mux)
 	a.registerSystemProbeHandlers(mux)

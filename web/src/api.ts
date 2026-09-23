@@ -184,6 +184,28 @@ export type UpstreamProxyState = {
   upstream_revision: number
   binding: UpstreamProxyBinding | null
 }
+export type OutboundProxyTestResultCode = 'handshake_ok' | 'configuration_changed' | 'proxy_unavailable' | 'target_unavailable' | 'address_rejected' | 'timeout' | 'cancelled' | 'interrupted' | 'internal_failure'
+export type OutboundProxyTestOperation = {
+  operation_id: string
+  proxy_id: string
+  proxy_revision: number
+  connection_revision: number
+  upstream_id: string
+  upstream_revision: number
+  state: 'pending' | 'in_progress' | 'completed'
+  result_code: OutboundProxyTestResultCode | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  latency_ms: number | null
+}
+export type OutboundProxyTestWrite = {
+  operation_id: string
+  expected_proxy_revision: number
+  expected_connection_revision: number
+  upstream_id: string
+  expected_upstream_revision: number
+}
 export type CooldownClearResult = {
   result: 'cleared' | 'already_clear'
   upstream_id: string
@@ -395,6 +417,10 @@ export const api = {
     request<UpstreamProxyState>(`/upstreams/${encodeURIComponent(id)}/proxy`, { signal }),
   putUpstreamProxy: (id: string, body: { expected_upstream_revision: number; proxy_id: string; expected_proxy_revision: number; bind: boolean }, csrf: string) =>
     request<UpstreamProxyState>(`/upstreams/${encodeURIComponent(id)}/proxy`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
+  startOutboundProxyTest: (id: string, body: OutboundProxyTestWrite, csrf: string, signal?: AbortSignal) =>
+    request<OutboundProxyTestOperation>(`/outbound-proxies/${encodeURIComponent(id)}/tests`, { method: 'POST', body: JSON.stringify(body), signal }, csrf),
+  outboundProxyTest: (id: string, operationId: string, signal?: AbortSignal) =>
+    request<OutboundProxyTestOperation>(`/outbound-proxies/${encodeURIComponent(id)}/tests/${encodeURIComponent(operationId)}`, { signal }),
   createUpstream: (body: Record<string, unknown>, csrf: string) =>
     request<Upstream>('/upstreams', { method: 'POST', body: JSON.stringify(body) }, csrf),
   batchImportUpstreams: (body: { operation_id: string; items: UpstreamBatchItem[] }, csrf: string) =>

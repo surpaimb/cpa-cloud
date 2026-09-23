@@ -1,6 +1,6 @@
 # 出站代理管理首批接口
 
-状态：2026-09-23，供并行实现的固定接口；尚未接入主线。信任与执行边界继承[代理契约](outbound-proxy-contract.md)。
+状态：2026-09-23，首批源码接口已实现；验收见[集成状态](integration-status.md)，下载版 preview.3 不含此功能。信任与执行边界继承[代理契约](outbound-proxy-contract.md)。
 
 以下均为 `/admin/api/v1` 下管理员接口；写入验证 session、Origin、CSRF，员工 Key 不可使用。
 JSON 字段采用 snake_case；revision 为 1 到 9007199254740991 的整数，时间为 RFC3339。
