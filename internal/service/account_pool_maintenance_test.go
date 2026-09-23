@@ -185,3 +185,61 @@ func TestMaintenanceMayHaveSentClearAndReimportRestartConservatively(t *testing.
 		t.Fatalf("restored maintenance capacity admission=%+v", result)
 	}
 }
+
+func TestMaintenanceFinalizeMatchSeparatesCancellationHeartbeatAndConfiguration(t *testing.T) {
+	newLease := func(t *testing.T, suffix string) (*runtimeFixture, accountRecoveryState, *accountMaintenanceLease, context.CancelFunc) {
+		t.Helper()
+		f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 4)
+		account := "ups_finalize_" + suffix
+		model := "finalize-model-" + suffix
+		f.insertAccount(t, account, true)
+		f.insertModelPool(t, model, account, 1, modelAccountView{UpstreamID: account, UpstreamModel: "provider-" + suffix, Weight: 1, MaxConcurrency: 1})
+		state := installRecoveryState(t, f, account, model, "cool_finalize_"+suffix, "probe_finalize_"+suffix, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		acquired := f.rt.AcquireMaintenance(ctx, maintenanceRequest(state), beginMaintenanceState)
+		if acquired.Code != accountPoolAcquired || acquired.Lease == nil {
+			cancel()
+			t.Fatalf("maintenance acquire=%+v", acquired)
+		}
+		return f, state, acquired.Lease, cancel
+	}
+
+	t.Run("cancelled context remains current", func(t *testing.T) {
+		_, _, lease, cancel := newLease(t, "cancel")
+		cancel()
+		current := false
+		if code := lease.Finalize(context.Background(), func(_ context.Context, _ *sql.Tx, match bool) error { current = match; return nil }); code != accountPoolReleased || !current {
+			t.Fatalf("cancelled finalize code=%s current=%v", code, current)
+		}
+	})
+
+	t.Run("heartbeat persistence failure is not current", func(t *testing.T) {
+		f, _, lease, cancel := newLease(t, "heartbeat")
+		defer cancel()
+		if _, err := f.base.app.store.db.Exec(`CREATE TRIGGER fail_maintenance_heartbeat BEFORE UPDATE OF expires_at ON account_pool_maintenance_leases BEGIN SELECT RAISE(FAIL,'synthetic heartbeat failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if code := lease.Heartbeat(context.Background()); code != accountPoolStorageUnavailable {
+			t.Fatalf("heartbeat code=%s", code)
+		}
+		if _, err := f.base.app.store.db.Exec(`DROP TRIGGER fail_maintenance_heartbeat`); err != nil {
+			t.Fatal(err)
+		}
+		current := true
+		if code := lease.Finalize(context.Background(), func(_ context.Context, _ *sql.Tx, match bool) error { current = match; return nil }); code != accountPoolReleased || current {
+			t.Fatalf("heartbeat-failed finalize code=%s current=%v", code, current)
+		}
+	})
+
+	t.Run("revision change is not current", func(t *testing.T) {
+		f, state, lease, cancel := newLease(t, "revision")
+		defer cancel()
+		if _, err := f.base.app.store.db.Exec(`UPDATE upstreams SET revision=revision+1 WHERE id=?`, state.AccountID); err != nil {
+			t.Fatal(err)
+		}
+		current := true
+		if code := lease.Finalize(context.Background(), func(_ context.Context, _ *sql.Tx, match bool) error { current = match; return nil }); code != accountPoolReleased || current {
+			t.Fatalf("revision-stale finalize code=%s current=%v", code, current)
+		}
+	})
+}

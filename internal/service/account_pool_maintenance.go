@@ -491,7 +491,7 @@ func (l *accountMaintenanceLease) Finalize(ctx context.Context, callback account
 	if matchCode == accountPoolStorageUnavailable {
 		return accountPoolStorageUnavailable
 	}
-	if matchCode == "" && !l.heartbeatFailed && l.ctx.Err() == nil {
+	if matchCode == "" && !l.heartbeatFailed {
 		currentMatch = true
 	}
 	if err := callback(ctx, tx, currentMatch); err != nil {
