@@ -241,6 +241,41 @@ func TestHTTPSConnectClientAddressBoundariesAndRebinding(t *testing.T) {
 	}
 }
 
+func TestProxyTunnelFixtureStopsWhenEitherEndpointCloses(t *testing.T) {
+	tests := []struct {
+		name        string
+		closeClient bool
+	}{
+		{name: "client closes", closeClient: true},
+		{name: "target closes"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			proxyClient, clientPeer := net.Pipe()
+			proxyTarget, targetPeer := net.Pipe()
+			t.Cleanup(func() {
+				_ = clientPeer.Close()
+				_ = targetPeer.Close()
+			})
+			done := make(chan struct{})
+			go func() {
+				relayProxyTunnel(proxyClient, proxyTarget, proxyClient)
+				close(done)
+			}()
+			if test.closeClient {
+				_ = clientPeer.Close()
+			} else {
+				_ = targetPeer.Close()
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("test CONNECT tunnel did not release both copy directions")
+			}
+		})
+	}
+}
+
 func TestHTTPSConnectClientTLSAndCancellation(t *testing.T) {
 	trusted := newTestPKI(t)
 	untrusted := newTestPKI(t)
@@ -807,13 +842,25 @@ func (proxy *testProxy) handle(connection net.Conn) {
 	defer upstream.Close()
 	_, _ = io.WriteString(connection, "HTTP/1.1 200 Connection Established\r\n\r\n")
 	_ = connection.SetDeadline(time.Time{})
-	done := make(chan struct{}, 1)
+	relayProxyTunnel(connection, upstream, reader)
+}
+
+// relayProxyTunnel owns both tunnel endpoints. Ending either direction means
+// the CONNECT tunnel is no longer reusable, so both endpoints are closed to
+// unblock the peer copy before the handler returns.
+func relayProxyTunnel(client, upstream net.Conn, clientReader io.Reader) {
+	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(upstream, reader)
+		_, _ = io.Copy(upstream, clientReader)
 		done <- struct{}{}
 	}()
-	_, _ = io.Copy(connection, upstream)
-	_ = connection.Close()
+	go func() {
+		_, _ = io.Copy(client, upstream)
+		done <- struct{}{}
+	}()
+	<-done
+	_ = client.Close()
+	_ = upstream.Close()
 	<-done
 }
 
