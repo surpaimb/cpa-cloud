@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"testing"
@@ -18,32 +19,124 @@ func TestAccountPoolCooldownMigrationRollbackRetryAndLegacyUpgrade(t *testing.T)
 		t.Fatal(err)
 	}
 	f.insertUpstream(t, "ups_cooldown_migration", "openai-compatible")
-	if _, err := f.app.store.db.Exec(`DROP TABLE account_pool_runtime_cooldowns`); err != nil {
-		t.Fatal(err)
+
+	invalidSchemas := []struct {
+		name       string
+		ddl        string
+		indexDDL   string
+		hasEventID bool
+	}{
+		{
+			name: "legacy missing primary key",
+			ddl: `CREATE TABLE account_pool_runtime_cooldowns (
+				account_id TEXT REFERENCES upstreams(id) ON DELETE CASCADE,
+				failure_class TEXT NOT NULL,
+				cooldown_until TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+		},
+		{
+			name: "current missing primary key",
+			ddl: `CREATE TABLE account_pool_runtime_cooldowns (
+				account_id TEXT REFERENCES upstreams(id) ON DELETE CASCADE,
+				event_id TEXT NOT NULL UNIQUE,
+				failure_class TEXT NOT NULL CHECK(failure_class IN ('rate_limited','overloaded','transient','authentication','permanent')),
+				cooldown_until TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+			hasEventID: true,
+		},
+		{
+			name: "legacy wrong type and nullability",
+			ddl: `CREATE TABLE account_pool_runtime_cooldowns (
+				account_id BLOB PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
+				failure_class TEXT,
+				cooldown_until TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+		},
+		{
+			name: "current wrong type and nullability",
+			ddl: `CREATE TABLE account_pool_runtime_cooldowns (
+				account_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
+				event_id BLOB UNIQUE,
+				failure_class TEXT NOT NULL CHECK(failure_class IN ('rate_limited','overloaded','transient','authentication','permanent')),
+				cooldown_until TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+			hasEventID: true,
+		},
+		{
+			name:     "legacy extra unique constraint",
+			ddl:      cooldownLegacyDDL,
+			indexDDL: `CREATE UNIQUE INDEX unexpected_cooldown_failure_unique ON account_pool_runtime_cooldowns(failure_class)`,
+		},
+		{
+			name:       "current extra unique constraint",
+			ddl:        cooldownCurrentDDL,
+			indexDDL:   `CREATE UNIQUE INDEX unexpected_cooldown_updated_unique ON account_pool_runtime_cooldowns(updated_at)`,
+			hasEventID: true,
+		},
+		{
+			name:     "legacy unique expiry index",
+			ddl:      cooldownLegacyDDL,
+			indexDDL: `CREATE UNIQUE INDEX account_pool_runtime_cooldown_expiry_idx ON account_pool_runtime_cooldowns(cooldown_until)`,
+		},
+		{
+			name:       "current partial expiry index",
+			ddl:        cooldownCurrentDDL,
+			indexDDL:   `CREATE INDEX account_pool_runtime_cooldown_expiry_idx ON account_pool_runtime_cooldowns(cooldown_until) WHERE failure_class='transient'`,
+			hasEventID: true,
+		},
 	}
-	if _, err := f.app.store.db.Exec(`CREATE TABLE account_pool_runtime_cooldowns (
-		account_id TEXT PRIMARY KEY REFERENCES upstreams(id),
-		event_id TEXT NOT NULL,
-		failure_class TEXT NOT NULL,
-		cooldown_until TEXT NOT NULL,
-		updated_at TEXT NOT NULL
-	)`); err != nil {
-		t.Fatal(err)
+
+	replaceSchema := func(t *testing.T, ddl, indexDDL string) {
+		t.Helper()
+		if _, err := f.app.store.db.Exec(`DROP TABLE account_pool_runtime_cooldowns`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.app.store.db.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+		if indexDDL != "" {
+			if _, err := f.app.store.db.Exec(indexDDL); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
-	if err := f.app.store.migrateAccountPoolRuntime(context.Background()); err == nil {
-		t.Fatal("migration accepted missing event uniqueness, failure CHECK, and cascade")
+
+	for _, test := range invalidSchemas {
+		t.Run(test.name, func(t *testing.T) {
+			replaceSchema(t, test.ddl, test.indexDDL)
+			if err := f.app.store.migrateAccountPoolRuntime(context.Background()); err == nil {
+				t.Fatal("migration accepted incompatible cooldown schema")
+			}
+			var eventColumns, legacyTables int
+			if err := f.app.store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('account_pool_runtime_cooldowns') WHERE name='event_id'`).Scan(&eventColumns); err != nil {
+				t.Fatal(err)
+			}
+			wantEventColumns := 0
+			if test.hasEventID {
+				wantEventColumns = 1
+			}
+			if eventColumns != wantEventColumns {
+				t.Fatalf("failed migration changed source table: event columns=%d want=%d", eventColumns, wantEventColumns)
+			}
+			if err := f.app.store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account_pool_runtime_cooldowns_legacy'`).Scan(&legacyTables); err != nil || legacyTables != 0 {
+				t.Fatalf("failed migration left a legacy table: count=%d err=%v", legacyTables, err)
+			}
+
+			replaceSchema(t, cooldownLegacyDDL, cooldownExpiryIndexDDL)
+			if err := f.app.store.migrateAccountPoolRuntime(context.Background()); err != nil {
+				t.Fatalf("migration was not retryable after repair: %v", err)
+			}
+			if err := verifyCooldownSchemaFromDB(f.app.store.db); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
-	if _, err := f.app.store.db.Exec(`DROP TABLE account_pool_runtime_cooldowns`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.app.store.db.Exec(`CREATE TABLE account_pool_runtime_cooldowns (
-		account_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
-		failure_class TEXT NOT NULL,
-		cooldown_until TEXT NOT NULL,
-		updated_at TEXT NOT NULL
-	)`); err != nil {
-		t.Fatal(err)
-	}
+
+	replaceSchema(t, cooldownLegacyDDL, cooldownExpiryIndexDDL)
 	if _, err := f.app.store.db.Exec(`INSERT INTO account_pool_runtime_cooldowns(account_id,failure_class,cooldown_until,updated_at) VALUES(?,?,?,?)`,
 		"ups_cooldown_migration", "unbounded_error_text", "2027-01-15T08:00:00Z", "2027-01-15T07:59:00Z"); err != nil {
 		t.Fatal(err)
@@ -71,6 +164,24 @@ func TestAccountPoolCooldownMigrationRollbackRetryAndLegacyUpgrade(t *testing.T)
 	if !validIdentifier(eventID, cooldownEventMaxLength) || failure != string(scheduling.FailureTransient) {
 		t.Fatalf("migrated event=%q failure=%q", eventID, failure)
 	}
+}
+
+func verifyCooldownSchemaFromDB(db *sql.DB) error {
+	var columns int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('account_pool_runtime_cooldowns')`).Scan(&columns); err != nil {
+		return err
+	}
+	if columns != 5 {
+		return errors.New("repaired cooldown schema was not upgraded")
+	}
+	var indexSQL string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='account_pool_runtime_cooldown_expiry_idx'`).Scan(&indexSQL); err != nil {
+		return err
+	}
+	if normalizeCooldownDDL(indexSQL) != normalizeCooldownDDL(cooldownExpiryIndexDDL) {
+		return errors.New("repaired cooldown expiry index is not canonical")
+	}
+	return nil
 }
 
 func TestUpstreamCooldownViewClearCASCancellationAndRestart(t *testing.T) {

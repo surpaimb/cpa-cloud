@@ -6,12 +6,30 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"cpacloud.local/server/internal/scheduling"
 )
 
 const cooldownEventMaxLength = 128
+
+const cooldownLegacyDDL = `CREATE TABLE account_pool_runtime_cooldowns (
+	account_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
+	failure_class TEXT NOT NULL,
+	cooldown_until TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+)`
+
+const cooldownCurrentDDL = `CREATE TABLE account_pool_runtime_cooldowns (
+	account_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
+	event_id TEXT NOT NULL UNIQUE,
+	failure_class TEXT NOT NULL CHECK(failure_class IN ('rate_limited','overloaded','transient','authentication','permanent')),
+	cooldown_until TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+)`
+
+const cooldownExpiryIndexDDL = `CREATE INDEX account_pool_runtime_cooldown_expiry_idx ON account_pool_runtime_cooldowns(cooldown_until)`
 
 type upstreamCooldownView struct {
 	EventID       string `json:"event_id"`
@@ -50,15 +68,18 @@ func migrateAccountPoolCooldownSchema(ctx context.Context, tx *sql.Tx) error {
 			return err
 		}
 		if exactCooldownColumns(columns, "account_id", "event_id", "failure_class", "cooldown_until", "updated_at") {
-			// The common verifier below validates the complete new schema.
+			if err := verifyCooldownTableSchema(ctx, tx, false); err != nil {
+				return err
+			}
 			break
 		}
 		if !exactCooldownColumns(columns, "account_id", "failure_class", "cooldown_until", "updated_at") {
 			return fmt.Errorf("existing %s table has an incompatible schema", accountPoolCooldownTable)
 		}
-		if err := verifyAccountPoolTable(ctx, tx, accountPoolCooldownTable,
-			[]string{"account_id", "failure_class", "cooldown_until", "updated_at"},
-			[]string{"references upstreams(id) on delete cascade"}); err != nil {
+		if err := verifyCooldownTableSchema(ctx, tx, true); err != nil {
+			return err
+		}
+		if err := verifyCooldownExpiryIndexIfPresent(ctx, tx); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS account_pool_runtime_cooldown_expiry_idx`); err != nil {
@@ -104,21 +125,222 @@ func migrateAccountPoolCooldownSchema(ctx context.Context, tx *sql.Tx) error {
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS account_pool_runtime_cooldown_expiry_idx ON account_pool_runtime_cooldowns(cooldown_until)`); err != nil {
+	if _, err := tx.ExecContext(ctx, strings.Replace(cooldownExpiryIndexDDL, "CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1)); err != nil {
+		return err
+	}
+	if err := verifyCooldownTableSchema(ctx, tx, false); err != nil {
 		return err
 	}
 	return verifyCooldownExpiryIndex(ctx, tx)
 }
 
 func createAccountPoolCooldownTable(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `CREATE TABLE account_pool_runtime_cooldowns (
-		account_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
-		event_id TEXT NOT NULL UNIQUE,
-		failure_class TEXT NOT NULL CHECK(failure_class IN ('rate_limited','overloaded','transient','authentication','permanent')),
-		cooldown_until TEXT NOT NULL,
-		updated_at TEXT NOT NULL
-	)`)
+	_, err := tx.ExecContext(ctx, cooldownCurrentDDL)
 	return err
+}
+
+type cooldownColumnSpec struct {
+	name    string
+	kind    string
+	notNull int
+	primary int
+}
+
+func verifyCooldownTableSchema(ctx context.Context, tx *sql.Tx, legacy bool) error {
+	expected := []cooldownColumnSpec{
+		{name: "account_id", kind: "TEXT", primary: 1},
+	}
+	canonical := cooldownCurrentDDL
+	if legacy {
+		canonical = cooldownLegacyDDL
+		expected = append(expected,
+			cooldownColumnSpec{name: "failure_class", kind: "TEXT", notNull: 1},
+			cooldownColumnSpec{name: "cooldown_until", kind: "TEXT", notNull: 1},
+			cooldownColumnSpec{name: "updated_at", kind: "TEXT", notNull: 1},
+		)
+	} else {
+		expected = append(expected,
+			cooldownColumnSpec{name: "event_id", kind: "TEXT", notNull: 1},
+			cooldownColumnSpec{name: "failure_class", kind: "TEXT", notNull: 1},
+			cooldownColumnSpec{name: "cooldown_until", kind: "TEXT", notNull: 1},
+			cooldownColumnSpec{name: "updated_at", kind: "TEXT", notNull: 1},
+		)
+	}
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(account_pool_runtime_cooldowns)`)
+	if err != nil {
+		return err
+	}
+	actual := make([]cooldownColumnSpec, 0, len(expected))
+	for rows.Next() {
+		var cid int
+		var column cooldownColumnSpec
+		var defaultValue any
+		if err := rows.Scan(&cid, &column.name, &column.kind, &column.notNull, &defaultValue, &column.primary); err != nil {
+			rows.Close()
+			return err
+		}
+		if cid != len(actual) || defaultValue != nil {
+			rows.Close()
+			return cooldownSchemaError()
+		}
+		column.kind = strings.ToUpper(column.kind)
+		actual = append(actual, column)
+	}
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil {
+		return iterationErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if len(actual) != len(expected) {
+		return cooldownSchemaError()
+	}
+	for index := range expected {
+		if actual[index] != expected[index] {
+			return cooldownSchemaError()
+		}
+	}
+
+	var objectType, schema string
+	if err := tx.QueryRowContext(ctx, `SELECT type,sql FROM sqlite_master WHERE name=?`, accountPoolCooldownTable).Scan(&objectType, &schema); err != nil {
+		return err
+	}
+	if objectType != "table" || normalizeCooldownDDL(schema) != normalizeCooldownDDL(canonical) {
+		return cooldownSchemaError()
+	}
+	if err := verifyCooldownForeignKey(ctx, tx); err != nil {
+		return err
+	}
+	return verifyCooldownUniqueIndexes(ctx, tx, legacy)
+}
+
+func cooldownSchemaError() error {
+	return fmt.Errorf("existing %s table has an incompatible schema", accountPoolCooldownTable)
+}
+
+func normalizeCooldownDDL(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
+func verifyCooldownForeignKey(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_list(account_pool_runtime_cooldowns)`)
+	if err != nil {
+		return err
+	}
+	count := 0
+	for rows.Next() {
+		var id, sequence int
+		var table, from, to, onUpdate, onDelete, match string
+		if err := rows.Scan(&id, &sequence, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			rows.Close()
+			return err
+		}
+		if id != 0 || sequence != 0 || table != "upstreams" || from != "account_id" || to != "id" || onUpdate != "NO ACTION" || onDelete != "CASCADE" || match != "NONE" {
+			rows.Close()
+			return cooldownSchemaError()
+		}
+		count++
+	}
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil {
+		return iterationErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if count != 1 {
+		return cooldownSchemaError()
+	}
+	return nil
+}
+
+func verifyCooldownUniqueIndexes(ctx context.Context, tx *sql.Tx, legacy bool) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA index_list(account_pool_runtime_cooldowns)`)
+	if err != nil {
+		return err
+	}
+	type indexSpec struct {
+		name    string
+		unique  int
+		origin  string
+		partial int
+	}
+	indexes := make([]indexSpec, 0, 3)
+	for rows.Next() {
+		var sequence int
+		var item indexSpec
+		if err := rows.Scan(&sequence, &item.name, &item.unique, &item.origin, &item.partial); err != nil {
+			rows.Close()
+			return err
+		}
+		indexes = append(indexes, item)
+	}
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil {
+		return iterationErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	foundPrimary, foundEvent := false, legacy
+	for _, item := range indexes {
+		if item.unique == 0 {
+			continue
+		}
+		if item.partial != 0 {
+			return cooldownSchemaError()
+		}
+		columns, err := cooldownIndexColumns(ctx, tx, item.name)
+		if err != nil {
+			return err
+		}
+		switch {
+		case item.origin == "pk" && len(columns) == 1 && columns[0] == "account_id" && !foundPrimary:
+			foundPrimary = true
+		case !legacy && item.origin == "u" && len(columns) == 1 && columns[0] == "event_id" && !foundEvent:
+			foundEvent = true
+		default:
+			return cooldownSchemaError()
+		}
+	}
+	if !foundPrimary || !foundEvent {
+		return cooldownSchemaError()
+	}
+	return nil
+}
+
+func cooldownIndexColumns(ctx context.Context, tx *sql.Tx, name string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `PRAGMA index_info(`+quoteSQLiteIdentifier(name)+`)`)
+	if err != nil {
+		return nil, err
+	}
+	columns := make([]string, 0, 2)
+	for rows.Next() {
+		var sequence, cid int
+		var column string
+		if err := rows.Scan(&sequence, &cid, &column); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if sequence != len(columns) || cid < 0 {
+			rows.Close()
+			return nil, cooldownSchemaError()
+		}
+		columns = append(columns, column)
+	}
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil {
+		return nil, iterationErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return columns, nil
+}
+
+func quoteSQLiteIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
 func cooldownTableColumns(ctx context.Context, tx *sql.Tx) ([]string, error) {
@@ -164,26 +386,32 @@ func exactCooldownColumns(actual []string, expected ...string) bool {
 }
 
 func verifyCooldownExpiryIndex(ctx context.Context, tx *sql.Tx) error {
-	var table string
-	if err := tx.QueryRowContext(ctx, `SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='account_pool_runtime_cooldown_expiry_idx'`).Scan(&table); err != nil {
+	var table, schema string
+	if err := tx.QueryRowContext(ctx, `SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name='account_pool_runtime_cooldown_expiry_idx'`).Scan(&table, &schema); err != nil {
 		return err
 	}
-	if table != accountPoolCooldownTable {
+	if table != accountPoolCooldownTable || normalizeCooldownDDL(schema) != normalizeCooldownDDL(cooldownExpiryIndexDDL) {
 		return errors.New("account pool cooldown expiry index belongs to an incompatible table")
 	}
-	rows, err := tx.QueryContext(ctx, `PRAGMA index_info(account_pool_runtime_cooldown_expiry_idx)`)
+	var unique, partial int
+	var origin string
+	rows, err := tx.QueryContext(ctx, `PRAGMA index_list(account_pool_runtime_cooldowns)`)
 	if err != nil {
 		return err
 	}
-	columns := make([]string, 0, 1)
+	found := false
 	for rows.Next() {
-		var sequence, cid int
+		var sequence int
 		var name string
-		if err := rows.Scan(&sequence, &cid, &name); err != nil {
+		var itemUnique, itemPartial int
+		var itemOrigin string
+		if err := rows.Scan(&sequence, &name, &itemUnique, &itemOrigin, &itemPartial); err != nil {
 			rows.Close()
 			return err
 		}
-		columns = append(columns, name)
+		if name == "account_pool_runtime_cooldown_expiry_idx" {
+			found, unique, partial, origin = true, itemUnique, itemPartial, itemOrigin
+		}
 	}
 	iterationErr, closeErr := rows.Err(), rows.Close()
 	if iterationErr != nil {
@@ -192,10 +420,28 @@ func verifyCooldownExpiryIndex(ctx context.Context, tx *sql.Tx) error {
 	if closeErr != nil {
 		return closeErr
 	}
+	if !found || unique != 0 || partial != 0 || origin != "c" {
+		return errors.New("account pool cooldown expiry index has an incompatible schema")
+	}
+	columns, err := cooldownIndexColumns(ctx, tx, "account_pool_runtime_cooldown_expiry_idx")
+	if err != nil {
+		return err
+	}
 	if len(columns) != 1 || columns[0] != "cooldown_until" {
 		return errors.New("account pool cooldown expiry index has an incompatible schema")
 	}
 	return nil
+}
+
+func verifyCooldownExpiryIndexIfPresent(ctx context.Context, tx *sql.Tx) error {
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='account_pool_runtime_cooldown_expiry_idx'`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		return nil
+	}
+	return verifyCooldownExpiryIndex(ctx, tx)
 }
 
 func validCooldownFailure(failure scheduling.FailureClass) bool {
