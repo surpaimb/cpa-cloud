@@ -28,6 +28,9 @@ type usageLedgerCoordinator struct {
 	now         func() time.Time
 	priceLookup func(context.Context, string, string) (*accounting.PriceSnapshot, error)
 	governance  *governance.Coordinator
+	budget      *governance.Budget
+	// Package-private commit fault injection for the joint budget settlement.
+	budgetCommit func(*sql.Tx) error
 }
 
 type usageRequestStart struct {
@@ -63,6 +66,7 @@ type usageLedgerAttempt struct {
 	dispatch  accounting.Dispatch
 	startedAt time.Time
 	usage     *accounting.UsageAccumulator
+	budget    *budgetAttemptState
 
 	mu             sync.Mutex
 	finishSnapshot *usageAttemptFinishSnapshot

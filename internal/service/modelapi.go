@@ -241,7 +241,7 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if codexPrepared != nil {
 		defer codexPrepared.Destroy()
 	}
-	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, true)
+	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, true, upstreamReq)
 	if dispatchFailure != nil {
 		if a.finishDispatchFailure(r, modelRequestID, true) {
 			writeModelError(w, dispatchFailure.status, dispatchFailure.code, dispatchFailure.message, modelRequestID)

@@ -32,17 +32,18 @@ type requestGovernance struct {
 }
 
 type governedRequest struct {
-	runtime      *requestGovernance
-	id           string
-	ctx          context.Context
-	cancel       context.CancelFunc
-	renewCtx     context.Context
-	stopRenew    context.CancelFunc
-	stopClient   func() bool
-	stopShutdown func() bool
-	done         chan struct{}
-	once         sync.Once
-	expires      time.Time
+	runtime       *requestGovernance
+	id            string
+	ctx           context.Context
+	cancel        context.CancelFunc
+	renewCtx      context.Context
+	stopRenew     context.CancelFunc
+	stopClient    func() bool
+	stopShutdown  func() bool
+	done          chan struct{}
+	once          sync.Once
+	expires       time.Time
+	budgetEnabled bool // Immutable hint; ReserveTx rechecks the persisted snapshot.
 
 	mu             sync.Mutex
 	phase          governedRequestPhase
@@ -114,6 +115,7 @@ func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model stri
 		return r, nil, governanceAdmissionFailure(context.Canceled)
 	}
 	started := time.Now().UTC()
+	budgetEnabled := false
 	g.app.admission.RLock()
 	lease, failed := func() (*governance.Lease, *modelAdmissionError) {
 		tx, err := g.app.store.db.BeginTx(admissionCtx, nil)
@@ -140,6 +142,13 @@ func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model stri
 		settings, scopes, err := g.policies.ResolveScopesTx(admissionCtx, tx, auth.EmployeeID, auth.KeyID)
 		if err != nil {
 			return nil, governanceAdmissionFailure(err)
+		}
+		if settings.Enabled && settings.BudgetEnabled {
+			for _, scope := range scopes {
+				if scope.UnknownMode == "deny_unknown" && (scope.HardTPM != nil || scope.HardCostMicro != nil) {
+					budgetEnabled = true
+				}
+			}
 		}
 		lease, decision, err := g.core.AdmitTx(admissionCtx, tx, governance.AdmissionStart{
 			RequestID: requestID(r.Context()), Subject: governance.Subject{EmployeeID: auth.EmployeeID, KeyID: auth.KeyID, PublicModel: model, Protocol: protocol},
@@ -176,6 +185,7 @@ func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model stri
 	guard := &governedRequest{
 		runtime: g, id: requestID(r.Context()), ctx: ctx, cancel: cancel, renewCtx: renewCtx, stopRenew: stopRenew,
 		done: make(chan struct{}), expires: lease.ExpiresAt, phase: governedRequestActive,
+		budgetEnabled: budgetEnabled,
 	}
 	guard.stopClient = context.AfterFunc(r.Context(), guard.cancelActive)
 	g.mu.Lock()
@@ -222,9 +232,29 @@ func (r *governedRequest) renewOnce() bool {
 			return err
 		}
 		defer tx.Rollback()
-		lease, err := r.runtime.core.RenewTx(ctx, tx, governance.Renew{RequestID: r.id, ExpectedExpiresAt: r.expires, ObservedAt: time.Now().UTC()})
+		observed := time.Now().UTC()
+		lease, err := r.runtime.core.RenewTx(ctx, tx, governance.Renew{RequestID: r.id, ExpectedExpiresAt: r.expires, ObservedAt: observed})
 		if err != nil {
 			return err
+		}
+		if r.budgetEnabled {
+			budget := r.runtime.app.budget
+			if budget == nil {
+				return governance.ErrUnavailable
+			}
+			_, err := budget.GetTx(ctx, tx, r.id+":1")
+			if err == nil {
+				if _, err := budget.RenewTx(ctx, tx, governance.BudgetRenew{AttemptID: r.id + ":1", ExpectedExpiresAt: r.expires, ObservedAt: observed}); err != nil {
+					return err
+				}
+			} else if errors.Is(err, governance.ErrNotFound) {
+				var attempts int
+				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounting_attempts WHERE request_id=?`, r.id).Scan(&attempts); err != nil || attempts != 0 {
+					return governance.ErrUnavailable
+				}
+			} else {
+				return err
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return err

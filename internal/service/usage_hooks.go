@@ -232,6 +232,19 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 	if r.attempt != attempt || !validUsageTerminalStatus(status) || finishedAt.IsZero() || finishedAt.Before(r.startedAt) || attempt == nil && status == accounting.StatusSucceeded {
 		return errUsageLedgerInvalid
 	}
+	if attempt != nil && attempt.budget != nil && attempt.budget.reserveUncertain {
+		persisted, err := r.reconcileBudgetStart(attempt)
+		if err != nil {
+			return err
+		}
+		if !persisted {
+			if status == accounting.StatusSucceeded {
+				return errUsageLedgerInvalid
+			}
+			r.attempt = nil
+			attempt = nil
+		}
+	}
 	if r.finishSnapshot == nil {
 		r.finishSnapshot = &usageFinishSnapshot{status: status, finishedAt: finishedAt}
 	} else if r.finishSnapshot.status != status {
@@ -265,6 +278,20 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 			}); err != nil {
 				return err
 			}
+			if attempt.budget != nil {
+				if r.coordinator.budget == nil {
+					return errUsageLedgerUnavailable
+				}
+				if attempt.budget.markUncertain {
+					if _, err := r.coordinator.budget.InterruptTx(writeCtx, tx, governance.BudgetMutation{AttemptID: attempt.id, ObservedAt: snapshot.finishedAt}); err != nil {
+						return err
+					}
+				} else {
+					if _, err := r.coordinator.budget.SettleTx(writeCtx, tx, governance.BudgetSettle{AttemptID: attempt.id, ObservedAt: snapshot.finishedAt, Mode: attempt.budget.mode}); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		if err := r.coordinator.ledger.FinishRequestTx(writeCtx, tx, accounting.RequestFinish{ID: r.id, Status: snapshot.status, FinishedAt: snapshot.finishedAt}); err != nil {
 			return err
@@ -296,6 +323,9 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 			if err := r.governance.FinishTx(writeCtx, tx, governance.Finish{RequestID: r.id, Status: snapshot.status, FinishedAt: snapshot.finishedAt}); err != nil {
 				return err
 			}
+		}
+		if attempt != nil && attempt.budget != nil && r.coordinator.budgetCommit != nil {
+			return r.coordinator.budgetCommit(tx)
 		}
 		return tx.Commit()
 	})

@@ -143,7 +143,7 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		r = r.WithContext(lease.Context())
 	}
 	defer a.releaseModelLease(lease, modelRequestID, !countTokens)
-	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, !countTokens)
+	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, !countTokens, upstreamReq)
 	if dispatchFailure != nil {
 		if a.finishDispatchFailure(r, modelRequestID, !countTokens) {
 			writeAnthropicError(w, dispatchFailure.status, anthropicAdmissionType(dispatchFailure.status), dispatchFailure.message, modelRequestID)

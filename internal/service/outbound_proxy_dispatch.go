@@ -89,7 +89,7 @@ func egressAdmissionFailure(err error) *modelAdmissionError {
 // Final dispatch is serialized with authorization, route and proxy edits. No
 // network runs under admission. The accounting write precedes MayHaveSent;
 // failures here cannot start an upstream attempt or trigger a second account.
-func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model string, selected route, lease *accountPoolLease, record bool) (upstreamHTTPDoer, *modelAdmissionError) {
+func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model string, selected route, lease *accountPoolLease, record bool, wire ...*http.Request) (upstreamHTTPDoer, *modelAdmissionError) {
 	if lease != nil {
 		lease.mu.Lock()
 		defer lease.mu.Unlock()
@@ -114,6 +114,13 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 	defer a.admission.RUnlock()
 	if r.Context().Err() != nil {
 		return nil, poolAdmissionFailure(accountPoolCancelled)
+	}
+	budgetState, budgetFailure := a.prepareBudgetDispatch(r, selected, lease, record, wire)
+	if budgetFailure != nil {
+		return nil, budgetFailure
+	}
+	if budgetState != nil {
+		defer budgetState.unlock()
 	}
 	tx, err := a.store.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -162,6 +169,15 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 		return nil, poolAdmissionFailure(accountPoolAccountChanged)
 	}
 	// Return the originally frozen client, not a newly read configuration.
+	if budgetState != nil {
+		if failure := a.commitBudgetDispatch(r.Context(), tx, selected, budgetState); failure != nil {
+			return nil, failure
+		}
+		if lease != nil {
+			lease.phase = scheduling.MayHaveSent
+		}
+		return selected.egress.client, nil
+	}
 	if err := tx.Rollback(); err != nil {
 		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)
 	}

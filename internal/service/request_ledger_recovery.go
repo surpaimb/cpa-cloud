@@ -24,6 +24,13 @@ func (a *App) recoverRequestLedgers(ctx context.Context, core *governance.Coordi
 	if err != nil {
 		return errUsageLedgerUnavailable
 	}
+	if a.budget != nil {
+		recovered, err := a.budget.RecoverTx(ctx, tx, at)
+		if err != nil {
+			return errUsageLedgerUnavailable
+		}
+		at = recovered.EffectiveAt
+	}
 	if _, err := a.usage.ledger.RecoverInterruptedTx(ctx, tx, at); err != nil {
 		return errUsageLedgerUnavailable
 	}

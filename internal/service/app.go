@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +47,8 @@ type App struct {
 	usage              *usageLedgerCoordinator
 	governance         *requestGovernance
 	governancePolicies *governanceManagementStore
+	budget             *governance.Budget
+	budgetCommit       func(string, *sql.Tx) error
 	usageRequests      sync.Map
 	loginMu            sync.Mutex
 	logins             map[string]*loginAttempt
@@ -147,16 +150,16 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := core.Migrate(ctx); err != nil {
-		return err
-	}
 	policies, err := newGovernanceManagementStore(a.store.db, core)
 	if err != nil {
 		return err
 	}
-	if err := policies.Migrate(ctx); err != nil {
+	budget := governance.NewBudget(a.store.db)
+	if err := a.migrateGovernanceBudget(ctx, core, policies, budget); err != nil {
 		return err
 	}
+	a.budget = budget
+	a.usage.budget = budget
 	if err := a.recoverRequestLedgers(ctx, core); err != nil {
 		return err
 	}

@@ -1,6 +1,6 @@
 # 预算准入的 Accounting 基础构件
 
-状态：**基础构件已实现，硬预算仍未实现**，2026-09-23。本文件记录
+状态：**基础构件已实现**，2026-09-23；后续硬预算接线见[集成进度](budget-service-integration-progress.md)。本文件记录
 [硬 TPM 与成本预算准入提案](budget-admission-proposal.md)所需的 accounting 事务与算术接口。它们不增加 reservation 表、
 运行时准入、Token 上界生成器、管理员 API、网页开关或任何生产 hard TPM/成本预算能力。
 

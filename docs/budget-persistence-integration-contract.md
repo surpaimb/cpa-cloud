@@ -1,6 +1,6 @@
 # 预算持久核心与服务接线契约
 
-状态：**下一批实现契约，核心与服务接线尚未实现**，2026-09-24。
+状态：**核心及服务接线已进入独立集成分支，完整验收待完成**，2026-09-24。见[实际进度](budget-service-integration-progress.md)。
 补充 [预算准入提案](budget-admission-proposal.md)，以当前自有源码为依据；不是 Sub2API 实现的移植。
 冲突时本文件中的接口、锁顺序和结算维度决定优先。基础接口的实际交付见
 [Accounting 基础](budget-accounting-foundations.md)与[恢复事务基础](budget-recovery-foundations.md)。
@@ -11,7 +11,7 @@
 不能把算术接口或可组合 Tx 接口标为预算可用。默认不开预算，不修改 shadow 字段含义，不发布新安装包。
 
 预算依赖三个独立事实：管理员明确开启的 hard 策略、最终 payload 的版本化上界证明、原子持久预留。
-目前只完成部分事务和算术基础；没有可调用的生产 bound profile。所有真实提供商兼容仍需另行验证。
+已实现一个严格固定模型的实验 bound profile；不代表通用生产预算或真实提供商兼容已验证。
 
 ## 配置与迁移
 
@@ -101,7 +101,7 @@ App 必须先完成全部 schema 升级，再进行一次联合恢复事务，�
 freeze统一时间，再修改 accounting、预算和治理。旧会计校验不允许结束早于 pending 子/父时间，治理可取有效时钟 max；
 联合协调器应先求合法全局恢复时刻，不删掉某个包的校验。失败不能先把 accounting 改为 interrupted 再忽略预算错误。
 
-当前新增 RecoverInterruptedTx 只是基础 API，App 仍旧分别恢复，尚未完成上述接线。未来续租在同一事务双 CAS 治理和
+App 已接入联合恢复事务。续租在同一事务双 CAS 治理和
 预算，Reserve 初值取当前治理 expiry，避免“续租完成但 reservation 尚未 attach”竞态。续租失败取消本地执行，但保留
 旧持久截止与上界；终结先赢时不反向续租。
 
