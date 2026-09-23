@@ -121,8 +121,8 @@ export function ProxiesPage({ csrf }: { csrf: string }) {
           const reason = bindingUnsupported(item)
           const read = bindings[item.id]
           const current = read?.state?.binding
-          const status = read?.failed ? <span className="proxy-binding-limit">状态未确认 / 读取失败</span> : current ? <><strong>{current.name}</strong><small>{current.enabled ? '代理已启用' : '代理已停用，绑定仍保留'}</small></> : <span className="muted-copy">直连</span>
-          return <tr key={item.id}><td><strong>{item.name}</strong><small>{item.provider_kind}</small></td><td><code className="endpoint">{item.provider_kind === 'codex-membership' ? '服务端固定' : item.endpoint}</code></td><td>{status}</td><td>{reason ? <span className="proxy-binding-limit">{reason}</span> : read?.failed ? <button className="link-button" onClick={() => void reload()}>重新读取绑定</button> : <button className="link-button" onClick={() => setBinding(item)}>{current ? '修改 / 解绑' : '绑定代理'}</button>}</td></tr>
+          const status = !read ? <span className="muted-copy">正在读取 / 未确认</span> : read.failed ? <span className="proxy-binding-limit">状态未确认 / 读取失败</span> : current ? <><strong>{current.name}</strong><small>{current.enabled ? '代理已启用' : '代理已停用，绑定仍保留'}</small></> : <span className="muted-copy">直连</span>
+          return <tr key={item.id}><td><strong>{item.name}</strong><small>{item.provider_kind}</small></td><td><code className="endpoint">{item.provider_kind === 'codex-membership' ? '服务端固定' : item.endpoint}</code></td><td>{status}</td><td>{reason ? <span className="proxy-binding-limit">{reason}</span> : !read ? <span className="muted-copy">正在读取</span> : read.failed ? <button className="link-button" onClick={() => void reload()}>重新读取绑定</button> : <button className="link-button" onClick={() => setBinding(item)}>{current ? '修改 / 解绑' : '绑定代理'}</button>}</td></tr>
         })}
       </tbody></table></div> : null}
     </section>
@@ -249,19 +249,20 @@ function EditProxyDialog({ proxyID, csrf, onClose, onSaved }: { proxyID: string;
     {loading ? <div className="loading" role="status"><span />正在读取实际状态…</div> : proxy ? <form onSubmit={(event) => { event.preventDefault(); void save() }}>
       <ProxyForm fields={fields} setFields={setFields} locked={busy || verification !== 'none'} includeCredentialMode credentialMode={mode} setCredentialMode={(next) => { setMode(next); setFields((value) => ({ ...value, username: '', password: '' })) }} />
       {verification !== 'none' ? <div className="proxy-uncertain" role="alert"><strong>{verification === 'verified' ? '已读取实际状态，请核对' : '实际状态尚未确认'}</strong><p>{error} 页面没有自动重放写入。{verification === 'verified' ? `当前显示版本 ${proxy.revision}。` : '在成功读取前不能继续写入。'}</p></div> : <FormError error={error} />}
-      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button>{verification === 'verified' ? <Button type="button" onClick={() => { setVerification('none'); setError(null) }}>按最新状态重新编辑</Button> : verification === 'failed' ? <Button type="button" disabled={busy} onClick={() => void retryVerification()}>{busy ? '读取中…' : '重新读取实际状态'}</Button> : <Button type="submit" disabled={busy}>{busy ? '保存中…' : '保存变更'}</Button>}</div>
+      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button>{verification === 'verified' ? <Button type="button" disabled={busy} onClick={(event) => { event.preventDefault(); setVerification('none'); setError(null) }}>按最新状态重新编辑</Button> : verification === 'failed' ? <Button type="button" disabled={busy} onClick={() => void retryVerification()}>{busy ? '读取中…' : '重新读取实际状态'}</Button> : <Button type="submit" disabled={busy}>{busy ? '保存中…' : '保存变更'}</Button>}</div>
     </form> : <><FormError error={error} /><div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>关闭</Button><Button type="button" onClick={() => { setLoading(true); setError(null); loadActual().catch((caught) => setError(messageFor(caught))).finally(() => setLoading(false)) }}>重新读取实际状态</Button></div></>}
   </Dialog>
 }
 
 function BindingDialog({ upstream, proxies, csrf, onClose, onSaved }: { upstream: Upstream; proxies: OutboundProxy[]; csrf: string; onClose: () => void; onSaved: () => void }) {
+  const [proxySnapshots, setProxySnapshots] = useState(proxies)
   const [actual, setActual] = useState<UpstreamProxyState | null>(null)
   const [selected, setSelected] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [verification, setVerification] = useState<Verification>('none')
   const [error, setError] = useState<string | null>(null)
-  const enabled = proxies.filter((item) => item.enabled)
+  const enabled = proxySnapshots.filter((item) => item.enabled)
 
   const loadActual = useCallback(async (signal?: AbortSignal) => {
     const state = await api.upstreamProxy(upstream.id, signal)
@@ -315,6 +316,16 @@ function BindingDialog({ upstream, proxies, csrf, onClose, onSaved }: { upstream
       let proxyRevision = current.binding?.proxy_revision ?? 0
       if (bind) {
         const latestProxy = await api.outboundProxy(proxyID)
+        const shownProxy = proxySnapshots.find((item) => item.id === proxyID)
+        if (!shownProxy || shownProxy.revision !== latestProxy.revision) {
+          setProxySnapshots((items) => [...items.filter((item) => item.id !== latestProxy.id), latestProxy])
+          setActual(current)
+          setSelected(latestProxy.id)
+          setVerification('verified')
+          setError(`所选代理配置已变化；当前为 ${latestProxy.host}:${latestProxy.port}，配置版本 ${latestProxy.revision}${latestProxy.enabled ? '' : '，且已停用'}。`)
+          setBusy(false)
+          return
+        }
         if (!latestProxy.enabled) throw new ApiError(409, 'binding_conflict', '所选代理已停用。')
         proxyRevision = latestProxy.revision
       }
@@ -332,7 +343,7 @@ function BindingDialog({ upstream, proxies, csrf, onClose, onSaved }: { upstream
       <div className="proxy-state-summary"><span>当前连接</span><strong>{actual.binding ? actual.binding.name : '直连'}</strong>{actual.binding && !actual.binding.enabled ? <small>该代理已停用，但绑定仍保留。</small> : null}</div>
       <Field label="选择已启用代理" hint="停用代理不会用于新绑定；现有停用绑定仍可明确解绑。"><select value={selected} onChange={(event) => setSelected(event.target.value)} disabled={busy || verification !== 'none'}><option value="">请选择</option>{enabled.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.host}:{item.port}</option>)}</select></Field>
       {verification !== 'none' ? <div className="proxy-uncertain" role="alert"><strong>{verification === 'verified' ? '已读取实际绑定，请核对' : '实际绑定尚未确认'}</strong><p>{error} 页面没有自动重放写入。{verification === 'failed' ? '在成功读取前不能继续写入。' : ''}</p></div> : <FormError error={error} />}
-      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button>{verification === 'none' && actual.binding ? <Button type="button" variant="danger" disabled={busy} onClick={() => void write(false)}>明确解绑为直连</Button> : null}{verification === 'verified' ? <Button type="button" onClick={() => { setVerification('none'); setError(null) }}>按实际状态重新选择</Button> : verification === 'failed' ? <Button type="button" disabled={busy} onClick={() => void retryVerification()}>{busy ? '读取中…' : '重新读取实际状态'}</Button> : <Button type="button" disabled={busy || !selected} onClick={() => void write(true)}>{busy ? '处理中…' : actual.binding ? '保存绑定' : '绑定代理'}</Button>}</div>
+      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button>{verification === 'none' && actual.binding ? <Button type="button" variant="danger" disabled={busy} onClick={() => void write(false)}>明确解绑为直连</Button> : null}{verification === 'verified' ? <Button type="button" disabled={busy} onClick={() => { setVerification('none'); setError(null) }}>按实际状态重新选择</Button> : verification === 'failed' ? <Button type="button" disabled={busy} onClick={() => void retryVerification()}>{busy ? '读取中…' : '重新读取实际状态'}</Button> : <Button type="button" disabled={busy || !selected} onClick={() => void write(true)}>{busy ? '处理中…' : actual.binding ? '保存绑定' : '绑定代理'}</Button>}</div>
     </> : <><FormError error={error} /><div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>关闭</Button></div></>}
   </Dialog>
 }

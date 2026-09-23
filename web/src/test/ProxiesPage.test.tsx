@@ -127,6 +127,24 @@ describe('outbound proxy management', () => {
     expect(screen.getByRole('button', { name: '重新读取绑定' })).toBeInTheDocument()
   })
 
+  it('shows an unconfirmed state while the initial binding read is pending', async () => {
+    let resolveBinding!: (value: Response) => void
+    const pending = new Promise<Response>((resolve) => { resolveBinding = resolve })
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/outbound-proxies?')) return response({ body: { items: [proxy('proxy-1')], next_cursor: null } })
+      if (url.endsWith('/upstreams')) return response({ body: { items: [upstream('pending')] } })
+      if (url.endsWith('/upstreams/pending/proxy')) return pending
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ProxiesPage csrf="csrf" />)
+    expect(await screen.findByText('正在读取 / 未确认')).toBeInTheDocument()
+    expect(screen.queryByText('直连')).not.toBeInTheDocument()
+    await act(async () => { resolveBinding(await response({ body: { upstream_id: 'pending', upstream_revision: 4, binding: null } })) })
+    expect(await screen.findByText('直连')).toBeInTheDocument()
+  })
+
   it('preserves a meaningful username and permits an empty Basic password', async () => {
     let body: { credentials?: { username: string; password: string } } | undefined
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -173,6 +191,9 @@ describe('outbound proxy management', () => {
     expect(screen.queryByDisplayValue('must-disappear')).not.toBeInTheDocument()
     expect(patches).toBe(1)
     expect(detailReads).toBe(2)
+    await userEvent.click(screen.getByRole('button', { name: '按最新状态重新编辑' }))
+    expect(patches).toBe(1)
+    expect(screen.getByRole('button', { name: '保存变更' })).toBeInTheDocument()
   })
 
   it('keeps proxy writes locked until a failed verification GET later succeeds', async () => {
@@ -277,6 +298,34 @@ describe('outbound proxy management', () => {
     expect(await screen.findByText('已读取实际绑定，请核对')).toBeInTheDocument()
     expect(screen.getByText(/账号版本或绑定已在操作前变化/)).toBeInTheDocument()
     expect(puts).toBe(0)
+  })
+
+  it('requires review when the selected proxy configuration changed and then uses the confirmed revision', async () => {
+    const account = upstream('https')
+    let puts = 0
+    const putBodies: Array<{ expected_proxy_revision: number }> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/outbound-proxies?')) return response({ body: { items: [proxy('enabled')], next_cursor: null } })
+      if (url.endsWith('/upstreams')) return response({ body: { items: [account] } })
+      if (url.endsWith('/upstreams/https/proxy') && init?.method === 'PUT') { puts += 1; putBodies.push(JSON.parse(String(init.body))); return response({ body: { upstream_id: 'https', upstream_revision: 5, binding: null } }) }
+      if (url.endsWith('/upstreams/https/proxy')) return response({ body: { upstream_id: 'https', upstream_revision: 4, binding: null } })
+      if (url.endsWith('/outbound-proxies/enabled')) return response({ body: proxy('enabled', { revision: 3, host: 'new.proxy.example' }) })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ProxiesPage csrf="csrf" />)
+    await userEvent.click(await screen.findByRole('button', { name: '绑定代理' }))
+    const dialog = screen.getByRole('dialog')
+    await userEvent.selectOptions(within(dialog).getByLabelText('选择已启用代理'), 'enabled')
+    await userEvent.click(within(dialog).getByRole('button', { name: '绑定代理' }))
+    expect(await within(dialog).findByText(/所选代理配置已变化/)).toBeInTheDocument()
+    expect(within(dialog).getAllByText(/new\.proxy\.example:443/).length).toBeGreaterThan(0)
+    expect(puts).toBe(0)
+    await userEvent.click(within(dialog).getByRole('button', { name: '按实际状态重新选择' }))
+    await userEvent.click(within(dialog).getByRole('button', { name: '绑定代理' }))
+    await waitFor(() => expect(puts).toBe(1))
+    expect(putBodies[0].expected_proxy_revision).toBe(3)
   })
 
   it('does not let a delayed editor response replace a newly opened proxy', async () => {
