@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -19,21 +18,29 @@ const (
 )
 
 func (a *App) discoverGeminiUpstreamModels(w http.ResponseWriter, r *http.Request, upstreamID, endpoint string, keyVersion int, ciphertext []byte) {
-	if keyVersion != 2 {
-		writeAdminError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is temporarily unavailable.")
-		return
-	}
-	credential, err := a.secrets.decryptGeminiAPIKey(upstreamID, ciphertext)
-	if err != nil {
-		writeAdminError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is temporarily unavailable.")
-		return
-	}
 	discoveryContext, cancel := context.WithTimeout(r.Context(), modelDiscoveryTimeout)
 	defer cancel()
-	validated, err := validateGeminiEndpoint(discoveryContext, endpoint, a.cfg.AllowLoopbackUpstream)
-	if err != nil {
-		writeModelDiscoveryFailure(w, r)
+	items, failure := a.runGeminiModelCatalog(discoveryContext, upstreamID, endpoint, keyVersion, ciphertext)
+	if failure != nil {
+		writeCatalogRunFailure(w, r, failure)
 		return
+	}
+	if r.Context().Err() == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	}
+}
+
+func (a *App) runGeminiModelCatalog(ctx context.Context, upstreamID, endpoint string, keyVersion int, ciphertext []byte) ([]discoveredModel, *catalogRunFailure) {
+	if keyVersion != 2 {
+		return nil, &catalogRunFailure{result: "configuration_changed", local: true}
+	}
+	credential, err := a.secrets.decryptGeminiAPIKey(upstreamID, ciphertext)
+	if err != nil || credential == "" {
+		return nil, &catalogRunFailure{result: "authentication_failed", local: true}
+	}
+	validated, err := validateGeminiEndpoint(ctx, endpoint, a.cfg.AllowLoopbackUpstream)
+	if err != nil {
+		return nil, &catalogRunFailure{result: "configuration_changed"}
 	}
 	seenIDs := make(map[string]struct{})
 	seenTokens := make(map[string]struct{})
@@ -41,74 +48,51 @@ func (a *App) discoverGeminiUpstreamModels(w http.ResponseWriter, r *http.Reques
 	pageToken := ""
 	for page := 0; ; page++ {
 		if page >= geminiDiscoveryMaxPages {
-			writeInvalidGeminiDiscovery(w, r)
-			return
+			return nil, &catalogRunFailure{result: "invalid_response"}
 		}
 		target, err := geminiModelsURL(validated, pageToken)
 		if err != nil {
-			writeModelDiscoveryFailure(w, r)
-			return
+			return nil, &catalogRunFailure{result: "configuration_changed"}
 		}
-		req, err := http.NewRequestWithContext(discoveryContext, http.MethodGet, target, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 		if err != nil {
-			writeModelDiscoveryFailure(w, r)
-			return
+			return nil, &catalogRunFailure{result: "configuration_changed"}
 		}
 		req.Header.Set("x-goog-api-key", credential)
 		req.Header.Set("Accept", "application/json")
 		response, err := a.http.Do(req)
 		if err != nil {
-			if errors.Is(discoveryContext.Err(), context.DeadlineExceeded) {
-				writeModelDiscoveryError(w, r, http.StatusGatewayTimeout, "model_discovery_timeout", "Upstream model discovery timed out.")
-			} else if r.Context().Err() == nil {
-				writeModelDiscoveryFailure(w, r)
-			}
-			return
+			return nil, catalogContextFailure(ctx)
+		}
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			failure := catalogHTTPFailure(response.StatusCode, response.Header.Get("Retry-After"))
+			_ = response.Body.Close()
+			return nil, failure
 		}
 		remaining := modelDiscoveryMaxBody - totalBytes
-		body, readErr := io.ReadAll(io.LimitReader(response.Body, int64(remaining)+1))
-		closeErr := response.Body.Close()
-		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-			switch response.StatusCode {
-			case http.StatusUnauthorized, http.StatusForbidden:
-				writeModelDiscoveryError(w, r, http.StatusBadGateway, "upstream_authentication_failed", "Upstream authentication failed.")
-			case http.StatusTooManyRequests:
-				if retry := safeRetryAfter(response.Header.Get("Retry-After")); retry != "" {
-					w.Header().Set("Retry-After", retry)
-				}
-				writeModelDiscoveryError(w, r, http.StatusTooManyRequests, "upstream_rate_limited", "Upstream rate limit was reached.")
-			default:
-				writeModelDiscoveryFailure(w, r)
-			}
-			return
-		}
-		if readErr != nil || closeErr != nil || len(body) > remaining {
-			writeInvalidGeminiDiscovery(w, r)
-			return
+		body, failure := readModelCatalogBody(ctx, response, remaining)
+		if failure != nil {
+			return nil, failure
 		}
 		totalBytes += len(body)
 		pageIDs, nextToken, err := parseGeminiDiscoveryPage(body)
 		if err != nil {
-			writeInvalidGeminiDiscovery(w, r)
-			return
+			return nil, &catalogRunFailure{result: "invalid_response"}
 		}
 		for _, id := range pageIDs {
 			seenIDs[id] = struct{}{}
 			if len(seenIDs) > modelDiscoveryMaxItems {
-				writeInvalidGeminiDiscovery(w, r)
-				return
+				return nil, &catalogRunFailure{result: "invalid_response"}
 			}
 		}
 		if nextToken == "" {
 			break
 		}
 		if !validGeminiPageToken(nextToken) {
-			writeInvalidGeminiDiscovery(w, r)
-			return
+			return nil, &catalogRunFailure{result: "invalid_response"}
 		}
 		if _, duplicate := seenTokens[nextToken]; duplicate {
-			writeInvalidGeminiDiscovery(w, r)
-			return
+			return nil, &catalogRunFailure{result: "invalid_response"}
 		}
 		seenTokens[nextToken] = struct{}{}
 		pageToken = nextToken
@@ -122,9 +106,7 @@ func (a *App) discoverGeminiUpstreamModels(w http.ResponseWriter, r *http.Reques
 	for _, id := range ids {
 		items = append(items, discoveredModel{ID: id})
 	}
-	if r.Context().Err() == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"items": items})
-	}
+	return items, nil
 }
 
 func geminiModelsURL(endpoint, pageToken string) (string, error) {

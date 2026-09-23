@@ -177,18 +177,33 @@ func (a *App) validateCatalogRevision(w http.ResponseWriter, r *http.Request, se
 func (a *App) codexCatalogClientAndCache(selected route) (codexCatalogLister, []byte) {
 	a.catalogMu.Lock()
 	defer a.catalogMu.Unlock()
-	if a.codexCatalog == nil {
-		version := strings.SplitN(strings.TrimPrefix(a.cfg.Version, "v"), "-", 2)[0]
-		client, err := membership.NewCodexModelsClient(version)
-		if err != nil {
-			client, _ = membership.NewCodexModelsClient("0.0.0")
-		}
-		a.codexCatalog = client
-	}
+	a.initializeCodexCatalogClientLocked()
 	if cached, ok := a.catalogs[selected.AccountID]; ok && cached.revision == selected.Revision && time.Now().Before(cached.expires) {
 		return a.codexCatalog, cached.body
 	}
 	return a.codexCatalog, nil
+}
+
+// codexCatalogClientNoCache returns the shared protocol client but deliberately
+// bypasses the one-minute admin display cache. A health observation must result
+// from a fresh provider catalog request.
+func (a *App) codexCatalogClientNoCache() codexCatalogLister {
+	a.catalogMu.Lock()
+	defer a.catalogMu.Unlock()
+	a.initializeCodexCatalogClientLocked()
+	return a.codexCatalog
+}
+
+func (a *App) initializeCodexCatalogClientLocked() {
+	if a.codexCatalog != nil {
+		return
+	}
+	version := strings.SplitN(strings.TrimPrefix(a.cfg.Version, "v"), "-", 2)[0]
+	client, err := membership.NewCodexModelsClient(version)
+	if err != nil {
+		client, _ = membership.NewCodexModelsClient("0.0.0")
+	}
+	a.codexCatalog = client
 }
 
 func writeCatalogJSON(w http.ResponseWriter, body []byte) {
