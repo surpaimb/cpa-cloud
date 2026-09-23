@@ -8,7 +8,7 @@ import (
 )
 
 func TestAccountRecoverySchemaRejectsChangedEnumAndRetries(t *testing.T) {
-	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 1)
+	f := newRawRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 1)
 	if err := f.rt.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestAccountRecoverySchemaRejectsChangedEnumAndRetries(t *testing.T) {
 }
 
 func TestAccountRecoveryLegacyMigrationRejectsUnexpectedIndexAndRetries(t *testing.T) {
-	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 1)
+	f := newRawRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 1)
 	if err := f.rt.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestAccountRecoveryLegacyMigrationRejectsUnexpectedIndexAndRetries(t *testi
 }
 
 func TestAccountRecoverySettingsSchemaAndStoredRowAreStrict(t *testing.T) {
-	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 1)
+	f := newRawRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 1)
 	if err := f.rt.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestAccountRecoverySettingsSchemaAndStoredRowAreStrict(t *testing.T) {
 }
 
 func TestAccountRecoveryStateCASAndCrossTableDuplicateLease(t *testing.T) {
-	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 2)
+	f := newRawRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 2)
 	f.insertAccount(t, "ups_recovery_cas", true)
 	f.insertModelPool(t, "recovery-cas-model", "ups_recovery_cas", 1, modelAccountView{UpstreamID: "ups_recovery_cas", UpstreamModel: "provider-cas", Weight: 1, MaxConcurrency: 1})
 	state := installRecoveryState(t, f, "ups_recovery_cas", "recovery-cas-model", "cool_recovery_cas", "probe_recovery_cas", 1)
@@ -148,7 +148,7 @@ func TestAccountRecoveryStateCASAndCrossTableDuplicateLease(t *testing.T) {
 }
 
 func TestAccountRecoveryRestartKeepsIsolationAcrossReimport(t *testing.T) {
-	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 2)
+	f := newRawRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 2)
 	f.insertAccount(t, "ups_recovery_reimport", true)
 	f.insertModelPool(t, "recovery-reimport-model", "ups_recovery_reimport", 1, modelAccountView{UpstreamID: "ups_recovery_reimport", UpstreamModel: "provider-before", Weight: 1, MaxConcurrency: 1})
 	state := installRecoveryState(t, f, "ups_recovery_reimport", "recovery-reimport-model", "cool_recovery_reimport", "probe_recovery_reimport", 1)

@@ -192,6 +192,7 @@ func verifyCooldownSchemaFromDB(db *sql.DB) error {
 
 func TestUpstreamCooldownViewClearCASCancellationAndRestart(t *testing.T) {
 	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 2)
+	f.base.enableRuntimeAdminHTTP(t)
 	if err := f.base.app.accountPool.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -324,6 +325,7 @@ func (r *cooldownBarrierRandom) Intn(n int) int {
 func TestCooldownReleaseFinalAdmissionBarrierAndConcurrentClear(t *testing.T) {
 	random := &cooldownBarrierRandom{}
 	f := newRuntimeFixture(t, random, 30*time.Second, 3)
+	f.base.enableRuntimeAdminHTTP(t)
 	f.insertAccount(t, "ups_cooldown_race", true)
 	f.insertModelPool(t, "cooldown-race-model", "ups_cooldown_race", 1, modelAccountView{
 		UpstreamID: "ups_cooldown_race", UpstreamModel: "provider-model", Weight: 1, MaxConcurrency: 3,

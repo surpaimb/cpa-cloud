@@ -92,7 +92,16 @@ type runtimeFixture struct {
 
 func newRuntimeFixture(t *testing.T, random scheduling.Random, leaseTTL time.Duration, maxWaiters int) *runtimeFixture {
 	t.Helper()
-	base := newAccountPoolFixture(t, false)
+	return newRuntimeFixtureWithBase(t, newRuntimeAccountPoolFixture(t), random, leaseTTL, maxWaiters)
+}
+
+func newRawRuntimeFixture(t *testing.T, random scheduling.Random, leaseTTL time.Duration, maxWaiters int) *runtimeFixture {
+	t.Helper()
+	return newRuntimeFixtureWithBase(t, newAccountPoolFixture(t, false), random, leaseTTL, maxWaiters)
+}
+
+func newRuntimeFixtureWithBase(t *testing.T, base *accountPoolFixture, random scheduling.Random, leaseTTL time.Duration, maxWaiters int) *runtimeFixture {
+	t.Helper()
 	if err := base.app.store.migrateAccountPoolRuntime(context.Background()); err != nil {
 		t.Fatalf("migrate runtime: %v", err)
 	}
