@@ -181,7 +181,7 @@ func TestCodexMembershipAdminImportReplacementAndFeatureFlag(t *testing.T) {
 	}
 
 	discovery := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+created.ID+"/discover-models", map[string]any{}, cookie, csrf, server.URL)
-	assertCodexAdminError(t, discovery, http.StatusConflict, "model_discovery_unsupported")
+	assertCodexAdminError(t, discovery, http.StatusConflict, "upstream_disabled")
 
 	apiUpstreamResponse := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams", map[string]any{
 		"name": "API key upstream", "provider_kind": "openai-compatible", "endpoint": "http://127.0.0.1:1/v1", "api_key": "api-upstream-secret",

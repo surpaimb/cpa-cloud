@@ -43,7 +43,7 @@ func (a *App) discoverUpstreamModels(w http.ResponseWriter, r *http.Request, _ a
 		return
 	}
 	if providerKind == codexMembershipProvider {
-		writeModelDiscoveryError(w, r, http.StatusConflict, "model_discovery_unsupported", "Upstream model discovery is not supported.")
+		a.discoverCodexUpstreamModels(w, r, id)
 		return
 	}
 	if enabled == 0 {

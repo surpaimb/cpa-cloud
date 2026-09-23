@@ -23,18 +23,21 @@ const (
 )
 
 type App struct {
-	cfg       Config
-	store     *store
-	secrets   *secrets
-	http      *http.Client
-	codex     codexExecutor
-	responses codexResponsesExecutor
-	oauthHTTP *http.Client
-	admission sync.RWMutex
-	refreshMu sync.Mutex
-	refreshes map[string]*sync.Mutex
-	loginMu   sync.Mutex
-	logins    map[string]*loginAttempt
+	cfg          Config
+	store        *store
+	secrets      *secrets
+	http         *http.Client
+	codex        codexExecutor
+	responses    codexResponsesExecutor
+	oauthHTTP    *http.Client
+	admission    sync.RWMutex
+	refreshMu    sync.Mutex
+	refreshes    map[string]*sync.Mutex
+	loginMu      sync.Mutex
+	logins       map[string]*loginAttempt
+	catalogMu    sync.Mutex
+	catalogs     map[string]codexCatalogCacheEntry
+	codexCatalog codexCatalogLister
 }
 
 type loginAttempt struct {
@@ -170,6 +173,8 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"responses_streaming":     true,
 			"codex_membership_oauth":  a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
 			"gemini_native_api":       true,
+			"anthropic_native_api":    true,
+			"codex_model_discovery":   a.cfg.ExperimentalCodexMembership,
 		},
 		"limitations": limitations,
 	})
