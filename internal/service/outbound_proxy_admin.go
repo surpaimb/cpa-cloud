@@ -84,17 +84,21 @@ func (a *App) listOutboundProxies(w http.ResponseWriter, r *http.Request, _ admi
 		writeProxyAdminError(w, err)
 		return
 	}
-	items, err := a.outboundProxies.List(r.Context(), values.after, values.limit)
+	items, err := a.outboundProxies.List(r.Context(), values.after, values.limit+1)
 	if err != nil {
 		writeProxyAdminError(w, err)
 		return
+	}
+	hasMore := len(items) > values.limit
+	if hasMore {
+		items = items[:values.limit]
 	}
 	result := make([]outboundProxyDTO, 0, len(items))
 	for _, item := range items {
 		result = append(result, proxyDTO(item))
 	}
 	var next *string
-	if len(items) == values.limit {
+	if hasMore {
 		last := items[len(items)-1].ID
 		next = &last
 	}

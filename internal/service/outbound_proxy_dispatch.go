@@ -117,11 +117,11 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 	if !authorized {
 		return nil, poolAdmissionFailure(accountPoolAuthorizationChanged)
 	}
-	if !allowed {
-		return nil, poolAdmissionFailure(accountPoolModelNotAllowed)
-	}
 	if !available {
 		return nil, poolAdmissionFailure(accountPoolConfigurationChanged)
+	}
+	if !allowed {
+		return nil, poolAdmissionFailure(accountPoolModelNotAllowed)
 	}
 	var matches int
 	if lease == nil {
