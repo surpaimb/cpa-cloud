@@ -1,8 +1,10 @@
 # ChatGPT/Codex、Claude、Gemini 会员账号接入可行性
 
-状态：研究结论（不含实现）
+状态：会员接入研究结论；当前源码实现状态以[接入条件](membership-provider-readiness.md)、[直接调用协议](codex-direct-protocol.md)和[OAuth 生命周期](../codex-lifecycle-contract.md)为准
 
-查阅日期：2026-09-22
+查阅日期：2026-09-22；Claude 认证政策与 Gemini FAQ 复核日期：2026-09-23
+
+当前源码已有默认关闭的 Codex 文件导入、网页 OAuth、共享刷新、模型目录及 Chat / Responses 子集，并通过合成验收；没有真实账号或供应商侧撤销验证。具体边界以顶部链接为准，本文后续的历史 Runner 研究不覆盖或替代当前实现契约。
 
 范围：会员账号授权、凭据导入/刷新、模型调用；API Key 仅作为对照
 
@@ -10,7 +12,7 @@
 
 ## 1. 结论摘要
 
-截至查阅日，本次官方公开资料检索没有找到任何一家供应商同时公开提供下列通用方案：由 CPA Cloud 注册自己的 OAuth 客户端，获得用户会员订阅授权，将该授权作为标准模型 API 凭据托管在服务端，并直接实现 `/v1/chat/completions`、`/v1/responses` 或 `/v1/messages` 代理。这表示缺少可据以实现的公开合同，不等同于认定该类行为普遍违法；只有 Gemini CLI OAuth 借用这一特定机制有下文所述的供应商明确限制。
+截至查阅日，本次官方公开资料检索没有找到任何一家供应商同时公开提供下列通用方案：由 CPA Cloud 注册自己的 OAuth 客户端，获得用户会员订阅授权，将该授权作为标准模型 API 凭据托管在服务端，并直接实现 `/v1/chat/completions`、`/v1/responses` 或 `/v1/messages` 代理。这表示缺少可据以实现的公开合同，不等同于认定该类行为普遍违法。另有两个范围明确的供应商限制：Anthropic 不允许第三方产品收集、保存或中介 Claude.ai 凭据来代用户路由当前账号池请求；Google 不允许第三方借用 Gemini CLI OAuth 访问其后端。结论不外推到双方另行约定或未来官方流程。
 
 会员权益与开发者 API 权益必须分开：
 
@@ -22,12 +24,12 @@
 
 | 目标 | 证据边界 | 研究结论 / 下一步 |
 | --- | --- | --- |
-| OpenAI Platform API Key | 官方、稳定、与 ChatGPT 会员分离 | 可规划为 API Key 上游；当前预览仅有 `openai-compatible` 契约，完成度以实现验收为准 |
+| OpenAI Platform API Key | 官方、稳定、与 ChatGPT 会员分离 | `openai-compatible` API Key 通路已实现；它按 API 用量计费，不是会员接入 |
 | ChatGPT Plus/Pro 会员直接作为通用模型上游 | 仅证实可登录官方 Codex；未找到通用模型 API 授权合同 | 保持目标但阻塞直接实现；这不是普遍法律结论 |
 | ChatGPT Business/Enterprise 的 Codex 自动化 | 有官方 Codex Access Token 与 CLI/App Server 路径 | 条件可行，但属于 Codex 代理执行器，不是通用 API；须先批准架构变更 |
-| Claude Console API Key / Platform OAuth / WIF | 官方、稳定、API 计费 | 官方路径可行；Claude 原生上游在当前预览中尚未实现或验收 |
-| Claude Pro/Max/Team/Enterprise 会员直接作为通用 Messages API 上游 | 官方支持 Claude Code/SDK 自动化 Token，但未公开会员 Token 的通用 Messages API 合同 | 阻塞直接实现；官方 Runner 方案条件可行 |
-| Gemini AI Studio API Key / Vertex AI | 官方、稳定、项目配额与计费 | 官方路径可行；Google 原生上游在当前预览中尚未实现或验收 |
+| Claude Console API Key / Platform OAuth / WIF | 官方、稳定、API 计费 | API Key 原生 Messages / count_tokens 子集已通过合成验收；Platform OAuth/WIF 仍待实现 |
+| Claude Pro/Max/Team/Enterprise 会员直接作为通用 Messages API 上游 | 官方支持用户在 Claude Code 中认证，但限制第三方产品中介 Claude.ai 凭据；也未公开会员 Token 的通用 Messages API 合同 | 当前管理员池化模式受认证政策限制；只有双方另行约定或新的官方第三方流程出现后才重评 |
+| Gemini AI Studio API Key / Vertex AI | 官方、稳定、项目配额与计费 | Gemini API Key 原生子集已通过合成验收；Vertex 认证仍待实现 |
 | 借用 Gemini CLI OAuth 的第三方会员代理 | FAQ 对该具体机制有明确政策限制 | 不实现该机制；第三方代理改用 Vertex AI 或 AI Studio API Key |
 
 表中的阻塞不删除会员支持目标。若供应商以后发布面向第三方服务的会员 OAuth、代理 API 或正式嵌入协议，应重新评估。
@@ -91,7 +93,7 @@
 
 ### 3.5 允许实现的下一步
 
-1. 当前预览只按既有 `openai-compatible` 契约继续验证 Platform API Key 上游；UI 和状态必须明确显示“API 计费”，不得显示成 ChatGPT 会员。这里不声明尚未验收的供应商原生能力已交付。
+1. `openai-compatible` API Key 与默认关闭的 Codex 会员实验必须保持独立标识；前者显示 API 计费，后者的源码和合成验收状态以本页顶部链接为准，不能因历史研究文字降级或升级支持声明。
 2. 保留 `openai_codex_membership` 能力项，状态为 `blocked_current_architecture`，不要把它映射到普通 `openai-compatible` 上游。
 3. 若主任务批准引入官方 Runner：只评估 Business/Enterprise Codex Access Token + 官方 Codex CLI/App Server；把它暴露为独立的 Codex Agent 能力，不宣称标准 OpenAI API 兼容。
 4. 个人 Plus/Pro 只允许在独立实验环境验证官方 Codex 自身的无头登录流程；在取得 OpenAI 对第三方托管用途的明确确认前，不进入产品实现。
@@ -104,9 +106,9 @@
 
 **会员包含 Claude Code 使用。** Claude Code 支持 Claude Pro、Max、Team 和 Enterprise 账号登录；`/login` 的订阅 OAuth 凭据是这些计划的默认凭据。设置 `ANTHROPIC_API_KEY` 会覆盖会员登录，调用改走 API 计费。
 
-**官方提供自动化用会员 Token。** `claude setup-token` 会通过浏览器授权生成一年期 OAuth Token，命令不把 Token 保存在本机；用户可把它作为 `CLAUDE_CODE_OAUTH_TOKEN` 提供给 CI、脚本、SDK 或自动化环境。该 Token 需要有效的 Pro、Max、Team 或 Enterprise 计划，只能进行模型请求，不能建立 Remote Control 或读取 claude.ai Connectors。到期后重新生成并重启使用它的进程。
+**官方客户端提供自动化 Token。** `claude setup-token` 会通过 Anthropic 浏览器流程生成一年期 OAuth Token，供用户自己的 Claude Code CI、脚本或自动化环境使用。技术上可生成 Token 不代表第三方产品可以收集、保存或中介它；Anthropic 的认证政策对这种产品用法另有明确限制。
 
-**关键原文定位。** Anthropic《Authentication》的 “Generate a long-lived token” 小节将该 Token 的权限概括为：“It can only make model requests”。结合同页的适用计划和 `CLAUDE_CODE_OAUTH_TOKEN` 用法，这支持 Claude Code 以及读取该变量的 Agent SDK/自动化环境；它本身不构成直接调用标准 Messages API 的公开合同。
+**关键边界。** Anthropic《Authentication》的 “Generate a long-lived token” 小节说明该 Token 只能发起模型请求；[《Legal and compliance》认证条款](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)同时要求开发者产品使用 API 认证，并限制第三方提供 Claude.ai 登录或收集、保存、中介 Claude.ai 凭据。托管未修改 Claude Code 时，每个终端用户仍须通过 Anthropic 自有流程使用自己的凭据。
 
 **官方还文档化了刷新输入，但没有公开发放合同。** `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` 与 `CLAUDE_CODE_OAUTH_SCOPES` 可让 `claude auth login` 在自动化环境直接交换刷新令牌，示例 Scope 为 `user:profile user:inference user:sessions:claude_code`。公开文档没有说明任意第三方如何注册 OAuth 应用或从用户处取得这种 Refresh Token，因此这些变量不是 CPA Cloud 自行实现授权服务器流程的依据。
 
@@ -115,9 +117,9 @@
 ### 4.2 OAuth 应用注册、作用域与第三方托管
 
 - 未找到面向第三方产品的 Claude.ai 会员 OAuth Client 注册流程、Redirect URI 登记流程或正式授权端点合同。
-- `claude setup-token` 是官方认可的会员自动化授权入口，输出是不透明的一年期 Token；公开支持面明确写为 Claude Code、SDK 和自动化环境。
+- `claude setup-token` 是用户在官方客户端自动化环境中的授权入口，不是 CPA Cloud 收集并池化会员凭据的产品接入合同。
 - 未找到官方说明允许第三方 Go 服务把 `CLAUDE_CODE_OAUTH_TOKEN` 直接放入标准 `/v1/messages` 请求。不能仅根据 Token 名称、Scope 或客户端行为推断 Header、端点或刷新协议。
-- 对企业集中托管多个员工会员 Token 的席位、共享和审计规则，公开文档不足；实现前应取得 Anthropic 的书面确认或采用明确面向组织的官方部署方式。
+- 当前认证政策明确限制第三方产品收集、保存或中介 Claude.ai 凭据。管理员集中托管会员 Token 并向其他员工转发请求，须先取得覆盖该模式的双方约定；不能先实现再以隔离措施替代接入许可。
 
 ### 4.3 公开可支持的导入格式
 
@@ -125,24 +127,25 @@
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` / Claude Platform API Key | 标准 Claude API，独立计费 | 可作为 API Key 上游 |
 | Platform OAuth/WIF Access Token | 标准 Claude API；Console/组织权益 | 可按 Platform 官方协议实现，不属于会员导入 |
-| `CLAUDE_CODE_OAUTH_TOKEN` | 一年期、不透明；Claude Code、SDK、CI/脚本自动化；会员权益 | 可作为未来官方 Claude Runner 的不透明秘密，不可直接当作标准 API Token |
-| `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` + `CLAUDE_CODE_OAUTH_SCOPES` | 官方 Claude Code 自动化预配输入 | 只有来源由组织官方流程保证时才可交给原版 Claude Code；CPA Cloud 不自行签发或交换 |
+| `CLAUDE_CODE_OAUTH_TOKEN` | 一年期、不透明；用户自己的 Claude Code CI/脚本自动化；会员权益 | 当前不接收、不保存、不池化；只有双方约定或新的官方第三方流程明确覆盖该模式后重评 |
+| `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` + `CLAUDE_CODE_OAUTH_SCOPES` | 官方 Claude Code 自动化预配输入 | 当前不接收或交换；环境变量存在不构成第三方产品授权合同 |
 | `.credentials.json`、浏览器 Cookie、网页 Session | 文档只说明官方客户端管理，未定义第三方导入格式 | 本项目不接收或解析（公开合同缺失） |
 
 ### 4.4 未知或阻塞
 
 - 没有面向 CPA Cloud 这种第三方服务的 Claude.ai OAuth 应用注册合同。
 - 没有公开的“会员 Token 直接调用 Messages API”的请求合同。
+- Anthropic 当前认证政策不允许第三方产品按 CPA Cloud 的管理员账号池模式收集、保存或中介 Claude.ai 凭据。
 - Claude Code/Agent SDK 是代理运行时而非透明 Messages API；直接映射会引入系统提示、工具、会话和权限语义差异。
 - 使用官方 CLI/Agent SDK 需要额外进程或非 Go 运行时，和当前单进程约束冲突。
-- 一年期 Token 的集中吊销、管理员列举和每员工审计能力，在面向个人计划时没有足够公开合同。
+- 托管未修改 Claude Code 的公开条件要求每个终端用户通过 Anthropic 自有流程使用自己的凭据，与管理员账号池复用给员工的产品模型不同。
 
 ### 4.5 允许实现的下一步
 
-1. 可另行规划 Claude Platform API Key 原生适配，并明确标注它按 API 用量计费、不消耗 Claude.ai 会员额度；当前预览尚未实现或验收该原生上游。
-2. 保留 `anthropic_claude_membership` 能力项，状态为 `blocked_current_architecture`。
-3. 若批准官方 Runner 架构，可做最小原型：管理员在供应商官方浏览器流程中自行运行 `claude setup-token`；CPA Cloud 只把所得不透明值加密保存，并仅通过 `CLAUDE_CODE_OAUTH_TOKEN` 交给固定版本的官方 Claude Code/Agent SDK。不得记录、解析或回显 Token。
-4. 原型只能宣称“Claude Code/Agent SDK 会员自动化”，不能宣称“Claude Messages API 会员代理”。上线前需取得 Anthropic 对企业内部集中托管和多员工转发用途的明确确认。
+1. Claude API Key 原生 Messages / count_tokens 子集已通过合成上游验收，必须继续标明 API 独立计费；Platform OAuth/WIF 仍是单独待办，不属于会员接入。
+2. 保留 `anthropic_claude_membership` 目标，当前管理员池化模式标记为 `blocked_by_provider_auth_policy`，不提供 Token 导入或虚假授权入口。
+3. 只有 Anthropic 与部署方的双方约定明确允许集中托管和多员工转发，并提供调用与生命周期合同，才重新设计该模式。
+4. 若产品改为每个终端用户在未修改 Claude Code 中通过 Anthropic 自有流程认证，仍须先做 Runner 架构决策和协议验收；该模式不能宣称为 Messages 会员代理，也不满足现有管理员账号池目标。
 
 ## 5. Google：Gemini
 
@@ -180,39 +183,37 @@
 
 ### 5.5 允许实现的下一步
 
-1. 如扩展 Google provider，只规划 Gemini API Key 和 Vertex AI，UI 明确显示项目、配额和 Cloud Billing 归属；当前预览尚未实现或验收这些原生上游。
+1. Gemini API Key 原生子集已通过合成上游验收，UI 必须明确显示 AI Studio 项目、配额和计费归属；Vertex 认证仍是独立待办，不属于会员接入。
 2. 保留 `google_gemini_membership` 能力项；对借用 CLI OAuth 的方案标记为 `blocked_by_provider_policy_for_cli_oauth`，向管理员显示官方 FAQ 链接。
 3. 不提供 OAuth 缓存上传、Cookie 导入或 Gemini CLI 凭据扫描功能。
 4. 只有在 Google 发布新的第三方会员授权产品或给出书面例外后，才重新开启实现评估。
 
-## 6. 可实施协议规格（仅限官方 Runner 条件方案）
+## 6. 可实施协议规格（仅限仍获官方支持的 Runner 条件方案）
 
-本节不是当前接口契约，也不授权修改 `/admin/api/v1/upstreams`。如主任务接受额外官方运行时并协调契约变更，可按以下供应商无关规格做原型。该规格只描述 CPA Cloud 自有边界，不包含任何现有产品实现细节。
+本节不是当前接口契约，也不授权修改 `/admin/api/v1/upstreams`。2026-09-23 复核后，管理员池化 Claude `setup-token` 的候选方案已撤回；下列规格只保留另有官方支持依据的 Runner 候选。任何新增提供商都要重新通过认证政策和架构门。
 
 ### 6.1 能力类型
 
 ```text
 provider_kind:
   openai_codex_agent
-  anthropic_claude_code_agent
 
 capability:
   agent_turn
 
 explicitly_not:
   generic_openai_api
-  generic_anthropic_messages_api
 ```
 
-不能把这两类 Runner 注册成 `openai-compatible` 或 `anthropic-messages` 上游。客户端必须知道它调用的是有会话、工具和审批语义的代理执行器。
+不能把该 Runner 注册成 `openai-compatible` 上游。客户端必须知道它调用的是有会话、工具和审批语义的代理执行器。
 
 ### 6.2 凭据封装
 
 ```json
 {
   "version": 1,
-  "provider_kind": "openai_codex_agent | anthropic_claude_code_agent",
-  "credential_kind": "codex_access_token | codex_auth_cache_opaque | claude_code_oauth_token",
+  "provider_kind": "openai_codex_agent",
+  "credential_kind": "codex_access_token | codex_auth_cache_opaque",
   "secret": "<opaque, write-only>",
   "account_label": "<admin supplied, non-secret>",
   "expires_at": "<RFC3339 or null>",
@@ -234,8 +235,6 @@ explicitly_not:
 | --- | --- | --- | --- |
 | OpenAI Business/Enterprise | 管理控制台创建 Codex Access Token，或官方 App Server 设备码登录 | Access Token 由管理员轮换；普通登录缓存由官方 Codex 刷新 | 只保存不透明令牌/缓存并启动固定版本官方 Runner |
 | OpenAI Plus/Pro | 官方 Codex 浏览器/设备码；可信无头环境可复制 `auth.json` | 官方 Codex 刷新 | 仅实验；不承诺第三方集中托管 |
-| Anthropic Pro/Max/Team/Enterprise | 用户运行官方 `claude setup-token` | 一年期 Token 到期后由用户重新生成；来源明确的 Refresh Token 只交给官方客户端 | 只通过官方文档化环境变量注入固定版本官方 Runner |
-| Gemini AI Pro/Ultra | 未找到公开支持的第三方会员入口；借用 Gemini CLI OAuth 明确受限 | 不适用 | 不实现该受限机制；等待新的官方合同 |
 
 ### 6.4 调用和隔离
 
@@ -248,7 +247,7 @@ explicitly_not:
 
 ### 6.5 当前否决条件
 
-只要“一个 Go 服务进程直接执行全部上游请求”仍是硬约束，官方 Runner 条件方案就不能进入实现。若坚持当前架构，OpenAI 和 Anthropic 的会员 Runner 方案因当前架构不支持而阻塞，其会员 Token 直连标准模型 API 又因公开调用合同缺失而阻塞；Gemini 则仅对借用 Gemini CLI OAuth 的具体方案存在供应商明确政策限制。API Key/Cloud IAM 的官方可行性不受这些会员结论影响，但是否已由当前预览实现仍须单独验收。
+只要“一个 Go 服务进程直接执行全部上游请求”仍是硬约束，任何官方 Runner 条件方案都不能进入实现。Claude 管理员池化 Runner 还受到当前 Anthropic 认证政策限制；Gemini 借用 CLI OAuth 受到 Google 针对该机制的明确限制。API Key/Platform/Cloud IAM 的可行性不受这些会员结论影响，但每种认证方式仍须单独实现和验收。
 
 ## 7. 产品与验收建议
 
@@ -262,7 +261,7 @@ explicitly_not:
 
 ## 8. 官方来源 URL / 查阅日期矩阵
 
-全部来源于供应商官方站点；查阅日期均为 2026-09-22。网页会更新，实施前应重新核对。
+全部来源于供应商官方站点；原始查阅日期为 2026-09-22，Claude 认证政策于 2026-09-23 复核。网页会更新，实施前应重新核对。
 
 | 提供商 | 官方来源 | 支持的结论 | 查阅日期 |
 | --- | --- | --- | --- |
@@ -275,6 +274,7 @@ explicitly_not:
 | OpenAI | https://developers.openai.com/api/docs/quickstart | 标准 OpenAI API 使用 Platform API Key | 2026-09-22 |
 | Anthropic | https://support.anthropic.com/en/articles/9876003-i-subscribe-to-a-paid-claude-ai-plan-why-do-i-have-to-pay-separately-for-api-usage-on-console | Claude.ai 会员不含 Console API 使用 | 2026-09-22 |
 | Anthropic | https://code.claude.com/docs/en/authentication | “Authentication precedence” 与 “Generate a long-lived token”：账号类型、`setup-token` 一年期会员 Token、适用范围和限制 | 2026-09-22 |
+| Anthropic | https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use | 第三方产品的认证、凭据中介限制，以及托管未修改 Claude Code 时的终端用户认证条件 | 2026-09-23 |
 | Anthropic | https://code.claude.com/docs/en/env-vars | `CLAUDE_CODE_OAUTH_TOKEN`、Refresh Token 与 Scope、API Key 覆盖会员登录 | 2026-09-22 |
 | Anthropic | https://platform.claude.com/docs/en/api/overview | 标准 Claude API 的认证前提与请求头 | 2026-09-22 |
 | Anthropic | https://platform.claude.com/docs/en/manage-claude/authentication | API Key、WIF、App Attest 的正式 API 认证范围 | 2026-09-22 |
@@ -288,8 +288,8 @@ explicitly_not:
 ## 9. 最终决策记录
 
 - 三家会员支持继续保留为核心目标，不从路线图删除。
-- 当前预览契约与已知实现只覆盖 `openai-compatible` API Key 闭环；Claude 原生 API、Gemini API Key 与 Vertex IAM 均是后续规划，尚未实现或验收，不得写成已交付。
-- OpenAI Business/Enterprise 和 Claude 会员存在官方 Agent 自动化路径，可在批准多进程 Runner 架构后做独立原型。
+- Claude API Key 原生 Messages / count_tokens 子集与 Gemini API Key 原生子集已完成合成上游验收；它们分别使用 API/AI Studio 配额，不是会员接入。Claude Platform OAuth/WIF 与 Google Vertex 认证仍待实现。
+- Claude 管理员池化 `setup-token` Runner 候选已撤回。只有取得覆盖集中托管和多员工转发的双方约定或新的官方第三方流程后才重评；每个终端用户登录未修改 Claude Code 是另一种产品和架构，不等于当前账号池目标。
 - OpenAI Plus/Pro 的第三方集中托管仍缺公开支持合同；这是实现阻塞，不以 `auth.json` 可复制为由宣称通用代理支持，也不据此断言普遍违法。
 - Gemini 不实现第三方借用 Gemini CLI OAuth 的会员代理；限制只针对这一明确机制，其他未来官方方案按新合同重新评估。
 - 不接收真实凭据用于研究，不实现 Cookie、网页 Session、非公开 Token 或非公开端点导入。
