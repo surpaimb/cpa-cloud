@@ -99,9 +99,32 @@ In **请求治理 / Request governance**, set requests per minute (RPM) and conc
 
 RPM uses a rolling 60-second window that policy edits do not reset. Chat, Responses, Claude Messages and Gemini generation share governance; `count_tokens` is currently excluded. Disabling the switch only affects new admissions; existing requests still settle. After an abnormal restart, previous concurrency reservations remain until their original lease expiry, without replaying requests.
 
-Governance groups are separate from departments and upstream account groups. Policies cannot grant model access or restore revoked keys. After a network interruption, reconcile the original save operation; after a version conflict, load and confirm the current configuration before saving again. **Shadow TPM and cost do not reject requests or charge users.** This integration branch adds a separate hard-budget switch, disabled by default: reservations require both switches enabled and a policy with `deny_unknown`.
+Governance groups are separate from departments and upstream account groups. Policies cannot grant model access or restore revoked keys. After a network interruption, reconcile the original save operation; after a version conflict, load and confirm the current configuration before saving again. **Shadow TPM and cost do not reject requests or charge users.** The latest source adds a separate hard-budget switch, disabled by default: reservations require both switches enabled and a policy with `deny_unknown`.
 
-The current bound covers only a fixed parameter shape for non-streaming text requests to official OpenAI `gpt-4.1-2025-04-14`. Other models, tools, membership requests and SSE are rejected when a bound cannot be proven. Cost limits additionally require a matching-currency price for the actual upstream model. Unknown usage conservatively retains the upper bound instead of becoming zero; this is not a provider invoice guarantee. See [integration progress and outstanding validation](docs/budget-service-integration-progress.md). Preview.3 downloads do not include this work. General budget coverage, tenant limits and billing remain unfinished.
+The current bound covers only a fixed parameter shape for non-streaming text requests to official OpenAI `gpt-4.1-2025-04-14`. Other models, tools, membership requests and SSE are rejected when a bound cannot be proven. Cost limits additionally require a matching-currency price for the actual upstream model. Unknown usage conservatively retains the upper bound instead of becoming zero; this is not a provider invoice guarantee. See [integration evidence and remaining scope](docs/budget-service-integration-progress.md). Preview.3 downloads do not include this work. General budget coverage, tenant limits and billing remain unfinished.
+
+<details>
+<summary>Request requirements for the fixed-model budget experiment</summary>
+
+Map an employee-accessible public model to `gpt-4.1-2025-04-14` on the official OpenAI upstream, then use an employee key with CPA Cloud's `/v1/chat/completions`. Replace `model` below with that public model name; retain all seven top-level fields and add no other parameters. Each message may contain only `role` and a string `content`.
+
+```json
+{
+  "model": "gpt-4.1-2025-04-14",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "max_completion_tokens": 256,
+  "n": 1,
+  "modalities": ["text"],
+  "store": false,
+  "stream": false
+}
+```
+
+`max_completion_tokens` must be 1–32768. The current proof reserves the input bound of 1,047,576 plus the output limit: this example initially holds up to 1,047,832 tokens, rather than estimating the short message. Less remaining TPM returns `429 budget_exceeded` even for a short input. This conservative approach still needs further refinement.
+
+A request without a supported bound, or a cost policy without a matching-currency price, returns `503 budget_bound_unavailable`; this is not an account authentication failure. These request conditions have synthetic-upstream coverage, but no real-provider validation.
+
+</details>
 
 Choose **查看用量观测 / View observations** on the same page and filter by employee, key, governance group or policy. Tokens use a 60-second window; costs use a 24-hour window and remain separate by currency. Unknown usage, pending requests and other currencies retain uncertainty; “exceeded” means the known portion exceeds a historical threshold. Every policy version for the same scope uses its full window total, so cards must not be added together. Pagination fixes the window boundary, while late settlement can change totals; refresh the first page for a current complete view. See the [observation contract](docs/governance-observation-contract.md).
 

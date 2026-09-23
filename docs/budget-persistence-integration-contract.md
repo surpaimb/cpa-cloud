@@ -1,6 +1,6 @@
 # 预算持久核心与服务接线契约
 
-状态：**核心及服务接线已进入独立集成分支，完整验收待完成**，2026-09-24。见[实际进度](budget-service-integration-progress.md)。
+状态：**本轮固定模型实验已实现、通过独立验收并合入主线；通用预算范围仍未完成**，2026-09-24。见[实际进度](budget-service-integration-progress.md)。
 补充 [预算准入提案](budget-admission-proposal.md)，以当前自有源码为依据；不是 Sub2API 实现的移植。
 冲突时本文件中的接口、锁顺序和结算维度决定优先。基础接口的实际交付见
 [Accounting 基础](budget-accounting-foundations.md)与[恢复事务基础](budget-recovery-foundations.md)。

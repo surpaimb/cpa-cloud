@@ -1,6 +1,22 @@
 # 集成状态
 
-## 2026-09-24：预算事务基础（独立分支，未合入主线）
+## 2026-09-24：预算预留、结算与请求执行集成
+
+- `ac4d820` 已集成持久预留、最终派发前确认、冻结价格、预算/账本/治理联合终结、严格迁移和启动恢复，
+  管理端开关与策略网页同时就绪。默认关闭；只有治理和预算开关同时开启并命中 `deny_unknown` hard 策略才启用。
+- 首个证明仅覆盖官方 `gpt-4.1-2025-04-14` 的严格文本、非流式请求；不把其他模型、SSE、会员、工具或媒体视为已获上界证明。
+  两个提交阶段结果不确定均不派发，结算不确定按原 ID 核对而不重发；未知 Token/成本分别保留上界，超界持久隔离 profile。
+- 根非缓存全量 Go、全项目 vet、网页 109 项测试/typecheck/build 及增强治理进程 smoke 通过；真实 Go + Playwright
+  桌面 1440×1000 和手机 390×844 创建/编辑/重载/开关通过，超大成本字符串原样保留，0 页面异常。
+  只用合成数据，临时服务/浏览器/数据均清理。详细证据见[预算集成进度](budget-service-integration-progress.md)。
+- [Code validation 35927456340](https://github.com/surpaimb/cpa-cloud/actions/runs/35927456340) 全部通过。
+  根读取 core `107405872942` 实际日志：普通 service 132.048s，race service 1323.013s、membership 1.870s、
+  scheduling 1.086s、accounting 59.363s、egress 1.319s、governance 8.858s 全 PASS；vet/build 与六组隔离进程 smoke 全 PASS。
+  web `107405872936` 的 typecheck、13 文件/109 测试及构建通过，三平台安装全部 skipped。
+- [PR #1](https://github.com/surpaimb/cpa-cloud/pull/1) 已合入 main `d95b6a7`；合并后的程序与该 CI 验证的 `ac4d820` 一致。
+  文档另行同步，preview.3 下载不含此增量，没有真实提供商兼容验证。
+
+## 2026-09-24：预算事务基础（早期记录，后续接线见上文）
 
 - 分支 `codex/budget-integration` 保存 caller-owned `BeginAttemptTx`、accounting/governance `RecoverInterruptedTx`、
   原始不可变价格的四桶/互斥输入组上界算术；根只读审查和修订三输入桶之和的 proof 条件，并补两包真实 SQLite
