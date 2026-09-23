@@ -169,6 +169,11 @@ func acquireRuntime(t *testing.T, rt *accountPoolRuntime, model string, auth emp
 
 func TestAccountPoolRuntimeMigrationRollbackAndMetadataOnly(t *testing.T) {
 	base := newAccountPoolFixture(t, false)
+	for _, table := range []string{accountPoolCooldownTable, accountPoolLeaseTable} {
+		if _, err := base.app.store.db.Exec(`DROP TABLE ` + table); err != nil {
+			t.Fatalf("drop initialized runtime table %s: %v", table, err)
+		}
+	}
 	if _, err := base.app.store.db.Exec(`CREATE TABLE account_pool_runtime_leases(lease_id TEXT PRIMARY KEY,account_id TEXT,public_model TEXT,employee_id TEXT,key_id TEXT,pool_revision INTEGER,account_revision INTEGER,expires_at TEXT,created_at TEXT)`); err != nil {
 		t.Fatal(err)
 	}
