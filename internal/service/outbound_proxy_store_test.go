@@ -335,6 +335,59 @@ func TestOutboundProxyCredentialEditsAdvanceOnlyEffectiveConnectionChanges(t *te
 	}
 }
 
+func TestOutboundProxyConnectionEditClampsToLatestBindingTime(t *testing.T) {
+	f := newOutboundProxyTestStore(t)
+	ctx := context.Background()
+	t1 := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Minute)
+	t3 := t1.Add(2 * time.Minute)
+	current := t1
+	f.store.now = func() time.Time { return current }
+	proxy, err := f.store.Create(ctx, outboundProxyCreateInput{OperationID: "10000000-0000-4000-8000-000000000010", Name: "Clock", Scheme: "https", Host: "proxy.example", Port: 443, AddressScope: "public", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertProxyTestUpstream(t, f.db, "ups_clock", "openai-compatible", "https://api.example/v1", 1)
+	current = t3
+	if _, err := f.store.SetBinding(ctx, upstreamProxyBindingInput{UpstreamID: "ups_clock", ExpectedUpstreamRevision: 1, ProxyID: proxy.ID, ExpectedProxyRevision: 1, Bind: true}); err != nil {
+		t.Fatal(err)
+	}
+	current = t2
+	updated, err := f.store.Update(ctx, outboundProxyUpdateInput{ID: proxy.ID, ExpectedRevision: 1, Name: proxy.Name, Scheme: proxy.Scheme, Host: "proxy-new.example", Port: proxy.Port, AddressScope: proxy.AddressScope, Enabled: true, CredentialMode: outboundProxyCredentialKeep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.View.UpdatedAt.Equal(t3) {
+		t.Fatalf("proxy updated_at=%v want %v", updated.View.UpdatedAt, t3)
+	}
+	var bindingCreated, bindingUpdated string
+	if err := f.db.QueryRow(`SELECT created_at,updated_at FROM upstream_proxy_bindings WHERE upstream_id='ups_clock'`).Scan(&bindingCreated, &bindingUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if bindingCreated != formatAccountPoolTime(t3) || bindingUpdated != formatAccountPoolTime(t3) {
+		t.Fatalf("binding times created=%q updated=%q", bindingCreated, bindingUpdated)
+	}
+	t4 := t3.Add(time.Minute)
+	current = t4
+	replacement, err := f.store.Create(ctx, outboundProxyCreateInput{OperationID: "10000000-0000-4000-8000-000000000011", Name: "New clock", Scheme: "https", Host: "proxy-replacement.example", Port: 443, AddressScope: "public", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = t2
+	if _, err := f.store.SetBinding(ctx, upstreamProxyBindingInput{UpstreamID: "ups_clock", ExpectedUpstreamRevision: 3, ProxyID: replacement.ID, ExpectedProxyRevision: 1, Bind: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRow(`SELECT created_at,updated_at FROM upstream_proxy_bindings WHERE upstream_id='ups_clock'`).Scan(&bindingCreated, &bindingUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if bindingCreated != formatAccountPoolTime(t3) || bindingUpdated != formatAccountPoolTime(t4) {
+		t.Fatalf("replacement binding times created=%q updated=%q", bindingCreated, bindingUpdated)
+	}
+	if err := f.store.Migrate(ctx); err != nil {
+		t.Fatalf("restart after clock rollback: %v", err)
+	}
+}
+
 func TestOutboundProxyMigrationStrictRollbackAndRepair(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "migration.db")

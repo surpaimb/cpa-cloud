@@ -272,16 +272,17 @@ func (s *outboundProxyStore) List(ctx context.Context, afterID string, limit int
 	if err != nil {
 		return nil, errors.New("outbound proxy storage unavailable")
 	}
-	defer rows.Close()
 	items := make([]outboundProxyView, 0)
 	for rows.Next() {
 		item, _, scanErr := scanOutboundProxy(rows)
 		if scanErr != nil {
+			rows.Close()
 			return nil, errors.New("outbound proxy storage unavailable")
 		}
 		items = append(items, item)
 	}
-	if err := rows.Err(); err != nil {
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil || closeErr != nil {
 		return nil, errors.New("outbound proxy storage unavailable")
 	}
 	return items, nil
@@ -330,7 +331,7 @@ func (s *outboundProxyStore) Update(ctx context.Context, input outboundProxyUpda
 	if connectionChanged && current.ConnectionRevision >= outboundProxyMaxRevision {
 		return zero, errOutboundProxyRevisionOverflow
 	}
-	boundIDs, err := proxyBoundAccounts(ctx, tx, input.ID)
+	boundIDs, latestBindingUpdate, err := proxyBoundAccounts(ctx, tx, input.ID)
 	if err != nil {
 		return zero, errors.New("outbound proxy storage unavailable")
 	}
@@ -346,6 +347,9 @@ func (s *outboundProxyStore) Update(ctx context.Context, input outboundProxyUpda
 	now := s.now().UTC()
 	if now.Before(current.UpdatedAt) {
 		now = current.UpdatedAt
+	}
+	if now.Before(latestBindingUpdate) {
+		now = latestBindingUpdate
 	}
 	connectionRevision := current.ConnectionRevision
 	if connectionChanged {
@@ -486,6 +490,9 @@ func (s *outboundProxyStore) SetBinding(ctx context.Context, input upstreamProxy
 		}
 	}
 	now := s.now().UTC()
+	if now.Before(proxy.UpdatedAt) {
+		now = proxy.UpdatedAt
+	}
 	if hasExisting && now.Before(existing.UpdatedAt) {
 		now = existing.UpdatedAt
 	}
@@ -766,21 +773,37 @@ func (s *outboundProxyStore) findByOperation(ctx context.Context, operationID st
 	return item, fingerprint, true, err
 }
 
-func proxyBoundAccounts(ctx context.Context, tx *sql.Tx, proxyID string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT upstream_id FROM upstream_proxy_bindings WHERE proxy_id=? ORDER BY upstream_id`, proxyID)
+func proxyBoundAccounts(ctx context.Context, tx *sql.Tx, proxyID string) ([]string, time.Time, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT upstream_id,updated_at FROM upstream_proxy_bindings WHERE proxy_id=? ORDER BY upstream_id`, proxyID)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
-	defer rows.Close()
 	items := make([]string, 0)
+	var latest time.Time
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		var id, updated string
+		if err := rows.Scan(&id, &updated); err != nil {
+			rows.Close()
+			return nil, time.Time{}, err
+		}
+		parsed, err := parseCanonicalProxyTime(updated)
+		if err != nil {
+			rows.Close()
+			return nil, time.Time{}, err
+		}
+		if parsed.After(latest) {
+			latest = parsed
 		}
 		items = append(items, id)
 	}
-	return items, rows.Err()
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil {
+		return nil, time.Time{}, iterationErr
+	}
+	if closeErr != nil {
+		return nil, time.Time{}, closeErr
+	}
+	return items, latest, nil
 }
 
 const upstreamProxyBindingSelect = `SELECT upstream_id,proxy_id,proxy_connection_revision,created_at,updated_at FROM upstream_proxy_bindings`
@@ -838,27 +861,30 @@ func validateProxyTable(ctx context.Context, tx *sql.Tx, table, expected string,
 	if err != nil {
 		return errors.New("outbound proxy schema is incompatible")
 	}
-	defer rows.Close()
 	seen, auto := map[string]bool{}, 0
 	for rows.Next() {
 		var sequence, unique, partial int
 		var name, origin string
 		if err := rows.Scan(&sequence, &name, &unique, &origin, &partial); err != nil {
+			rows.Close()
 			return errors.New("outbound proxy schema is incompatible")
 		}
 		if origin == "c" {
 			if _, ok := indexes[name]; !ok || unique != 0 || partial != 0 {
+				rows.Close()
 				return errors.New("outbound proxy schema is incompatible")
 			}
 			seen[name] = true
 			continue
 		}
 		if (origin != "pk" && origin != "u") || unique != 1 || partial != 0 {
+			rows.Close()
 			return errors.New("outbound proxy schema is incompatible")
 		}
 		auto++
 	}
-	if rows.Err() != nil || len(seen) != len(indexes) || auto != automatic {
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil || closeErr != nil || len(seen) != len(indexes) || auto != automatic {
 		return errors.New("outbound proxy schema is incompatible")
 	}
 	return nil
