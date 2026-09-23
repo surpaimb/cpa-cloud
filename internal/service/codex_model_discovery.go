@@ -66,9 +66,16 @@ func (a *App) discoverCodexUpstreamModels(w http.ResponseWriter, r *http.Request
 		writeAdminError(w, http.StatusConflict, "upstream_reauthentication_required", "The upstream credential must be authorized or imported again.")
 		return
 	}
-	credential, err := a.codexCatalogCredential(r.Context(), &selected)
-	if err != nil {
-		writeAdminError(w, http.StatusConflict, "upstream_reauthentication_required", "The upstream credential must be authorized or imported again.")
+	selected, credential, credentialErr := a.acquireCodexCredential(r.Context(), selected)
+	if credentialErr != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		if credentialErr.Code == membership.CodexErrorReauthentication {
+			writeAdminError(w, http.StatusConflict, "upstream_reauthentication_required", "The upstream credential must be authorized or imported again.")
+		} else {
+			writeModelDiscoveryFailure(w, r)
+		}
 		return
 	}
 	defer credential.Destroy()
@@ -165,23 +172,6 @@ func (a *App) validateCatalogRevision(w http.ResponseWriter, r *http.Request, se
 		return false
 	}
 	return true
-}
-
-func (a *App) codexCatalogCredential(_ context.Context, selected *route) (*membership.CodexAuthCredential, error) {
-	plaintext, err := a.secrets.decryptCodexAuth(selected.AccountID, selected.Ciphertext)
-	if err != nil {
-		return nil, err
-	}
-	defer clear(plaintext)
-	credential, err := membership.ParseCodexAuthJSON(plaintext)
-	if err != nil {
-		return nil, err
-	}
-	if err := membership.NewCodexDirectAdapter().ValidateCredentialForScheduling(credential); err != nil {
-		credential.Destroy()
-		return nil, err
-	}
-	return credential, nil
 }
 
 func (a *App) codexCatalogClientAndCache(selected route) (codexCatalogLister, []byte) {
