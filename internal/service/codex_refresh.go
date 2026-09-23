@@ -223,6 +223,10 @@ func (a *App) acquireCodexMutationLock(ctx context.Context, id string) (func(), 
 }
 
 func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expected *int64, force bool) (codexRefreshSnapshot, error) {
+	return c.refreshGuarded(ctx, id, expected, force, nil)
+}
+
+func (c *codexRefreshCoordinator) refreshGuarded(ctx context.Context, id string, expected *int64, force bool, guard *codexRecoveryRefreshGuard) (codexRefreshSnapshot, error) {
 	if !c.enabled() {
 		return codexRefreshSnapshot{}, &codexRefreshFailure{code: "refresh_unavailable"}
 	}
@@ -230,18 +234,24 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 	if !lock.lock(ctx) {
 		return codexRefreshSnapshot{}, &codexRefreshFailure{code: "refresh_cancelled", err: ctx.Err()}
 	}
-	defer lock.unlock()
+	notify := false
+	defer func() {
+		lock.unlock()
+		if notify {
+			c.app.notifyAccountPoolChanged()
+		}
+	}()
 
 	var snapshot codexRefreshSnapshot
 	var provider, boundClient, boundSource string
-	var enabled int
+	var enabled, keyVersion int
 	var refreshState, reason sql.NullString
 	err := c.app.store.db.QueryRowContext(ctx, `SELECT u.provider_kind,u.enabled,u.revision,u.credential_ciphertext,
-		COALESCE(u.credential_state,''),COALESCE(b.client_id,''),COALESCE(b.source,''),r.state,r.reason_code
+		u.key_version,COALESCE(u.credential_state,''),COALESCE(b.client_id,''),COALESCE(b.source,''),r.state,r.reason_code
 		FROM upstreams u
 		LEFT JOIN codex_oauth_bindings b ON b.upstream_id=u.id
 		LEFT JOIN codex_oauth_refresh_states r ON r.upstream_id=u.id
-		WHERE u.id=?`, id).Scan(&provider, &enabled, &snapshot.revision, &snapshot.ciphertext, &snapshot.credentialState,
+		WHERE u.id=?`, id).Scan(&provider, &enabled, &snapshot.revision, &snapshot.ciphertext, &keyVersion, &snapshot.credentialState,
 		&boundClient, &boundSource, &refreshState, &reason)
 	if err != nil {
 		return snapshot, err
@@ -254,6 +264,14 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 	}
 	if expected != nil && snapshot.revision != *expected {
 		return snapshot, &codexRefreshFailure{code: "revision_conflict"}
+	}
+	if guard != nil {
+		if keyVersion != 2 {
+			return snapshot, &codexRefreshFailure{code: "revision_conflict"}
+		}
+		if err := guard.validateInitial(ctx, c.app.store.db, id, snapshot.revision, boundSource, boundClient); err != nil {
+			return snapshot, err
+		}
 	}
 	if boundClient == "" || boundSource != "authorization_code" || boundClient != c.app.cfg.CodexOAuthClientID {
 		return snapshot, &codexRefreshFailure{code: "refresh_not_bound"}
@@ -333,7 +351,13 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 	tokens, wireErr := c.app.requestCodexOAuthTokensWithRetryGuard(ctx, codexOAuthTokenRequest{
 		GrantType: "refresh_token", ClientID: boundClient, RefreshToken: refreshToken,
 	}, func(retryCtx context.Context) error {
-		return c.requireCurrentAttempt(retryCtx, id, snapshot.revision, enabled, boundClient)
+		if err := c.requireCurrentAttempt(retryCtx, id, snapshot.revision, enabled, boundClient); err != nil {
+			return err
+		}
+		if guard != nil {
+			return guard.validateRecoveryAnchor(retryCtx, c.app.store.db, id, snapshot.revision)
+		}
+		return nil
 	})
 	if wireErr != nil {
 		if wireErr.internal != nil {
@@ -386,16 +410,21 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 			return pauseThenGlobal("rotated_credential_save_failed", err)
 		}
 	}
-	if err := c.persistRotated(ctx, id, snapshot.revision, enabled, boundClient, rotated); err != nil {
+	var adopt codexRefreshAdoptionHook
+	if guard != nil {
+		adopt = guard.adopt
+	}
+	if err := c.persistRotated(ctx, id, snapshot.revision, enabled, boundClient, rotated, adopt); err != nil {
 		return pauseThenGlobal("rotated_credential_save_failed", err)
 	}
+	notify = true
 	snapshot.revision++
 	snapshot.ciphertext = rotated
 	snapshot.credentialState = codexStateImported
 	return snapshot, nil
 }
 
-func (c *codexRefreshCoordinator) persistRotated(ctx context.Context, id string, revision int64, enabled int, clientID string, ciphertext []byte) error {
+func (c *codexRefreshCoordinator) persistRotated(ctx context.Context, id string, revision int64, enabled int, clientID string, ciphertext []byte, adopt codexRefreshAdoptionHook) error {
 	tx, err := c.app.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -423,10 +452,17 @@ func (c *codexRefreshCoordinator) persistRotated(ctx context.Context, id string,
 	if changed != 1 {
 		return &codexRefreshFailure{code: "revision_conflict"}
 	}
+	if adopt != nil {
+		if err := adopt(ctx, tx, codexRefreshTransition{
+			accountID: id, fromRevision: revision, toRevision: revision + 1,
+			source: "authorization_code", clientID: clientID,
+		}); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	c.app.notifyAccountPoolChanged()
 	return nil
 }
 
