@@ -78,6 +78,9 @@ func (a *App) discoverCodexUpstreamModels(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if cached != nil {
+		if !a.validateCatalogRevision(w, r, selected) {
+			return
+		}
 		writeCatalogJSON(w, cached)
 		return
 	}
@@ -130,13 +133,7 @@ func (a *App) discoverCodexUpstreamModels(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// Re-import, disabling, or replacement while discovering invalidates this result.
-	var current int
-	if err := a.store.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM upstreams WHERE id=? AND revision=? AND enabled=1 AND provider_kind=? AND credential_state<>?`, id, selected.Revision, codexMembershipProvider, codexStateReauth).Scan(&current); err != nil {
-		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
-		return
-	}
-	if current != 1 {
-		writeAdminError(w, http.StatusConflict, "revision_conflict", "The upstream changed while discovering models.")
+	if !a.validateCatalogRevision(w, r, selected) {
 		return
 	}
 	a.catalogMu.Lock()
@@ -155,6 +152,19 @@ func (a *App) discoverCodexUpstreamModels(w http.ResponseWriter, r *http.Request
 	}
 	a.catalogMu.Unlock()
 	writeCatalogJSON(w, body)
+}
+
+func (a *App) validateCatalogRevision(w http.ResponseWriter, r *http.Request, selected route) bool {
+	var current int
+	if err := a.store.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM upstreams WHERE id=? AND revision=? AND enabled=1 AND provider_kind=? AND credential_state<>?`, selected.AccountID, selected.Revision, codexMembershipProvider, codexStateReauth).Scan(&current); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return false
+	}
+	if current != 1 {
+		writeAdminError(w, http.StatusConflict, "revision_conflict", "The upstream changed while discovering models.")
+		return false
+	}
+	return true
 }
 
 func (a *App) codexCatalogCredential(_ context.Context, selected *route) (*membership.CodexAuthCredential, error) {

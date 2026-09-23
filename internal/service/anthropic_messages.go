@@ -318,6 +318,10 @@ func (a *App) forwardAnthropicStream(w http.ResponseWriter, r *http.Request, res
 	var frame anthropicSSEFrame
 	for {
 		line, err := readBoundedSSELine(reader, anthropicMaxSSELine)
+		if limited.N <= 0 {
+			outcome = "failed"
+			break
+		}
 		if len(line) > 0 {
 			if frame.size+len(line) > anthropicMaxSSEEvent {
 				outcome = "failed"

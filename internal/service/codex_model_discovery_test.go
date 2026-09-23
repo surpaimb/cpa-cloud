@@ -129,7 +129,9 @@ func TestCodexModelCatalogAdminCacheReplacementAndNoPermissionMutation(t *testin
 		t.Fatal("stale result cached")
 	}
 	// Default-off gate remains authoritative even with a populated cache/client.
-	app.cfg.ExperimentalCodexMembership = false
-	disabled := requestJSON(t, http.MethodPost, target, "{}", cookie, csrf, server.URL)
+	disabledApp := &App{cfg: Config{ExperimentalCodexMembership: false}, store: app.store, secrets: app.secrets}
+	disabledServer := httptest.NewServer(disabledApp.Handler())
+	defer disabledServer.Close()
+	disabled := requestJSON(t, http.MethodPost, disabledServer.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/discover-models", "{}", cookie, csrf, disabledServer.URL)
 	assertCodexAdminError(t, disabled, http.StatusForbidden, "feature_disabled")
 }
