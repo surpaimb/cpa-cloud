@@ -70,6 +70,7 @@ type accountPoolRuntime struct {
 type accountPoolLease struct {
 	runtime         *accountPoolRuntime
 	inner           *scheduling.Lease
+	poolRevision    int64
 	ctx             context.Context
 	cancel          context.CancelFunc
 	stopRuntime     func() bool
@@ -77,6 +78,7 @@ type accountPoolLease struct {
 	mu              sync.Mutex
 	finished        bool
 	heartbeatFailed bool
+	phase           scheduling.DispatchPhase
 }
 
 type accountPoolRuntimeConfig struct {
@@ -87,6 +89,11 @@ type accountPoolRuntimeConfig struct {
 	MaxSticky  int
 	MaxWaiters int
 	Cooldowns  map[scheduling.FailureClass]time.Duration
+}
+
+type accountPoolAcquireOptions struct {
+	ExcludedAccountIDs   []string
+	ExpectedPoolRevision int64
 }
 
 type poolCandidate struct {
@@ -318,13 +325,18 @@ func (runtimeClock) Now() time.Time                         { return time.Now() 
 func (runtimeClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
 func (rt *accountPoolRuntime) Acquire(ctx context.Context, publicModel string, auth employeeAuth, allowedProviders []string, stickyOpaque string) accountPoolAcquireResult {
+	return rt.AcquireWithOptions(ctx, publicModel, auth, allowedProviders, stickyOpaque, accountPoolAcquireOptions{})
+}
+
+func (rt *accountPoolRuntime) AcquireWithOptions(ctx context.Context, publicModel string, auth employeeAuth, allowedProviders []string, stickyOpaque string, options accountPoolAcquireOptions) accountPoolAcquireResult {
 	if !rt.begin() {
 		return accountPoolAcquireResult{Code: accountPoolClosed}
 	}
 	defer rt.wg.Done()
-	if ctx == nil || !validIdentifier(publicModel, 128) || auth.EmployeeID == "" || auth.KeyID == "" || len(allowedProviders) == 0 || len(stickyOpaque) > 256 {
+	if ctx == nil || !validIdentifier(publicModel, 128) || auth.EmployeeID == "" || auth.KeyID == "" || len(allowedProviders) == 0 || len(stickyOpaque) > 256 || !validAccountPoolAcquireOptions(options) {
 		return accountPoolAcquireResult{Code: accountPoolInvalid}
 	}
+	options.ExcludedAccountIDs = append([]string(nil), options.ExcludedAccountIDs...)
 	if ctx.Err() != nil {
 		return accountPoolAcquireResult{Code: accountPoolCancelled}
 	}
@@ -371,6 +383,12 @@ func (rt *accountPoolRuntime) Acquire(ctx context.Context, publicModel string, a
 		if !modelAllowed {
 			return accountPoolAcquireResult{Code: accountPoolModelNotAllowed}
 		}
+		if code == accountPoolStorageUnavailable {
+			return accountPoolAcquireResult{Code: code}
+		}
+		if options.ExpectedPoolRevision > 0 && (legacy || pool.revision != options.ExpectedPoolRevision) {
+			return accountPoolAcquireResult{Code: accountPoolConfigurationChanged}
+		}
 		if code != "" {
 			return accountPoolAcquireResult{Code: code}
 		}
@@ -395,7 +413,7 @@ func (rt *accountPoolRuntime) Acquire(ctx context.Context, publicModel string, a
 			cancelWait()
 			continue
 		}
-		inner, decision := rt.scheduler.Acquire(waitContext, scheduling.Request{Provider: pool.provider, Model: publicModel, AllowedAccountIDs: candidateIDs(pool.candidates), StickyKey: sticky, Candidates: pool.candidates})
+		inner, decision := rt.scheduler.Acquire(waitContext, scheduling.Request{Provider: pool.provider, Model: publicModel, AllowedAccountIDs: candidateIDs(pool.candidates), ExcludedAccountIDs: append([]string(nil), options.ExcludedAccountIDs...), StickyKey: sticky, Candidates: pool.candidates})
 		stopChange()
 		cancelWait()
 		if !rt.changeIsCurrent(epoch) {
@@ -411,14 +429,14 @@ func (rt *accountPoolRuntime) Acquire(ctx context.Context, publicModel string, a
 			return accountPoolAcquireResult{Code: mapSchedulingCode(decision.Code)}
 		}
 		rt.app.admission.RLock()
-		selected, code := rt.persistRevalidatedLease(opContext, publicModel, auth, allowedProviders, pool, inner)
+		selected, code := rt.persistRevalidatedLease(opContext, publicModel, auth, allowedProviders, pool, options, inner)
 		rt.app.admission.RUnlock()
 		if code != "" {
 			inner.Release(scheduling.ReleaseResult{})
 			return accountPoolAcquireResult{Code: code}
 		}
 		leaseContext, cancelLease := context.WithCancel(ctx)
-		lease := &accountPoolLease{runtime: rt, inner: inner, ctx: leaseContext, cancel: cancelLease, done: make(chan struct{})}
+		lease := &accountPoolLease{runtime: rt, inner: inner, poolRevision: pool.revision, ctx: leaseContext, cancel: cancelLease, done: make(chan struct{}), phase: scheduling.DispatchNotStarted}
 		lease.stopRuntime = context.AfterFunc(rt.ctx, cancelLease)
 		if !rt.startHeartbeat(lease) {
 			lease.Release(context.Background(), scheduling.ReleaseResult{})
@@ -526,12 +544,12 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 		return poolSnapshot{}, false, accountPoolStorageUnavailable
 	}
 	if len(pool.candidates) == 0 {
-		return poolSnapshot{}, false, accountPoolNoCompatible
+		return pool, false, accountPoolNoCompatible
 	}
 	return pool, false, ""
 }
 
-func (rt *accountPoolRuntime) persistRevalidatedLease(ctx context.Context, model string, auth employeeAuth, allowedProviders []string, pool poolSnapshot, inner *scheduling.Lease) (route, accountPoolRuntimeCode) {
+func (rt *accountPoolRuntime) persistRevalidatedLease(ctx context.Context, model string, auth employeeAuth, allowedProviders []string, pool poolSnapshot, options accountPoolAcquireOptions, inner *scheduling.Lease) (route, accountPoolRuntimeCode) {
 	tx, err := rt.app.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return route{}, accountPoolStorageUnavailable
@@ -559,6 +577,9 @@ func (rt *accountPoolRuntime) persistRevalidatedLease(ctx context.Context, model
 	}
 	expected, ok := pool.byID[inner.AccountID()]
 	if !ok {
+		return route{}, accountPoolConfigurationChanged
+	}
+	if accountPoolAccountExcluded(inner.AccountID(), options.ExcludedAccountIDs) {
 		return route{}, accountPoolConfigurationChanged
 	}
 	var selected route
@@ -592,6 +613,35 @@ func (rt *accountPoolRuntime) persistRevalidatedLease(ctx context.Context, model
 }
 
 func (l *accountPoolLease) Context() context.Context { return l.ctx }
+
+func (l *accountPoolLease) PoolRevision() int64 {
+	if l == nil {
+		return 0
+	}
+	return l.poolRevision
+}
+
+func (l *accountPoolLease) MarkDispatch() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.finished && l.phase < scheduling.MayHaveSent {
+		l.phase = scheduling.MayHaveSent
+	}
+}
+
+func (l *accountPoolLease) MarkOutput() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.finished && l.phase < scheduling.OutputCommitted {
+		l.phase = scheduling.OutputCommitted
+	}
+}
 
 func (l *accountPoolLease) Heartbeat(ctx context.Context) accountPoolRuntimeCode {
 	l.mu.Lock()
@@ -628,6 +678,10 @@ func (l *accountPoolLease) Release(ctx context.Context, result scheduling.Releas
 	defer l.mu.Unlock()
 	if l.finished {
 		return false, accountPoolReleaseResult{Code: accountPoolAlreadyReleased}
+	}
+	result.Phase = conservativeDispatchPhase(result.Phase, l.phase)
+	if l.heartbeatFailed || l.ctx.Err() != nil {
+		result.Phase = scheduling.DispatchUnknown
 	}
 	l.finished = true
 	close(l.done)
@@ -777,6 +831,42 @@ func candidateIDs(candidates []scheduling.Candidate) []string {
 		ids[i] = candidates[i].ID
 	}
 	return ids
+}
+
+func validAccountPoolAcquireOptions(options accountPoolAcquireOptions) bool {
+	if options.ExpectedPoolRevision < 0 || len(options.ExcludedAccountIDs) > maxModelAccounts {
+		return false
+	}
+	seen := make(map[string]struct{}, len(options.ExcludedAccountIDs))
+	for _, id := range options.ExcludedAccountIDs {
+		if !validIdentifier(id, 128) {
+			return false
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return false
+		}
+		seen[id] = struct{}{}
+	}
+	return true
+}
+
+func accountPoolAccountExcluded(accountID string, excluded []string) bool {
+	for _, id := range excluded {
+		if id == accountID {
+			return true
+		}
+	}
+	return false
+}
+
+func conservativeDispatchPhase(explicit, observed scheduling.DispatchPhase) scheduling.DispatchPhase {
+	if explicit == scheduling.DispatchUnknown || observed == scheduling.DispatchUnknown || explicit > scheduling.OutputCommitted || observed > scheduling.OutputCommitted {
+		return scheduling.DispatchUnknown
+	}
+	if explicit > observed {
+		return explicit
+	}
+	return observed
 }
 
 func providerAllowed(provider string, allowed []string) bool {

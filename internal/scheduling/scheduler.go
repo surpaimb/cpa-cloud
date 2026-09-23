@@ -41,6 +41,17 @@ const (
 	FailurePermanent  FailureClass = "permanent"
 )
 
+// DispatchPhase is positive evidence about whether an upstream model request
+// could have executed. The zero value deliberately denies retry.
+type DispatchPhase uint8
+
+const (
+	DispatchUnknown DispatchPhase = iota
+	DispatchNotStarted
+	MayHaveSent
+	OutputCommitted
+)
+
 type Candidate struct {
 	ID            string
 	Provider      string
@@ -55,11 +66,12 @@ type Candidate struct {
 // Request contains routing metadata only. AllowedAccountIDs must be the
 // explicit result of the caller's employee/model authorization checks.
 type Request struct {
-	Provider          string
-	Model             string
-	AllowedAccountIDs []string
-	StickyKey         string
-	Candidates        []Candidate
+	Provider           string
+	Model              string
+	AllowedAccountIDs  []string
+	ExcludedAccountIDs []string
+	StickyKey          string
+	Candidates         []Candidate
 }
 
 type Decision struct {
@@ -69,7 +81,10 @@ type Decision struct {
 }
 
 type ReleaseResult struct {
-	Failure            FailureClass
+	Failure FailureClass
+	Phase   DispatchPhase
+	// Deprecated: retained for source compatibility. False zero values are not
+	// evidence that dispatch was safe, so these fields never authorize retry.
 	StreamCommitted    bool
 	ExecutionUncertain bool
 }
@@ -235,7 +250,7 @@ func New(config Config) *Scheduler {
 }
 
 func (s *Scheduler) Acquire(ctx context.Context, request Request) (*Lease, Decision) {
-	if ctx == nil || request.Provider == "" || request.Model == "" || len(request.AllowedAccountIDs) == 0 || len(request.Candidates) == 0 || len(request.Candidates) > maxCandidates || len(request.StickyKey) > maxStickyKeyBytes {
+	if ctx == nil || request.Provider == "" || request.Model == "" || len(request.AllowedAccountIDs) == 0 || len(request.Candidates) == 0 || len(request.Candidates) > maxCandidates || len(request.ExcludedAccountIDs) > maxCandidates || len(request.StickyKey) > maxStickyKeyBytes {
 		return nil, Decision{Code: ReasonInvalidRequest}
 	}
 	if ctx.Err() != nil {
@@ -260,6 +275,16 @@ func (s *Scheduler) Acquire(ctx context.Context, request Request) (*Lease, Decis
 	if len(allowed) == 0 {
 		return nil, Decision{Code: ReasonInvalidRequest}
 	}
+	excluded := make(map[string]struct{}, len(request.ExcludedAccountIDs))
+	for _, id := range request.ExcludedAccountIDs {
+		if id == "" {
+			return nil, Decision{Code: ReasonInvalidRequest}
+		}
+		if _, duplicate := excluded[id]; duplicate {
+			return nil, Decision{Code: ReasonInvalidRequest}
+		}
+		excluded[id] = struct{}{}
+	}
 	waiting := false
 	defer func() {
 		if waiting {
@@ -280,7 +305,7 @@ func (s *Scheduler) Acquire(ctx context.Context, request Request) (*Lease, Decis
 			s.mu.Unlock()
 			return nil, Decision{Code: ReasonCancelled}
 		}
-		available, compatible, allowedFound, nextWake := s.availableLocked(request, allowed, now)
+		available, compatible, allowedFound, nextWake := s.availableLocked(request, allowed, excluded, now)
 		if len(available) > 0 {
 			candidate, ok := s.chooseLocked(available, request.StickyKey)
 			if !ok {
@@ -358,13 +383,16 @@ func (s *Scheduler) Acquire(ctx context.Context, request Request) (*Lease, Decis
 	}
 }
 
-func (s *Scheduler) availableLocked(request Request, allowed map[string]struct{}, now time.Time) ([]Candidate, bool, bool, time.Time) {
+func (s *Scheduler) availableLocked(request Request, allowed, excluded map[string]struct{}, now time.Time) ([]Candidate, bool, bool, time.Time) {
 	available := []Candidate{}
 	compatible := false
 	allowedFound := false
 	var next time.Time
 	for _, c := range request.Candidates {
 		if _, ok := allowed[c.ID]; !ok || c.ID == "" {
+			continue
+		}
+		if _, skip := excluded[c.ID]; skip {
 			continue
 		}
 		allowedFound = true
@@ -513,7 +541,7 @@ func (s *Scheduler) release(id string, result ReleaseResult) (bool, Decision) {
 		}
 	}
 	s.signalLocked()
-	retry := (result.Failure == FailureRateLimit || result.Failure == FailureOverloaded || result.Failure == FailureTransient) && !result.StreamCommitted && !result.ExecutionUncertain
+	retry := result.Phase == DispatchNotStarted && !result.StreamCommitted && !result.ExecutionUncertain && (result.Failure == FailureRateLimit || result.Failure == FailureOverloaded || result.Failure == FailureTransient || result.Failure == FailureAuth || result.Failure == FailurePermanent)
 	return true, Decision{Code: ReasonReleased, AccountID: snapshot.AccountID, RetrySuggested: retry}
 }
 

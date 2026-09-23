@@ -488,7 +488,7 @@ func TestAccountPoolRuntimeHeartbeatFailureReleaseFailureRestartAndCooldown(t *t
 	<-restartWait
 	f.clock.Advance(10 * time.Second)
 	cooldownLease := acquireRuntime(t, restarted, "lifecycle-model", f.auth1, "")
-	ok, released := cooldownLease.Lease.Release(context.Background(), scheduling.ReleaseResult{Failure: scheduling.FailureRateLimit})
+	ok, released := cooldownLease.Lease.Release(context.Background(), scheduling.ReleaseResult{Failure: scheduling.FailureRateLimit, Phase: scheduling.DispatchNotStarted})
 	if !ok || released.Code != accountPoolReleased || !released.RetrySuggested {
 		t.Fatalf("cooldown release=%v %+v", ok, released)
 	}

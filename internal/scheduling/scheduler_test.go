@@ -142,6 +142,14 @@ func TestSchedulerPermissionCompatibilityPriorityWeightAndSticky(t *testing.T) {
 	if sticky == "a" {
 		other = b
 	}
+	lease, d = s.Acquire(context.Background(), Request{Provider: "codex", Model: "gpt", AllowedAccountIDs: []string{"a", "b"}, ExcludedAccountIDs: []string{sticky}, StickyKey: "thread", Candidates: []Candidate{a, b}})
+	if d.Code != ReasonAcquired || lease.AccountID() != other.ID {
+		t.Fatalf("excluded sticky decision=%+v account=%v", d, lease)
+	}
+	lease.Release(ReleaseResult{})
+	if _, d := s.Acquire(context.Background(), Request{Provider: "codex", Model: "gpt", AllowedAccountIDs: []string{"a", "b"}, ExcludedAccountIDs: []string{"a", "a"}, Candidates: []Candidate{a, b}}); d.Code != ReasonInvalidRequest {
+		t.Fatalf("duplicate exclusion=%+v", d)
+	}
 	lease, _ = s.Acquire(context.Background(), Request{Provider: "codex", Model: "gpt", AllowedAccountIDs: []string{other.ID}, StickyKey: "thread", Candidates: []Candidate{a, b}})
 	if lease.AccountID() != other.ID {
 		t.Fatal("sticky bypassed current allowlist")
@@ -416,7 +424,7 @@ func TestSchedulerCooldownRecoveryAndSafeRetryAdvice(t *testing.T) {
 	s := New(Config{Clock: clock, LeaseTTL: time.Minute, MaxWaiters: 2, Cooldowns: map[FailureClass]time.Duration{FailureRateLimit: 30 * time.Second, FailureTransient: 10 * time.Second, FailureAuth: time.Hour}})
 	a := candidate("a")
 	lease, _ := s.Acquire(context.Background(), request(a))
-	ok, decision := lease.Release(ReleaseResult{Failure: FailureRateLimit})
+	ok, decision := lease.Release(ReleaseResult{Failure: FailureRateLimit, Phase: DispatchNotStarted})
 	if !ok || !decision.RetrySuggested {
 		t.Fatalf("safe retry=%+v", decision)
 	}
@@ -441,11 +449,26 @@ func TestSchedulerCooldownRecoveryAndSafeRetryAdvice(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cooldown waiter not awakened")
 	}
-	for _, release := range []ReleaseResult{{Failure: FailureTransient, StreamCommitted: true}, {Failure: FailureTransient, ExecutionUncertain: true}, {Failure: FailureAuth}} {
+	for _, release := range []ReleaseResult{
+		{Failure: FailureTransient},
+		{Failure: FailureTransient, Phase: MayHaveSent},
+		{Failure: FailureTransient, Phase: OutputCommitted},
+		{Failure: FailureTransient, StreamCommitted: false, ExecutionUncertain: false},
+		{Failure: FailureTransient, Phase: DispatchNotStarted, StreamCommitted: true},
+		{Failure: FailureTransient, Phase: DispatchNotStarted, ExecutionUncertain: true},
+	} {
 		lease, _ = s.Acquire(context.Background(), request(a))
 		_, decision = lease.Release(release)
 		if decision.RetrySuggested {
 			t.Fatalf("unsafe retry suggested for %+v", release)
+		}
+		clock.Advance(time.Hour)
+	}
+	for _, failure := range []FailureClass{FailureAuth, FailurePermanent} {
+		lease, _ = s.Acquire(context.Background(), request(a))
+		_, decision = lease.Release(ReleaseResult{Failure: failure, Phase: DispatchNotStarted})
+		if !decision.RetrySuggested {
+			t.Fatalf("pre-dispatch retry not suggested for %s", failure)
 		}
 		clock.Advance(time.Hour)
 	}
