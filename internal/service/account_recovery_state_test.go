@@ -37,6 +37,85 @@ func TestAccountRecoverySchemaRejectsChangedEnumAndRetries(t *testing.T) {
 	}
 }
 
+func TestAccountRecoveryLegacyMigrationRejectsUnexpectedIndexAndRetries(t *testing.T) {
+	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 1)
+	if err := f.rt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.base.app.store.db.Exec(`DROP TABLE account_recovery_states`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.base.app.store.db.Exec(accountRecoveryLegacyDDL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.base.app.store.db.Exec(`CREATE INDEX account_recovery_states_unexpected_idx ON account_recovery_states(state)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.base.app.store.migrateAccountPoolRuntime(context.Background()); err == nil {
+		t.Fatal("legacy migration accepted an unexpected index")
+	}
+	var legacyColumns int
+	if err := f.base.app.store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('account_recovery_states') WHERE name IN ('attention_code','checked_at')`).Scan(&legacyColumns); err != nil || legacyColumns != 0 {
+		t.Fatalf("failed migration changed legacy columns=%d err=%v", legacyColumns, err)
+	}
+	if _, err := f.base.app.store.db.Exec(`DROP INDEX account_recovery_states_unexpected_idx`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.base.app.store.migrateAccountPoolRuntime(context.Background()); err != nil {
+		t.Fatalf("retry migration: %v", err)
+	}
+	var currentColumns, dueIndexes int
+	if err := f.base.app.store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('account_recovery_states') WHERE name IN ('attention_code','checked_at')`).Scan(&currentColumns); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.base.app.store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, accountRecoveryDueIndex).Scan(&dueIndexes); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := f.base.app.recovery.loadSettings(context.Background())
+	if err != nil || currentColumns != 2 || dueIndexes != 1 || settings.Enabled {
+		t.Fatalf("migration columns=%d due=%d settings=%+v err=%v", currentColumns, dueIndexes, settings, err)
+	}
+}
+
+func TestAccountRecoverySettingsSchemaAndStoredRowAreStrict(t *testing.T) {
+	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 1)
+	if err := f.rt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.base.app.store.db.Exec(`DROP TABLE account_recovery_settings`); err != nil {
+		t.Fatal(err)
+	}
+	badDDL := strings.Replace(accountRecoverySettingsDDL, "enabled IN (0,1)", "enabled IN (0,2)", 1)
+	if _, err := f.base.app.store.db.Exec(badDDL); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.base.app.store.migrateAccountPoolRuntime(context.Background()); err == nil {
+		t.Fatal("migration accepted changed settings CHECK")
+	}
+	var ddl string
+	if err := f.base.app.store.db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='account_recovery_settings'`).Scan(&ddl); err != nil || !strings.Contains(ddl, "enabled IN (0,2)") {
+		t.Fatalf("failed settings migration changed source ddl=%q err=%v", ddl, err)
+	}
+	if _, err := f.base.app.store.db.Exec(`DROP TABLE account_recovery_settings`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.base.app.store.migrateAccountPoolRuntime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.base.app.store.db.Exec(`UPDATE account_recovery_settings SET updated_at='not-a-time'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.base.app.store.migrateAccountPoolRuntime(context.Background()); err == nil {
+		t.Fatal("migration accepted malformed settings row")
+	}
+	if _, err := f.base.app.store.db.Exec(`UPDATE account_recovery_settings SET updated_at=?`, formatAccountPoolTime(time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.base.app.store.migrateAccountPoolRuntime(context.Background()); err != nil {
+		t.Fatalf("settings migration after repair: %v", err)
+	}
+}
+
 func TestAccountRecoveryStateCASAndCrossTableDuplicateLease(t *testing.T) {
 	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, 30*time.Second, 2)
 	f.insertAccount(t, "ups_recovery_cas", true)

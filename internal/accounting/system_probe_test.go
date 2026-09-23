@@ -480,6 +480,37 @@ func TestNormalizeSystemProbeSQLPreservesQuotedWhitespaceAndEscapes(t *testing.T
 	}
 }
 
+func TestSystemProbeCountsAcceptRuntimeEventIDAndSeeTransaction(t *testing.T) {
+	db, _, probes := openSystemProbeTest(t, filepath.Join(t.TempDir(), "counts.db"))
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO upstreams(id) VALUES('ups_probe')`); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	first := testSystemProbeStart(97_001)
+	first.RecoveryEventID = "cool_runtime_event"
+	beginSystemProbe(t, db, probes, first)
+	withSystemProbeTx(t, db, func(tx *sql.Tx) {
+		second := testSystemProbeStart(97_002)
+		second.RecoveryEventID = first.RecoveryEventID
+		second.StartedAt = first.StartedAt.Add(time.Second)
+		if _, err := probes.BeginTx(ctx, tx, second); err != nil {
+			t.Fatal(err)
+		}
+		counts, err := probes.CountsTx(ctx, tx, first.RecoveryEventID)
+		if err != nil || counts.Total != 2 || counts.Event != 2 {
+			t.Fatalf("transaction counts=%+v err=%v", counts, err)
+		}
+	})
+	counts, err := probes.Counts(ctx, first.RecoveryEventID)
+	if err != nil || counts.Total != 2 || counts.Event != 2 {
+		t.Fatalf("committed counts=%+v err=%v", counts, err)
+	}
+	if _, err := probes.Counts(ctx, "bad event"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid event err=%v", err)
+	}
+}
+
 func openSystemProbeTest(t *testing.T, path string) (*sql.DB, *PriceCatalog, *SystemProbeLedger) {
 	t.Helper()
 	db := openPriceDB(t, path)

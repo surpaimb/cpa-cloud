@@ -153,6 +153,7 @@ func (l *SystemProbeLedger) Migrate(ctx context.Context) error {
 		systemProbeDDL,
 		`CREATE INDEX IF NOT EXISTS system_probe_attempts_account_started_idx ON system_probe_attempts(account_id,started_at)`,
 		`CREATE INDEX IF NOT EXISTS system_probe_attempts_status_started_idx ON system_probe_attempts(status,started_at)`,
+		`CREATE INDEX IF NOT EXISTS system_probe_attempts_recovery_event_started_idx ON system_probe_attempts(recovery_event_id,started_at)`,
 	} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate system probe ledger: %w", err)
@@ -162,6 +163,59 @@ func (l *SystemProbeLedger) Migrate(ctx context.Context) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// SystemProbeCounts is read in the same transaction which rotates a recovery
+// operation. Total enforces the process-wide retention ceiling; Event enforces
+// the per-cooldown-event retry budget.
+type SystemProbeCounts struct {
+	Total int64
+	Event int64
+}
+
+func (l *SystemProbeLedger) CountsTx(ctx context.Context, tx *sql.Tx, recoveryEventID string) (SystemProbeCounts, error) {
+	if l == nil || l.db == nil || ctx == nil || tx == nil || !validID(recoveryEventID) {
+		return SystemProbeCounts{}, ErrInvalid
+	}
+	var counts SystemProbeCounts
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CASE WHEN recovery_event_id=? THEN 1 ELSE 0 END),0) FROM system_probe_attempts`, recoveryEventID).Scan(&counts.Total, &counts.Event)
+	if err != nil {
+		return SystemProbeCounts{}, err
+	}
+	if counts.Total < 0 || counts.Event < 0 || counts.Event > counts.Total {
+		return SystemProbeCounts{}, ErrInvalid
+	}
+	return counts, nil
+}
+
+func (l *SystemProbeLedger) Counts(ctx context.Context, recoveryEventID string) (SystemProbeCounts, error) {
+	if l == nil || l.db == nil || ctx == nil || !validID(recoveryEventID) {
+		return SystemProbeCounts{}, ErrInvalid
+	}
+	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return SystemProbeCounts{}, err
+	}
+	defer tx.Rollback()
+	counts, err := l.CountsTx(ctx, tx, recoveryEventID)
+	if err != nil {
+		return SystemProbeCounts{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return SystemProbeCounts{}, err
+	}
+	return counts, nil
+}
+
+func (l *SystemProbeLedger) HistoryCount(ctx context.Context) (int64, error) {
+	if l == nil || l.db == nil || ctx == nil {
+		return 0, ErrInvalid
+	}
+	var count int64
+	if err := l.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM system_probe_attempts`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (l *SystemProbeLedger) BeginTx(ctx context.Context, tx *sql.Tx, input SystemProbeStart) (SystemProbeAttempt, error) {
@@ -619,8 +673,9 @@ func validateSystemProbeSchema(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	wantedIndexes := map[string]string{
-		"system_probe_attempts_account_started_idx": "CREATE INDEX system_probe_attempts_account_started_idx ON system_probe_attempts(account_id,started_at)",
-		"system_probe_attempts_status_started_idx":  "CREATE INDEX system_probe_attempts_status_started_idx ON system_probe_attempts(status,started_at)",
+		"system_probe_attempts_account_started_idx":        "CREATE INDEX system_probe_attempts_account_started_idx ON system_probe_attempts(account_id,started_at)",
+		"system_probe_attempts_status_started_idx":         "CREATE INDEX system_probe_attempts_status_started_idx ON system_probe_attempts(status,started_at)",
+		"system_probe_attempts_recovery_event_started_idx": "CREATE INDEX system_probe_attempts_recovery_event_started_idx ON system_probe_attempts(recovery_event_id,started_at)",
 	}
 	for name, definition := range wantedIndexes {
 		var kind, sqlDefinition string

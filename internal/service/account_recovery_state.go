@@ -11,13 +11,22 @@ import (
 var errAccountRecoveryConflict = errors.New("account recovery state conflict")
 
 const (
-	accountRecoveryStateTable = "account_recovery_states"
-	recoveryRequired          = "required"
-	recoveryInProgress        = "in_progress"
-	recoveryInterrupted       = "interrupted"
+	accountRecoveryStateTable             = "account_recovery_states"
+	accountRecoveryDueIndex               = "account_recovery_states_due_idx"
+	recoveryRequired                      = "required"
+	recoveryInProgress                    = "in_progress"
+	recoveryInterrupted                   = "interrupted"
+	recoveryAttentionHistoryFull          = "history_full"
+	recoveryAttentionRetryLimit           = "retry_limit"
+	recoveryAttentionAuthentication       = "authentication_required"
+	recoveryAttentionProtocol             = "protocol_error"
+	recoveryAttentionUnsupported          = "unsupported"
+	recoveryAttentionConfigurationChanged = "configuration_changed"
+	recoveryAttentionSettlementPending    = "settlement_pending"
+	recoveryAttentionStorageUnavailable   = "storage_unavailable"
 )
 
-const accountRecoveryStateDDL = `CREATE TABLE IF NOT EXISTS account_recovery_states (
+const accountRecoveryLegacyDDL = `CREATE TABLE IF NOT EXISTS account_recovery_states (
 	account_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
 	cooldown_event_id TEXT NOT NULL UNIQUE,
 	operation_id TEXT NOT NULL UNIQUE,
@@ -44,6 +53,37 @@ const accountRecoveryStateDDL = `CREATE TABLE IF NOT EXISTS account_recovery_sta
 	CHECK((source_snapshot='authorization_code' AND client_id IS NOT NULL AND length(client_id) BETWEEN 1 AND 256) OR (source_snapshot<>'authorization_code' AND client_id IS NULL))
 )`
 
+const accountRecoveryStateDDL = `CREATE TABLE IF NOT EXISTS account_recovery_states (
+	account_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
+	cooldown_event_id TEXT NOT NULL UNIQUE,
+	operation_id TEXT NOT NULL UNIQUE,
+	recovery_revision INTEGER NOT NULL CHECK(recovery_revision >= 1),
+	pool_revision INTEGER NOT NULL CHECK(pool_revision >= 1),
+	account_revision INTEGER NOT NULL CHECK(account_revision >= 1),
+	provider_kind TEXT NOT NULL,
+	source_snapshot TEXT NOT NULL CHECK(source_snapshot IN ('api_key','import','authorization_code')),
+	client_id TEXT,
+	public_model TEXT NOT NULL REFERENCES models(id),
+	upstream_model TEXT NOT NULL,
+	protocol TEXT NOT NULL,
+	state TEXT NOT NULL CHECK(state IN ('required','in_progress','interrupted')),
+	attention_code TEXT CHECK(attention_code IS NULL OR attention_code IN ('history_full','retry_limit','authentication_required','protocol_error','unsupported','configuration_changed','settlement_pending','storage_unavailable')),
+	checked_at TEXT,
+	next_probe_at TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	CHECK(length(account_id) BETWEEN 1 AND 128),
+	CHECK(length(cooldown_event_id) BETWEEN 1 AND 128),
+	CHECK(length(operation_id) BETWEEN 1 AND 128),
+	CHECK(length(provider_kind) BETWEEN 1 AND 64),
+	CHECK(length(public_model) BETWEEN 1 AND 128),
+	CHECK(length(upstream_model) BETWEEN 1 AND 256),
+	CHECK(length(protocol) BETWEEN 1 AND 64),
+	CHECK((source_snapshot='authorization_code' AND client_id IS NOT NULL AND length(client_id) BETWEEN 1 AND 256) OR (source_snapshot<>'authorization_code' AND client_id IS NULL))
+)`
+
+const accountRecoveryDueIndexDDL = `CREATE INDEX account_recovery_states_due_idx ON account_recovery_states(state,attention_code,next_probe_at,account_id)`
+
 type accountRecoveryState struct {
 	AccountID        string
 	CooldownEventID  string
@@ -58,16 +98,18 @@ type accountRecoveryState struct {
 	UpstreamModel    string
 	Protocol         string
 	State            string
+	AttentionCode    string
+	CheckedAt        time.Time
 	NextProbeAt      time.Time
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
 
 func migrateAccountRecoveryStateTx(ctx context.Context, tx *sql.Tx) error {
-	if _, err := tx.ExecContext(ctx, accountRecoveryStateDDL); err != nil {
+	if err := migrateAccountRecoveryStateSchemaTx(ctx, tx); err != nil {
 		return err
 	}
-	if err := verifyCanonicalTable(ctx, tx, accountRecoveryStateTable, accountRecoveryStateDDL); err != nil {
+	if err := migrateAccountRecoverySettingsTx(ctx, tx); err != nil {
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, accountRecoverySelect+` ORDER BY account_id`)
@@ -94,6 +136,99 @@ func migrateAccountRecoveryStateTx(ctx context.Context, tx *sql.Tx) error {
 		if err := validatePersistedRecoveryAnchorTx(ctx, tx, item); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func migrateAccountRecoveryStateSchemaTx(ctx context.Context, tx *sql.Tx) error {
+	var objectType, ddl string
+	err := tx.QueryRowContext(ctx, `SELECT type,sql FROM sqlite_master WHERE name=?`, accountRecoveryStateTable).Scan(&objectType, &ddl)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if _, err := tx.ExecContext(ctx, accountRecoveryStateDDL); err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	case objectType != "table":
+		return errors.New("account recovery schema is incompatible")
+	case normalizeRecoveryDDL(ddl) == normalizeRecoveryDDL(accountRecoveryLegacyDDL):
+		if err := verifyCanonicalTable(ctx, tx, accountRecoveryStateTable, accountRecoveryLegacyDDL); err != nil {
+			return err
+		}
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='account_recovery_states_legacy'`).Scan(&count); err != nil || count != 0 {
+			if err != nil {
+				return err
+			}
+			return errors.New("account recovery legacy migration object exists")
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE account_recovery_states RENAME TO account_recovery_states_legacy`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, accountRecoveryStateDDL); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO account_recovery_states(account_id,cooldown_event_id,operation_id,recovery_revision,pool_revision,account_revision,provider_kind,source_snapshot,client_id,public_model,upstream_model,protocol,state,attention_code,checked_at,next_probe_at,created_at,updated_at)
+			SELECT account_id,cooldown_event_id,operation_id,recovery_revision,pool_revision,account_revision,provider_kind,source_snapshot,client_id,public_model,upstream_model,protocol,state,NULL,NULL,next_probe_at,created_at,updated_at FROM account_recovery_states_legacy`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DROP TABLE account_recovery_states_legacy`); err != nil {
+			return err
+		}
+	case normalizeRecoveryDDL(ddl) != normalizeRecoveryDDL(accountRecoveryStateDDL):
+		return errors.New("account recovery schema is incompatible")
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS account_recovery_states_due_idx ON account_recovery_states(state,attention_code,next_probe_at,account_id)`); err != nil {
+		return err
+	}
+	return verifyRecoveryStateTable(ctx, tx)
+}
+
+func verifyRecoveryStateTable(ctx context.Context, tx *sql.Tx) error {
+	var objectType, ddl string
+	if err := tx.QueryRowContext(ctx, `SELECT type,sql FROM sqlite_master WHERE name=?`, accountRecoveryStateTable).Scan(&objectType, &ddl); err != nil {
+		return err
+	}
+	if objectType != "table" || normalizeRecoveryDDL(ddl) != normalizeRecoveryDDL(accountRecoveryStateDDL) {
+		return errors.New("account recovery schema is incompatible")
+	}
+	var indexType, indexDDL string
+	if err := tx.QueryRowContext(ctx, `SELECT type,sql FROM sqlite_master WHERE name=?`, accountRecoveryDueIndex).Scan(&indexType, &indexDDL); err != nil {
+		return err
+	}
+	if indexType != "index" || normalizeRecoveryDDL(indexDDL) != normalizeRecoveryDDL(accountRecoveryDueIndexDDL) {
+		return errors.New("account recovery due index is incompatible")
+	}
+	rows, err := tx.QueryContext(ctx, `PRAGMA index_list(account_recovery_states)`)
+	if err != nil {
+		return err
+	}
+	seenDue := false
+	for rows.Next() {
+		var sequence, unique, partial int
+		var name, origin string
+		if err := rows.Scan(&sequence, &name, &unique, &origin, &partial); err != nil {
+			rows.Close()
+			return err
+		}
+		if origin == "c" {
+			if name != accountRecoveryDueIndex || unique != 0 || partial != 0 || seenDue {
+				rows.Close()
+				return errors.New("account recovery schema has an unexpected index")
+			}
+			seenDue = true
+		}
+	}
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil {
+		return iterationErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if !seenDue {
+		return errors.New("account recovery due index is missing")
 	}
 	return nil
 }
@@ -144,6 +279,7 @@ func validRecoveryState(item accountRecoveryState) bool {
 		strings.TrimSpace(item.UpstreamModel) == "" || len(item.UpstreamModel) > 256 || !validIdentifier(item.Protocol, 64) ||
 		!validRecoveryProviderProtocol(item.ProviderKind, item.Protocol) ||
 		(item.State != recoveryRequired && item.State != recoveryInProgress && item.State != recoveryInterrupted) ||
+		!validRecoveryAttention(item.AttentionCode) ||
 		item.NextProbeAt.IsZero() || item.CreatedAt.IsZero() || item.UpdatedAt.IsZero() || item.UpdatedAt.Before(item.CreatedAt) {
 		return false
 	}
@@ -154,6 +290,17 @@ func validRecoveryState(item accountRecoveryState) bool {
 		return item.ProviderKind == codexMembershipProvider && item.ClientID == ""
 	case "api_key":
 		return item.ProviderKind != codexMembershipProvider && item.ClientID == ""
+	default:
+		return false
+	}
+}
+
+func validRecoveryAttention(code string) bool {
+	switch code {
+	case "", recoveryAttentionHistoryFull, recoveryAttentionRetryLimit, recoveryAttentionAuthentication,
+		recoveryAttentionProtocol, recoveryAttentionUnsupported, recoveryAttentionConfigurationChanged,
+		recoveryAttentionSettlementPending, recoveryAttentionStorageUnavailable:
+		return true
 	default:
 		return false
 	}
@@ -198,17 +345,17 @@ func putAccountRecoveryStateTx(ctx context.Context, tx *sql.Tx, item accountReco
 		return err
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO account_recovery_states(
-		account_id,cooldown_event_id,operation_id,recovery_revision,pool_revision,account_revision,provider_kind,source_snapshot,client_id,public_model,upstream_model,protocol,state,next_probe_at,created_at,updated_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		account_id,cooldown_event_id,operation_id,recovery_revision,pool_revision,account_revision,provider_kind,source_snapshot,client_id,public_model,upstream_model,protocol,state,attention_code,checked_at,next_probe_at,created_at,updated_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT(account_id) DO UPDATE SET
 		cooldown_event_id=excluded.cooldown_event_id,operation_id=excluded.operation_id,recovery_revision=excluded.recovery_revision,
 		pool_revision=excluded.pool_revision,account_revision=excluded.account_revision,provider_kind=excluded.provider_kind,
 		source_snapshot=excluded.source_snapshot,client_id=excluded.client_id,public_model=excluded.public_model,
-		upstream_model=excluded.upstream_model,protocol=excluded.protocol,state=excluded.state,next_probe_at=excluded.next_probe_at,updated_at=excluded.updated_at
+		upstream_model=excluded.upstream_model,protocol=excluded.protocol,state=excluded.state,attention_code=excluded.attention_code,checked_at=excluded.checked_at,next_probe_at=excluded.next_probe_at,updated_at=excluded.updated_at
 	WHERE account_recovery_states.recovery_revision + 1 = excluded.recovery_revision`,
 		item.AccountID, item.CooldownEventID, item.OperationID, item.RecoveryRevision, item.PoolRevision, item.AccountRevision,
 		item.ProviderKind, item.SourceSnapshot, nullableRecoveryClient(item), item.PublicModel, item.UpstreamModel, item.Protocol,
-		item.State, formatAccountPoolTime(item.NextProbeAt), formatAccountPoolTime(item.CreatedAt), formatAccountPoolTime(item.UpdatedAt))
+		item.State, nullableRecoveryString(item.AttentionCode), nullableRecoveryTime(item.CheckedAt), formatAccountPoolTime(item.NextProbeAt), formatAccountPoolTime(item.CreatedAt), formatAccountPoolTime(item.UpdatedAt))
 	if err != nil {
 		return err
 	}
@@ -270,17 +417,37 @@ func nullableRecoveryClient(item accountRecoveryState) any {
 	return item.ClientID
 }
 
+func nullableRecoveryString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+func nullableRecoveryTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return formatAccountPoolTime(value)
+}
+
 func scanAccountRecoveryState(scanner interface{ Scan(...any) error }) (accountRecoveryState, error) {
 	var item accountRecoveryState
 	var client sql.NullString
+	var attention, checked sql.NullString
 	var nextProbe, created, updated string
 	err := scanner.Scan(&item.AccountID, &item.CooldownEventID, &item.OperationID, &item.RecoveryRevision, &item.PoolRevision,
 		&item.AccountRevision, &item.ProviderKind, &item.SourceSnapshot, &client, &item.PublicModel, &item.UpstreamModel,
-		&item.Protocol, &item.State, &nextProbe, &created, &updated)
+		&item.Protocol, &item.State, &attention, &checked, &nextProbe, &created, &updated)
 	if err != nil {
 		return item, err
 	}
 	item.ClientID = client.String
+	item.AttentionCode = attention.String
+	if checked.Valid {
+		if item.CheckedAt, err = parseTime(checked.String); err != nil || checked.String != formatAccountPoolTime(item.CheckedAt) {
+			return item, errors.New("invalid stored recovery checked timestamp")
+		}
+	}
 	if item.NextProbeAt, err = parseTime(nextProbe); err != nil {
 		return item, err
 	}
@@ -305,4 +472,4 @@ func scanAccountRecoveryState(scanner interface{ Scan(...any) error }) (accountR
 	return item, nil
 }
 
-const accountRecoverySelect = `SELECT account_id,cooldown_event_id,operation_id,recovery_revision,pool_revision,account_revision,provider_kind,source_snapshot,client_id,public_model,upstream_model,protocol,state,next_probe_at,created_at,updated_at FROM account_recovery_states`
+const accountRecoverySelect = `SELECT account_id,cooldown_event_id,operation_id,recovery_revision,pool_revision,account_revision,provider_kind,source_snapshot,client_id,public_model,upstream_model,protocol,state,attention_code,checked_at,next_probe_at,created_at,updated_at FROM account_recovery_states`
