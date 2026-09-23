@@ -460,6 +460,7 @@ func (f *egressHTTPFixture) testFailureAndInflightSemantics(t *testing.T) {
 	})
 	current = f.mustProxy(t)
 	f.updateProxy(t, current, current.Port, true, outboundProxyCredentialKeep, nil)
+	f.clearAccountCooldown(t, f.accounts["openai"].ID)
 	if _, err := f.app.store.db.Exec(`UPDATE outbound_proxies SET credential_ciphertext=X'0102' WHERE id=?`, f.proxyView.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -473,6 +474,7 @@ func (f *egressHTTPFixture) testFailureAndInflightSemantics(t *testing.T) {
 	current = f.mustProxy(t)
 	replacement := &outboundProxyCredential{username: egHTTPProxyUser, password: egHTTPProxyPassword}
 	f.updateProxy(t, current, current.Port, true, outboundProxyCredentialReplace, replacement)
+	f.clearAccountCooldown(t, f.accounts["openai"].ID)
 	badURL, _ := url.Parse(f.badProxy.server.URL)
 	badPort, _ := strconv.Atoi(badURL.Port())
 	current = f.mustProxy(t)
