@@ -202,6 +202,12 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 		return
 	}
 	id := r.PathValue("id")
+	unlock, err := a.acquireCodexMutationLock(r.Context(), id)
+	if err != nil {
+		writeAdminError(w, http.StatusRequestTimeout, "request_cancelled", "The request was cancelled.")
+		return
+	}
+	defer unlock()
 	a.admission.Lock()
 	defer a.admission.Unlock()
 	tx, err := a.store.db.BeginTx(r.Context(), nil)

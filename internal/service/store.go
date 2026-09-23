@@ -184,11 +184,16 @@ func (s *store) migrateCodexOAuthLifecycle(ctx context.Context) error {
 		if err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, codexOAuthRefreshStateTable).Scan(&schema); err != nil {
 			return err
 		}
+		constraints, err := tableColumnConstraints(ctx, s.db, codexOAuthRefreshStateTable)
+		if err != nil {
+			return err
+		}
 		normalized := strings.ToLower(strings.Join(strings.Fields(schema), " "))
 		if !refreshColumns["upstream_id"] || !refreshColumns["state"] || !refreshColumns["reason_code"] ||
 			!refreshColumns["attempt_revision"] || !refreshColumns["updated_at"] ||
+			constraints["upstream_id"].primaryKey != 1 || !constraints["state"].notNull || !constraints["updated_at"].notNull ||
 			!strings.Contains(normalized, "references upstreams(id) on delete cascade") ||
-			!strings.Contains(normalized, "'in_progress'") || !strings.Contains(normalized, "'paused'") {
+			!strings.Contains(normalized, "check(state in ('ready','in_progress','paused','reauth_required'))") {
 			return errors.New("existing Codex OAuth refresh state table has an incompatible schema")
 		}
 	}
@@ -234,6 +239,38 @@ func (s *store) migrateCodexOAuthLifecycle(ctx context.Context) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+type tableColumnConstraint struct {
+	notNull    bool
+	primaryKey int
+}
+
+func tableColumnConstraints(ctx context.Context, db *sql.DB, table string) (map[string]tableColumnConstraint, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	constraints := make(map[string]tableColumnConstraint)
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, err
+		}
+		constraints[name] = tableColumnConstraint{notNull: notNull != 0, primaryKey: primaryKey}
+	}
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	if iterationErr != nil {
+		return nil, iterationErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return constraints, nil
 }
 
 const codexOAuthBindingTable = "codex_oauth_bindings"

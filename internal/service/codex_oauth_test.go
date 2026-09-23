@@ -484,7 +484,7 @@ func TestCodexOAuthRefreshRotationRetriesAndReauthorization(t *testing.T) {
 	}
 }
 
-func TestCodexOAuthConcurrentRefreshAndAdministratorReplacement(t *testing.T) {
+func TestCodexOAuthConcurrentRefreshWinsAndStaleAdministratorReplacementConflicts(t *testing.T) {
 	dataDir := t.TempDir()
 	app := openOAuthTestApp(t, dataDir)
 	defer app.Close()
@@ -514,21 +514,109 @@ func TestCodexOAuthConcurrentRefreshAndAdministratorReplacement(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("refresh request did not reach token transport")
 	}
-	replacementAuth := codexAdminAuthJSON(t, time.Now().Add(3*time.Hour), "acct-race", "administrator-reimport-wins")
-	replaced := codexAdminRequest(t, http.MethodPut, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-auth", map[string]any{
-		"expected_revision": 1, "auth_json": replacementAuth,
-	}, cookie, csrf, server.URL)
-	if replaced.StatusCode != http.StatusOK {
-		t.Fatalf("administrator replacement status=%d body=%s", replaced.StatusCode, readBody(replaced))
-	}
-	replaced.Body.Close()
+	replacementAuth := codexAdminAuthJSON(t, time.Now().Add(3*time.Hour), "acct-race", "administrator-reimport-loses")
+	replacementStarted := make(chan struct{})
+	replacementResult := make(chan *http.Response, 1)
+	go func() {
+		close(replacementStarted)
+		replacementResult <- codexAdminRequest(t, http.MethodPut, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-auth", map[string]any{
+			"expected_revision": 1, "auth_json": replacementAuth,
+		}, cookie, csrf, server.URL)
+	}()
+	<-replacementStarted
 	close(release)
 	result := <-refreshResult
-	if result.StatusCode != http.StatusConflict {
-		t.Fatalf("stale refresh status=%d body=%s", result.StatusCode, readBody(result))
+	if result.StatusCode != http.StatusOK {
+		t.Fatalf("refresh status=%d body=%s", result.StatusCode, readBody(result))
 	}
 	result.Body.Close()
-	assertRefreshTokenStored(t, app, upstream.ID, "administrator-reimport-wins")
+	replaced := <-replacementResult
+	assertCodexAdminError(t, replaced, http.StatusConflict, "revision_conflict")
+	assertRefreshTokenStored(t, app, upstream.ID, "stale-network-refresh")
+}
+
+func TestCodexOAuthAdministratorReplacementWinsBeforeRefreshAndMutationWaitCancels(t *testing.T) {
+	app := openOAuthTestApp(t, t.TempDir())
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	upstream := importTestCodexUpstream(t, server.URL, cookie, csrf, "7b4f04e6-c243-46a8-8502-c4b05640dc06",
+		codexAdminAuthJSON(t, time.Now().Add(time.Hour), "acct-admin-first", "old-admin-first"))
+	bindOAuthTestUpstream(t, app, upstream.ID, testOAuthClientID)
+	replaced := codexAdminRequest(t, http.MethodPut, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-auth", map[string]any{
+		"expected_revision": 1,
+		"auth_json":         codexAdminAuthJSON(t, time.Now().Add(2*time.Hour), "acct-admin-first", "admin-first-wins"),
+	}, cookie, csrf, server.URL)
+	if replaced.StatusCode != http.StatusOK {
+		t.Fatalf("replacement status=%d body=%s", replaced.StatusCode, readBody(replaced))
+	}
+	replaced.Body.Close()
+	var calls atomic.Int32
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("must not be called")
+	})}
+	refresh := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 1}, cookie, csrf, server.URL)
+	assertCodexAdminError(t, refresh, http.StatusConflict, "revision_conflict")
+	assertRefreshTokenStored(t, app, upstream.ID, "admin-first-wins")
+	if calls.Load() != 0 {
+		t.Fatalf("stale refresh made %d provider calls", calls.Load())
+	}
+
+	lock := app.refresh.accountLock(upstream.ID)
+	<-lock.token
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if unlock, err := app.acquireCodexMutationLock(cancelled, upstream.ID); !errors.Is(err, context.Canceled) || unlock != nil {
+		t.Fatalf("cancelled mutation wait unlock=%v err=%v", unlock != nil, err)
+	}
+	lock.token <- struct{}{}
+}
+
+func TestCodexOAuthConcurrentRefreshWinsAndStaleDisableConflicts(t *testing.T) {
+	app := openOAuthTestApp(t, t.TempDir())
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	upstream := importTestCodexUpstream(t, server.URL, cookie, csrf, "03b88a49-f81f-4c44-8241-bd3ca163154e",
+		codexAdminAuthJSON(t, time.Now().Add(time.Hour), "acct-disable-race", "disable-race-old"))
+	bindOAuthTestUpstream(t, app, upstream.ID, testOAuthClientID)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	access := oauthTestJWT(t, map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+	idToken := oauthTestJWT(t, map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-disable-race"}})
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		close(started)
+		<-release
+		return oauthHTTPResponse(http.StatusOK, map[string]string{"access_token": access, "id_token": idToken, "refresh_token": "disable-race-rotated"}), nil
+	})}
+	refreshDone := make(chan *http.Response, 1)
+	go func() {
+		refreshDone <- codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 1}, cookie, csrf, server.URL)
+	}()
+	<-started
+	disableDone := make(chan *http.Response, 1)
+	go func() {
+		disableDone <- codexAdminRequest(t, http.MethodPatch, server.URL+"/admin/api/v1/upstreams/"+upstream.ID, map[string]any{"expected_revision": 1, "enabled": false}, cookie, csrf, server.URL)
+	}()
+	close(release)
+	refresh := <-refreshDone
+	if refresh.StatusCode != http.StatusOK {
+		t.Fatalf("refresh status=%d body=%s", refresh.StatusCode, readBody(refresh))
+	}
+	refresh.Body.Close()
+	disable := <-disableDone
+	assertCodexAdminError(t, disable, http.StatusConflict, "revision_conflict")
+	var enabled int
+	var revision int64
+	if err := app.store.db.QueryRow(`SELECT enabled,revision FROM upstreams WHERE id=?`, upstream.ID).Scan(&enabled, &revision); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 1 || revision != 2 {
+		t.Fatalf("enabled=%d revision=%d", enabled, revision)
+	}
 }
 
 func TestCodexOAuthRefreshLostResponseIsNotRetriedOrMarkedReauth(t *testing.T) {
@@ -867,7 +955,11 @@ func TestCodexOAuthLifecycleMigrationFailureLeavesLegacySessionSchemaUntouched(t
 			state_digest BLOB NOT NULL UNIQUE, secret_ciphertext BLOB NOT NULL,
 			name TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE codex_oauth_refresh_states (blocking INTEGER)`,
+		`CREATE TABLE codex_oauth_refresh_states (
+			upstream_id TEXT REFERENCES upstreams(id) ON DELETE CASCADE,
+			state TEXT NOT NULL CHECK(state IN ('ready','in_progress','paused','reauth_required')),
+			reason_code TEXT, attempt_revision INTEGER, updated_at TEXT NOT NULL
+		)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatalf("prepare legacy schema: %v", err)
@@ -905,6 +997,34 @@ func TestCodexOAuthLifecycleMigrationFailureLeavesLegacySessionSchemaUntouched(t
 	columns, err = tableColumns(context.Background(), migrated.db, "codex_oauth_sessions")
 	if err != nil || !columns["status"] || !columns["upstream_id"] || !columns["error_code"] {
 		t.Fatalf("migrated session columns=%v err=%v", columns, err)
+	}
+}
+
+func TestCodexOAuthLifecycleMigrationRejectsIncompleteStateConstraint(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := Initialize(context.Background(), dataDir, strings.NewReader("a-strong-preview-password\n")); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dataDir, "cpa-cloud.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE codex_oauth_refresh_states`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE codex_oauth_refresh_states (
+		upstream_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
+		state TEXT NOT NULL CHECK(state IN ('ready','in_progress','paused')),
+		reason_code TEXT,attempt_revision INTEGER,updated_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if migrated, err := openStore(dataDir); err == nil {
+		migrated.close()
+		t.Fatal("incomplete refresh state constraint unexpectedly accepted")
 	}
 }
 

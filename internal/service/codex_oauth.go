@@ -80,6 +80,7 @@ type codexOAuthWireError struct {
 	Code      string
 	Retryable bool
 	After     time.Duration
+	internal  error
 }
 
 var errCodexOAuthConfigurationChanged = errors.New("Codex OAuth configuration changed")
@@ -535,6 +536,10 @@ func (a *App) refreshCodexCredential(w http.ResponseWriter, r *http.Request, _ a
 }
 
 func (a *App) requestCodexOAuthTokens(ctx context.Context, payload codexOAuthTokenRequest) (codexOAuthTokenResponse, *codexOAuthWireError) {
+	return a.requestCodexOAuthTokensWithRetryGuard(ctx, payload, nil)
+}
+
+func (a *App) requestCodexOAuthTokensWithRetryGuard(ctx context.Context, payload codexOAuthTokenRequest, retryGuard func(context.Context) error) (codexOAuthTokenResponse, *codexOAuthWireError) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return codexOAuthTokenResponse{}, &codexOAuthWireError{}
@@ -582,7 +587,16 @@ func (a *App) requestCodexOAuthTokens(ctx context.Context, payload codexOAuthTok
 		if wireErr.Retryable {
 			wireErr.After = retryDelay(response.Header.Get("Retry-After"), attempt)
 		}
-		if wireErr.Retryable && attempt+1 < maxAttempts && sleepContext(ctx, wireErr.After) == nil {
+		if wireErr.Retryable && attempt+1 < maxAttempts {
+			if sleepContext(ctx, wireErr.After) != nil {
+				return codexOAuthTokenResponse{}, wireErr
+			}
+			if retryGuard != nil {
+				if err := retryGuard(ctx); err != nil {
+					wireErr.internal = err
+					return codexOAuthTokenResponse{}, wireErr
+				}
+			}
 			continue
 		}
 		return codexOAuthTokenResponse{}, wireErr

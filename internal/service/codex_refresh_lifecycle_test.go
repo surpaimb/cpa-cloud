@@ -275,6 +275,94 @@ func TestCodexRequestAndManualRefreshShareRevisionLock(t *testing.T) {
 	}
 }
 
+func TestCodexRefresh429RetryRechecksAttemptRevision(t *testing.T) {
+	app := openOAuthTestApp(t, t.TempDir())
+	defer app.Close()
+	id := insertRefreshLifecycleAccount(t, app, "ups_retry_guard", time.Now().Add(time.Minute), true)
+	var calls atomic.Int32
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if _, err := app.store.db.Exec(`UPDATE upstreams SET revision=2 WHERE id=? AND revision=1`, id); err != nil {
+			t.Errorf("mutate revision: %v", err)
+		}
+		return oauthHTTPResponse(http.StatusTooManyRequests, map[string]string{"error": "temporarily_unavailable"}), nil
+	})}
+	_, err := app.refresh.refresh(context.Background(), id, nil, false)
+	var failure *codexRefreshFailure
+	if !errors.As(err, &failure) || failure.code != "revision_conflict" {
+		t.Fatalf("refresh error=%v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("guarded retry made %d provider calls", calls.Load())
+	}
+}
+
+func TestCodexRefreshCASRejectsOutOfBandReplacement(t *testing.T) {
+	app := openOAuthTestApp(t, t.TempDir())
+	defer app.Close()
+	id := insertRefreshLifecycleAccount(t, app, "ups_out_of_band", time.Now().Add(time.Minute), true)
+	replacementRaw := []byte(syntheticCodexAuth(t, "out-of-band-wins", time.Now().Add(time.Hour)))
+	replacementCiphertext, err := app.secrets.encryptCodexAuth(id, replacementRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := oauthTestJWT(t, map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+	idToken := oauthTestJWT(t, map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "account-out-of-band"}})
+	app.oauthHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		tx, err := app.store.db.Begin()
+		if err != nil {
+			t.Errorf("begin replacement: %v", err)
+			return nil, err
+		}
+		if _, err := tx.Exec(`UPDATE upstreams SET credential_ciphertext=?,revision=2 WHERE id=? AND revision=1`, replacementCiphertext, id); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		if _, err := tx.Exec(`DELETE FROM codex_oauth_bindings WHERE upstream_id=?`, id); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		if _, err := tx.Exec(`DELETE FROM codex_oauth_refresh_states WHERE upstream_id=?`, id); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return oauthHTTPResponse(http.StatusOK, map[string]string{"access_token": access, "id_token": idToken, "refresh_token": "must-not-win"}), nil
+	})}
+	_, err = app.refresh.refresh(context.Background(), id, nil, false)
+	var failure *codexRefreshFailure
+	if !errors.As(err, &failure) || failure.code != "revision_conflict" {
+		t.Fatalf("refresh error=%v", err)
+	}
+	assertRefreshTokenStored(t, app, id, "refresh-out-of-band-wins")
+}
+
+func TestCodexRefreshDoesNotRecreateStateAfterBindingRemoval(t *testing.T) {
+	app := openOAuthTestApp(t, t.TempDir())
+	defer app.Close()
+	id := insertRefreshLifecycleAccount(t, app, "ups_binding_removed", time.Now().Add(time.Minute), true)
+	if _, err := app.store.db.Exec(`DELETE FROM codex_oauth_refresh_states WHERE upstream_id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.db.Exec(`DELETE FROM codex_oauth_bindings WHERE upstream_id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	_, err := app.refresh.refresh(context.Background(), id, nil, false)
+	var failure *codexRefreshFailure
+	if !errors.As(err, &failure) || failure.code != "refresh_not_bound" {
+		t.Fatalf("refresh error=%v", err)
+	}
+	var count int
+	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM codex_oauth_refresh_states WHERE upstream_id=?`, id).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("removed binding recreated %d lifecycle rows", count)
+	}
+}
+
 func TestCodexRefreshSkipsDisabledUpstream(t *testing.T) {
 	app := openOAuthTestApp(t, t.TempDir())
 	defer app.Close()

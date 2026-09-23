@@ -47,6 +47,9 @@ func newCodexAccountLock() *codexAccountLock {
 }
 
 func (l *codexAccountLock) lock(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	select {
 	case <-ctx.Done():
 		return false
@@ -206,6 +209,17 @@ func (c *codexRefreshCoordinator) accountLock(id string) *codexAccountLock {
 	return lock
 }
 
+func (a *App) acquireCodexMutationLock(ctx context.Context, id string) (func(), error) {
+	if a.refresh == nil {
+		return func() {}, nil
+	}
+	lock := a.refresh.accountLock(id)
+	if !lock.lock(ctx) {
+		return nil, ctx.Err()
+	}
+	return lock.unlock, nil
+}
+
 func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expected *int64, force bool) (codexRefreshSnapshot, error) {
 	if !c.enabled() {
 		return codexRefreshSnapshot{}, &codexRefreshFailure{code: "refresh_unavailable"}
@@ -243,9 +257,18 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 		return snapshot, &codexRefreshFailure{code: "refresh_not_bound"}
 	}
 	if !refreshState.Valid {
-		if _, err := c.app.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO codex_oauth_refresh_states
-			(upstream_id,state,reason_code,attempt_revision,updated_at) VALUES(?,'ready',NULL,?,?)`, id, snapshot.revision, utcNow()); err != nil {
+		result, err := c.app.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO codex_oauth_refresh_states
+			(upstream_id,state,reason_code,attempt_revision,updated_at)
+			SELECT u.id,'ready',NULL,u.revision,? FROM upstreams u
+			JOIN codex_oauth_bindings b ON b.upstream_id=u.id
+			WHERE u.id=? AND u.provider_kind=? AND u.enabled=? AND u.revision=?
+				AND b.client_id=? AND b.source='authorization_code'`, utcNow(), id, codexMembershipProvider, enabled, snapshot.revision, boundClient)
+		if err != nil {
 			return snapshot, err
+		}
+		changed, _ := result.RowsAffected()
+		if changed != 1 {
+			return snapshot, &codexRefreshFailure{code: "revision_conflict"}
 		}
 		refreshState = sql.NullString{String: "ready", Valid: true}
 	}
@@ -280,7 +303,11 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 
 	result, err := c.app.store.db.ExecContext(ctx, `UPDATE codex_oauth_refresh_states
 		SET state='in_progress',reason_code=NULL,attempt_revision=?,updated_at=?
-		WHERE upstream_id=? AND state='ready'`, snapshot.revision, utcNow(), id)
+		WHERE upstream_id=? AND state='ready'
+			AND EXISTS(SELECT 1 FROM upstreams u JOIN codex_oauth_bindings b ON b.upstream_id=u.id
+				WHERE u.id=codex_oauth_refresh_states.upstream_id AND u.provider_kind=? AND u.enabled=? AND u.revision=?
+					AND b.client_id=? AND b.source='authorization_code')`, snapshot.revision, utcNow(), id,
+		codexMembershipProvider, enabled, snapshot.revision, boundClient)
 	if err != nil {
 		return snapshot, err
 	}
@@ -289,10 +316,15 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 		return snapshot, &codexRefreshFailure{code: "refresh_unavailable"}
 	}
 
-	tokens, wireErr := c.app.requestCodexOAuthTokens(ctx, codexOAuthTokenRequest{
+	tokens, wireErr := c.app.requestCodexOAuthTokensWithRetryGuard(ctx, codexOAuthTokenRequest{
 		GrantType: "refresh_token", ClientID: boundClient, RefreshToken: refreshToken,
+	}, func(retryCtx context.Context) error {
+		return c.requireCurrentAttempt(retryCtx, id, snapshot.revision, enabled, boundClient)
 	})
 	if wireErr != nil {
+		if wireErr.internal != nil {
+			return snapshot, wireErr.internal
+		}
 		if wireErr.Status == http.StatusUnauthorized || wireErr.Code == "invalid_grant" {
 			if err := c.markReauthorization(id, snapshot.revision); err != nil {
 				return snapshot, err
@@ -301,7 +333,11 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 		}
 		if wireErr.Status == http.StatusTooManyRequests {
 			result, err := c.app.store.db.ExecContext(ctx, `UPDATE codex_oauth_refresh_states SET state='ready',reason_code='rate_limited',updated_at=?
-				WHERE upstream_id=? AND state='in_progress' AND attempt_revision=?`, utcNow(), id, snapshot.revision)
+				WHERE upstream_id=? AND state='in_progress' AND attempt_revision=?
+					AND EXISTS(SELECT 1 FROM upstreams u JOIN codex_oauth_bindings b ON b.upstream_id=u.id
+						WHERE u.id=codex_oauth_refresh_states.upstream_id AND u.provider_kind=? AND u.enabled=? AND u.revision=?
+							AND b.client_id=? AND b.source='authorization_code')`, utcNow(), id, snapshot.revision,
+				codexMembershipProvider, enabled, snapshot.revision, boundClient)
 			if err != nil {
 				return snapshot, err
 			}
@@ -338,7 +374,7 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 			return snapshot, &codexRefreshFailure{code: "refresh_paused", err: err}
 		}
 	}
-	if err := c.persistRotated(ctx, id, snapshot.revision, rotated); err != nil {
+	if err := c.persistRotated(ctx, id, snapshot.revision, enabled, boundClient, rotated); err != nil {
 		c.markPaused(id, snapshot.revision, "rotated_credential_save_failed")
 		return snapshot, err
 	}
@@ -348,7 +384,7 @@ func (c *codexRefreshCoordinator) refresh(ctx context.Context, id string, expect
 	return snapshot, nil
 }
 
-func (c *codexRefreshCoordinator) persistRotated(ctx context.Context, id string, revision int64, ciphertext []byte) error {
+func (c *codexRefreshCoordinator) persistRotated(ctx context.Context, id string, revision int64, enabled int, clientID string, ciphertext []byte) error {
 	tx, err := c.app.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -356,7 +392,9 @@ func (c *codexRefreshCoordinator) persistRotated(ctx context.Context, id string,
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE upstreams SET credential_ciphertext=?,key_version=2,
 		revision=revision+1,credential_state=?,verified_at=NULL
-		WHERE id=? AND provider_kind=? AND revision=?`, ciphertext, codexStateImported, id, codexMembershipProvider, revision)
+		WHERE id=? AND provider_kind=? AND enabled=? AND revision=?
+			AND EXISTS(SELECT 1 FROM codex_oauth_bindings b WHERE b.upstream_id=upstreams.id
+				AND b.client_id=? AND b.source='authorization_code')`, ciphertext, codexStateImported, id, codexMembershipProvider, enabled, revision, clientID)
 	if err != nil {
 		return err
 	}
@@ -375,6 +413,21 @@ func (c *codexRefreshCoordinator) persistRotated(ctx context.Context, id string,
 		return &codexRefreshFailure{code: "revision_conflict"}
 	}
 	return tx.Commit()
+}
+
+func (c *codexRefreshCoordinator) requireCurrentAttempt(ctx context.Context, id string, revision int64, enabled int, clientID string) error {
+	var present int
+	err := c.app.store.db.QueryRowContext(ctx, `SELECT 1
+		FROM codex_oauth_refresh_states r
+		JOIN upstreams u ON u.id=r.upstream_id
+		JOIN codex_oauth_bindings b ON b.upstream_id=r.upstream_id
+		WHERE r.upstream_id=? AND r.state='in_progress' AND r.attempt_revision=?
+			AND u.provider_kind=? AND u.enabled=? AND u.revision=?
+			AND b.client_id=? AND b.source='authorization_code'`, id, revision, codexMembershipProvider, enabled, revision, clientID).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &codexRefreshFailure{code: "revision_conflict"}
+	}
+	return err
 }
 
 func (c *codexRefreshCoordinator) markPaused(id string, revision int64, reason string) {

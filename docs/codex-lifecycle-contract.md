@@ -150,6 +150,11 @@ button and callback status view in a later batch.
 - Manual, background, Chat, Responses and discovery acquisition share one
   per-upstream cancellable lock. A waiter reads the newest revision and
   ciphertext after acquiring it rather than reusing an earlier route snapshot.
+- Codex credential replacement and revision-changing administrator updates
+  acquire that same lock before the admission lock, then re-read
+  `expected_revision`. If refresh wins, a stale administrator mutation
+  conflicts; if replacement wins, the later refresh observes the new revision
+  and removed provenance without sending the old refresh token.
 - The token response is saved only with `WHERE revision = <revision read before
   refresh>`. Administrator re-import/replace therefore wins; a stale refresh
   never overwrites it. Success increments the upstream revision once and clears
@@ -190,7 +195,9 @@ Startup turns every persisted `in_progress` row into `paused` before the worker
 starts, closing the process-crash replay window.
 Schema initialization and migration are idempotent; any failing statement rolls
 back without modifying existing upstream credentials, routes, employees, keys,
-or request history.
+or request history. An existing refresh-state table is accepted only when its
+upstream key is a real primary key, required columns are `NOT NULL`, the foreign
+key cascades, and the complete four-state check constraint is present.
 
 Process-local refresh locks intentionally do not claim multi-process safety;
 the current product contract is one Go process and one SQLite database.
