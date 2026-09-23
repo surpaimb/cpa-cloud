@@ -1,6 +1,6 @@
 # 账号分组、渠道与多账号路由配置契约
 
-状态：2026-09-23 已接入管理 API、网页编辑器及四协议请求执行；隔离合成上游与真实浏览器验收见 [集成记录](integration-status.md)。仅最新源码，preview.3 下载包不包含此功能。自动换号、恢复探测、成本倍率和代理池尚未实现。
+状态：2026-09-23 源码已接入管理 API、网页编辑器及四协议请求执行；既有接线的隔离合成上游与真实浏览器证据见 [集成记录](integration-status.md)。当前源码另实现模型执行前最多一次的账号预检换号，仍待本轮总验收；preview.3 下载包不包含此功能，也不表示已经发布。执行后换号、恢复探测、成本倍率和代理池尚未实现。
 
 ## 边界
 
@@ -59,11 +59,12 @@
 
 审计表没有请求正文、提示、响应、token、Authorization、Cookie、上游 Key 或配置快照字段。拒绝和存储错误也只返回固定错误，不把内部错误写入响应。
 
-## 根任务接线清单
+## 源码接线约束
 
 1. 在 `store.initialize` 完成现有基础表及上游迁移后调用 `s.migrateAccountPools(ctx)`；失败时返回带固定阶段名称的启动错误。
 2. 在 `App.Handler` 创建私有 mux 后调用一次 `a.registerAccountPoolHandlers(mux)`。
-3. 暂不修改 Chat、Responses、Messages 或 Gemini 执行器。后续执行接线读取 revision 大于 0 的配置，经员工公开模型权限过滤后再交给调度器；revision 0 继续使用旧单路由。
-4. 接线执行器时补充禁用账号、协议能力、冷却、租约续期、revision 竞争、流已提交不换号及用量归属的端到端验收。
+3. Chat、Responses、Messages、Gemini 与 count-tokens 读取 revision 大于 0 的显式配置，经员工公开模型权限过滤后交给共享运行时；revision 0 继续使用旧单路由。
+4. 首账号只有在 HTTP 或 Codex executor 调用前发生明确账号特定预检失败时才能切换一次。第二次选择固定初始 pool revision 并排除首账号；配置或权限变化直接终止。开始执行或提交流输出后绝不换号。
+5. 每个员工请求只建立一个父请求；未派发的失败候选不建立 attempt。真正派发时以实际账号和实际上游模型建立唯一 attempt，并据此取得价格快照。
 
 实现依据本项目规格独立编写，没有复制 CLIProxyAPI、Sub2API 或归档 CPA 的实现、迁移或测试。

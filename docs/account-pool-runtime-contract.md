@@ -1,6 +1,6 @@
 # 账号池运行时适配契约
 
-状态：2026-09-23 已接入 Chat、Responses、Messages 和 Gemini HTTP 处理器，隔离进程与真实浏览器验收见 [集成状态](integration-status.md)。仅源码预览，未提供新安装包；自动换号、恢复探测和代理池仍未实现。
+状态：2026-09-23 源码已接入 Chat、Responses、Messages 和 Gemini HTTP 处理器；既有账号池接线的隔离进程与真实浏览器证据见 [集成状态](integration-status.md)。当前源码另实现下述有界预检换号，仍待本轮总验收；未提供包含该能力的新安装包，也不表示已经发布。执行后的自动换号、恢复探测和代理池仍未实现。
 
 ## 接口与调用边界
 
@@ -18,7 +18,19 @@ func (rt *accountPoolRuntime) Acquire(
     stickyOpaque string,
 ) accountPoolAcquireResult
 
+func (rt *accountPoolRuntime) AcquireWithOptions(
+    ctx context.Context,
+    publicModel string,
+    auth employeeAuth,
+    allowedProviders []string,
+    stickyOpaque string,
+    options accountPoolAcquireOptions, // exclusions + expected pool revision
+) accountPoolAcquireResult
+
 func (l *accountPoolLease) Context() context.Context
+func (l *accountPoolLease) PoolRevision() int64
+func (l *accountPoolLease) MarkDispatch()
+func (l *accountPoolLease) MarkOutput()
 func (l *accountPoolLease) Heartbeat(ctx context.Context) accountPoolRuntimeCode
 func (l *accountPoolLease) Release(ctx context.Context, result scheduling.ReleaseResult) (bool, accountPoolReleaseResult)
 func (rt *accountPoolRuntime) NotifyChanged()
@@ -30,6 +42,10 @@ func (rt *accountPoolRuntime) Close() error
 没有显式 `model_account_pool_configs` 记录时，结果为 `Legacy=true` 和 `Code=legacy_no_pool`，且没有租约。调用侧必须重新锁内检查 Key、员工状态、model policy 和旧单路由，然后继续原有行为。这样现有用户不会因为仅安装运行时表而获得并发或冷却限制。
 
 显式池成功时，调用侧必须用 `Lease.Context()` 执行上游请求并 `defer Release`。运行时每个租约自动以 TTL 的三分之一为间隔续租；公开 `Heartbeat` 供显式控制与测试。续租或持久化失败会取消 `Lease.Context()`，调用侧不得继续执行请求。
+
+服务协调层只在模型 HTTP 或 Codex executor 尚未进入时允许一次换号：首账号发生明确的账号特定本地预检失败后，先成功释放旧租约，再以首次 `PoolRevision()`、首账号排除集及原授权条件调用 `AcquireWithOptions`。revision 改变、池消失、权限变化、排除后无候选或第二个账号预检失败都会终止请求。sticky 选择不能越过排除集。
+
+执行证据采用正向状态。零值 `DispatchUnknown` 拒绝换号；新租约从 `DispatchNotStarted` 开始，调用 HTTP `Do` 或 Codex executor 前必须调用 `MarkDispatch` 单调推进到 `MayHaveSent`，开始向客户端提交输出时可调用 `MarkOutput` 推进到 `OutputCommitted`。进入 `MayHaveSent` 后，无论连接错误、HTTP 状态、协议错误、取消或尚未输出，都绝不重放本次请求。
 
 ## 选择与重查
 
@@ -69,7 +85,7 @@ func (rt *accountPoolRuntime) Close() error
 
 运行时表中的时间统一写为 UTC 固定九位小数格式 `2006-01-02T15:04:05.000000000Z`，使 SQLite 文本排序与时间顺序一致。启动恢复先用 Go 解析所有已有时间，再判定过期并把仍有效的旧格式值规范化；不会对可变小数位的 RFC3339 文本直接做字典序过期判断。
 
-`Release` 只处理一次。它先在一个事务中写入需要的 cooldown 并删除持久化租约，提交后才释放内存容量。持久化失败时返回 `storage_unavailable`，取消请求并让内存与数据库租约保守地保持到原 TTL；重复 Release 返回 `already_released`。rate limit、overload 和 transient 只有在 `StreamCommitted=false` 且 `ExecutionUncertain=false` 时返回 `RetrySuggested=true`。该值只表示安全资格，本层不自动换号或重放请求。
+`Release` 只处理一次。它先在一个事务中写入需要的 cooldown 并删除持久化租约，提交后才释放内存容量。持久化失败时返回 `storage_unavailable`，取消请求并让内存与数据库租约保守地保持到原 TTL；重复 Release 返回 `already_released`。`RetrySuggested` 只有在显式 `DispatchNotStarted`、租约自身没有更晚执行证据、context 未取消、旧风险字段没有正向危险证据且失败类允许时才可能为 true；零值或两个旧布尔字段为 false 不能授权换号。该值只是运行时证据，服务协调层仍只允许上述一次预检换号。
 
 cooldown 按 account ID 持久化，重启后仍生效。同一账号收到重叠 cooldown 时，数据库只保留截止时间更晚的完整事件；`failure_class`、`cooldown_until` 和 `updated_at` 始终来自同一次 Release，不把较短的新失败类型拼到较长的旧截止时间上。过期数据在启动时清理。当前实现仍是单服务进程 scheduler；SQLite 恢复是崩溃保守占位，不是多节点分布式租约协议。
 
@@ -79,13 +95,13 @@ cooldown 按 account ID 持久化，重启后仍生效。同一账号收到重�
 
 运行时只返回固定 code：`acquired`、`legacy_no_pool`、`invalid_request`、`model_not_allowed`、`no_compatible_account`、`capacity_unavailable`、`queue_full`、`cancelled`、`authorization_changed`、`configuration_changed`、`account_changed`、`storage_unavailable`、`closed`、`released` 和 `already_released`。这些 code 不包含 SQL、凭据、请求正文或上游响应。
 
-## 根任务接线清单
+## 源码接线约束
 
 1. 在 account-pool 配置迁移之后调用 `s.migrateAccountPoolRuntime(ctx)`。
 2. `Open` 创建共享 `accountPoolRuntime`；`App.Close` 在关闭 store 前调用 runtime `Close`。
 3. 四协议处理器完成现有认证后释放 admission 锁，再调用 `Acquire`。显式池成功时使用返回 route 和 `Lease.Context()`；legacy 结果继续旧单路由并重新锁内校验。
-4. 所有协议和 count-tokens 路径都必须 Release。根据既有请求生命周期填写有限 `FailureClass`、`StreamCommitted` 和 `ExecutionUncertain`；不得在本批自动重试或换号。
+4. 所有协议和 count-tokens 路径都必须 Release。只有本地账号预检失败可经共享协调层执行一次固定 revision、排除首账号的换号；`MarkDispatch` 后不得进入任何换号入口。
 5. 下列写入成功提交后调用 `accountPool.NotifyChanged()`：撤销 Key、更新员工状态、更新员工模型权限、更新/停用上游、写入模型池、替换凭据，以及 OAuth 刷新导致 upstream revision、credential state、source 或 client binding 变化。回滚或提交失败时不得通知。
-6. HTTP 接线完成并通过四协议端到端测试之前，feature/status 必须继续显示 pool routing 未启用。
+6. 当前源码及合成验收记录不能替代本轮总验收，也不能用来声明新安装包已经发布。
 
 本实现依据本项目规格独立编写，没有复制 CLIProxyAPI、Sub2API 或归档 CPA 的实现、迁移或测试。

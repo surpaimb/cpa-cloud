@@ -1,7 +1,7 @@
 # 服务用量账本协调契约
 
-状态：源码开发预览，2026-09-23。协调器已接入 `App`、四种协议 handler 和转发器，
-进程回归、HTTP 用量/故障专项及完整 Go 回归通过。价格版本、管理员统计和网页已按
+状态：源码开发预览，2026-09-23。协调器已接入 `App`、四种协议 handler 和转发器，既有进程回归、
+HTTP 用量/故障专项及完整 Go 回归曾通过。当前源码另接入账号池预检换号，本轮总验收仍未完成，也不表示已经发布。价格版本、管理员统计和网页已按
 [用量管理契约](usage-management-contract.md) 接入；预算和正式账单仍未实现。
 
 ## 生命周期接口
@@ -17,9 +17,10 @@
   记录 `requestID:1` 尝试。进入 adapter 后发生的本地校验失败仍属于一次真实执行尝试；
   adapter 尚未执行前的路由或准备失败调用 `finishWithoutAttempt`，请求可以失败、取消或
   中断并保持零 attempt。
-- 服务接线调用 `beginPricedAttempt(ctx, accountID, startedAt, price)`：先通过启动时注入的
-  价格查询器读取实际账号与上游模型的当前不可变快照，再记录 attempt。旧 `beginAttempt`
-  是无价格的内部包装接口。价格目录查询失败拒绝 dispatch，不把失败解释为未配置。
+- 服务接线把当前实际 `route` 交给 `beginRouteUpstreamUsage`：先以该 route 的 `account_id + upstream_model`
+  调用启动时注入的价格查询器，再通过 `beginDispatchedAttempt` 记录 attempt。直接派发标为 `primary`；
+  模型执行前完成一次安全换号后标为 `failover`。旧 `beginAttempt` 与 `beginPricedAttempt` 是底层包装接口。
+  价格目录查询失败拒绝 dispatch，不把失败解释为未配置，也不触发换号。
 - `attempt.observe(dataJSON)` 只接受协议转发器已经验证和接受的完整 JSON 或单个 SSE
   `data:` JSON，交给 `accounting.UsageAccumulator`。协调层只保留四个 nullable 计数，
   不保留或输出正文、工具参数、提示词、响应或原始错误。
@@ -27,15 +28,16 @@
   `finishWithoutAttempt` 只结束无 attempt 的 request，且拒绝成功状态。
 
 协调器没有 HTTP 接口或后台队列，不自行管理价格目录、预算或账单，也不执行上游请求。
-一次请求对象最多创建一个上游 attempt，调度固定为 `primary`，不会重试或创建
-`retry`/`failover` attempt。未配置或已停用时 `BeginAttempt.Price` 为 `nil`；
+一次请求对象最多创建一个真实上游 attempt。首账号若在模型执行前的本地账号预检失败，服务可在不创建 attempt
+的情况下换一个账号一次；最终实际派发的唯一 attempt 标为 `primary` 或 `failover`。进入 HTTP `Do` 或 Codex
+executor 后不会重试，也不会创建第二个 attempt。未配置或已停用时 `BeginAttempt.Price` 为 `nil`；
 即使用量已知，成本仍为 SQL `NULL`。配置价格只提供内部估算，不能冒充供应商账单。
 
 ## 服务接线
 
-服务启动先迁移价格目录，再迁移并恢复账本；路由和权限检查通过后记录 request，在调用 HTTP transport
-或会员 adapter 前记录 attempt。`count_tokens` 是估算接口，不写入生成用量账本。
-入口拒绝、未找到路由等尚未接纳的请求不计为上游尝试。
+服务启动先迁移价格目录，再迁移并恢复账本；首次路由和权限检查通过后只记录一次父 request。账号预检换号不会
+结束或重建父 request，失败候选也不产生 attempt；最终 route 完成价格查询后、调用 HTTP transport 或会员
+executor 前记录唯一 attempt。`count_tokens` 是估算接口，不写入生成用量账本。入口拒绝、未找到路由等尚未接纳的请求不计为上游尝试。
 
 JSON 和 SSE 转发器仅向累计器传递已经通过协议验证的事件。无效用量保留未知，
 不会把未知计数当成零。终结账本失败会返回固定错误；流式已经输出的内容不可撤回。
@@ -84,13 +86,14 @@ SQL、数据库路径、标识符、凭据或上游正文：
 启动恢复只把遗留 pending request/attempt 标为 `interrupted`，不会填写 Token、成本或
 成功状态。失败事件未提供合法 usage 时，四个 Token 字段和成本都保持 SQL `NULL`。
 
-## 本批合成验证
+## 源码合成验证
 
 测试使用临时 SQLite 与自行编写的 JSON/SSE 数据，覆盖四种 provider 的隔离、
 OpenAI-compatible 与 Codex 的双协议选择、中文公开模型、无价格 attempt、JSON
 完整用量、Anthropic 跨 SSE 事件累计快照、重复终结、取消 context 的 3 秒落盘、
 零 attempt 本地失败、失败事件未知用量、持久化失败显式返回，以及重启恢复
-`interrupted`。测试不访问网络、不读取真实凭据或真实请求内容。
+`interrupted`，以及预检换号仍保持一个父 request、零个失败候选 attempt、一个按实际账号和实际模型定价的
+`failover` attempt。测试不访问真实上游、不读取真实凭据或真实请求内容；这些证据仍待本轮总验收汇总。
 
 底层账本与协议字段依据分别见
 [内部用量与尝试账本核心契约](usage-ledger-contract.md)和

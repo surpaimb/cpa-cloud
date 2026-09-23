@@ -1,9 +1,11 @@
 # Usage protocol mapping
 
 Status: source preview, 2026-09-23. The service coordinator connects this parser
-to four-protocol HTTP forwarding and request completion. Forwarders pass only
-JSON accepted by their protocol handler and decide terminal status separately.
-Pricing configuration, budgets, statistics APIs, and billing remain unimplemented.
+to four-protocol HTTP forwarding, bounded pre-dispatch account failover, and
+request completion. Forwarders pass only JSON accepted by their protocol handler
+and decide terminal status separately. Pricing configuration and statistics APIs
+are implemented in the current source and await this round's overall acceptance;
+budgets and billing remain unimplemented. This is not a release statement.
 
 ## Small API
 
@@ -79,9 +81,9 @@ output-only delta. Repeated events are idempotent.
 
 Protocol error objects, Anthropic `error` events, and Responses failed/cancelled
 events are ignored as usage sources. They leave usage unknown when no earlier
-valid snapshot exists and never expose their error body. Attempt status and the
-decision to persist any earlier known counters belong to the future forwarding
-integration.
+valid snapshot exists and never expose their error body. The service forwarding
+layer records terminal attempt status and persists any earlier valid counters;
+the parser itself does not decide status or routing.
 
 ## Public protocol sources
 
