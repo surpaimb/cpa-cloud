@@ -11,11 +11,11 @@ A self-hosted AI access platform for internal enterprise use. Administrators man
 | Implemented | Not yet implemented or validated |
 | --- | --- |
 | Web console, administrator sessions, employee enable/disable, model permissions | Multi-tenancy, SSO, administrator password-reset command |
-| Multiple keys per employee, no expiration by default, optional expiration, revocation | Membership authorization UI, automatic refresh, Claude/Gemini membership integration, and real-account validation |
+| Multiple keys per employee, no expiration by default, optional expiration, revocation; source adds Codex web authorization and automatic refresh | Claude/Gemini membership integration and real-account validation |
 | OpenAI-compatible API-key upstreams, presets and discovery; source adds native Claude/Gemini API-key routes | Automatic protocol conversion and fields outside the documented subset |
 | `/v1/models`, non-streaming and SSE Chat Completions | Complete compatibility testing with CC Switch and real AI tools |
 | Latest source: `POST /v1/responses`, function calls/results, non-streaming JSON and SSE | Stateful Responses sessions, background tasks, hosted tools, and full client compatibility |
-| SQLite persistence, encrypted upstream credentials, restart recovery | Account pooling, reliable billing usage, automated backup/migration, production key management |
+| SQLite persistence, encrypted upstream credentials, restart recovery; source adds account-pool routing | Reliable billing usage, automated backup, production key management |
 
 Employee keys remain valid across normal restarts. Revocation, employee disablement, optional expiration, and permission restrictions still take effect. Employees never need the upstream provider key.
 
@@ -29,26 +29,29 @@ This feature is integrated into the latest source and **is not included in the v
 4. Employees keep using CPA Cloud keys with `/v1/chat/completions`. The supported subset is string text in `user`/`assistant` messages and an optional `stream` boolean, with non-streaming and SSE text output. System/developer roles, tools, images, and other unsupported parameters are explicitly rejected.
 5. A completed successful upstream request marks the account verified. Expiration or an upstream 401 requires reimport. Replace credentials through the existing row's reimport action; employee keys remain unchanged. Disabling the experiment blocks membership imports and requests without affecting ordinary API-key upstreams.
 
-The membership experiment also supports the backend OAuth authorization/manual refresh and native Responses subset below. Claude/Gemini membership integration remains incomplete. Automated acceptance uses synthetic credentials and fake upstreams; **real membership accounts have not been validated**. This does not establish compatibility with Codex CLI, Claude Code, or every tool configured through CC Switch. Messages uses a separate Anthropic API-key upstream; it does not turn Codex credentials into a Claude subscription.
+The membership experiment also supports the web OAuth authorization, shared automatic/manual refresh, and native Responses subset below. Claude/Gemini membership integration remains incomplete. Automated acceptance uses synthetic credentials and fake upstreams; **real membership accounts have not been validated**. This does not establish compatibility with Codex CLI, Claude Code, or every tool configured through CC Switch. Messages uses a separate Anthropic API-key upstream; it does not turn Codex credentials into a Claude subscription.
 
 Before upgrading, stop the service and back up the complete data directory, including the database and master key, with restricted access. The source build transactionally extends the existing upstream table and rolls back a failed migration. To revert to an older program, restore the complete pre-upgrade backup as well; never run old and new processes against the same directory concurrently.
 
-## Codex backend authorization and manual refresh (source experiment)
+## Codex web authorization and credential refresh (source experiment)
 
-This batch provides management APIs, **without an authorization UI or automatic refresh, and is not included in preview.3 downloads**. It is disabled by default. Configure all three flags: `--experimental-codex-membership`, `--codex-oauth-client-id`, and `--codex-oauth-redirect-uri`. Administrators must supply a client ID they are entitled to use and confirm provider support for its redirect URI and scopes. The project does not embed another product's client ID or claim a validated third-party registration.
+The latest source provides web authorization, status polling, manual refresh, and shared automatic refresh. **It is not included in preview.3 downloads**. It is disabled by default. Configure all three flags: `--experimental-codex-membership`, `--codex-oauth-client-id`, and `--codex-oauth-redirect-uri`. Administrators must supply a client ID they are entitled to use and confirm provider support for its redirect URI and scopes. The project does not embed another product's client ID or claim a validated third-party registration.
 
 The callback path must be `/admin/api/v1/codex/oauth/callback` on your full HTTPS deployment URL. Literal loopback HTTP is permitted only for local development. Session creation and manual refresh require an administrator session, same-origin requests, and a CSRF token. The callback requires the same administrator browser session that initiated authorization.
 
 | Management API | Request and behavior |
 | --- | --- |
 | `POST /admin/api/v1/upstreams/codex-oauth-sessions` | `{ "name": "Team Codex", "operation_id": "uuid" }`; returns an authorization URL and expiry; sessions last 10 minutes and retries reuse the same operation ID |
+| `GET /admin/api/v1/upstreams/codex-oauth-sessions/{id}` | Only the originating administrator session may poll; returns progress without credentials |
 | `GET /admin/api/v1/codex/oauth/callback` | Receives the provider callback; validates state, session binding, and PKCE; exchanges the code at most once and encrypts stored credentials |
 | `POST /admin/api/v1/upstreams/{id}/codex-refresh` | `{ "expected_revision": 3 }`; explicitly refreshes and atomically replaces credentials while preserving employee keys |
 
 - Only accounts created through this service's OAuth flow with the same client ID as the current configuration can refresh. Imported files with unknown provenance or a client-ID mismatch return `409 codex_refresh_not_bound`, leaving credentials and state unchanged. Reimport clears any previous OAuth provenance binding.
 - Authorization sessions retain their original client ID and redirect URI. If configuration changes across restart, start a new authorization session; the service does not consume the old session using the new configuration.
-- Refresh network failures, lost responses, and server errors do not automatically replay the old token. Only an explicit 429 permits bounded backoff retries. An uncertain outcome does not establish that the old token remains valid. Invalid `expected_revision` returns 400; concurrent revision conflicts return 409.
-- Successful authorization or refresh means credentials were saved, not that a model or account was verified online. Configure model routes manually. Expired accounts can be authorized again, and the existing file-import path still permits reimport. Scheduled refresh, the authorization UI, and provider-side revocation are separate future deliveries.
+- Refresh network failures, lost responses, and server errors do not automatically replay the old token. Only an explicit 429 permits bounded backoff retries. An uncertain outcome persists a paused refresh state, preventing later scheduled replays. An unexpired access token may still be used for requests; after expiry, authorization or import is required. Invalid `expected_revision` returns 400; concurrent revision conflicts return 409.
+- Successful authorization or refresh means credentials were saved, not that a model or account was verified online. Discovery supplies candidates that must be explicitly selected to create routes. Expired accounts can be authorized again or reimported. Provider-side revocation remains unimplemented.
+
+Use the upstreams page to authorize, check status, refresh manually, or reimport. The background task scans up to 16 candidates each minute, refreshes at most two accounts concurrently, and starts within five minutes of expiry. Chat, Responses, and discovery share credential acquisition; per-account locking, rereads, and revision checks coordinate refresh with credential replacement.
 
 See the [OAuth lifecycle contract](docs/codex-lifecycle-contract.md) for API and failure semantics.
 
@@ -76,7 +79,19 @@ Select the upstream type, save the provider API key, and discover models. The na
 
 The management API `POST /admin/api/v1/upstreams/batch-import` accepts up to 100 items and 8 MiB of JSON, with a UUID `operation_id` and unique `item_id` values inside `items`. It reports `created`, `existing`, or `failed` per item across four upstream types. If a network failure leaves the result uncertain, retry the same operation ID and content. Import does not verify an account online or create model routes. See the [batch import contract](docs/upstream-batch-contract.md) for the format.
 
-Claude/Gemini subscriptions are separate from these API-key capabilities; see the [membership prerequisites](docs/research/membership-provider-readiness.md). Account pools, the full ledger and remaining work continue under the [feature matrix](docs/feature-parity-plan.md).
+The batch-import page previews per-item results and allows repairing failed items separately. After a lost response, retry with the original operation ID and content without duplicating successful accounts.
+
+Claude/Gemini subscriptions are separate from these API-key capabilities; see the [membership prerequisites](docs/research/membership-provider-readiness.md). The full ledger and remaining work continue under the [feature matrix](docs/feature-parity-plan.md).
+
+## Account-pool routing (latest source only)
+
+On the Models page, choose “编辑账号池” to configure accounts of the same provider, mappings, priority, weight, and concurrency. “分组与渠道” manages their directories. Existing single routes retain their behavior; routing activates only after an explicit pool save. Revision conflicts preserve edits and require a reload. See the [account-pool API](docs/account-pool-service-contract.md).
+
+Chat, Responses, Messages (including count_tokens), and Gemini share scheduling. Key validity, employee permissions, and configuration revision are rechecked after waiting. Capacity is shared across pools; an account uses the smallest configured concurrency across enabled model pools.
+
+The optional `X-CPA-Session` header accepts a 1–256-byte identifier. Only an employee/key/model/protocol-scoped HMAC is used for short-lived affinity; the original value is neither stored nor forwarded. Leases renew, release, and conservatively recover across restarts. Rate limits, authentication errors, and temporary failures cool accounts for later independent requests; **the current request is never automatically switched or replayed**. Recovery probes, outbound proxy pools, upstream quota collection, and employee budgets remain unimplemented. See the [runtime contract](docs/account-pool-runtime-contract.md).
+
+The source usage ledger records employee requests separately from upstream attempts. It retains call metadata and explicitly reported token counts, without prompts, replies, or tool arguments. Unknown usage and costs without configured prices remain null, not zero. Usage dashboards, price management, and budget enforcement are not implemented. See the [usage integration contract](docs/usage-service-contract.md).
 
 ## 1. Download and installation
 
@@ -339,7 +354,7 @@ This example uses TLS provided directly by the service. Trusted reverse-proxy co
 | `--init` | Initialize from stdin and then exit |
 | `--tls-cert` / `--tls-key` | Must be set together; required for a non-loopback listener |
 | `--experimental-codex-membership` | Latest source only; Codex file import, membership requests, and OAuth experiments are disabled by default |
-| `--codex-oauth-client-id` / `--codex-oauth-redirect-uri` | Latest source only; set both to enable backend authorization and manual refresh, with the membership experiment enabled |
+| `--codex-oauth-client-id` / `--codex-oauth-redirect-uri` | Latest source only; set both to enable web authorization and automatic/manual refresh, with the membership experiment enabled |
 | `--allow-loopback-upstream` | Disabled by default; local development testing only |
 
 Run `cpa-cloud --help` to see the binary flags.

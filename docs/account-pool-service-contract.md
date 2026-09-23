@@ -1,12 +1,12 @@
 # 账号分组、渠道与多账号路由配置契约
 
-状态：独立持久化与管理 API 批次，尚未接入模型请求执行；2026-09-23。本批不能据此宣称账号池或实时调度已经上线。
+状态：2026-09-23 已接入管理 API、网页编辑器及四协议请求执行；隔离合成上游与真实浏览器验收见 [集成记录](integration-status.md)。仅最新源码，preview.3 下载包不包含此功能。自动换号、恢复探测、成本倍率和代理池尚未实现。
 
 ## 边界
 
 本模块只保存账号分组、渠道和公开模型到上游账号的路由配置。管理员请求沿用现有 session、同源 Origin 和 CSRF 校验。模块不读取或探测上游凭据，不修改员工的 `model_mode` 或 `employee_models`，也不改变每个员工看到的公开模型 ID。
 
-公开模型仍由 `models.id` 唯一标识。没有 `model_account_pool_configs` 记录时，`revision` 为 0，读取接口返回 `models` 中的旧单路由作为兼容项；模型执行必须继续走原单路由，不得因为迁移表存在而改变行为。首次成功 PUT 才创建 revision 1 的显式账号池。后续请求执行接线必须单独引入 `internal/scheduling`，本批不修改执行器。
+公开模型仍由 `models.id` 唯一标识。没有 `model_account_pool_configs` 记录时，`revision` 为 0，读取接口返回 `models` 中的旧单路由作为兼容项；模型执行继续走原单路由，不因迁移表存在而改变行为。首次成功 PUT 才创建 revision 1 的显式账号池，执行器通过共享运行时调用 `internal/scheduling`。
 
 ## 管理 API
 

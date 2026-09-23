@@ -1,10 +1,9 @@
 # Usage protocol mapping
 
-Status: internal parsing contract, 2026-09-23. This component is not connected to
-HTTP forwarding, request completion, pricing, budgets, or billing. A forwarding
-integration must pass only JSON that its protocol handler has already accepted
-and must decide separately whether the attempt succeeded, failed, or was
-cancelled.
+Status: source preview, 2026-09-23. The service coordinator connects this parser
+to four-protocol HTTP forwarding and request completion. Forwarders pass only
+JSON accepted by their protocol handler and decide terminal status separately.
+Pricing configuration, budgets, statistics APIs, and billing remain unimplemented.
 
 ## Small API
 

@@ -117,8 +117,8 @@ OAuth binding.
 The status response adds `features.codex_membership_oauth`,
 `features.codex_membership_auto_refresh`, and a limitation
 when the experiment is enabled but the client configuration is incomplete.
-This backend batch does not claim a complete web UI; the web client may add a
-button and callback status view in a later batch.
+The integrated web client provides authorization, status polling, manual refresh,
+and reimport entry points. These remain source experiments and are not in preview.3.
 
 ## Token exchange and persisted credential
 
@@ -217,8 +217,8 @@ credentials or requests to OpenAI.
 
 The implemented product surface is backend authorization, redacted session
 status, explicit refresh, request-side refresh and a bounded in-process
-background scheduler. There is no web-console entry point or real-account
-compatibility verification yet.
+background scheduler, with matching web-console entry points. Real-account
+compatibility and provider-side revocation remain unverified or unimplemented.
 
 ## Public protocol sources
 

@@ -1,5 +1,16 @@
 # 集成状态
 
+## 2026-09-23：账号池执行、网页配置与共享刷新
+
+- 主任务在 `c8036d1` 构建真实 Go 进程并运行 `scripts/smoke-account-pool.mjs`：四协议映射、默认账号停用后的备用路由、目录一致性、429 不重放当前请求、冷却重启、排队 Key 撤销与会话元数据隔离全部通过。只使用随机临时目录与回环合成上游。
+- 网页 `1e61003` 独立执行 58 项测试及 TypeScript/Vite 构建通过。真实 Go + Playwright 运行 `scripts/smoke-account-pool-ui.cjs`，验证分组/渠道、显式保存、revision 冲突保留编辑、重新加载、停用账号提示、权限不自动扩大及备用账号模型映射。桌面/手机截图已查看，0 页面 JavaScript 异常，模拟上游仅收到 1 个明确授权请求；数据和进程已清理。
+- OAuth 竞争修复 `a5dee0f` 已复核：重导入、启停与刷新共用账号锁；交换前、明确 429 重试及旋转写入均检查当前来源、client ID 和 revision。主任务专项 `TestCodex(OAuth|Refresh|Catalog)` 非缓存通过（40.681s）。
+- 新一轮接线包含权限变更唤醒排队请求和四协议账本 hook。主任务 `Test(AccountPool|ModelAdmission|UsageLedger)` 非缓存通过（69.847s）；最终 `go test -p 1 ./... -count=1 -timeout=5m` 全部通过（service 215.888s），`go vet -p 1 ./...` 和 Windows 本机编译通过。用量 HTTP 专项 `e822783`、流式终帧修复 `e824d7e` 均纳入这轮完整回归。
+- 用量终结 `2244367`/`fe68ed1` 用同一事务更新 attempt、accounting request 和旧请求状态；SQL trigger 注入验证任一失败全部回滚、不返回成功正文/结束帧、重启后恢复 interrupted。四协议 JSON/SSE、重复快照、未知用量/价格 NULL、Codex 用量转换、取消、零 attempt、撤销、协议不匹配和内存关联清理已自动验收。Gemini 多候选从首个结束标记开始缓冲，Responses 的 failed/incomplete/EOF 分别归类并保留合法 incomplete 用量。
+- 主任务对最终新编译程序执行 `smoke-native-providers.mjs`、`smoke-responses.mjs` 与 `smoke-account-pool.mjs` 均通过；此前账本接线版本的 `smoke-preview.mjs --discover-models`、`smoke-codex-import.mjs` 也通过。没有访问真实供应商凭据或模型端点。本机工具链没有可用 C 编译器，Linux race 由随后轻量 CI 验证，结果待追加。
+- 本批 CI 路径计划核对为 core/web=true，windows/linux/macos=false，6 项计划测试通过；两份 README 各 5 个 PowerShell 命令块与修改前一致，更新文档的本地链接检查通过。
+- 此批仅源码；没有新 tag、安装包或真实供应商账号测试。Claude/Gemini 会员、自动换号、代理池、完整预算与运营功能继续未完成。
+
 ## 2026-09-22 16:20（Asia/Shanghai）
 
 - 网页提交 `c220477` 已存在；主任务在 `web/` 独立重跑 `bun run test`，1 个文件、4 个测试通过。

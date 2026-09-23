@@ -11,11 +11,11 @@
 | 已实现 | 尚未实现或验证 |
 | --- | --- |
 | 网页后台、管理员会话、员工启停、模型权限 | 多租户、SSO、管理员密码重置命令 |
-| 一人多个 Key、默认永久有效、可选到期、撤销 | 网页会员授权入口、自动刷新、Claude/Gemini 会员接入及真实账号验证 |
+| 一人多个 Key、默认永久有效、可选到期、撤销；源码提供 Codex 网页授权和自动刷新 | Claude/Gemini 会员接入及真实账号验证 |
 | OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路 | 跨协议自动转换和未列出的协议字段 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
 | 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE | Responses 有状态会话、后台任务、托管工具与完整客户端兼容性 |
-| SQLite 持久化、上游凭据加密、重启恢复 | 账号池、可靠计费用量、自动备份/迁移、生产密钥托管 |
+| SQLite 持久化、上游凭据加密、重启恢复；源码提供多账号路由 | 可靠计费用量、自动备份、生产密钥托管 |
 
 员工 Key 正常重启后仍有效；撤销、员工停用、可选到期时间及权限限制仍会生效。员工无需知道上游供应商 Key。
 
@@ -29,26 +29,29 @@
 4. 员工仍使用 CPA Cloud Key，通过 `/v1/chat/completions` 调用。当前只接收 `user`/`assistant` 字符串文本，以及可选的 `stream` 布尔字段；支持文本非流式与 SSE。system/developer、工具、图片及其他未支持参数会明确拒绝。
 5. 上游请求成功完成后状态变为“已验证”；凭据过期或上游返回 401 时提示重新导入。使用现有上游行的“重新导入”替换文件，员工 Key 不变。关闭实验开关会阻止会员导入及调用，普通 API Key 上游不受影响。
 
-会员实验另支持下文的后台 OAuth 授权与手动刷新、原生 Responses 子集；Claude/Gemini 会员接入仍未完成。自动验收使用合成凭据和假上游，**尚未用真实会员账号验证**；不应据此认定 Codex CLI、Claude Code 或 CC Switch 所配置的所有工具均可使用。Messages 使用独立的 Anthropic API Key 上游，不支持把 Codex 账号转换成 Claude 会员。
+会员实验另支持下文的网页 OAuth 授权、共享自动/手动刷新与原生 Responses 子集；Claude/Gemini 会员接入仍未完成。自动验收使用合成凭据和假上游，**尚未用真实会员账号验证**；不应据此认定 Codex CLI、Claude Code 或 CC Switch 所配置的所有工具均可使用。Messages 使用独立的 Anthropic API Key 上游，不支持把 Codex 账号转换成 Claude 会员。
 
 升级前停止服务并备份整个数据目录（包含数据库及主密钥），保护备份访问权限。源码首次打开旧数据库会事务化扩展上游表；迁移失败会回滚。回退旧程序时应同时恢复升级前的整份备份，勿让新旧进程同时使用同一目录。
 
-## Codex 后台授权与手动刷新（源码实验）
+## Codex 网页授权与凭据刷新（源码实验）
 
-此批提供管理 API，**没有网页授权按钮或自动刷新，不在 preview.3 下载包中**。默认关闭；需同时配置 `--experimental-codex-membership`、`--codex-oauth-client-id` 和 `--codex-oauth-redirect-uri`。管理员须提供自己获准使用的 OAuth client ID，并确认其回调地址与 scope 获供应商支持；项目不内置其他产品的 client ID，也未验证真实第三方注册是否可用。
+最新源码提供网页授权、状态查询、手动刷新和共享自动刷新，**不在 preview.3 下载包中**。默认关闭；需同时配置 `--experimental-codex-membership`、`--codex-oauth-client-id` 和 `--codex-oauth-redirect-uri`。管理员须提供自己获准使用的 OAuth client ID，并确认其回调地址与 scope 获供应商支持；项目不内置其他产品的 client ID，也未验证真实第三方注册是否可用。
 
 回调路径必须为 `/admin/api/v1/codex/oauth/callback`，使用部署的完整 HTTPS 地址；仅本机开发允许字面回环地址的 HTTP。创建授权会话和手动刷新均要求管理员会话、同源请求与 CSRF Token；授权回调要求发起授权的同一个管理员浏览器会话。
 
 | 管理 API | 请求及行为 |
 | --- | --- |
 | `POST /admin/api/v1/upstreams/codex-oauth-sessions` | `{ "name": "Team Codex", "operation_id": "uuid" }`，返回授权 URL 和有效期；会话有效期 10 分钟，重试复用同一 operation ID |
+| `GET /admin/api/v1/upstreams/codex-oauth-sessions/{id}` | 仅发起授权的管理员登录会话可查询；返回进度，不返回凭据 |
 | `GET /admin/api/v1/codex/oauth/callback` | 接收供应商回调；验证 state、会话与 PKCE，授权码最多交换一次，凭据加密保存 |
 | `POST /admin/api/v1/upstreams/{id}/codex-refresh` | `{ "expected_revision": 3 }`，显式刷新并原子替换凭据；员工 Key 保持不变 |
 
 - 仅本服务通过 OAuth 创建、且创建时 client ID 与当前配置一致的账号允许刷新。来源不明的导入文件或 client ID 错配返回 `409 codex_refresh_not_bound`，不修改现有凭据和状态。重新导入文件会清除此前 OAuth 来源绑定。
 - 授权会话保存创建时的 client ID 和回调地址；重启更改配置后，旧会话要求重新发起授权，不会用新配置消费旧会话。
-- 刷新网络失败、响应丢失或服务器错误时不会自动重放旧 Token；仅明确收到 429 才有界退避重试。失败结果未确认时不能据此认定旧 Token 仍有效。无效的 `expected_revision` 返回 400；并发版本冲突返回 409。
-- 授权或刷新成功仅表示凭据已保存，不等于模型可用或账号已在线验证。模型仍需手动配置；过期账号可重新授权，原文件导入路径可继续重新导入。后台定时刷新、网页授权体验与供应商侧撤销另行交付。
+- 刷新网络失败、响应丢失或服务器错误时不会自动重放旧 Token；仅明确收到 429 才有界退避重试。结果不确定会持久化暂停刷新，阻止后续定时任务重放旧 Token；现有未过期 access token 可继续尝试请求，到期后需重新授权或导入。无效的 `expected_revision` 返回 400；并发版本冲突返回 409。
+- 授权或刷新成功仅表示凭据已保存，不等于模型可用或账号已在线验证。同步目录只提供候选，需明确选择建立路由；过期账号可重新授权或重新导入。供应商侧撤销仍待实现。
+
+网页“上游连接”可发起授权、查看状态、手动刷新或重新导入。自动任务每分钟扫描最多 16 个候选、最多同时刷新 2 个账号，在到期前 5 分钟尝试刷新。Chat、Responses 和模型目录共用凭据获取服务；账号级锁、锁内重读和 revision 条件更新协调刷新与凭据替换。
 
 接口与失败语义详见 [OAuth 生命周期契约](docs/codex-lifecycle-contract.md)。
 
@@ -76,7 +79,19 @@
 
 批量管理 API `POST /admin/api/v1/upstreams/batch-import` 支持最多 100 条、总计 8 MiB 的 JSON，请求包含 UUID `operation_id` 和带唯一 `item_id` 的 `items`。四种上游逐项返回 `created`、`existing` 或 `failed`；网络结果未确认时应使用相同操作 ID 与原内容重试。导入成功不等于在线认证，也不会自动创建模型路由。格式见 [批量导入契约](docs/upstream-batch-contract.md)。
 
-Claude/Gemini 订阅会员不属于上述 API Key 能力；各自接入条件仍见 [会员接入记录](docs/research/membership-provider-readiness.md)。账号池、完整账本和后续范围继续按 [功能矩阵](docs/feature-parity-plan.md) 实现。
+网页批量导入可预览逐项结果，只修复失败项；响应丢失后用原操作编号和原内容重试，不重复创建已成功的账号。
+
+Claude/Gemini 订阅会员不属于上述 API Key 能力；各自接入条件仍见 [会员接入记录](docs/research/membership-provider-readiness.md)。完整账本和后续范围继续按 [功能矩阵](docs/feature-parity-plan.md) 实现。
+
+## 账号池调度（仅最新源码）
+
+在网页“模型路由”选择“编辑账号池”，配置同一提供商的多个账号及模型映射、优先级、权重和并发容量；“分组与渠道”管理对应目录。已有单路由保持原行为，只有点击“保存账号池”才启用调度；版本冲突会保留编辑并要求重新加载。接口见 [账号池管理 API](docs/account-pool-service-contract.md)。
+
+Chat、Responses、Messages（含 count_tokens）和 Gemini 共用调度。排队结束会重新检查 Key、员工权限和配置 revision。同一账号跨池共享容量，配置不同时取所有启用模型池中的最小值。
+
+可选请求头 `X-CPA-Session` 接受 1–256 字节会话标识；仅使用绑定员工、Key、模型和协议的 HMAC 做短时粘滞，不保存或转发原值。租约会续期、释放并在重启后保守恢复。429、认证或暂时故障会冷却账号，后续独立请求可选择其他可用账号；**当前请求不会自动换号或重放**。恢复探测、出站代理池、配额采集和员工预算尚未实现。见 [运行时契约](docs/account-pool-runtime-contract.md)。
+
+用量账本将员工请求与上游尝试分开记录，只保存调用元数据及供应商明确返回的 Token 计数；不记录提示词、回复或工具参数。未知用量和未配置价格的成本保持为空，不能视为零费用。当前没有用量查询页面、价格管理或预算执行，详见 [用量接线契约](docs/usage-service-contract.md)。
 
 ## 1. 下载安装
 
@@ -339,7 +354,7 @@ unset CPA_EMPLOYEE_KEY
 | `--init` | 读取 stdin 初始化，然后退出 |
 | `--tls-cert` / `--tls-key` | 必须成对设置；非回环监听必需 |
 | `--experimental-codex-membership` | 仅最新源码；默认关闭 Codex 文件导入、会员请求及 OAuth 实验 |
-| `--codex-oauth-client-id` / `--codex-oauth-redirect-uri` | 仅最新源码；同时设置才启用后台 OAuth 授权与手动刷新，另需开启会员实验 |
+| `--codex-oauth-client-id` / `--codex-oauth-redirect-uri` | 仅最新源码；同时设置才启用网页 OAuth 与自动/手动刷新，另需开启会员实验 |
 | `--allow-loopback-upstream` | 默认关闭，仅本机开发测试 |
 
 用 `cpa-cloud --help` 查看二进制参数。

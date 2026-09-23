@@ -1,6 +1,6 @@
 # 账号池调度核心契约
 
-状态：独立可测试核心，尚未接入员工模型请求；2026-09-23。本模块不能据此宣称账号池已经上线。
+状态：源码开发预览，2026-09-23。独立核心已通过[账号池运行时](account-pool-runtime-contract.md)接入四协议员工模型请求、持久化租约和网页配置，并通过隔离进程验收；没有发布新安装包。
 
 ## 边界与接口
 
@@ -28,8 +28,8 @@ released, releaseDecision := lease.Release(scheduling.ReleaseResult{...})
 
 调用侧用有限 `FailureClass` 释放租约。配置可为 rate limit、overload、transient、authentication 等类别设置冷却；内部冷却与候选携带的外部冷却取较晚截止时间。fake clock 测试覆盖冷却恢复。
 
-`RetrySuggested` 只在 rate limited、overloaded 或 transient 且明确尚未提交流、执行结果也不确定时为 true。`StreamCommitted` 或 `ExecutionUncertain` 任一为 true 时始终 false；认证和永久失败也不建议自动重放。该布尔值只是安全资格，不是自动重试命令；次数、幂等、请求生命周期和员工可见错误仍由未来服务接线决定。
+`RetrySuggested` 只在 rate limited、overloaded 或 transient，且 `StreamCommitted` 与 `ExecutionUncertain` 均为 false 时可能为 true。任一为 true 时始终 false；认证和永久失败也不建议自动重放。该布尔值只是安全资格，不是自动重试命令；当前服务不自动重试或换号。
 
-## 当前未接线项
+## 服务集成与剩余范围
 
-本批没有修改 service、store 或 web：没有账号池表、管理员 CRUD、员工请求分派、持久化事务、跨进程租约、用量归属或真实故障切换。下一批接线必须自动验收权限过滤、revision 竞争、租约快照持久化/恢复、成功与失败状态写入顺序、已提交流绝不换号，以及日志不含凭据和模型内容。
+服务已有账号池表、管理 API、网页编辑、四协议请求分派、租约持久化/重启恢复，以及请求与尝试的用量归属；权限过滤、revision 竞争和撤销已自动验收。跨进程调度、自动故障换号、恢复探测、配额和代理仍待实现；已提交流绝不换号，日志不含凭据和模型内容。

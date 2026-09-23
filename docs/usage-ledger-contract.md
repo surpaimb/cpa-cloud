@@ -1,12 +1,13 @@
 # 内部用量与尝试账本核心契约
 
-状态：核心模块开发预览，2026-09-23。本批只提供 `internal/accounting` 的 SQLite 账本和合成测试，尚未接入模型请求、管理 API、网页、预算、限流或账单流程，不能据此宣称线上请求已经计量或形成可靠账单。
+状态：源码开发预览，2026-09-23。`internal/accounting` 已通过[服务协调器](usage-service-contract.md)接入四协议模型请求及启动恢复；HTTP 用量、事务回滚和失败恢复专项通过。管理统计 API、网页、价格配置、预算和账单流程尚未实现，不能据此宣称正式计费。
 
 ## 范围与接口
 
 - `NewLedger(*sql.DB)` 接受服务拥有的共享数据库；模块不自行打开数据库、改变连接池或接管服务迁移顺序。
 - `Migrate(ctx)` 在一个数据库事务中创建 `accounting_requests`、`accounting_attempts` 及索引，并验证同名对象确为表、列集完全一致、关键 CHECK 约束存在且 attempt→request 外键正确。已有 view、缺约束或外键、缺列以及包含正文等额外列的伪兼容 schema 均拒绝；失败事务完整回滚并可在修复后重试。调用者负责在服务启动迁移中调用它。
 - `BeginRequest` / `FinishRequest` 记录一次员工请求；`BeginAttempt` / `FinishAttempt` 记录该请求下每次真实上游执行。ID 全部由调用者稳定提供，模块不从时间或内容生成 ID。
+- `FinishAttemptTx` / `FinishRequestTx` 复用相同终结校验，接受调用者事务且不自行提交或回滚；服务用它们与旧请求状态一起原子提交。
 - `RecoverInterrupted` 由启动恢复流程显式调用，将仍为 `pending` 的请求和尝试一次性转为 `interrupted`。迁移本身不隐式改变运行记录。
 - `SummarizeRequests` 只统计客户端请求状态和数量；`SummarizeAttempts` 另行统计上游尝试、已知用量和实际尝试成本。请求汇总不得把多次尝试的 Token 伪装成一次成功请求的 Token。
 
@@ -42,6 +43,6 @@ provider 是固定枚举：`openai`、`openai-compatible`、`anthropic`、`gemin
 
 恢复只把未完成行标为 `interrupted` 并写恢复时间；不会填 Token、成本或成功状态。若调用方给出的恢复时间早于任一 pending 请求或尝试的开始时间，或早于 pending 请求下已结束尝试的结束时间，整次恢复返回 `ErrInvalid` 并回滚，不写出倒序时间。恢复与正常 Finish 竞争时，先提交者决定终态，后到的不同 Finish 返回冲突。重复恢复返回零变更。
 
-本核心不提供 HTTP 接线、内存队列、本地持久日志、磁盘故障就绪降级、保留期清理、日汇总、配额或预算执行。这些仍需后续服务集成和故障验收；在此之前该模块只是可复算的内部明细核心，不是完整的 billing-grade 交付。
+本核心自身不依赖 HTTP，服务接线见服务协调契约。内存队列、本地持久日志、磁盘故障就绪降级、保留期清理、日汇总、配额和预算执行仍待实现；当前是内部明细子集，不是完整的 billing-grade 交付。
 
 实现依据本仓 `core-design.md` 与 `acceptance-matrix.md` 的独立规格；测试只使用临时 SQLite 和合成元数据，不读取真实凭据或请求内容，也没有新增第三方依赖。

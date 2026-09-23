@@ -1,8 +1,7 @@
 # 服务用量账本协调契约
 
-状态：内部协调层开发预览，2026-09-23。本批只新增
-`internal/service` 内的 package-private 协调器和合成测试；尚未把协调器接入
-`App`、HTTP handler、各协议转发器或价格配置，不能据此宣称请求计量已经上线。
+状态：源码开发预览，2026-09-23。协调器已接入 `App`、四种协议 handler 和转发器，
+进程回归、HTTP 用量/故障专项及完整 Go 回归通过。尚无价格配置、预算、统计页面或正式账单。
 
 ## 生命周期接口
 
@@ -28,6 +27,21 @@
 `retry`/`failover` attempt。价格尚未配置，因此 `BeginAttempt.Price` 固定为 `nil`；
 即使用量已知，成本仍为 SQL `NULL`，不能伪造零价格或精确账单。
 
+## 服务接线
+
+服务启动先迁移并恢复账本；路由和权限检查通过后记录 request，在调用 HTTP transport
+或会员 adapter 前记录 attempt。`count_tokens` 是估算接口，不写入生成用量账本。
+入口拒绝、未找到路由等尚未接纳的请求不计为上游尝试。
+
+JSON 和 SSE 转发器仅向累计器传递已经通过协议验证的事件。无效用量保留未知，
+不会把未知计数当成零。终结账本失败会返回固定错误；流式已经输出的内容不可撤回。
+Chat、Responses 和 Messages 的正常结束帧在落盘之后发送；Gemini 从含 finishReason 的
+候选帧起有界缓冲尾帧，EOF 验证和落盘成功后才发送。成功记录描述上游已经完成，不保证客户端最终
+收到所有字节。进程在账本终结后、客户端接收前断开仍可能保留成功用量。
+
+每个活跃 request 的内存关联在 handler 返回时清理；未终结路径用有界后台 context
+补记 interrupted，保存失败则保留 pending 供重启恢复。此时不宣称落盘成功。
+
 ## Provider 与协议隔离
 
 入口必须同时传入实际选中路由的 `provider_kind` 和员工入口所用的
@@ -51,8 +65,10 @@ Anthropic 与 Gemini 的协议固定。未知 provider、未知协议或不匹�
 复用第一次快照并幂等重放账本写入；不同状态重放返回固定冲突错误。这样正常路径与
 defer 清理不会因各自取了不同时间而制造冲突，也不会在重放时重新取用量。
 
-若 attempt 已经写入但 request 写入失败，再次调用相同 finish 会先幂等重放 attempt，
-然后重试 request。数据库错误不会被当作成功吞掉。传入 context 已关闭时，协调器用
+独立协调器接口可分别结束 attempt 和 request；服务 HTTP 执行路径通过同一 SQLite 事务
+结束 attempt、accounting request 和旧 model_requests 元数据。任一写入失败全部回滚，
+不允许账本已成功而请求状态仍 running。相同快照可幂等重试，只有整个事务提交成功
+才标记内存关联已终结。数据库错误不会被当作成功吞掉。传入 context 已关闭时，协调器用
 独立的 3 秒 background context 完成落盘；若原 context 在写入期间关闭且写入报错，
 也以同一幂等数据做一次 background 重试。最终失败只返回以下固定包内错误，不拼接
 SQL、数据库路径、标识符、凭据或上游正文：

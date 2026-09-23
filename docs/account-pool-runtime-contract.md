@@ -1,6 +1,6 @@
 # 账号池运行时适配契约
 
-状态：独立运行时适配层，尚未接入 Chat、Responses、Messages 或 Gemini HTTP 处理器；2026-09-23。本文件不能用于宣称实时账号池调度已经上线。
+状态：2026-09-23 已接入 Chat、Responses、Messages 和 Gemini HTTP 处理器，隔离进程与真实浏览器验收见 [集成状态](integration-status.md)。仅源码预览，未提供新安装包；自动换号、恢复探测和代理池仍未实现。
 
 ## 接口与调用边界
 
