@@ -85,6 +85,30 @@ describe('upstream and model discovery flows', () => {
     })
   })
 
+  it('distinguishes native Gemini from its OpenAI-compatible endpoint and fixes the native origin', async () => {
+    expect(presetForEndpoint('https://generativelanguage.googleapis.com')?.id).toBe('gemini-native')
+    expect(presetForEndpoint('https://generativelanguage.googleapis.com/v1beta/openai')?.id).toBe('gemini-openai')
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/upstreams') && init?.method === 'POST') return response({ body: { id: 'gemini-1', name: 'Google Gemini（原生 API）', provider_kind: 'gemini-api-key', endpoint: 'https://generativelanguage.googleapis.com', enabled: true, revision: 1 } })
+      if (url.endsWith('/upstreams/gemini-1/discover-models')) return response({ body: { items: [] } })
+      throw new Error(`unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<CreateUpstream csrf="csrf" onClose={() => undefined} onSaved={() => undefined} />)
+    await userEvent.selectOptions(screen.getByLabelText('服务商'), 'gemini-native')
+    expect(screen.getByLabelText('API 端点')).toHaveValue('https://generativelanguage.googleapis.com')
+    expect(screen.getByLabelText('API 端点')).toHaveAttribute('readonly')
+    await userEvent.type(screen.getByLabelText('API Key'), 'gemini-secret')
+    await userEvent.click(screen.getByRole('button', { name: '保存并同步模型' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    const createCall = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/upstreams') && (init as RequestInit)?.method === 'POST')
+    expect(JSON.parse(String((createCall?.[1] as RequestInit).body))).toMatchObject({
+      provider_kind: 'gemini-api-key',
+      endpoint: 'https://generativelanguage.googleapis.com',
+    })
+  })
+
   it('retries discovery after saving without creating the upstream twice', async () => {
     let discoveryAttempts = 0
     const onSaved = vi.fn()
@@ -158,12 +182,13 @@ describe('upstream and model discovery flows', () => {
     expect(screen.getByLabelText('上游模型名称')).toHaveValue('beta-model')
   })
 
-  it('requires manual model entry for membership upstreams without calling discovery', async () => {
+  it('discovers membership models while keeping manual model entry available', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/upstreams') && !init?.method) return response({ body: { items: [
         { id: 'codex-1', name: 'Codex 会员', provider_kind: 'codex-membership', endpoint: 'https://chatgpt.com/backend-api/codex', enabled: true, revision: 1, credential_state: 'imported_unverified', verified_at: null },
       ] } })
+      if (url.endsWith('/upstreams/codex-1/discover-models') && init?.method === 'POST') return response({ body: { items: [{ id: 'gpt-5-codex', display_name: 'GPT-5 Codex', upstream_capabilities: { input_modalities: ['text', 'image'] } }] } })
       if (url.endsWith('/models') && init?.method === 'POST') return response({ body: { id: 'codex-model', upstream_id: 'codex-1', upstream_model: 'codex-model', enabled: true } })
       throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
     })
@@ -171,8 +196,9 @@ describe('upstream and model discovery flows', () => {
     const onCreated = vi.fn()
     render(<CreateModel csrf="csrf" onClose={() => undefined} onCreated={onCreated} />)
 
-    expect(await screen.findByText('文件导入实验不会发现模型；保存本页填写的名称后才会创建路由。')).toBeInTheDocument()
-    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/discover-models'))).toBe(false)
+    expect(await screen.findByText('已同步 1 个模型；请选择或手动输入。')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/discover-models'))).toHaveLength(1)
+    expect(screen.queryByText(/image/)).not.toBeInTheDocument()
     await userEvent.type(screen.getByLabelText('上游模型名称'), 'codex-model')
     await userEvent.type(screen.getByLabelText('对外模型 ID'), 'codex-model')
     await userEvent.click(screen.getByRole('button', { name: '添加路由' }))

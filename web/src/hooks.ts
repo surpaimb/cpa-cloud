@@ -58,6 +58,40 @@ export function membershipMessageFor(error: unknown) {
   return '未能确认导入结果，请刷新列表核对后重试。'
 }
 
+const oauthErrorMessages: Record<string, string> = {
+  feature_disabled: 'Codex 会员实验未启用。请检查服务启动参数。',
+  codex_oauth_not_configured: 'OAuth 尚未配置。请使用 --codex-oauth-client-id 与 --codex-oauth-redirect-uri 启动服务。',
+  codex_oauth_configuration_changed: 'OAuth 配置已变化。请关闭此流程并重新开始授权。',
+  already_exists: '授权会话发生冲突，请关闭后重新开始。',
+}
+
+export function oauthMessageFor(error: unknown) {
+  if (error instanceof ApiError) {
+    if (oauthErrorMessages[error.code]) return oauthErrorMessages[error.code]
+    if (error.status === 409) return '授权会话状态已变化，请关闭后重新开始。'
+    return '无法创建 Codex OAuth 授权会话，请检查服务配置后重试。'
+  }
+  return '未能确认授权会话是否已创建。可在当前页面重试，系统会复用同一操作编号。'
+}
+
+const refreshErrorMessages: Record<string, string> = {
+  feature_disabled: 'Codex 会员实验未启用，无法刷新。',
+  codex_oauth_not_configured: 'OAuth 尚未配置。请检查服务启动参数后重新载入列表。',
+  codex_refresh_not_bound: '此凭据不是由当前 OAuth 客户端建立，不能手动刷新。请重新授权创建新连接，或重新导入 auth.json。',
+  codex_reauthorization_required: '提供商要求重新授权。请从上方 OAuth 入口创建新连接，再停用此记录。',
+  revision_conflict: '记录已被其他操作更新，本次刷新未覆盖该更新。请重新载入列表。',
+  credential_unavailable: '服务无法读取此凭据。请重新授权或重新导入 auth.json。',
+  codex_refresh_failed: '服务端未完成刷新。请稍后重新载入列表再决定是否重试。',
+}
+
+export function refreshMessageFor(error: unknown) {
+  if (error instanceof ApiError) {
+    if (refreshErrorMessages[error.code]) return refreshErrorMessages[error.code]
+    return '无法刷新 Codex 凭据，请重新载入列表核对状态。'
+  }
+  return '未能确认刷新结果，请重新载入列表核对后再决定是否重试。'
+}
+
 export function useResource<T>(loader: () => Promise<T>) {
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(true)

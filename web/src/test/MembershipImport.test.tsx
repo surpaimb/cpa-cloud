@@ -119,7 +119,7 @@ describe('Codex membership file import', () => {
     expect(screen.getByText('已导入，未验证')).toBeInTheDocument()
     expect(screen.getByText('已验证')).toBeInTheDocument()
     expect(screen.getByText('需要重新导入')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '同步模型' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: '同步模型' })).toHaveLength(3)
 
     const firstRow = screen.getByText('Codex 团队账号').closest('tr')
     expect(firstRow).not.toBeNull()
@@ -134,5 +134,46 @@ describe('Codex membership file import', () => {
     expect(within(firstRow!).getByText('已导入，未验证')).toBeInTheDocument()
     const put = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/upstreams/codex-1/codex-auth') && (init as RequestInit)?.method === 'PUT')
     expect(JSON.parse(String((put?.[1] as RequestInit).body))).toEqual({ expected_revision: 7, auth_json: authJSON })
+  })
+
+  it('manually refreshes an eligible OAuth credential once with its expected revision', async () => {
+    const oauthUpstream = { ...membershipUpstream, oauth_refresh: { eligible: true, state: 'ready' } }
+    let listReads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response({ body: { version: 'test', ready: true, storage: 'sqlite-wal', limitations: [], features: { codex_membership_import: true, codex_membership_oauth: true, codex_membership_auto_refresh: true } } })
+      if (url.endsWith('/upstreams') && !init?.method) { listReads += 1; return response({ body: { items: [oauthUpstream] } }) }
+      if (url.endsWith('/upstreams/codex-1/codex-refresh') && init?.method === 'POST') return response({ body: { ...oauthUpstream, revision: 8 } })
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<UpstreamsPage csrf="csrf" />)
+    await userEvent.click(await screen.findByRole('button', { name: '手动刷新' }))
+    await waitFor(() => expect(listReads).toBeGreaterThan(1))
+    const refreshes = fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith('/codex-refresh') && (init as RequestInit)?.method === 'POST')
+    expect(refreshes).toHaveLength(1)
+    expect(JSON.parse(String((refreshes[0][1] as RequestInit).body))).toEqual({ expected_revision: 7 })
+  })
+
+  it('stops manual retry after an ambiguous refresh failure and gives recovery guidance for paused OAuth', async () => {
+    const items = [
+      { ...membershipUpstream, oauth_refresh: { eligible: true, state: 'ready' } },
+      { ...membershipUpstream, id: 'codex-paused', name: '暂停账号', oauth_refresh: { eligible: false, state: 'paused', reason_code: 'configuration_changed' } },
+    ]
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response({ body: { version: 'test', ready: true, storage: 'sqlite-wal', limitations: [], features: { codex_membership_import: true, codex_membership_oauth: true, codex_membership_auto_refresh: true } } })
+      if (url.endsWith('/upstreams') && !init?.method) return response({ body: { items } })
+      if (url.endsWith('/upstreams/codex-1/codex-refresh')) return Promise.reject(new TypeError('connection reset'))
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<UpstreamsPage csrf="csrf" />)
+    const refresh = await screen.findByRole('button', { name: '手动刷新' })
+    await userEvent.click(refresh)
+    expect(await screen.findByText('未能确认刷新结果，请重新载入列表核对后再决定是否重试。')).toBeInTheDocument()
+    expect(refresh).toBeDisabled()
+    expect(screen.getByText('自动刷新已暂停')).toBeInTheDocument()
+    expect(screen.getByText('请检查 OAuth 服务配置，恢复后重新载入列表。')).toBeInTheDocument()
   })
 })

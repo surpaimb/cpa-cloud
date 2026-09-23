@@ -71,6 +71,7 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .membership-panel p { margin: 0; font-size: 13px; line-height: 1.6; }
 .membership-panel__limits { margin-top: 5px !important; color: var(--muted); }
 .membership-panel .button { flex: 0 0 auto; }
+.membership-panel__actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 .table-scroll { overflow: auto; }
 table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 14px; }
 .upstreams-table { min-width: 980px; }
@@ -90,6 +91,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .status--danger i { background: var(--danger); box-shadow: 0 0 0 3px rgb(174 61 68 / .11); }
 .row-actions { display: flex; align-items: center; gap: 18px; white-space: nowrap; }
 .manual-route-note { color: var(--muted); font-size: 12px; }
+.credential-stack { max-width: 290px; white-space: normal; }
+.credential-stack small { line-height: 1.45; }
 .link-button { color: #08768a; background: none; border: 0; padding: 0; display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
 .link-button:hover { color: #064f5d; text-decoration: underline; }
 .link-button .icon { width: 16px; height: 16px; }
@@ -146,6 +149,12 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .membership-limitations strong { display: block; margin-bottom: 6px; color: #48391f; }
 .membership-limitations ul { margin: 0; padding-left: 19px; }
 .membership-limitations li + li { margin-top: 4px; }
+.oauth-flow { display: grid; gap: 18px; }
+.oauth-callout { padding: 15px 16px; color: #31566c; background: #edf6fa; border: 1px solid #c5dee9; border-radius: 7px; }
+.oauth-callout strong { color: var(--navy); }
+.oauth-callout p { margin: 7px 0 0; font-size: 13px; line-height: 1.6; }
+.oauth-open-link { width: 100%; text-decoration: none; }
+.oauth-progress { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px; color: var(--muted); font-size: 14px; }
 .key-create { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 12px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
 .key-list { display: grid; }
 .key-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 15px 0; border-bottom: 1px solid var(--border); }
@@ -199,6 +208,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .page-header__action .button { font-size: 0; width: 42px; padding: 0; }
   .page-header__action .button .icon { margin: 0; }
   .membership-panel { align-items: flex-start; flex-direction: column; gap: 14px; }
+  .membership-panel__actions { width: 100%; justify-content: flex-start; }
   .status-layout { grid-template-columns: 1fr; }
 }
 

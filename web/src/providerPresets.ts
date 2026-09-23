@@ -1,14 +1,17 @@
-export type ProviderPresetId = 'anthropic' | 'deepseek' | 'openai' | 'groq' | 'mistral' | 'openrouter'
+export type ProviderPresetId = 'anthropic' | 'gemini-native' | 'gemini-openai' | 'deepseek' | 'openai' | 'groq' | 'mistral' | 'openrouter'
 
 export type ProviderPreset = {
   id: ProviderPresetId
   name: string
   endpoint: string
-  providerKind: 'openai-compatible' | 'anthropic-api-key'
+  providerKind: 'openai-compatible' | 'anthropic-api-key' | 'gemini-api-key'
+  endpointLocked?: boolean
 }
 
 export const providerPresets: readonly ProviderPreset[] = [
   { id: 'anthropic', name: 'Anthropic', endpoint: 'https://api.anthropic.com', providerKind: 'anthropic-api-key' },
+  { id: 'gemini-native', name: 'Google Gemini（原生 API）', endpoint: 'https://generativelanguage.googleapis.com', providerKind: 'gemini-api-key', endpointLocked: true },
+  { id: 'gemini-openai', name: 'Google Gemini（OpenAI 兼容）', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', providerKind: 'openai-compatible' },
   { id: 'deepseek', name: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1', providerKind: 'openai-compatible' },
   { id: 'openai', name: 'OpenAI', endpoint: 'https://api.openai.com/v1', providerKind: 'openai-compatible' },
   { id: 'groq', name: 'Groq', endpoint: 'https://api.groq.com/openai/v1', providerKind: 'openai-compatible' },

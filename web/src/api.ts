@@ -59,12 +59,29 @@ export type EmployeeKey = {
 export type Upstream = {
   id: string
   name: string
-  provider_kind: 'openai-compatible' | 'anthropic-api-key' | 'codex-membership'
+  provider_kind: 'openai-compatible' | 'anthropic-api-key' | 'gemini-api-key' | 'codex-membership'
   endpoint: string
   enabled: boolean
   revision: number
   credential_state: 'imported_unverified' | 'verified' | 'reauth_required' | null
   verified_at: string | null
+  oauth_refresh?: {
+    eligible: boolean
+    state: 'ready' | 'refreshing' | 'paused' | 'reauth_required' | 'unavailable'
+    reason_code?: string
+  }
+}
+export type CodexOAuthSession = {
+  session_id: string
+  authorization_url: string
+  expires_at: string
+}
+export type CodexOAuthSessionStatus = {
+  session_id: string
+  status: 'pending' | 'exchanging' | 'succeeded' | 'failed' | 'cancelled' | 'expired'
+  expires_at: string
+  upstream_id?: string
+  error_code?: string
 }
 export type ModelRoute = {
   id: string
@@ -72,14 +89,30 @@ export type ModelRoute = {
   upstream_model: string
   enabled: boolean
 }
-export type DiscoveredModel = { id: string }
+export type DiscoveredModel = {
+  id: string
+  display_name?: string
+  upstream_capabilities?: {
+    supported_in_api?: boolean
+    input_modalities?: string[]
+    context_window?: number
+    reasoning_levels?: string[]
+    search_tool?: boolean
+    verbosity?: boolean
+  }
+}
 export type SystemStatus = {
   version: string
   ready: boolean
   storage: string
   limitations: string[]
   features?: {
-    codex_membership_import: boolean
+    codex_membership_import?: boolean
+    codex_membership_oauth?: boolean
+    codex_membership_auto_refresh?: boolean
+    codex_model_discovery?: boolean
+    anthropic_native_api?: boolean
+    gemini_native_api?: boolean
   }
 }
 
@@ -113,6 +146,12 @@ export const api = {
     request<Upstream>('/upstreams/codex-import', { method: 'POST', body: JSON.stringify(body) }, csrf),
   replaceCodexMembershipAuth: (id: string, body: { expected_revision: number; auth_json: string }, csrf: string) =>
     request<Upstream>(`/upstreams/${encodeURIComponent(id)}/codex-auth`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
+  createCodexOAuthSession: (body: { name: string; operation_id: string }, csrf: string) =>
+    request<CodexOAuthSession>('/upstreams/codex-oauth-sessions', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  codexOAuthSession: (id: string, signal?: AbortSignal) =>
+    request<CodexOAuthSessionStatus>(`/upstreams/codex-oauth-sessions/${encodeURIComponent(id)}`, { signal }),
+  refreshCodexMembership: (id: string, body: { expected_revision: number }, csrf: string) =>
+    request<Upstream>(`/upstreams/${encodeURIComponent(id)}/codex-refresh`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   updateUpstream: (id: string, body: Record<string, unknown>, csrf: string) =>
     request<Upstream>(`/upstreams/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
   discoverUpstreamModels: (id: string, csrf: string) =>
