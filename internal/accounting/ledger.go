@@ -223,6 +223,26 @@ func (l *Ledger) BeginRequest(ctx context.Context, input RequestStart) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := beginRequestTx(ctx, tx, input, startedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// BeginRequestTx participates in a caller-owned admission transaction. It does
+// not commit or roll back, so sibling metadata cannot outlive a failed start.
+func (l *Ledger) BeginRequestTx(ctx context.Context, tx *sql.Tx, input RequestStart) error {
+	if l == nil || l.db == nil || ctx == nil || tx == nil {
+		return ErrInvalid
+	}
+	startedAt, err := validateRequestStart(input)
+	if err != nil {
+		return err
+	}
+	return beginRequestTx(ctx, tx, input, startedAt)
+}
+
+func beginRequestTx(ctx context.Context, tx *sql.Tx, input RequestStart, startedAt string) error {
 	result, err := tx.ExecContext(ctx, `INSERT INTO accounting_requests(
 		id,employee_id,key_id,model_id,provider,started_at,status
 	) VALUES(?,?,?,?,?,?,'pending') ON CONFLICT(id) DO NOTHING`,
@@ -245,7 +265,7 @@ func (l *Ledger) BeginRequest(ctx context.Context, input RequestStart) error {
 			return fmt.Errorf("%w: request start differs", ErrConflict)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (l *Ledger) BeginAttempt(ctx context.Context, input AttemptStart) error {

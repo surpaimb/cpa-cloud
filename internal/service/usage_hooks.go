@@ -26,9 +26,6 @@ type activeUsageRequest struct {
 }
 
 func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string, selected route) error {
-	if a.usage == nil {
-		return nil
-	}
 	var protocol accounting.UsageProtocol
 	switch {
 	case r.URL.Path == "/v1/chat/completions":
@@ -42,11 +39,26 @@ func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string
 	default:
 		return errUsageLedgerInvalid
 	}
-	request, err := a.usage.beginRequest(r.Context(), usageRequestStart{
+	startedAt := time.Now().UTC()
+	tx, err := a.store.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO model_requests(id,employee_id,key_id,model_id,started_at,outcome) VALUES(?,?,?,?,?,'running')`, requestID(r.Context()), auth.EmployeeID, auth.KeyID, model, startedAt.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if a.usage == nil {
+		return tx.Commit() // Isolated legacy fixtures have no usage coordinator.
+	}
+	request, err := a.usage.beginRequestTx(r.Context(), tx, usageRequestStart{
 		RequestID: requestID(r.Context()), EmployeeID: auth.EmployeeID, KeyID: auth.KeyID,
-		PublicModel: model, ProviderKind: selected.ProviderKind, Protocol: protocol, StartedAt: time.Now().UTC(),
+		PublicModel: model, ProviderKind: selected.ProviderKind, Protocol: protocol, StartedAt: startedAt,
 	})
 	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	a.usageRequests.Store(requestID(r.Context()), &activeUsageRequest{request: request})

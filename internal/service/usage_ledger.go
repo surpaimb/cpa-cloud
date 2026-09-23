@@ -101,6 +101,17 @@ func (c *usageLedgerCoordinator) start(ctx context.Context) error {
 // is explicit because OpenAI-compatible and Codex routes can execute either
 // Chat Completions or Responses wire contracts.
 func (c *usageLedgerCoordinator) beginRequest(ctx context.Context, input usageRequestStart) (*usageLedgerRequest, error) {
+	return c.beginRequestInTransaction(ctx, nil, input)
+}
+
+func (c *usageLedgerCoordinator) beginRequestTx(ctx context.Context, tx *sql.Tx, input usageRequestStart) (*usageLedgerRequest, error) {
+	if tx == nil {
+		return nil, errUsageLedgerInvalid
+	}
+	return c.beginRequestInTransaction(ctx, tx, input)
+}
+
+func (c *usageLedgerCoordinator) beginRequestInTransaction(ctx context.Context, tx *sql.Tx, input usageRequestStart) (*usageLedgerRequest, error) {
 	if c == nil || c.ledger == nil || ctx == nil {
 		return nil, errUsageLedgerUnavailable
 	}
@@ -116,7 +127,12 @@ func (c *usageLedgerCoordinator) beginRequest(ctx context.Context, input usageRe
 		Provider:   provider,
 		StartedAt:  input.StartedAt,
 	}
-	if err := c.ledger.BeginRequest(ctx, start); err != nil {
+	if tx == nil {
+		err = c.ledger.BeginRequest(ctx, start)
+	} else {
+		err = c.ledger.BeginRequestTx(ctx, tx, start)
+	}
+	if err != nil {
 		return nil, classifyUsageLedgerError(err)
 	}
 	return &usageLedgerRequest{

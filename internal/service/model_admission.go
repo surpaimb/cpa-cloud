@@ -87,18 +87,12 @@ func (a *App) selectModelRoute(r *http.Request, auth employeeAuth, model string,
 		}
 	}
 	if record {
-		_, err := a.store.db.ExecContext(r.Context(), `INSERT INTO model_requests(id,employee_id,key_id,model_id,started_at,outcome) VALUES(?,?,?,?,?,'running')`, requestID(r.Context()), auth.EmployeeID, auth.KeyID, model, utcNow())
-		if err != nil {
+		if err := a.beginRequestUsage(r, auth, model, selected); err != nil {
 			if lease != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
-				lease.Release(ctx, scheduling.ReleaseResult{ExecutionUncertain: true})
+				lease.Release(ctx, scheduling.ReleaseResult{Failure: scheduling.FailureNone, Phase: scheduling.DispatchNotStarted})
 			}
-			return route{}, nil, poolAdmissionFailure(accountPoolStorageUnavailable)
-		}
-		if err := a.beginRequestUsage(r, auth, model, selected); err != nil {
-			a.finishRequest(requestID(r.Context()), "failed", 0)
-			a.releaseModelLease(lease, requestID(r.Context()), true)
 			return route{}, nil, poolAdmissionFailure(accountPoolStorageUnavailable)
 		}
 	}
