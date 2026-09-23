@@ -152,6 +152,9 @@ func (s *store) initialize(ctx context.Context) error {
 	if err := s.migrateUpstreamBatchItems(ctx); err != nil {
 		return fmt.Errorf("migrate upstream batch items: %w", err)
 	}
+	if err := s.migrateAccountPools(ctx); err != nil {
+		return fmt.Errorf("migrate account pools: %w", err)
+	}
 	return nil
 }
 

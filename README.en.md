@@ -12,7 +12,7 @@ A self-hosted AI access platform for internal enterprise use. Administrators man
 | --- | --- |
 | Web console, administrator sessions, employee enable/disable, model permissions | Multi-tenancy, SSO, administrator password-reset command |
 | Multiple keys per employee, no expiration by default, optional expiration, revocation | Membership authorization UI, automatic refresh, Claude/Gemini membership integration, and real-account validation |
-| OpenAI-compatible API-key upstreams, verified provider presets, model discovery, and manual mapping | Anthropic Messages and native Gemini protocols |
+| OpenAI-compatible API-key upstreams, presets and discovery; source adds native Claude/Gemini API-key routes | Automatic protocol conversion and fields outside the documented subset |
 | `/v1/models`, non-streaming and SSE Chat Completions | Complete compatibility testing with CC Switch and real AI tools |
 | Latest source: `POST /v1/responses`, function calls/results, non-streaming JSON and SSE | Stateful Responses sessions, background tasks, hosted tools, and full client compatibility |
 | SQLite persistence, encrypted upstream credentials, restart recovery | Account pooling, reliable billing usage, automated backup/migration, production key management |
@@ -25,11 +25,11 @@ This feature is integrated into the latest source and **is not included in the v
 
 1. Sign in as administrator and choose “导入 Codex auth.json” under upstream connections. Select an authorization file you provide; the service does not scan local configuration files.
 2. The file must contain a schedulable short-lived access token, an account ID, and the required structure. Its initial state is imported/unverified. The server encrypts the stored file; importing does not contact the provider to verify the account.
-3. Manually create a model route with a model ID available to that account and an employee-facing name. Membership model discovery is not provided, and arbitrary model availability is not guaranteed.
+3. Use Sync Models to retrieve candidates and explicitly select routes, or enter a model ID and public name manually. Catalogs are cached briefly; listing does not guarantee access or automatically extend employee permissions.
 4. Employees keep using CPA Cloud keys with `/v1/chat/completions`. The supported subset is string text in `user`/`assistant` messages and an optional `stream` boolean, with non-streaming and SSE text output. System/developer roles, tools, images, and other unsupported parameters are explicitly rejected.
 5. A completed successful upstream request marks the account verified. Expiration or an upstream 401 requires reimport. Replace credentials through the existing row's reimport action; employee keys remain unchanged. Disabling the experiment blocks membership imports and requests without affecting ordinary API-key upstreams.
 
-The membership experiment also supports the backend OAuth authorization/manual refresh and native Responses subset below. The authorization UI, automatic refresh, and Claude/Gemini membership integration remain unimplemented. Automated acceptance uses synthetic credentials and fake upstreams; **real membership accounts have not been validated**. This does not establish compatibility with Codex CLI, Claude Code, or every tool configured through CC Switch. Employee-facing Messages remains unavailable.
+The membership experiment also supports the backend OAuth authorization/manual refresh and native Responses subset below. Claude/Gemini membership integration remains incomplete. Automated acceptance uses synthetic credentials and fake upstreams; **real membership accounts have not been validated**. This does not establish compatibility with Codex CLI, Claude Code, or every tool configured through CC Switch. Messages uses a separate Anthropic API-key upstream; it does not turn Codex credentials into a Claude subscription.
 
 Before upgrading, stop the service and back up the complete data directory, including the database and master key, with restricted access. The source build transactionally extends the existing upstream table and rolls back a failed migration. To revert to an older program, restore the complete pre-upgrade backup as well; never run old and new processes against the same directory concurrently.
 
@@ -62,6 +62,21 @@ See the [OAuth lifecycle contract](docs/codex-lifecycle-contract.md) for API and
 - Only a complete `response.completed` event denotes streaming success. Upstream failure, premature EOF, or credential-state persistence failure cannot count as completion. Raw upstream error bodies are not returned.
 
 This does not establish real Codex CLI or membership-account compatibility. See the [feature parity plan](docs/feature-parity-plan.md) for stages and remaining work.
+
+## Native Claude / Gemini APIs and batch import (latest source only)
+
+These capabilities **are not included in preview.3 downloads**:
+
+| Upstream type | Employee endpoint | Current scope |
+| --- | --- | --- |
+| `anthropic-api-key` | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Messages, SSE, function tools and results; see the [Claude contract](docs/claude-messages-contract.md) |
+| `gemini-api-key` | `GET /v1beta/models`, `POST /v1beta/models/{model}:generateContent`, `:streamGenerateContent` | Gemini Developer API text, function tools and SSE; see the [Gemini contract](docs/gemini-native-contract.md) |
+
+Select the upstream type, save the provider API key, and discover models. The native Gemini preset fills the fixed Google endpoint; compatibility mode is a separate preset. Provider discovery consumes bounded pages before returning results. Employee requests use CPA Cloud keys and configured public model names. Protocols are not automatically converted.
+
+The management API `POST /admin/api/v1/upstreams/batch-import` accepts up to 100 items and 8 MiB of JSON, with a UUID `operation_id` and unique `item_id` values inside `items`. It reports `created`, `existing`, or `failed` per item across four upstream types. If a network failure leaves the result uncertain, retry the same operation ID and content. Import does not verify an account online or create model routes. See the [batch import contract](docs/upstream-batch-contract.md) for the format.
+
+Claude/Gemini subscriptions are separate from these API-key capabilities; see the [membership prerequisites](docs/research/membership-provider-readiness.md). Account pools, the full ledger and remaining work continue under the [feature matrix](docs/feature-parity-plan.md).
 
 ## 1. Download and installation
 
@@ -274,7 +289,7 @@ Use a client that supports **OpenAI Chat Completions**:
 
 A remote employee cannot use `127.0.0.1` to reach an administrator's computer; that address refers to the employee's own machine.
 
-CC Switch may help configure tools, but the tool making the final request must support the implemented protocol. **The preview.3 download provides Chat Completions; the latest source adds the Responses subset described above.** Claude Messages, native Gemini, and full real-device/tool compatibility remain pending. See [Employee access](docs/employee-access.md).
+CC Switch may help configure tools, but the tool making the final request must support the implemented protocol. **The preview.3 download provides Chat Completions; the latest source adds the Responses, Claude Messages, and native Gemini subsets described above.** Full real-device/tool compatibility remains pending. See [Employee access](docs/employee-access.md).
 
 Bash + curl test example (the key is entered interactively, and the request header is passed through stdin):
 
@@ -380,7 +395,7 @@ A source build is not automatically a distributable package. External distributi
 | Model list is empty | Check the model route, upstream enabled state, and employee permissions |
 | Employee receives 401 / 403 | Check the key, revocation/expiration, employee state, and model permissions |
 | Upstream request fails | Check the provider key, quota, model ID, network, and certificates; never paste secrets into a support report |
-| Codex / Claude Code request fails | Check the source/download version, protocol, and supported fields; preview.3 has no Responses and Messages is unavailable, so the key is not necessarily the problem |
+| Codex / Claude Code request fails | Check the source/download version, protocol, upstream type and supported fields; preview.3 has no Responses/Messages, so the key is not necessarily the problem |
 
 ## 10. Development validation
 

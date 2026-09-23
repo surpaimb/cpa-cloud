@@ -80,6 +80,7 @@ func (a *App) Close() error { return a.store.close() }
 
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
+	a.registerAccountPoolHandlers(mux)
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("POST /admin/api/v1/sessions", a.login)
 	mux.HandleFunc("DELETE /admin/api/v1/sessions", a.requireAdmin(a.logout, true))
@@ -169,14 +170,16 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"ready":   true,
 		"storage": "sqlite-wal",
 		"features": map[string]bool{
-			"codex_membership_import": a.cfg.ExperimentalCodexMembership,
-			"responses_api":           true,
-			"responses_streaming":     true,
-			"codex_membership_oauth":  a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
-			"gemini_native_api":       true,
-			"anthropic_native_api":    true,
-			"codex_model_discovery":   a.cfg.ExperimentalCodexMembership,
-			"upstream_batch_import":   true,
+			"codex_membership_import":    a.cfg.ExperimentalCodexMembership,
+			"responses_api":              true,
+			"responses_streaming":        true,
+			"codex_membership_oauth":     a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
+			"gemini_native_api":          true,
+			"anthropic_native_api":       true,
+			"codex_model_discovery":      a.cfg.ExperimentalCodexMembership,
+			"upstream_batch_import":      true,
+			"account_pool_configuration": true,
+			"account_pool_routing":       false,
 		},
 		"limitations": limitations,
 	})

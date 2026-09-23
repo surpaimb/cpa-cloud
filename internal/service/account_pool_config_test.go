@@ -35,10 +35,7 @@ func newAccountPoolFixture(t *testing.T, experimentalCodex bool) *accountPoolFix
 		app.Close()
 		t.Fatalf("migrate account pools: %v", err)
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /admin/api/v1/sessions", app.login)
-	app.registerAccountPoolHandlers(mux)
-	server := httptest.NewServer(requestMiddleware(mux))
+	server := httptest.NewServer(app.Handler())
 	t.Cleanup(func() {
 		server.Close()
 		if err := app.Close(); err != nil {
@@ -81,6 +78,8 @@ func TestAccountPoolMigrationRollbackRetryAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.close() })
+	removeTestPoolSchema(t, s.db)
 	if _, err := s.db.Exec(`INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at,credential_state,operation_id) VALUES('ups_oauth_pool_test','OAuth fixture','codex-membership','https://chatgpt.com',1,X'0102',2,4,'2026-09-23T00:00:00Z','imported_unverified','pool-oauth-operation')`); err != nil {
 		t.Fatal(err)
 	}
@@ -172,6 +171,7 @@ func TestAccountPoolMigrationRejectsIncompatibleObjects(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer s.close()
+			removeTestPoolSchema(t, s.db)
 			if _, err := s.db.Exec(test.statement); err != nil {
 				t.Fatal(err)
 			}
@@ -183,6 +183,17 @@ func TestAccountPoolMigrationRejectsIncompatibleObjects(t *testing.T) {
 				t.Fatalf("failed migration left new tables count=%d err=%v", created, err)
 			}
 		})
+	}
+}
+
+// The application now installs this migration automatically. Remove only its
+// empty tables from the isolated fixture to simulate the preceding schema.
+func removeTestPoolSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, table := range []string{accountPoolAuditTable, modelPoolRouteTable, modelPoolConfigTable, accountChannelTable, accountGroupTable} {
+		if _, err := db.Exec(`DROP TABLE ` + table); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

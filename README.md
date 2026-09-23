@@ -12,7 +12,7 @@
 | --- | --- |
 | 网页后台、管理员会话、员工启停、模型权限 | 多租户、SSO、管理员密码重置命令 |
 | 一人多个 Key、默认永久有效、可选到期、撤销 | 网页会员授权入口、自动刷新、Claude/Gemini 会员接入及真实账号验证 |
-| OpenAI-compatible API Key 上游、已核实服务商预设、模型同步与手动映射 | Anthropic Messages、Gemini 原生协议 |
+| OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路 | 跨协议自动转换和未列出的协议字段 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
 | 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE | Responses 有状态会话、后台任务、托管工具与完整客户端兼容性 |
 | SQLite 持久化、上游凭据加密、重启恢复 | 账号池、可靠计费用量、自动备份/迁移、生产密钥托管 |
@@ -25,11 +25,11 @@
 
 1. 管理员登录网页，在“上游连接”选择“导入 Codex auth.json”，主动选择自己提供的授权文件；系统不会扫描本机配置。
 2. 文件须包含可用的短期 access token、账号 ID 和所需结构。导入后显示“已导入，未验证”；文件由服务端加密保存，导入本身不会联网验证账号。
-3. 在“模型路由”手动填写该账号可用的模型 ID 和对外名称。此实验不提供会员模型自动发现，也不保证任意模型可用。
+3. 点击“同步模型”获取候选目录，再明确选择模型建立路由；也可手动填写模型 ID 和对外名称。目录有短时缓存，不保证所有列出的模型都可调用，不自动扩大员工权限。
 4. 员工仍使用 CPA Cloud Key，通过 `/v1/chat/completions` 调用。当前只接收 `user`/`assistant` 字符串文本，以及可选的 `stream` 布尔字段；支持文本非流式与 SSE。system/developer、工具、图片及其他未支持参数会明确拒绝。
 5. 上游请求成功完成后状态变为“已验证”；凭据过期或上游返回 401 时提示重新导入。使用现有上游行的“重新导入”替换文件，员工 Key 不变。关闭实验开关会阻止会员导入及调用，普通 API Key 上游不受影响。
 
-会员实验另支持下文的后台 OAuth 授权与手动刷新、原生 Responses 子集；网页授权入口、自动刷新及 Claude/Gemini 会员接入仍未实现。自动验收使用合成凭据和假上游，**尚未用真实会员账号验证**；不应据此认定 Codex CLI、Claude Code 或 CC Switch 所配置的所有工具均可使用。员工侧 Messages 协议仍未实现。
+会员实验另支持下文的后台 OAuth 授权与手动刷新、原生 Responses 子集；Claude/Gemini 会员接入仍未完成。自动验收使用合成凭据和假上游，**尚未用真实会员账号验证**；不应据此认定 Codex CLI、Claude Code 或 CC Switch 所配置的所有工具均可使用。Messages 使用独立的 Anthropic API Key 上游，不支持把 Codex 账号转换成 Claude 会员。
 
 升级前停止服务并备份整个数据目录（包含数据库及主密钥），保护备份访问权限。源码首次打开旧数据库会事务化扩展上游表；迁移失败会回滚。回退旧程序时应同时恢复升级前的整份备份，勿让新旧进程同时使用同一目录。
 
@@ -62,6 +62,21 @@
 - 流式只有完整 `response.completed` 才表示成功；上游失败、提前断流或凭据状态保存失败不能当作完成。上游错误正文不会直接返回。
 
 这不等于已经通过真实 Codex CLI 或会员账号验收。完整功能的阶段与待办见[功能对齐计划](docs/feature-parity-plan.md)。
+
+## Claude / Gemini 原生 API 与批量导入（仅最新源码）
+
+这些功能**不在 preview.3 下载包中**：
+
+| 上游类型 | 员工入口 | 当前范围 |
+| --- | --- | --- |
+| `anthropic-api-key` | `POST /v1/messages`、`POST /v1/messages/count_tokens` | Messages、SSE、函数工具及结果回合；详见 [Claude 契约](docs/claude-messages-contract.md) |
+| `gemini-api-key` | `GET /v1beta/models`、`POST /v1beta/models/{model}:generateContent`、`:streamGenerateContent` | Gemini Developer API 文本、函数工具与 SSE；详见 [Gemini 契约](docs/gemini-native-contract.md) |
+
+管理员选择对应上游类型、保存供应商 API Key 并同步模型。Gemini 原生预设自动填写固定 Google 地址，兼容模式是另一种预设；供应商模型列表分页读取后才返回结果。员工请求使用 CPA Cloud Key 和管理员配置的公开模型名称。不同协议不会自动相互转换。
+
+批量管理 API `POST /admin/api/v1/upstreams/batch-import` 支持最多 100 条、总计 8 MiB 的 JSON，请求包含 UUID `operation_id` 和带唯一 `item_id` 的 `items`。四种上游逐项返回 `created`、`existing` 或 `failed`；网络结果未确认时应使用相同操作 ID 与原内容重试。导入成功不等于在线认证，也不会自动创建模型路由。格式见 [批量导入契约](docs/upstream-batch-contract.md)。
+
+Claude/Gemini 订阅会员不属于上述 API Key 能力；各自接入条件仍见 [会员接入记录](docs/research/membership-provider-readiness.md)。账号池、完整账本和后续范围继续按 [功能矩阵](docs/feature-parity-plan.md) 实现。
 
 ## 1. 下载安装
 
@@ -274,7 +289,7 @@ preview.3 会自动读取上游模型作为候选；勾选所需模型，可修�
 
 远程员工不能用 `127.0.0.1` 连接管理员电脑，该地址指向员工自己的电脑。
 
-CC Switch 可用于配置工具，但最终调用工具必须支持当前协议。**preview.3 下载包仅提供 Chat Completions；最新源码增加上述 Responses 子集。**Claude Messages、Gemini 原生 API 和完整实机兼容验收仍待完成，参见[员工接入说明](docs/employee-access.md)。
+CC Switch 可用于配置工具，但最终调用工具必须支持当前协议。**preview.3 下载包仅提供 Chat Completions；最新源码增加上述 Responses、Claude Messages 和 Gemini 原生子集。**完整实机兼容验收仍待完成，参见[员工接入说明](docs/employee-access.md)。
 
 Bash + curl 测试示例（Key 交互输入，请求头经 stdin 传入）：
 
@@ -380,7 +395,7 @@ cd dist/local
 | 模型列表为空 | 检查模型路由、上游启用状态和员工权限 |
 | 员工 401 / 403 | 检查 Key、撤销/到期、员工状态与模型权限 |
 | 上游失败 | 检查供应商 Key、额度、模型 ID、网络和证书；报障时不粘贴秘密 |
-| Codex / Claude Code 调用失败 | 核对源码与下载版本、协议和支持字段；preview.3 无 Responses，Messages 尚未实现，不一定是 Key 错误 |
+| Codex / Claude Code 调用失败 | 核对源码与下载版本、协议、上游类型和支持字段；preview.3 无 Responses/Messages，不一定是 Key 错误 |
 
 ## 10. 开发验证
 
