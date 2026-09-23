@@ -143,3 +143,12 @@
 - 独立假上游测试覆盖员工 Bearer Key 隔离、模型映射、contents/systemInstruction、函数声明与 functionCall/functionResponse 回合、明确 generationConfig 子集、finishReason/usage 原样返回、SSE、多帧、取消、错误脱敏、429、权限、撤销、凭据替换和重启恢复。没有访问真实 Google 账号或端点。
 - Google 官方 Gemini CLI 条款与 FAQ 明确反对第三方复用 Gemini CLI OAuth 访问 Code Assist 后端，因此未实现会员 OAuth/缓存 Token 导入，且不把 AI Studio API Key 通路称为会员可用。该边界是当前官方材料下的产品阻塞，不代表普遍法律结论；未来如有适用的公开委托协议需另立契约。
 - 本功能尚未由主任务集成、进程级验收或发布；测试结果与最终提交号以集成回报为准。
+
+## 2026-09-23：原生协议与网页授权集成分支验收
+
+- 集成分支 `codex/parity-integration` 已合入 Anthropic Messages/count_tokens、Gemini 原生协议与分页目录；共享 `app.go` 保留 Codex OAuth、Chat、Responses 和四种提供商能力。旧库测试保留 OAuth client 绑定、模型路由和员工 Key，覆盖迁移失败回滚、重试与重开。
+- Gemini 流式错误正文泄漏由进程验收发现，修复 `109f3d1` 加入有界行/事件/整流读取、错误脱敏及结束确认。主任务构建实际 Go 程序，运行 `scripts/smoke-native-providers.mjs` PASS：Claude/Gemini 模型发现、分页、工具定义及结果回合、count_tokens、SSE/错误、员工权限、凭据隔离、重启和撤销。使用随机端口、本地假上游及临时数据，结束清理；没有真实供应商调用。
+- 主任务在上述集成版本独立执行 `go test -p 1 ./... -count=1 -timeout=3m` PASS（service 88.194s、membership 0.390s、scheduling 0.145s），`go vet -p 1 ./...` PASS。本机没有 race 工具链，不能用本次普通测试替代 Linux race；CI 已加入 scheduling 并发测试，结果待实际运行。
+- 网页 `02e2346` / `db923f0` 在实际生产网页产物上完成 Playwright + headless Chrome 验收，后台为独立模拟管理 API。桌面 1440×960、手机 390×844：OAuth 创建与轮询、失败隐藏旧链接和重新开始、保存后不自动建路由、Gemini 原生地址与清空 Key 均 PASS；无 JavaScript 异常或相关控制台错误。Browser plugin 不可用，使用已有 Playwright 和 Chrome；没有打开真实授权页或读取用户浏览器配置。
+- root 查看稳定后的桌面/手机截图，按钮可见，无移动端水平溢出。截图及临时检查脚本位于仓库外 `C:/Users/apple/AppData/Local/Temp/cpac-parity-ui-KcjZh6/`。该项是模拟管理 API 的界面验收，仍需新凭据生命周期后端完成后的真实服务衔接验收。
+- `scripts/smoke-codex-oauth.mjs` 已补会话状态、跨管理员登录会话拒绝、重启配置漂移和功能开关检查，目前仅语法检查通过，待生命周期服务交付后运行。独立调度核心已测试但尚未接员工请求；自动刷新、批量导入及账号池服务集成另列后续证据，不按文件存在标为完成。本批尚未推送或发布新安装包。

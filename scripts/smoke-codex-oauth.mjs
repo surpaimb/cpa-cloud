@@ -74,14 +74,28 @@ try {
 
   await start(false); await login();
   assert.equal((await admin('/system/status')).features.codex_membership_oauth, false);
+  assert.equal((await admin('/system/status')).features.codex_membership_auto_refresh, false);
   assert.equal((await admin('/upstreams/codex-oauth-sessions', 'POST', input, 403)).error.code, 'feature_disabled');
   await stop(); await start(true); await login();
   assert.equal((await admin('/upstreams/codex-oauth-sessions', 'POST', input, 409)).error.code, 'codex_oauth_not_configured');
 
   await stop(); await start(true, clientA); await login();
   assert.equal((await admin('/system/status')).features.codex_membership_oauth, true);
+  assert.equal((await admin('/system/status')).features.codex_membership_auto_refresh, true);
   await admin('/upstreams/codex-oauth-sessions', 'POST', input, 403, false);
   const created = await admin('/upstreams/codex-oauth-sessions', 'POST', input, 201);
+  assert.ok(typeof created.session_id === 'string' && created.session_id.length > 0);
+  const statusPath = '/upstreams/codex-oauth-sessions/' + encodeURIComponent(created.session_id);
+  async function sessionStatus(expectedStatus = 'pending', errorCode) {
+    const status = await admin(statusPath);
+    assert.equal(status.session_id, created.session_id);
+    assert.equal(status.status, expectedStatus);
+    assert.equal(status.expires_at, created.expires_at);
+    if (errorCode) assert.equal(status.error_code, errorCode);
+    assert.ok(Object.keys(status).every(key => ['session_id', 'status', 'expires_at', 'upstream_id', 'error_code'].includes(key)), 'Status exposed unexpected fields');
+    noSecrets(JSON.stringify(status), 'Authorization status');
+    return status;
+  }
   const authorize = new URL(created.authorization_url);
   assert.equal(authorize.origin + authorize.pathname, 'https://auth.openai.com/oauth/authorize');
   assert.equal(authorize.searchParams.get('client_id'), clientA);
@@ -89,6 +103,12 @@ try {
   assert.equal(authorize.searchParams.get('code_challenge_method'), 'S256');
   assert.match(authorize.searchParams.get('code_challenge'), /^[A-Za-z0-9_-]{43}$/);
   const state = authorize.searchParams.get('state'); assert.ok(state && state.length >= 40); secrets.push(state);
+  await sessionStatus();
+  const initiatingLogin = { cookie, csrf };
+  await login();
+  await admin(statusPath, 'GET', undefined, 404);
+  ({ cookie, csrf } = initiatingLogin);
+  await sessionStatus();
   assert.deepEqual(await admin('/upstreams/codex-oauth-sessions', 'POST', input), created);
   for (const body of [{}, { expected_revision: null }, { expected_revision: 0 }, { expected_revision: -1 }]) {
     assert.equal((await admin('/upstreams/synthetic-only/codex-refresh', 'POST', body, 400)).error.code, 'invalid_request');
@@ -96,22 +116,27 @@ try {
 
   await stop(); await start(true, clientA);
   assert.deepEqual(await admin('/upstreams/codex-oauth-sessions', 'POST', input), created, 'Same-config restart changed session');
+  await sessionStatus();
   await stop(); await start(true, clientB);
   const conflict = await admin('/upstreams/codex-oauth-sessions', 'POST', input, 409);
   assert.equal(conflict.error.code, 'codex_oauth_configuration_changed');
   noSecrets(JSON.stringify(conflict), 'Configuration conflict');
+  await sessionStatus('failed', 'codex_oauth_configuration_changed');
   await stop(); await start(true, clientA);
   assert.deepEqual(await admin('/upstreams/codex-oauth-sessions', 'POST', input), created, 'Mismatch consumed or replaced session');
+  await sessionStatus();
   assert.equal((await admin('/upstreams')).items.length, 0, 'Session creation unexpectedly created an account');
   await stop(); await start(false, clientA);
   assert.equal((await admin('/system/status')).features.codex_membership_oauth, false);
+  assert.equal((await admin('/system/status')).features.codex_membership_auto_refresh, false);
+  await admin(statusPath, 'GET', undefined, 403);
   assert.equal((await admin('/upstreams/codex-oauth-sessions', 'POST', input, 403)).error.code, 'feature_disabled');
   await stop();
   noSecrets(logs, 'Process logs');
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     if (entry.isFile()) noSecrets(await readFile(path.join(directory, entry.name)), 'Persistent data');
   }
-  console.log('PASS: OAuth CLI flags, disabled/unconfigured states, CSRF, PKCE/session idempotency, invalid revision, configuration-change rejection, restart and encrypted state. No provider request performed.');
+  console.log('PASS: OAuth CLI flags, disabled/unconfigured states, CSRF, PKCE/session idempotency, private session-status polling, invalid revision, configuration-change status/rejection, restart and encrypted state. No provider request performed.');
 } finally {
   await stop();
   const resolved = path.resolve(directory);
