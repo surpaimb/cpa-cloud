@@ -1,6 +1,7 @@
 # 固定模型 hard budget bound profile 可行性
 
-状态：**研究结论，功能待实现且默认关闭**，2026-09-23。本文只评估一个极窄的 OpenAI API Key
+状态：**严格本地 profile parser 已实现；生产派发、预算预留、结算与真实 provider 兼容仍待实现，功能默认关闭**，
+2026-09-24。本文只评估一个极窄的 OpenAI API Key
 文本生成子集，不表示当前服务、网页或发布包已经提供 hard TPM、hard cost、余额或收费。研究没有调用真实账号，
 没有读取真实凭据，也不覆盖 Codex membership、Claude、Gemini 或任意第三方 `openai-compatible` 服务。
 
@@ -40,8 +41,23 @@ TPMUpper = checked_add(InputMax, OutputMax) = C + M
 bounder 或 tokenizer，不能因“通常提示很短”降低预留。该 profile 的成立还依赖真实响应 usage 与上述官方容量和
 输出上限语义一致；这项兼容性尚未用真实 provider 验证。
 
-这项结论是**有条件可上线的工程子集**，不是当前代码已经可上线。上线前仍须实现预算总开关、reservation/settlement、
-本文的 strict profile parser、组合上界成本算法，以及下文所述 usage parser 修正和专项故障测试。
+这项结论是**有条件可上线的工程子集**，不是当前代码已经可上线。仓库现已提供本文的 strict profile parser 和组合
+上界算术基础；根集成分支也已新增只供该 fixed snapshot proof 使用的 usage accumulator。上线前仍须完成预算总开关、
+reservation/settlement、生产派发冻结接线和专项故障测试。
+
+## 当前实现状态
+
+`internal/accounting/bound_profile.go` 现提供纯本地 `ProveBoundProfile`：输入是服务端确定的 provider、协议、实际 endpoint、
+实际模型和准备派发的最终 payload bytes。它只接受本文冻结的官方 host/path/model 与 exact JSON allowlist，返回稳定
+`ProfileID`、整数 `ProfileVersion=1`、`Transform` 和 `MutuallyExclusiveInputUpperUsage{InputMax:1047576,
+OutputMax:M}`。route/profile 不匹配只返回固定 unsupported；JSON、类型或 allowlist 不合法只返回固定 invalid。返回值和错误
+不含正文、字段值、正文 hash 或 Token 估算，解析不会修改输入 bytes，也不执行网络、重定向、schema 或账本写入。
+
+当前 parser 没有注册到 App 或任何员工 handler；根集成仍须从最终 prepared upstream request 的可重读 body 取字节，并把
+真实 target URL 和 route 身份交给 parser，在 proof 后阻止任何 payload/route 变更。本文所述 profile-aware GPT-4.1 usage
+归一化已由根集成分支的独立 accumulator 实现，通用 usage parser 口径不因本 parser 改变。合成测试验证严格 JSON、
+endpoint 伪装、状态/工具/多模态拒绝、输出边界、输入互斥组合成本算术和无正文返回；没有调用 OpenAI，所以真实
+provider 字段兼容仍未验收。
 
 ## 输出上界覆盖什么
 
@@ -155,36 +171,39 @@ Prompt caching 仍可能由 OpenAI 对 eligible prefix 自动执行。它不是�
 context 的匹配前缀，并通过 usage 的输入细分报告实际复用。在 profile 互斥证据成立的前提下，成本上界对三个输入
 费率取最大值，因此 cache hit、miss 或 write 的收费分类不会突破 reservation；证据不成立时不得使用该结论。
 
-## 当前 usage parser 的上线阻塞
+## profile-aware usage 归一化边界
 
 本仓 `internal/accounting/usage_parser.go` 已把 Chat 的 `completion_tokens` 整体记为 output，因此不会重复加
 `reasoning_tokens`；这与官方“reported completion 包含所有生成 Token”的口径一致。它还验证
 `prompt_tokens = ordinary + cached + cache_write` 后才给 ordinary input。
 
-但当前实现只有在 `cached_tokens` 和 `cache_write_tokens` **同时存在**时才给出 ordinary input 和完整四桶。官方 Chat
-默认示例只展示 `prompt_tokens_details.cached_tokens`，并不承诺 GPT-4.1 每次都返回 `cache_write_tokens`。因此仅实现
-bounder 仍不足以上线：常见成功响应可能被结算为 unknown，导致完整 `C` reservation 一直保守占用。
+通用 parser 只有在 `cached_tokens` 和 `cache_write_tokens` **同时存在**时才给出 ordinary input 和完整四桶。官方 Chat
+默认示例只展示 `prompt_tokens_details.cached_tokens`，并不承诺 GPT-4.1 每次都返回 `cache_write_tokens`。通用 parser 的
+保守行为保持不变，不能让任意模型借 fixed profile 的费用分类规则获得已知结算。
 
-上线前必须增加只受该固定 profile 调用的结算规则，并用保存的 actual model/profile 验证来源：
+根集成分支已增加只受该固定 profile proof 调用的 `NewGPT41SnapshotUsageAccumulator`，并用响应 actual model 再次验证
+固定 snapshot。其冻结规则是：
 
 1. `prompt_tokens`、`completion_tokens` 必须存在、非负，且 `total_tokens`（若存在）与二者一致；
 2. `cached_tokens` 缺失时保持 unknown，不能猜零；
-3. 对 `gpt-4.1-2025-04-14`，若 `cache_write_tokens` 缺失，可以提出版本化的 effective billing 归一化：把
+3. 对 `gpt-4.1-2025-04-14`，若 `cache_write_tokens` 缺失，使用版本化的 effective billing 归一化：把
    `prompt_tokens - cached_tokens` 全部归入 ordinary 收费桶。这里的 effective `cache_write=0` 只表示内部收费分类，
-   **不表示物理上没有写入缓存，也不声称知道真实写入 Token 数**；该规则尚未实现，不得改变通用 OpenAI/GPT-5.6
-   parser；
-4. 若响应显式给出 `cache_write_tokens`，继续按三桶互斥关系验证并保存真实值；
-5. 任一负数、溢出、子桶大于 prompt、协议错误、半响应或持久化失败仍 settlement unknown，并保留上界。
+   **不表示物理上没有写入缓存，也不声称知道真实写入 Token 数**；该规则不改变通用 OpenAI parser；
+4. 显式 `cache_write_tokens:null` 保持 unknown，显式非零 cache write 固定拒绝；非零 reasoning 明细也固定拒绝，不能把
+   未证明类别折进 profile 已知结算；
+5. usage 元数据重复键、任一负数、溢出、子桶大于 prompt、协议错误、半响应或持久化失败仍 settlement unknown，并保留
+   上界。
 
 第 3 条依赖官方对 earlier models “no additional cache-write charge”的当前说明，并且必须由 profile revision 与专项
-provider 兼容测试绑定。真实 provider 兼容目前未测。若工程审阅或测试认为该说明不足以把剩余部分归入 effective
-ordinary，则 profile 仍可保守运行，但只能按 bound 做 unknown settlement；在这种模式通过 24 小时成本窗口前，它不
-具备实用性，不能称为首个可上线 profile。
+provider 兼容测试绑定。真实 provider 兼容目前未测。若真实 usage 不满足冻结规则，必须保持 unknown/overage 隔离，
+不能放宽 accumulator 或改写 usage 来维持 proof。
 
 ## 必须实现和证明的最小批次
 
-1. 新 profile registry 只注册上述 exact host/path/model/protocol/transform revision；unknown profile fail closed。
-2. strict JSON parser 和冻结 payload；proof 后任何字段修改、route/account/model revision 改变都取消派发。
+1. strict parser 已实现上述 exact host/path/model/protocol/transform revision；生产 profile registry 和 unknown-profile 派发
+   fail closed 接线仍待实现。
+2. strict JSON parser 已验证最终 payload；服务仍须接入冻结边界，proof 后任何字段修改、route/account/model revision
+   改变都取消派发。
 3. 预算总开关仍默认 `false`；只有 proposal 规定的 budget 开关与 `deny_unknown` 双门控才执行 hard 拒绝。
 4. reservation schema 保存独立 `InputMax=C`、`OutputMax=M`、输入 group-bound 版本、profile/bounder revision、实际 route
    和不可变 price version；不保存正文、正文 hash、Authorization、响应或原始错误。
@@ -214,5 +233,6 @@ transport，不调用 OpenAI。上线验收还需用无真实员工数据的受�
 
 综上，官方固定 context window 加显式输出上限支持构造一个有条件、极保守的 hard budget profile 工程推断。首版必须
 独立预留 `InputMax=C` 与 `OutputMax=M`，只在固定 profile 证据成立时把三个输入桶作为 group bound；它不能改变通用
-四桶 helper，也不能绕过 GPT-4.1 cache-write 缺失字段的结算问题。完成 strict allowlist、profile-aware usage 归一化、
-真实 provider 兼容验收和 overage 自动停用前，应继续保持计划状态与默认关闭。
+四桶 helper，也不能绕过 GPT-4.1 cache-write 缺失字段的结算问题。strict allowlist parser 虽已实现，但在完成生产冻结
+接线、profile-aware usage 生产接线与验收、真实 provider 兼容验收和 overage 自动停用前，整体功能仍保持计划状态与
+默认关闭。
