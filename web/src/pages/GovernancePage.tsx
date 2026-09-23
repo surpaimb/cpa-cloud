@@ -51,6 +51,19 @@ function useGovernanceWrite() {
   const [pending, setPending] = useState(false)
   const [receipt, setReceipt] = useState<GovernanceReceipt | null>(null)
   const [operationID, setOperationID] = useState<string | null>(null)
+  const [conflictPending, setConflictPending] = useState(false)
+
+  async function handleConflict(current: FrozenWrite) {
+    if (!current.conflict) { setError('配置版本已变化；当前对象无法安全继续编辑。'); return }
+    try {
+      await current.conflict()
+      setConflictPending(false)
+      setError('配置已被其他操作更新。页面已读取当前状态，请确认后再提交新操作。')
+    } catch {
+      setConflictPending(true)
+      setError('检测到版本冲突，但无法读取服务器当前状态。读取成功前不会允许新写入。')
+    }
+  }
 
   async function finish(next: GovernanceReceipt, current: FrozenWrite) {
     if (!receiptMatches(next, current)) {
@@ -74,15 +87,14 @@ function useGovernanceWrite() {
   }
 
   async function execute(current: FrozenWrite) {
-    frozen.current = current; setOperationID(current.operationID); setBusy(true); setError(null); setReceipt(null)
+    frozen.current = current; setOperationID(current.operationID); setBusy(true); setError(null); setReceipt(null); setConflictPending(false)
     try { await finish(await current.send(), current) }
     catch (caught) {
       if (!(caught instanceof ApiError) || caught.status >= 500) {
         setPending(true)
         await queryCurrent(current)
       } else if (caught.status === 409 && caught.code === 'revision_conflict' && current.conflict) {
-        try { await current.conflict() } catch { /* The fixed conflict copy remains conservative. */ }
-        setError(governanceMessage(caught))
+        await handleConflict(current)
       } else setError(governanceMessage(caught))
     } finally { setBusy(false) }
   }
@@ -103,9 +115,8 @@ function useGovernanceWrite() {
       else {
         setPending(false)
         if (caught.status === 409 && caught.code === 'revision_conflict' && current.conflict) {
-          try { await current.conflict() } catch { /* Keep the fixed conflict copy. */ }
-        }
-        setError(governanceMessage(caught))
+          await handleConflict(current)
+        } else setError(governanceMessage(caught))
       }
     } finally { setBusy(false) }
   }
@@ -118,10 +129,18 @@ function useGovernanceWrite() {
     finally { setBusy(false) }
   }
 
-  return { busy, error, pending, receipt, operationID, execute, query, retry, reread }
+  async function rereadConflict() {
+    if (!frozen.current?.conflict) return
+    setBusy(true); setError(null)
+    try { await handleConflict(frozen.current) }
+    finally { setBusy(false) }
+  }
+
+  return { busy, error, pending, receipt, operationID, conflictPending, execute, query, retry, reread, rereadConflict }
 }
 
 function WriteRecovery({ state }: { state: ReturnType<typeof useGovernanceWrite> }) {
+  if (state.conflictPending) return <div className="governance-recovery" role="alert"><strong>最新状态尚未确认</strong><p>{state.error}</p><Button type="button" variant="secondary" disabled={state.busy} onClick={() => void state.rereadConflict()}>{state.busy ? '读取中…' : '重新读取最新状态'}</Button></div>
   if (!state.pending && !state.receipt) return <FormError error={state.error} />
   return <div className="governance-recovery" role="status">
     {state.pending ? <><strong>写入结果尚未确认</strong><p>{state.error}</p><code>{state.operationID}</code><div><Button type="button" variant="secondary" disabled={state.busy} onClick={() => void state.query()}>查询原回执</Button><Button type="button" disabled={state.busy} onClick={() => void state.retry()}>用原操作重试</Button></div></> : <><strong>写入回执已确认</strong><p>{state.error ?? '已重新读取资源当前状态；回执版本不等同于当前版本。'}</p>{state.error ? <Button type="button" variant="secondary" disabled={state.busy} onClick={() => void state.reread()}>重新读取当前资源</Button> : null}</>}
@@ -163,6 +182,12 @@ export function GovernancePage({ csrf }: { csrf: string }) {
   const [keys, setKeys] = useState<TargetKey[]>([])
   const [groupCursor, setGroupCursor] = useState<string | null>(null)
   const [policyCursor, setPolicyCursor] = useState<string | null>(null)
+  const [groupLoadingMore, setGroupLoadingMore] = useState(false)
+  const [policyLoadingMore, setPolicyLoadingMore] = useState(false)
+  const [groupLoadError, setGroupLoadError] = useState<string | null>(null)
+  const [policyLoadError, setPolicyLoadError] = useState<string | null>(null)
+  const groupMoreActive = useRef(false)
+  const policyMoreActive = useRef(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [unsupported, setUnsupported] = useState(false)
@@ -200,14 +225,26 @@ export function GovernancePage({ csrf }: { csrf: string }) {
   }
 
   async function moreGroups() {
-    if (!groupCursor) return
-    const page = await api.governanceGroups(groupCursor)
-    setGroups((current) => [...current, ...page.items]); setGroupCursor(page.next_cursor)
+    if (!groupCursor || groupMoreActive.current) return
+    groupMoreActive.current = true
+    setGroupLoadingMore(true); setGroupLoadError(null)
+    try {
+      const page = await api.governanceGroups(groupCursor)
+      setGroups((current) => { const seen = new Set(current.map((item) => item.id)); return [...current, ...page.items.filter((item) => !seen.has(item.id))] })
+      setGroupCursor(page.next_cursor)
+    } catch { setGroupLoadError('无法读取更多治理组；现有列表保持不变。') }
+    finally { groupMoreActive.current = false; setGroupLoadingMore(false) }
   }
   async function morePolicies() {
-    if (!policyCursor) return
-    const page = await api.governancePolicies(policyCursor)
-    setPolicies((current) => [...current, ...page.items]); setPolicyCursor(page.next_cursor)
+    if (!policyCursor || policyMoreActive.current) return
+    policyMoreActive.current = true
+    setPolicyLoadingMore(true); setPolicyLoadError(null)
+    try {
+      const page = await api.governancePolicies(policyCursor)
+      setPolicies((current) => { const seen = new Set(current.map((item) => item.id)); return [...current, ...page.items.filter((item) => !seen.has(item.id))] })
+      setPolicyCursor(page.next_cursor)
+    } catch { setPolicyLoadError('无法读取更多治理策略；现有列表保持不变。') }
+    finally { policyMoreActive.current = false; setPolicyLoadingMore(false) }
   }
 
   const employeeNames = new Map(employees.map((employee) => [employee.id, employee.name]))
@@ -226,20 +263,22 @@ export function GovernancePage({ csrf }: { csrf: string }) {
     {!loading && !error && settings ? <>
       <section className="content-panel governance-settings">
         <div><span>治理总开关</span><strong>{settings.enabled ? '已启用' : '默认关闭 / 当前关闭'}</strong><small>配置 revision {settings.revision} · 新准入按此状态读取</small></div>
-        <Button variant={settings.enabled ? 'danger' : 'primary'} disabled={settingsWrite.busy || settingsWrite.pending || unsupported} onClick={() => void toggleSettings()}>{settingsWrite.busy ? '处理中…' : settings.enabled ? '关闭治理' : '启用治理'}</Button>
+        <Button variant={settings.enabled ? 'danger' : 'primary'} disabled={settingsWrite.busy || settingsWrite.pending || settingsWrite.conflictPending || unsupported} onClick={() => void toggleSettings()}>{settingsWrite.busy ? '处理中…' : settings.enabled ? '关闭治理' : '启用治理'}</Button>
         <WriteRecovery state={settingsWrite} />
       </section>
 
       <section className="content-panel governance-panel">
         <div className="section-heading"><div><h2>治理组</h2><p>只使用显式员工成员；部门和上游账号组不会自动成为成员。</p></div><Button onClick={() => setGroupEditor('create')}><Icon name="plus" />新建治理组</Button></div>
         {groups.length === 0 ? <EmptyState title="还没有治理组" body="可先创建空组，再用组策略统一治理明确加入的员工。" /> : <div className="table-scroll"><table className="governance-table"><thead><tr><th>名称</th><th>显式成员</th><th>版本</th><th>操作</th></tr></thead><tbody>{groups.map((group) => <tr key={group.id}><td><strong>{group.name}</strong><small><code>{group.id}</code></small></td><td>{group.employee_ids.length}<small>{group.employee_ids.slice(0, 3).map((id) => employeeNames.get(id) ?? id).join('、') || '空组'}</small></td><td>r{group.revision}</td><td><button className="link-button" onClick={() => setGroupEditor(group)}>编辑成员</button></td></tr>)}</tbody></table></div>}
-        {groupCursor ? <div className="pagination"><Button variant="secondary" onClick={() => void moreGroups()}>加载更多治理组</Button></div> : null}
+        {groupLoadError ? <div className="governance-page-error" role="alert"><span>{groupLoadError}</span><Button variant="secondary" disabled={groupLoadingMore} onClick={() => void moreGroups()}>重试加载治理组</Button></div> : null}
+        {groupCursor && !groupLoadError ? <div className="pagination"><Button variant="secondary" disabled={groupLoadingMore} onClick={() => void moreGroups()}>{groupLoadingMore ? '读取中…' : '加载更多治理组'}</Button></div> : null}
       </section>
 
       <section className="content-panel governance-panel">
         <div className="section-heading"><div><h2>治理策略</h2><p>每个员工、Key 或治理组最多一条策略；Key 策略使用独立策略 revision。</p></div><Button onClick={() => setPolicyEditor('create')}><Icon name="plus" />新建策略</Button></div>
         {policies.length === 0 ? <EmptyState title="还没有治理策略" body="总开关开启但没有适用策略时，不会增加治理限制。" /> : <div className="table-scroll"><table className="governance-table governance-policy-table"><thead><tr><th>作用范围</th><th>硬限制</th><th>Shadow 配置</th><th>状态 / 版本</th><th>操作</th></tr></thead><tbody>{policies.map((policy) => <tr key={policy.id}><td><strong>{scopeLabel(policy.scope_kind)} · {targetName(policy) ?? policy.scope_id}</strong><small><code>{policy.scope_id}</code></small></td><td>RPM {policy.hard.rpm ?? '不限'}<small>并发 {policy.hard.concurrency ?? '不限'}</small></td><td>TPM {policy.shadow.tpm ?? '未配置'}<small>{policy.shadow.cost_micro ? `${policy.shadow.cost_micro} μ ${policy.shadow.currency} / 24h` : '成本未配置'} · 仅 shadow</small></td><td>{policy.enabled ? '启用' : '停用'}<small>policy r{policy.revision}</small></td><td><button className="link-button" onClick={() => setPolicyEditor(policy)}>编辑策略</button></td></tr>)}</tbody></table></div>}
-        {policyCursor ? <div className="pagination"><Button variant="secondary" onClick={() => void morePolicies()}>加载更多策略</Button></div> : null}
+        {policyLoadError ? <div className="governance-page-error" role="alert"><span>{policyLoadError}</span><Button variant="secondary" disabled={policyLoadingMore} onClick={() => void morePolicies()}>重试加载策略</Button></div> : null}
+        {policyCursor && !policyLoadError ? <div className="pagination"><Button variant="secondary" disabled={policyLoadingMore} onClick={() => void morePolicies()}>{policyLoadingMore ? '读取中…' : '加载更多策略'}</Button></div> : null}
       </section>
     </> : null}
     {groupEditor ? <GroupEditor key={groupEditor === 'create' ? 'create' : groupEditor.id} initial={groupEditor === 'create' ? null : groupEditor} employees={employees} csrf={csrf} onClose={() => setGroupEditor(null)} onSaved={async () => { setGroupEditor(null); await reload() }} /> : null}
@@ -273,7 +312,7 @@ function GroupEditor({ initial, employees, csrf, onClose, onSaved }: { initial: 
     })
   }
 
-  const frozen = write.pending || Boolean(write.receipt)
+  const frozen = write.pending || write.conflictPending || Boolean(write.receipt)
   return <Dialog title={baseline ? `编辑治理组 · ${baseline.name}` : '新建治理组'} description="治理组只包含这里明确选择的员工；保存名称与全量成员共用一次 CAS。" onClose={onClose} wide closeDisabled={write.busy || write.pending}>
     <form onSubmit={submitHandler(async () => save())}>
       <Field label="治理组名称"><input value={name} disabled={frozen || Boolean(conflict)} onChange={(event) => setName(event.target.value)} required autoFocus /></Field>
@@ -323,7 +362,7 @@ function PolicyEditor({ initial, employees, keys, groups, csrf, onClose, onSaved
     })
   }
 
-  const frozen = write.pending || Boolean(write.receipt)
+  const frozen = write.pending || write.conflictPending || Boolean(write.receipt)
   return <Dialog title={baseline ? '编辑治理策略' : '新建治理策略'} description="RPM 与并发会硬拒绝；TPM 与成本首批只保存 shadow 配置，不展示余额或是否超限。" onClose={onClose} wide closeDisabled={write.busy || write.pending}>
     <form onSubmit={submitHandler(async () => save())}>
       <div className="governance-form-grid">

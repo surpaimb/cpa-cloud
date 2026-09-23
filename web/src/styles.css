@@ -346,6 +346,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .governance-recovery p, .governance-conflict p { margin: 6px 0 10px; font-size: 13px; line-height: 1.55; }
 .governance-recovery code { display: block; margin: 8px 0 12px; overflow-wrap: anywhere; }
 .governance-recovery > div { display: flex; flex-wrap: wrap; gap: 9px; }
+.governance-page-error { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 20px; color: #734213; background: #fff7e8; border-top: 1px solid #f1d39b; font-size: 13px; }
 .governance-member-picker { max-height: 330px; margin: 18px 0 0; padding: 13px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
 .governance-member-picker legend { padding: 0 7px; color: var(--muted); font-size: 12px; font-weight: 650; }
 .governance-member-picker label { display: flex; align-items: flex-start; gap: 10px; padding: 10px; border-radius: 6px; }

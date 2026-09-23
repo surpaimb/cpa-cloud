@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GovernancePage } from '../pages/GovernancePage'
@@ -52,9 +52,36 @@ describe('governance management page', () => {
     expect(screen.getByText(/TPM 与成本目前只保存 shadow 配置/)).toBeInTheDocument()
     expect(screen.getByText(/治理组与上游账号组彼此独立/)).toBeInTheDocument()
     expect(screen.queryByText(/^余额充足$|^低于阈值$|^将会拦截$/)).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: '加载更多治理组' }))
+    const more = screen.getByRole('button', { name: '加载更多治理组' })
+    fireEvent.click(more); fireEvent.click(more)
     expect(await screen.findByText('组 g-2')).toBeInTheDocument()
-    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('limit=50&after_id=g-1'))).toBe(true)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('limit=50&after_id=g-1'))).toHaveLength(1)
+  })
+
+  it('keeps the current page after a pagination failure and retries without duplicates', async () => {
+    let attempts = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('after_id=g-1')) {
+        attempts += 1
+        if (attempts === 1) return Promise.reject(new TypeError('network down'))
+        return response({ body: { items: [group('g-1'), group('g-2')], next_cursor: null } })
+      }
+      if (url.endsWith('/governance/settings')) return response({ body: settings() })
+      if (url.includes('/governance/groups?')) return response({ body: { items: [group('g-1')], next_cursor: 'g-1' } })
+      if (url.includes('/governance/policies?')) return response({ body: { items: [], next_cursor: null } })
+      if (url.endsWith('/employees')) return response({ body: { items: [] } })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<GovernancePage csrf="csrf" />)
+    await screen.findByText('组 g-1')
+    await userEvent.click(screen.getByRole('button', { name: '加载更多治理组' }))
+    expect(await screen.findByText('无法读取更多治理组；现有列表保持不变。')).toBeInTheDocument()
+    expect(screen.getAllByText('组 g-1')).toHaveLength(1)
+    await userEvent.click(screen.getByRole('button', { name: '重试加载治理组' }))
+    expect(await screen.findByText('组 g-2')).toBeInTheDocument()
+    expect(screen.getAllByText('组 g-1')).toHaveLength(1)
   })
 
   it('freezes an unknown settings write and retries only the original operation and payload', async () => {
@@ -193,6 +220,39 @@ describe('governance management page', () => {
     expect(bodies[1].expected_revision).toBe(5)
     expect(bodies[1]).not.toHaveProperty('scope_kind')
     expect(bodies[1].operation_id).not.toBe(bodies[0].operation_id)
+  })
+
+  it('freezes a conflicted policy when the latest state cannot be read', async () => {
+    const person = employee('employee-1', 'Alice')
+    const accessKey = key('key-1', 'Laptop')
+    let detailReads = 0
+    const latest = policy({ revision: 5, hard: { rpm: 20, concurrency: null } })
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/governance/settings')) return response({ body: settings() })
+      if (url.includes('/governance/groups?')) return response({ body: { items: [], next_cursor: null } })
+      if (url.includes('/governance/policies?')) return response({ body: { items: [policy()], next_cursor: null } })
+      if (url.endsWith('/employees')) return response({ body: { items: [person] } })
+      if (url.endsWith('/employees/employee-1/keys')) return response({ body: { items: [accessKey] } })
+      if (url.endsWith('/governance/policies/policy-1') && init?.method === 'PUT') return response({ status: 409, body: { error: { code: 'revision_conflict' } } })
+      if (url.endsWith('/governance/policies/policy-1')) {
+        detailReads += 1
+        if (detailReads === 1) return Promise.reject(new TypeError('network down'))
+        return response({ body: latest })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<GovernancePage csrf="csrf" />)
+    await screen.findByText('Key · Alice · Laptop')
+    await userEvent.click(screen.getByRole('button', { name: '编辑策略' }))
+    const dialog = screen.getByRole('dialog')
+    await userEvent.click(within(dialog).getByRole('button', { name: '保存策略' }))
+    expect(await within(dialog).findByText('最新状态尚未确认')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: '保存策略' })).toBeDisabled()
+    await userEvent.click(within(dialog).getByRole('button', { name: '重新读取最新状态' }))
+    expect(await within(dialog).findByText('服务器当前策略 r5')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: '保存策略' })).toBeDisabled()
   })
 
   it('fails closed when the governance management API is unavailable', async () => {
