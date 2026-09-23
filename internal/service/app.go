@@ -93,6 +93,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/v1/keys/{id}/revoke", a.requireAdmin(a.revokeKey, true))
 	mux.HandleFunc("GET /admin/api/v1/upstreams", a.requireAdmin(a.listUpstreams, false))
 	mux.HandleFunc("POST /admin/api/v1/upstreams", a.requireAdmin(a.createUpstream, true))
+	mux.HandleFunc("POST /admin/api/v1/upstreams/batch-import", a.requireAdmin(a.batchImportUpstreams, true))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/codex-import", a.requireAdmin(a.importCodexUpstream, true))
 	mux.HandleFunc("PATCH /admin/api/v1/upstreams/{id}", a.requireAdmin(a.updateUpstream, true))
 	mux.HandleFunc("PUT /admin/api/v1/upstreams/{id}/codex-auth", a.requireAdmin(a.replaceCodexCredential, true))
@@ -175,6 +176,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"gemini_native_api":       true,
 			"anthropic_native_api":    true,
 			"codex_model_discovery":   a.cfg.ExperimentalCodexMembership,
+			"upstream_batch_import":   true,
 		},
 		"limitations": limitations,
 	})
