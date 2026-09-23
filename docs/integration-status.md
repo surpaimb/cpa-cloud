@@ -1,5 +1,16 @@
 # 集成状态
 
+## 2026-09-23：生成恢复基础模块与独立探测账本
+
+- 账本 `45bafe9`、维护租约/隔离 `3cf737e`、固定协议 runner `b54cb5d` 已由 GPT-5.6 Sol 子任务交付，根任务负责 App 初始化、管理员汇总、内部单次执行事务桥、legacy 路由隔离及进程验收。独立规格见[基础模块契约](system-probe-foundations-contract.md)。入口、执行、持久化、生命周期分别列明：只读管理入口已接线；内部执行有测试；三张独立表已迁移；启动中断与容量恢复已接线；自动创建隔离/触发探测的 worker 和配置仍未实现。
+- 系统探测不创建员工/Key/普通模型请求，成本与用量独立汇总，未知值保持 NULL。Begin/派发/结算与维护租约、隔离修改共用调用方事务；MarkMayHaveSent 持久化失败时零网络。结束提交失败保留隔离及 receipt，后续只能重试元数据，不可重放 operation。真实版本失配仍结算实际消耗，但不清新事件。
+- 根任务审阅发现并协调修复：取消/超时被当作配置漂移（`a0e3577` 加根结果分类）；重启墙钟回拨导致 pending 无法中断（`98fbad3` 加根隔离时间保护）；SQL CHECK 字面值空白被错误归一化（`7a17a39`）；手工 clear 未取消同事件活动探测（`a87a75a`）。根执行桥加入完整运行期计数，Close 先取消并等待执行/终结后才允许关库。屏障测试阻塞取消后的 transport 返回，确认不是只等待心跳。
+- 根任务完整非缓存 `go test -p 1 ./... -count=1 -timeout=8m` PASS（service 351.646s、accounting 14.114s、membership 0.397s、scheduling 0.142s）。该全量运行之后的收尾修订在最终源码重新定向执行：service 的 SystemProbeAccounting/RecoveryExecution/RecoveryIsolation/CooldownClearCancelsOnlyMatchingMaintenanceEvent 19.797s、accounting 的 TestSystemProbe 8.624s，均 PASS；全仓 `go vet -p 1 ./...` PASS。本机没有 C 编译器，完整 Linux race 待本批轻量 CI，不能用普通测试替代。
+- 根任务在最终源码编译 `dist/recovery-smoke.exe`，实际运行 `scripts/smoke-recovery-foundations.mjs` PASS。旧 `dist/health-smoke.exe` 初始化隔离库，脚本确认三张新表原先不存在，再升级验证员工 Key 与旧数据保留、独立汇总、启动 pending→interrupted、关闭自动探测时零重放、冷却已到期仍保持恢复隔离、事件 clear、保守恢复维护容量及 TTL 后员工可用。模拟凭据/临时目录/随机端口，数据库和日志无明文秘密，测试服务与数据已清理。
+- 既有 `scripts/smoke-upstream-health.mjs` 在本批集成程序上 PASS，覆盖管理员/员工隔离、目录与分页、幂等、替换竞争、崩溃中断、冷却事件 CAS、重启和撤销；后续 clear 取消小修另有专项覆盖。没有浏览器页面改动，本批不新增 GUI 实测声明。
+- 两份 README 的 PowerShell 块与基线一致，相关文档 85 个本地链接、6 项 CI 路径计划及 diff 检查通过。core/web=true、Windows/Linux/macOS 安装任务=false。根据前一批 race 的 1175 秒实测，将完整 race 上限 20→25 分钟、core job 30→35 分钟，保留完整套件与断言；CI 新增独立进程恢复 smoke。
+- 本批尚未启用自动生成探测，没有新 tag/安装包，preview.3 不变。Codex 的可证明刷新 revision 采纳、失败路径快照、默认关闭开关、退避和后台协调器、网页控制继续按[执行计划](account-recovery-execution-plan.md)实现；模拟成功不等于真实会员或供应商兼容验收。
+
 ## 2026-09-23：上游凭据/目录测试与冷却管理
 
 - 后台 `5501f51`、网络边界测试 `d7298f5`、冷却运行时 `9e69bba`、Codex 专项 `4290c68` 和网页 `4f9fbb0` 已交付。根任务负责 App 生命周期/路由、列表投影、契约及进程验收接线。实现依据本仓[上游测试与恢复契约](upstream-health-contract.md)，只允许本地凭据检查与模型目录请求，不新增生成请求或后台探测定时器。

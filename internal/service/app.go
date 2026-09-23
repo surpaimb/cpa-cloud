@@ -36,6 +36,7 @@ type App struct {
 	refresh       *codexRefreshCoordinator
 	accountPool   *accountPoolRuntime
 	healthTests   *upstreamHealthCoordinator
+	systemProbes  *accounting.SystemProbeLedger
 	usage         *usageLedgerCoordinator
 	usageRequests sync.Map
 	loginMu       sync.Mutex
@@ -81,6 +82,10 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err := prices.Migrate(ctx); err != nil {
 		s.close()
 		return nil, errUsageLedgerUnavailable
+	}
+	if err := app.initializeSystemProbeAccounting(ctx); err != nil {
+		s.close()
+		return nil, err
 	}
 	app.usage = newUsageLedgerCoordinator(s.db)
 	app.usage.priceLookup = prices.Current
@@ -131,6 +136,7 @@ func (a *App) Handler() http.Handler {
 	a.registerAccountPoolHandlers(mux)
 	a.registerPricingHandlers(mux)
 	a.registerUsageHandlers(mux)
+	a.registerSystemProbeHandlers(mux)
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("POST /admin/api/v1/sessions", a.login)
 	mux.HandleFunc("DELETE /admin/api/v1/sessions", a.requireAdmin(a.logout, true))
@@ -240,6 +246,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"account_pool_preflight_failover": a.accountPool != nil,
 			"usage_reporting":                 true,
 			"versioned_cost_prices":           true,
+			"system_probe_accounting":         a.systemProbes != nil,
 			"codex_membership_auto_refresh":   a.refresh != nil && a.refresh.enabled(),
 		},
 		"limitations": limitations,

@@ -103,6 +103,8 @@ The list shows administrator enablement, test observations, and cooldown separat
 
 These operations require an administrator session and CSRF validation; employee keys cannot invoke them. Automatic generation recovery probes remain unimplemented. See the [upstream health contract](docs/upstream-health-contract.md) for API and failure semantics.
 
+The latest source adds recovery foundations: a separate system-probe ledger, maintenance leases sharing employee-request capacity, durable recovery isolation, and fixed-input probes for the four API protocols and Codex. Administrators can read `GET /admin/api/v1/system-probes/summary`. Probe usage is separate from employee statistics; unknown usage and cost remain null. There is currently no web action, CLI flag, or background timer that starts probes, so ordinary operation sends no automatic generation probes. See the [foundation contract and remaining work](docs/system-probe-foundations-contract.md). These changes are not included in preview.3 downloads.
+
 ## Usage and cost management (latest source only)
 
 This feature is **not included in preview.3 downloads**. On “用量与成本” (Usage and cost), administrators can filter by time, employee, key ID, public model, upstream, provider, and status. “查看尝试” shows the actual account, token counters, and price version for each attempt. Requests and attempts are counted separately; currencies are never added together. Queries cover at most 31 days. Pagination pins the selected window; “最近24小时” refreshes the most recent 24 hours.
