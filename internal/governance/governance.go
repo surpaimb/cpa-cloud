@@ -17,12 +17,15 @@ import (
 )
 
 var (
-	ErrInvalid     = errors.New("invalid governance metadata")
-	ErrConflict    = errors.New("governance state conflict")
-	ErrNotFound    = errors.New("governance record not found")
-	ErrUnavailable = errors.New("governance storage unavailable")
-	ErrSchema      = errors.New("invalid governance schema")
+	ErrInvalid      = errors.New("invalid governance metadata")
+	ErrConflict     = errors.New("governance state conflict")
+	ErrNotFound     = errors.New("governance record not found")
+	ErrLeaseExpired = errors.New("governance lease expired")
+	ErrUnavailable  = errors.New("governance storage unavailable")
+	ErrSchema       = errors.New("invalid governance schema")
 )
+
+const MaxRevision int64 = 9007199254740991
 
 type ScopeKind string
 
@@ -40,6 +43,7 @@ const (
 	DecisionConcurrencyExceeded DecisionCode = "concurrency_exceeded"
 	DecisionPolicyChanged       DecisionCode = "policy_changed"
 	DecisionAlreadyTerminal     DecisionCode = "already_terminal"
+	DecisionLeaseExpired        DecisionCode = "lease_expired"
 )
 
 type Config struct {
@@ -90,6 +94,7 @@ type AdmissionStart struct {
 	SnapshotComplete bool
 	Scopes           []ScopeSnapshot
 	StartedAt        time.Time
+	ObservedAt       time.Time
 }
 
 type Lease struct {
@@ -110,6 +115,12 @@ type Finish struct {
 	FinishedAt time.Time
 }
 
+type Renew struct {
+	RequestID         string
+	ExpectedExpiresAt time.Time
+	ObservedAt        time.Time
+}
+
 type RecoveryResult struct {
 	Interrupted int64
 }
@@ -123,6 +134,7 @@ type storedRequest struct {
 	settingsRevision    int64
 	observedStartedAt   time.Time
 	effectiveStartedAt  time.Time
+	effectiveLeaseAt    time.Time
 	expiresAt           time.Time
 	observedFinishedAt  *time.Time
 	effectiveFinishedAt *time.Time
@@ -148,12 +160,13 @@ func (c *Coordinator) Settings(ctx context.Context) (Settings, error) {
 // operation-ID deduplication; a caller with an uncertain commit must reload
 // settings rather than treating a repeated CAS as an idempotent network retry.
 func (c *Coordinator) SetEnabledTx(ctx context.Context, tx *sql.Tx, input SettingsUpdate) (Settings, error) {
-	if c == nil || c.db == nil || ctx == nil || tx == nil || input.ExpectedRevision < 1 || !validTime(input.UpdatedAt) {
+	if c == nil || c.db == nil || ctx == nil || tx == nil || !validRevision(input.ExpectedRevision) || !validUTCTime(input.UpdatedAt) {
 		return Settings{}, ErrInvalid
 	}
 	updatedAt := formatTime(input.UpdatedAt)
 	result, err := tx.ExecContext(ctx, `UPDATE governance_settings
-		SET enabled=?,revision=revision+1,updated_at=? WHERE singleton=1 AND revision=?`, boolInteger(input.Enabled), updatedAt, input.ExpectedRevision)
+		SET enabled=?,revision=revision+1,updated_at=?
+		WHERE singleton=1 AND revision=? AND revision<?`, boolInteger(input.Enabled), updatedAt, input.ExpectedRevision, MaxRevision)
 	if err != nil {
 		return Settings{}, ErrUnavailable
 	}
@@ -202,6 +215,10 @@ func (c *Coordinator) AdmitTx(ctx context.Context, tx *sql.Tx, input AdmissionSt
 		if existing.status != accounting.StatusPending {
 			return lease, Decision{Code: DecisionAlreadyTerminal}, nil
 		}
+		current := effectiveClock(input.ObservedAt, settings.LastEffectiveAdmissionTime, existing.effectiveLeaseAt)
+		if existing.releasedAt != nil || !existing.expiresAt.After(current) {
+			return lease, Decision{Code: DecisionLeaseExpired}, nil
+		}
 		return lease, Decision{Allowed: true, Code: DecisionAllowed}, nil
 	}
 
@@ -212,12 +229,9 @@ func (c *Coordinator) AdmitTx(ctx context.Context, tx *sql.Tx, input AdmissionSt
 		return nil, Decision{Allowed: true, Code: DecisionAllowed}, nil
 	}
 
-	effective := input.StartedAt.UTC()
-	if settings.LastEffectiveAdmissionTime != nil && settings.LastEffectiveAdmissionTime.After(effective) {
-		effective = *settings.LastEffectiveAdmissionTime
-	}
+	effective := effectiveClock(input.ObservedAt, settings.LastEffectiveAdmissionTime, input.StartedAt)
 	expires := effective.Add(c.leaseTTL)
-	if !validTime(expires) || !expires.After(effective) {
+	if !validUTCTime(expires) || !expires.After(effective) {
 		return nil, Decision{}, ErrInvalid
 	}
 
@@ -258,9 +272,9 @@ func (c *Coordinator) AdmitTx(ctx context.Context, tx *sql.Tx, input AdmissionSt
 		return nil, Decision{}, ErrUnavailable
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO governance_requests(
-		id,employee_id,key_id,public_model,protocol,settings_revision,observed_started_at,effective_started_at,expires_at,status
-	) VALUES(?,?,?,?,?,?,?,?,?,'pending')`, input.RequestID, input.Subject.EmployeeID, input.Subject.KeyID, input.Subject.PublicModel,
-		string(input.Subject.Protocol), input.SettingsRevision, formatTime(input.StartedAt), formattedEffective, formatTime(expires)); err != nil {
+		id,employee_id,key_id,public_model,protocol,settings_revision,observed_started_at,effective_started_at,effective_lease_at,expires_at,status
+	) VALUES(?,?,?,?,?,?,?,?,?,?,'pending')`, input.RequestID, input.Subject.EmployeeID, input.Subject.KeyID, input.Subject.PublicModel,
+		string(input.Subject.Protocol), input.SettingsRevision, formatTime(input.StartedAt), formattedEffective, formattedEffective, formatTime(expires)); err != nil {
 		return nil, Decision{}, ErrUnavailable
 	}
 	for _, scope := range scopes {
@@ -275,7 +289,7 @@ func (c *Coordinator) AdmitTx(ctx context.Context, tx *sql.Tx, input AdmissionSt
 }
 
 func (c *Coordinator) FinishTx(ctx context.Context, tx *sql.Tx, input Finish) error {
-	if c == nil || c.db == nil || ctx == nil || tx == nil || !validMetadata(input.RequestID, 256) || !terminalStatus(input.Status) || !validTime(input.FinishedAt) {
+	if c == nil || c.db == nil || ctx == nil || tx == nil || !validMetadata(input.RequestID, 256) || !terminalStatus(input.Status) || !validUTCTime(input.FinishedAt) {
 		return ErrInvalid
 	}
 	if err := lockSettingsRow(ctx, tx); err != nil {
@@ -299,13 +313,7 @@ func (c *Coordinator) FinishTx(ctx context.Context, tx *sql.Tx, input Finish) er
 		}
 		return ErrConflict
 	}
-	effective := observed
-	if request.effectiveStartedAt.After(effective) {
-		effective = request.effectiveStartedAt
-	}
-	if settings.LastEffectiveAdmissionTime != nil && settings.LastEffectiveAdmissionTime.After(effective) {
-		effective = *settings.LastEffectiveAdmissionTime
-	}
+	effective := effectiveClock(observed, settings.LastEffectiveAdmissionTime, request.effectiveLeaseAt)
 	result, err := tx.ExecContext(ctx, `UPDATE governance_requests SET
 		observed_finished_at=?,effective_finished_at=?,released_at=?,status=?
 		WHERE id=? AND status='pending'`, formatTime(observed), formatTime(effective), formatTime(effective), string(input.Status), input.RequestID)
@@ -322,10 +330,65 @@ func (c *Coordinator) FinishTx(ctx context.Context, tx *sql.Tx, input Finish) er
 	return nil
 }
 
+// RenewTx extends an active request lease using an expiry compare-and-swap.
+// It never reopens terminal, released, recovered, or expired requests. Replaying
+// AdmitTx does not call this method and cannot extend a lease.
+func (c *Coordinator) RenewTx(ctx context.Context, tx *sql.Tx, input Renew) (*Lease, error) {
+	if c == nil || c.db == nil || ctx == nil || tx == nil || !validMetadata(input.RequestID, 256) ||
+		!validUTCTime(input.ExpectedExpiresAt) || !validUTCTime(input.ObservedAt) {
+		return nil, ErrInvalid
+	}
+	if err := lockSettingsRow(ctx, tx); err != nil {
+		return nil, err
+	}
+	settings, err := readSettings(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	request, found, err := loadRequest(ctx, tx, input.RequestID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, ErrNotFound
+	}
+	if request.status != accounting.StatusPending || request.releasedAt != nil {
+		return nil, ErrConflict
+	}
+	if !request.expiresAt.Equal(input.ExpectedExpiresAt.UTC()) {
+		return nil, ErrConflict
+	}
+	current := effectiveClock(input.ObservedAt, settings.LastEffectiveAdmissionTime, request.effectiveLeaseAt)
+	if !request.expiresAt.After(current) {
+		return nil, ErrLeaseExpired
+	}
+	newExpiry := current.Add(c.leaseTTL)
+	if !validUTCTime(newExpiry) || !newExpiry.After(current) {
+		return nil, ErrInvalid
+	}
+	if !newExpiry.After(request.expiresAt) {
+		return &Lease{RequestID: request.id, EffectiveStartedAt: request.effectiveStartedAt, ExpiresAt: request.expiresAt}, nil
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE governance_requests SET effective_lease_at=?,expires_at=?
+		WHERE id=? AND status='pending' AND released_at IS NULL AND expires_at=? AND effective_lease_at=?`,
+		formatTime(current), formatTime(newExpiry), request.id, formatTime(input.ExpectedExpiresAt), formatTime(request.effectiveLeaseAt))
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	if changed != 1 {
+		return nil, ErrConflict
+	}
+	return &Lease{RequestID: request.id, EffectiveStartedAt: request.effectiveStartedAt, ExpiresAt: newExpiry}, nil
+}
+
 func validateAdmission(input AdmissionStart) ([]ScopeSnapshot, error) {
 	if !validMetadata(input.RequestID, 256) || !validMetadata(input.Subject.EmployeeID, 256) || !validMetadata(input.Subject.KeyID, 256) ||
-		!validMetadata(input.Subject.PublicModel, 256) || !validProtocol(input.Subject.Protocol) || input.SettingsRevision < 1 ||
-		!input.SnapshotComplete || !validTime(input.StartedAt) {
+		!validMetadata(input.Subject.PublicModel, 256) || !validProtocol(input.Subject.Protocol) || !validRevision(input.SettingsRevision) ||
+		!input.SnapshotComplete || !validUTCTime(input.StartedAt) || !validUTCTime(input.ObservedAt) {
 		return nil, ErrInvalid
 	}
 	scopes := append([]ScopeSnapshot(nil), input.Scopes...)
@@ -336,7 +399,7 @@ func validateAdmission(input AdmissionStart) ([]ScopeSnapshot, error) {
 		return scopes[i].ID < scopes[j].ID
 	})
 	for index, scope := range scopes {
-		if !validScopeKind(scope.Kind) || !validMetadata(scope.ID, 256) || !validMetadata(scope.PolicyID, 256) || scope.PolicyRevision < 1 ||
+		if !validScopeKind(scope.Kind) || !validMetadata(scope.ID, 256) || !validMetadata(scope.PolicyID, 256) || !validRevision(scope.PolicyRevision) ||
 			scope.RPMLimit == nil && scope.ConcurrencyLimit == nil || !validLimit(scope.RPMLimit) || !validLimit(scope.ConcurrencyLimit) {
 			return nil, ErrInvalid
 		}
@@ -376,6 +439,8 @@ func sameLimit(left, right *int64) bool {
 
 func validLimit(value *int64) bool { return value == nil || *value > 0 }
 
+func validRevision(value int64) bool { return value >= 1 && value <= MaxRevision }
+
 func validScopeKind(kind ScopeKind) bool {
 	return kind == ScopeEmployee || kind == ScopeKey || kind == ScopeGroup
 }
@@ -407,6 +472,25 @@ func validMetadata(value string, maximum int) bool {
 
 func validTime(value time.Time) bool {
 	return !value.IsZero() && value.Year() >= 1 && value.Year() <= 9999
+}
+
+func validUTCTime(value time.Time) bool {
+	if !validTime(value) {
+		return false
+	}
+	_, offset := value.Zone()
+	return offset == 0
+}
+
+func effectiveClock(observed time.Time, last *time.Time, floor time.Time) time.Time {
+	effective := observed.UTC()
+	if last != nil && last.After(effective) {
+		effective = *last
+	}
+	if floor.After(effective) {
+		effective = floor
+	}
+	return effective
 }
 
 func formatTime(value time.Time) string { return value.UTC().Format("2006-01-02T15:04:05.000000000Z") }
@@ -456,7 +540,7 @@ func readSettings(ctx context.Context, query queryRower) (Settings, error) {
 	if err := query.QueryRowContext(ctx, `SELECT enabled,revision,last_effective_admission_at,updated_at FROM governance_settings WHERE singleton=1`).Scan(&enabled, &revision, &last, &updated); err != nil {
 		return Settings{}, ErrUnavailable
 	}
-	if enabled != 0 && enabled != 1 || revision < 1 {
+	if enabled != 0 && enabled != 1 || !validRevision(revision) {
 		return Settings{}, ErrSchema
 	}
 	updatedAt, err := parseStoredTime(updated)
@@ -485,13 +569,13 @@ func lockSettingsRow(ctx context.Context, tx *sql.Tx) error {
 func loadRequest(ctx context.Context, tx *sql.Tx, id string) (storedRequest, bool, error) {
 	var row storedRequest
 	var protocol string
-	var observedStart, effectiveStart, expires string
+	var observedStart, effectiveStart, effectiveLease, expires string
 	var observedFinish, effectiveFinish, released sql.NullString
 	var status string
 	err := tx.QueryRowContext(ctx, `SELECT id,employee_id,key_id,public_model,protocol,settings_revision,
-		observed_started_at,effective_started_at,expires_at,observed_finished_at,effective_finished_at,released_at,status
+		observed_started_at,effective_started_at,effective_lease_at,expires_at,observed_finished_at,effective_finished_at,released_at,status
 		FROM governance_requests WHERE id=?`, id).Scan(&row.id, &row.employeeID, &row.keyID, &row.publicModel, &protocol, &row.settingsRevision,
-		&observedStart, &effectiveStart, &expires, &observedFinish, &effectiveFinish, &released, &status)
+		&observedStart, &effectiveStart, &effectiveLease, &expires, &observedFinish, &effectiveFinish, &released, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedRequest{}, false, nil
 	}
@@ -505,6 +589,10 @@ func loadRequest(ctx context.Context, tx *sql.Tx, id string) (storedRequest, boo
 		return storedRequest{}, false, err
 	}
 	row.effectiveStartedAt, err = parseStoredTime(effectiveStart)
+	if err != nil {
+		return storedRequest{}, false, err
+	}
+	row.effectiveLeaseAt, err = parseStoredTime(effectiveLease)
 	if err != nil {
 		return storedRequest{}, false, err
 	}

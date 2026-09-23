@@ -6,7 +6,7 @@ import (
 )
 
 func (c *Coordinator) RecoverInterrupted(ctx context.Context, at time.Time) (RecoveryResult, error) {
-	if c == nil || c.db == nil || ctx == nil || !validTime(at) {
+	if c == nil || c.db == nil || ctx == nil || !validUTCTime(at) {
 		return RecoveryResult{}, ErrInvalid
 	}
 	tx, err := c.db.BeginTx(ctx, nil)
@@ -25,7 +25,7 @@ func (c *Coordinator) RecoverInterrupted(ctx context.Context, at time.Time) (Rec
 	if settings.LastEffectiveAdmissionTime != nil && settings.LastEffectiveAdmissionTime.After(effectiveAt) {
 		effectiveAt = *settings.LastEffectiveAdmissionTime
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id,effective_started_at,expires_at FROM governance_requests WHERE status='pending' ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,effective_lease_at,expires_at FROM governance_requests WHERE status='pending' ORDER BY id`)
 	if err != nil {
 		return RecoveryResult{}, ErrUnavailable
 	}
@@ -54,7 +54,9 @@ func (c *Coordinator) RecoverInterrupted(ctx context.Context, at time.Time) (Rec
 		}
 		items = append(items, item)
 	}
-	if err := rows.Close(); err != nil {
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	if iterationErr != nil || closeErr != nil {
 		return RecoveryResult{}, ErrUnavailable
 	}
 	result := RecoveryResult{}

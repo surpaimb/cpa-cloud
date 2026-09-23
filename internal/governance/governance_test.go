@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,6 +54,203 @@ func TestMigrateDefaultsStrictRollbackAndRetry(t *testing.T) {
 	}
 	if err := coordinator.Migrate(context.Background()); err != nil {
 		t.Fatalf("retry after index repair: %v", err)
+	}
+}
+
+func TestMigrateRejectsChangedCheckLiteralsAndRollsBack(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		replacement string
+	}{
+		{name: "case", replacement: "'PENDING'"},
+		{name: "space", replacement: "'pending '"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "literal.db")
+			db := openGovernanceDB(t, path, 1)
+			defer db.Close()
+			badDDL := strings.Replace(requestsDDL, "'pending'", test.replacement, 1)
+			if _, err := db.Exec(badDDL); err != nil {
+				t.Fatal(err)
+			}
+			coordinator := newTestCoordinator(t, db)
+			if err := coordinator.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+				t.Fatalf("changed literal migration error=%v", err)
+			}
+			assertObjectCount(t, db, "governance_settings", 0)
+			assertObjectCount(t, db, "governance_request_scopes", 0)
+			if _, err := db.Exec(`DROP TABLE governance_requests`); err != nil {
+				t.Fatal(err)
+			}
+			if err := coordinator.Migrate(context.Background()); err != nil {
+				t.Fatalf("retry after literal repair: %v", err)
+			}
+		})
+	}
+}
+
+func TestMigrateValidatesStoredRowsAndForeignKeys(t *testing.T) {
+	db, coordinator := openMigratedCoordinator(t, filepath.Join(t.TempDir(), "stored.db"), 1)
+	defer db.Close()
+	setEnabled(t, db, coordinator, 1, true, governanceStart)
+	input := testAdmission("stored-request", governanceStart, employeeScope(1, 5, 5))
+	input.SettingsRevision = 2
+	if lease, decision, err := runAdmit(t, db, coordinator, input); err != nil || lease == nil || !decision.Allowed {
+		t.Fatalf("seed lease=%+v decision=%+v err=%v", lease, decision, err)
+	}
+
+	if _, err := db.Exec(`UPDATE governance_settings SET last_effective_admission_at=NULL`); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+		t.Fatalf("missing effective clock error=%v", err)
+	}
+	if _, err := db.Exec(`UPDATE governance_settings SET last_effective_admission_at=?`, formatTime(governanceStart)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE governance_requests SET observed_started_at='invalid-time' WHERE id=?`, input.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+		t.Fatalf("invalid request time error=%v", err)
+	}
+	if _, err := db.Exec(`UPDATE governance_requests SET observed_started_at=? WHERE id=?`, formatTime(governanceStart), input.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE governance_settings SET last_effective_admission_at=?`, formatTime(governanceStart.Add(-time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+		t.Fatalf("regressed effective clock error=%v", err)
+	}
+	if _, err := db.Exec(`UPDATE governance_settings SET last_effective_admission_at=?`, formatTime(governanceStart)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE governance_requests SET status='succeeded' WHERE id=?`, input.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+		t.Fatalf("inconsistent status error=%v", err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE governance_requests SET status='pending' WHERE id=?`, input.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE governance_request_scopes SET policy_revision=1.5 WHERE request_id=?`, input.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+		t.Fatalf("non-integer scope revision error=%v", err)
+	}
+	if _, err := db.Exec(`UPDATE governance_request_scopes SET policy_revision=1 WHERE request_id=?`, input.RequestID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO governance_request_scopes(
+		request_id,scope_kind,scope_id,policy_id,policy_revision,rpm_limit
+	) VALUES('missing-request','group','group-orphan','policy-orphan',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+		t.Fatalf("orphan scope error=%v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM governance_request_scopes WHERE request_id='missing-request'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); err != nil {
+		t.Fatalf("retry after stored data repair: %v", err)
+	}
+}
+
+func TestRevisionBoundsAndUpdateOverflowAreAtomic(t *testing.T) {
+	db, coordinator := openMigratedCoordinator(t, filepath.Join(t.TempDir(), "revision.db"), 1)
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE governance_settings SET revision=? WHERE singleton=1`, MaxRevision); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.SetEnabledTx(context.Background(), tx, SettingsUpdate{ExpectedRevision: MaxRevision, Enabled: true, UpdatedAt: governanceStart}); !errors.Is(err, ErrConflict) {
+		tx.Rollback()
+		t.Fatalf("overflow CAS error=%v", err)
+	}
+	tx.Rollback()
+	var revision int64
+	var kind string
+	if err := db.QueryRow(`SELECT revision,typeof(revision) FROM governance_settings WHERE singleton=1`).Scan(&revision, &kind); err != nil {
+		t.Fatal(err)
+	}
+	if revision != MaxRevision || kind != "integer" {
+		t.Fatalf("revision=%d typeof=%s", revision, kind)
+	}
+	invalidSettings := testAdmission("revision-settings", governanceStart, employeeScope(1, 1, 1))
+	invalidSettings.SettingsRevision = MaxRevision + 1
+	if _, _, err := runAdmit(t, db, coordinator, invalidSettings); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("settings revision overflow error=%v", err)
+	}
+	invalidPolicy := testAdmission("revision-policy", governanceStart, employeeScope(MaxRevision, 1, 1))
+	invalidPolicy.Scopes[0].PolicyRevision = MaxRevision + 1
+	invalidPolicy.SettingsRevision = MaxRevision
+	if _, _, err := runAdmit(t, db, coordinator, invalidPolicy); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("policy revision overflow error=%v", err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE governance_settings SET revision=? WHERE singleton=1`, MaxRevision+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+		t.Fatalf("stored revision overflow error=%v", err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE governance_settings SET revision=1 WHERE singleton=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Migrate(context.Background()); err != nil {
+		t.Fatalf("retry after revision repair: %v", err)
 	}
 }
 
@@ -114,6 +312,18 @@ func TestInvalidScopeSnapshotFailsClosed(t *testing.T) {
 		if _, _, err := runAdmit(t, db, coordinator, input); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("invalid scope %d error=%v", index, err)
 		}
+	}
+	missingClock := testAdmission("missing-clock", governanceStart, employeeScope(1, 1, 1))
+	missingClock.SettingsRevision = 2
+	missingClock.ObservedAt = time.Time{}
+	if _, _, err := runAdmit(t, db, coordinator, missingClock); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing observed clock error=%v", err)
+	}
+	offsetClock := testAdmission("offset-clock", governanceStart, employeeScope(1, 1, 1))
+	offsetClock.SettingsRevision = 2
+	offsetClock.ObservedAt = governanceStart.In(time.FixedZone("CST", 8*60*60))
+	if _, _, err := runAdmit(t, db, coordinator, offsetClock); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("non-UTC observed clock error=%v", err)
 	}
 	assertRequestCount(t, db, 0)
 }
@@ -308,6 +518,133 @@ func TestConcurrentAdmissionAndRelease(t *testing.T) {
 	next.SettingsRevision = 2
 	if lease, decision, err := runAdmit(t, db, coordinator, next); err != nil || lease == nil || !decision.Allowed {
 		t.Fatalf("post-release lease=%+v decision=%+v err=%v", lease, decision, err)
+	}
+}
+
+func TestExpiredReplayDoesNotRenewLease(t *testing.T) {
+	db, coordinator := openMigratedCoordinator(t, filepath.Join(t.TempDir(), "expired-replay.db"), 1)
+	defer db.Close()
+	setEnabled(t, db, coordinator, 1, true, governanceStart)
+	input := testAdmission("expired-replay", governanceStart, employeeScope(1, 10, 1))
+	input.SettingsRevision = 2
+	lease, decision, err := runAdmit(t, db, coordinator, input)
+	if err != nil || lease == nil || !decision.Allowed {
+		t.Fatalf("initial lease=%+v decision=%+v err=%v", lease, decision, err)
+	}
+	replay := input
+	replay.ObservedAt = lease.ExpiresAt
+	got, decision, err := runAdmit(t, db, coordinator, replay)
+	if err != nil || got == nil || decision.Allowed || decision.Code != DecisionLeaseExpired || !got.ExpiresAt.Equal(lease.ExpiresAt) {
+		t.Fatalf("expired replay lease=%+v decision=%+v err=%v", got, decision, err)
+	}
+	var storedExpiry string
+	if err := db.QueryRow(`SELECT expires_at FROM governance_requests WHERE id=?`, input.RequestID).Scan(&storedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if storedExpiry != formatTime(lease.ExpiresAt) {
+		t.Fatalf("expired replay changed expiry=%s", storedExpiry)
+	}
+	if err := runFinish(t, db, coordinator, Finish{RequestID: input.RequestID, Status: accounting.StatusInterrupted, FinishedAt: lease.ExpiresAt}); err != nil {
+		t.Fatal(err)
+	}
+	terminal, decision, err := runAdmit(t, db, coordinator, replay)
+	if err != nil || terminal == nil || decision.Code != DecisionAlreadyTerminal {
+		t.Fatalf("terminal replay lease=%+v decision=%+v err=%v", terminal, decision, err)
+	}
+}
+
+func TestRenewTxCASClockRollbackFinishAndRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "renew.db")
+	db, coordinator := openMigratedCoordinator(t, path, 1)
+	setEnabled(t, db, coordinator, 1, true, governanceStart)
+	input := testAdmission("renew-active", governanceStart, employeeScope(1, 10, 1))
+	input.SettingsRevision = 2
+	lease, decision, err := runAdmit(t, db, coordinator, input)
+	if err != nil || lease == nil || !decision.Allowed {
+		t.Fatalf("initial lease=%+v decision=%+v err=%v", lease, decision, err)
+	}
+	first, err := runRenew(t, db, coordinator, Renew{RequestID: input.RequestID, ExpectedExpiresAt: lease.ExpiresAt, ObservedAt: governanceStart.Add(time.Minute)})
+	if err != nil || !first.ExpiresAt.Equal(governanceStart.Add(3*time.Minute)) {
+		t.Fatalf("first renew=%+v err=%v", first, err)
+	}
+	if _, err := runRenew(t, db, coordinator, Renew{RequestID: input.RequestID, ExpectedExpiresAt: lease.ExpiresAt, ObservedAt: governanceStart.Add(time.Minute)}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale renew CAS error=%v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, coordinator = openMigratedCoordinator(t, path, 1)
+	defer db.Close()
+	setEnabled(t, db, coordinator, 2, false, governanceStart.Add(time.Minute+time.Second))
+	rolledBack, err := runRenew(t, db, coordinator, Renew{RequestID: input.RequestID, ExpectedExpiresAt: first.ExpiresAt, ObservedAt: governanceStart.Add(30 * time.Second)})
+	if err != nil || !rolledBack.ExpiresAt.Equal(first.ExpiresAt) {
+		t.Fatalf("rollback renew=%+v err=%v", rolledBack, err)
+	}
+	setEnabled(t, db, coordinator, 3, true, governanceStart.Add(time.Minute+2*time.Second))
+	second, err := runRenew(t, db, coordinator, Renew{RequestID: input.RequestID, ExpectedExpiresAt: first.ExpiresAt, ObservedAt: governanceStart.Add(2 * time.Minute)})
+	if err != nil || !second.ExpiresAt.Equal(governanceStart.Add(4*time.Minute)) {
+		t.Fatalf("second renew=%+v err=%v", second, err)
+	}
+	var effectiveLease string
+	if err := db.QueryRow(`SELECT effective_lease_at FROM governance_requests WHERE id=?`, input.RequestID).Scan(&effectiveLease); err != nil {
+		t.Fatal(err)
+	}
+	if effectiveLease != formatTime(governanceStart.Add(2*time.Minute)) {
+		t.Fatalf("effective lease=%s", effectiveLease)
+	}
+	if _, err := runRenew(t, db, coordinator, Renew{RequestID: input.RequestID, ExpectedExpiresAt: second.ExpiresAt, ObservedAt: second.ExpiresAt}); !errors.Is(err, ErrLeaseExpired) {
+		t.Fatalf("expired renew error=%v", err)
+	}
+	if err := runFinish(t, db, coordinator, Finish{RequestID: input.RequestID, Status: accounting.StatusSucceeded, FinishedAt: governanceStart.Add(3 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runRenew(t, db, coordinator, Renew{RequestID: input.RequestID, ExpectedExpiresAt: second.ExpiresAt, ObservedAt: governanceStart.Add(3 * time.Minute)}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("terminal renew error=%v", err)
+	}
+
+	recoveryInput := testAdmission("renew-recovered", governanceStart.Add(5*time.Minute), keyScope(1, 10, 1))
+	recoveryInput.SettingsRevision = 4
+	recoveryLease, decision, err := runAdmit(t, db, coordinator, recoveryInput)
+	if err != nil || recoveryLease == nil || !decision.Allowed {
+		t.Fatalf("recovery lease=%+v decision=%+v err=%v", recoveryLease, decision, err)
+	}
+	if _, err := coordinator.RecoverInterrupted(context.Background(), governanceStart.Add(5*time.Minute+time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runRenew(t, db, coordinator, Renew{RequestID: recoveryInput.RequestID, ExpectedExpiresAt: recoveryLease.ExpiresAt, ObservedAt: governanceStart.Add(5*time.Minute + 2*time.Second)}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("recovered renew error=%v", err)
+	}
+}
+
+func TestRenewTxWriteFailureRollsBack(t *testing.T) {
+	db, coordinator := openMigratedCoordinator(t, filepath.Join(t.TempDir(), "renew-write.db"), 1)
+	defer db.Close()
+	setEnabled(t, db, coordinator, 1, true, governanceStart)
+	input := testAdmission("renew-write", governanceStart, employeeScope(1, 10, 1))
+	input.SettingsRevision = 2
+	lease, decision, err := runAdmit(t, db, coordinator, input)
+	if err != nil || lease == nil || !decision.Allowed {
+		t.Fatalf("initial lease=%+v decision=%+v err=%v", lease, decision, err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER governance_fail_renew BEFORE UPDATE OF expires_at ON governance_requests
+		BEGIN SELECT RAISE(ABORT,'synthetic'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runRenew(t, db, coordinator, Renew{RequestID: input.RequestID, ExpectedExpiresAt: lease.ExpiresAt, ObservedAt: governanceStart.Add(time.Minute)}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("renew write error=%v", err)
+	}
+	var expires, effectiveLease string
+	if err := db.QueryRow(`SELECT expires_at,effective_lease_at FROM governance_requests WHERE id=?`, input.RequestID).Scan(&expires, &effectiveLease); err != nil {
+		t.Fatal(err)
+	}
+	if expires != formatTime(lease.ExpiresAt) || effectiveLease != formatTime(governanceStart) {
+		t.Fatalf("failed renew expires=%s leaseAt=%s", expires, effectiveLease)
+	}
+	if _, err := db.Exec(`DROP TRIGGER governance_fail_renew`); err != nil {
+		t.Fatal(err)
+	}
+	if renewed, err := runRenew(t, db, coordinator, Renew{RequestID: input.RequestID, ExpectedExpiresAt: lease.ExpiresAt, ObservedAt: governanceStart.Add(time.Minute)}); err != nil || !renewed.ExpiresAt.Equal(governanceStart.Add(3*time.Minute)) {
+		t.Fatalf("renew retry=%+v err=%v", renewed, err)
 	}
 }
 
@@ -521,11 +858,28 @@ func runFinish(t *testing.T, db *sql.DB, coordinator *Coordinator, input Finish)
 	return tx.Commit()
 }
 
+func runRenew(t *testing.T, db *sql.DB, coordinator *Coordinator, input Renew) (*Lease, error) {
+	t.Helper()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := coordinator.RenewTx(context.Background(), tx, input)
+	if err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return lease, nil
+}
+
 func testAdmission(id string, at time.Time, scopes ...ScopeSnapshot) AdmissionStart {
 	return AdmissionStart{
 		RequestID:        id,
 		Subject:          Subject{EmployeeID: "employee-1", KeyID: "key-1", PublicModel: "模型-1", Protocol: accounting.ProtocolOpenAIResponses},
-		SettingsRevision: 1, SnapshotComplete: true, Scopes: scopes, StartedAt: at,
+		SettingsRevision: 1, SnapshotComplete: true, Scopes: scopes, StartedAt: at, ObservedAt: at,
 	}
 }
 
