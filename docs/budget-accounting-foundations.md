@@ -14,7 +14,9 @@ func (l *Ledger) BeginAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptSt
 
 `BeginAttemptTx` 与原 `BeginAttempt` 使用相同的输入校验、精确幂等比较、父 request 存在且 pending 校验、provider 一致性、
 时间顺序和不可变价格快照规则。它在调用者提供的 SQLite 事务中写入 attempt，不提交也不回滚。调用者可以在同一事务
-写入未来的预算 reservation；任一 sibling 写入或最终 commit 失败时，attempt 与 sibling 一起回滚。
+写入未来的预算 reservation；已确定回滚时，attempt 与 sibling 都不可见。这个接口不承诺所有 Commit 错误都代表
+没有提交：提交结果不确定时，调用者必须以原 attempt ID 查询或幂等核对，不能改用新 ID 重试，也不能提前释放预算。
+同事务保证两个写入共同持久化或共同回滚，但提交结果是否已确认由调用者的生命周期协调器处理。
 
 相同 attempt ID 的完整相同重放返回成功，包括该 attempt 和父 request 已终结后的查询重放。相同 ID 的 route、provider、
 dispatch、时间或价格快照不同返回 `ErrConflict`。父 request 不存在返回 `ErrNotFound`；父 request 已终结且不是既有 attempt
@@ -50,8 +52,9 @@ version、三位大写币种和价格目录允许范围内的四项非负费率�
 
 ## 已验证边界
 
-专项测试覆盖 caller sibling 回滚、提交前隔离、成功提交、终结后精确重放与冲突、nil/无效输入、context 取消、commit
-失败后重试，以及以 `math/big` 独立 oracle 验证四桶、向上取整、零费率、`MaxInt64` 边界和溢出拒绝。该验证只证明上述
+专项测试覆盖 caller sibling 回滚、提交前隔离、成功提交、终结后精确重放与冲突、nil/无效输入、context 取消导致的
+确定性 Commit 失败及回滚后重试，以及以 `math/big` 独立 oracle 验证四桶、向上取整、零费率、`MaxInt64` 边界和溢出拒绝。
+本测试没有模拟“数据库已提交、调用者却收到错误”的结果不确定情形，未来预留运行时必须补该故障验收。该验证只证明上述
 事务与算术基础，不证明普通模型请求已有可信 Token 上界或预算执行。
 
 2026-09-23 根任务在 `codex/budget-integration` 独立复核：accounting 全包非缓存测试 PASS（15.844s）；
