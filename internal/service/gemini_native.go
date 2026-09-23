@@ -192,8 +192,9 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 	defer a.releaseModelLease(lease, modelRequestID, true)
 	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, true)
 	if dispatchFailure != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeGeminiError(w, dispatchFailure.status, geminiAdmissionStatus(dispatchFailure.status), dispatchFailure.message)
+		if a.finishDispatchFailure(r, modelRequestID, true) {
+			writeGeminiError(w, dispatchFailure.status, geminiAdmissionStatus(dispatchFailure.status), dispatchFailure.message)
+		}
 		return
 	}
 	response, err := client.Do(upstreamReq)

@@ -93,9 +93,22 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 	if lease != nil {
 		lease.mu.Lock()
 		defer lease.mu.Unlock()
-		if lease.finished || lease.phase != scheduling.DispatchNotStarted || lease.ctx.Err() != nil {
+		if lease.ctx.Err() != nil {
+			return nil, poolAdmissionFailure(accountPoolCancelled)
+		}
+		if lease.finished || lease.phase != scheduling.DispatchNotStarted {
 			return nil, poolAdmissionFailure(accountPoolConfigurationChanged)
 		}
+	}
+	// Refresh/re-import serializes with the same account mutation lock rather
+	// than admission. Keep it until the immutable attempt and dispatch phase
+	// are committed, in the established lease -> mutation -> admission order.
+	if selected.ProviderKind == codexMembershipProvider {
+		unlock, err := a.acquireCodexMutationLock(r.Context(), selected.AccountID)
+		if err != nil {
+			return nil, poolAdmissionFailure(accountPoolCancelled)
+		}
+		defer unlock()
 	}
 	a.admission.RLock()
 	defer a.admission.RUnlock()
@@ -161,6 +174,20 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 		lease.phase = scheduling.MayHaveSent
 	}
 	return selected.egress.client, nil
+}
+
+// A rejected final dispatch has no upstream attempt. Cancellation must retain
+// that fact in both ledgers and must not write an error to a disconnected caller.
+func (a *App) finishDispatchFailure(r *http.Request, id string, record bool) bool {
+	cancelled := r.Context().Err() != nil
+	if record {
+		outcome := "failed"
+		if cancelled {
+			outcome = "cancelled"
+		}
+		a.finishRequest(id, outcome, 0)
+	}
+	return !cancelled
 }
 
 // Model catalog pages are separate safe GETs, but all pages belong to one

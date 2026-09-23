@@ -150,8 +150,9 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, true)
 	if dispatchFailure != nil {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, dispatchFailure.status, dispatchFailure.code, dispatchFailure.message, reqID)
+		if a.finishDispatchFailure(r, reqID, true) {
+			writeModelError(w, dispatchFailure.status, dispatchFailure.code, dispatchFailure.message, reqID)
+		}
 		return
 	}
 	if codexPrepared != nil {

@@ -130,10 +130,9 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 	defer a.releaseModelLease(lease, modelRequestID, !countTokens)
 	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, !countTokens)
 	if dispatchFailure != nil {
-		if !countTokens {
-			a.finishRequest(modelRequestID, "failed", 0)
+		if a.finishDispatchFailure(r, modelRequestID, !countTokens) {
+			writeAnthropicError(w, dispatchFailure.status, anthropicAdmissionType(dispatchFailure.status), dispatchFailure.message, modelRequestID)
 		}
-		writeAnthropicError(w, dispatchFailure.status, anthropicAdmissionType(dispatchFailure.status), dispatchFailure.message, modelRequestID)
 		return
 	}
 	response, err := client.Do(upstreamReq)

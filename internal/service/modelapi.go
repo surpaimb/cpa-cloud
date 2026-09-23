@@ -230,8 +230,9 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	client, dispatchFailure := a.dispatchModelRoute(r, auth, model, selected, lease, true)
 	if dispatchFailure != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, dispatchFailure.status, dispatchFailure.code, dispatchFailure.message, modelRequestID)
+		if a.finishDispatchFailure(r, modelRequestID, true) {
+			writeModelError(w, dispatchFailure.status, dispatchFailure.code, dispatchFailure.message, modelRequestID)
+		}
 		return
 	}
 	if codexPrepared != nil {
