@@ -109,7 +109,10 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	}
 	app.usage = newUsageLedgerCoordinator(s.db)
 	app.usage.priceLookup = prices.Current
-	if err := app.usage.start(ctx); err != nil {
+	if err := app.usage.ledger.Migrate(ctx); err != nil {
+		return nil, err
+	}
+	if err := app.initializeGovernance(ctx); err != nil {
 		return nil, err
 	}
 	trimExpiredSessions(ctx, s.db)
@@ -122,9 +125,6 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	}
 	app.healthTests, err = newUpstreamHealthCoordinator(app)
 	if err != nil {
-		return nil, err
-	}
-	if err := app.initializeGovernance(ctx); err != nil {
 		return nil, err
 	}
 	if err := app.refresh.Start(); err != nil {
@@ -157,7 +157,10 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 	if err := policies.Migrate(ctx); err != nil {
 		return err
 	}
-	runtime, err := newRequestGovernance(a, core, policies)
+	if err := a.recoverRequestLedgers(ctx, core); err != nil {
+		return err
+	}
+	runtime, err := newRequestGovernanceRuntime(a, core, policies)
 	if err != nil {
 		return err
 	}

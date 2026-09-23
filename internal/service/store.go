@@ -136,7 +136,6 @@ func (s *store) initialize(ctx context.Context) error {
 			outcome TEXT NOT NULL CHECK(outcome IN ('running','succeeded','failed','cancelled','interrupted')),
 			upstream_status INTEGER
 		)`,
-		`UPDATE model_requests SET outcome='interrupted', finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE outcome='running'`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {

@@ -59,6 +59,20 @@ const (
 )
 
 func newRequestGovernance(a *App, core *governance.Coordinator, policies governancePolicyResolver) (*requestGovernance, error) {
+	runtime, err := newRequestGovernanceRuntime(a, core, policies)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := core.RecoverInterrupted(runtime.ctx, time.Now().UTC()); err != nil {
+		runtime.cancel()
+		return nil, err
+	}
+	return runtime, nil
+}
+
+// Production startup has already recovered every request ledger in one caller
+// transaction. The wrapper above remains useful for isolated coordinator tests.
+func newRequestGovernanceRuntime(a *App, core *governance.Coordinator, policies governancePolicyResolver) (*requestGovernance, error) {
 	if a == nil || a.store == nil || core == nil || policies == nil {
 		return nil, governance.ErrInvalid
 	}
@@ -66,10 +80,6 @@ func newRequestGovernance(a *App, core *governance.Coordinator, policies governa
 	runtime := &requestGovernance{
 		app: a, core: core, policies: policies, ctx: ctx, cancel: cancel,
 		requests: make(map[*governedRequest]struct{}), renewEvery: 20 * time.Second,
-	}
-	if _, err := core.RecoverInterrupted(ctx, time.Now().UTC()); err != nil {
-		cancel()
-		return nil, err
 	}
 	return runtime, nil
 }
