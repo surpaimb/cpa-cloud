@@ -158,6 +158,9 @@ func (s *store) initialize(ctx context.Context) error {
 	if err := s.migrateAccountPools(ctx); err != nil {
 		return fmt.Errorf("migrate account pools: %w", err)
 	}
+	if err := s.migrateAccountPoolRuntime(ctx); err != nil {
+		return fmt.Errorf("migrate account pool runtime: %w", err)
+	}
 	return nil
 }
 

@@ -34,13 +34,8 @@ func (a *App) listModels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	query := `SELECT m.id,m.created_at FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND u.enabled=1`
+	query := `SELECT m.id,m.created_at FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND ` + a.availableModelRouteSQL(false)
 	args := []any{}
-	if !a.cfg.ExperimentalCodexMembership {
-		query += ` AND u.provider_kind<>'codex-membership'`
-	} else {
-		query += ` AND (u.provider_kind<>'codex-membership' OR u.credential_state<>'reauth_required')`
-	}
 	if auth.Mode == "selected" {
 		query += ` AND EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id)`
 		args = append(args, auth.EmployeeID)
@@ -152,34 +147,24 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeModelError(w, 400, "invalid_request_error", "The stream field must be boolean.", requestID(r.Context()))
 		return
 	}
-	a.admission.RLock()
 	auth, ok := a.authenticateEmployee(w, r)
 	if !ok {
-		a.admission.RUnlock()
-		return
-	}
-	if auth.Mode == "selected" {
-		var allowed int
-		if err := a.store.db.QueryRowContext(r.Context(), `SELECT 1 FROM employee_models WHERE employee_id=? AND model_id=?`, auth.EmployeeID, model).Scan(&allowed); err != nil {
-			a.admission.RUnlock()
-			writeModelError(w, 403, "model_not_allowed", "Model is not allowed for this key.", requestID(r.Context()))
-			return
-		}
-	}
-	var route route
-	err = a.store.db.QueryRowContext(r.Context(), `SELECT u.id,u.endpoint,m.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND u.enabled=1`, model).Scan(&route.AccountID, &route.Endpoint, &route.UpstreamModel, &route.Ciphertext, &route.ProviderKind, &route.Revision, &route.CredentialState, &route.KeyVersion)
-	if err != nil {
-		a.admission.RUnlock()
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", requestID(r.Context()))
 		return
 	}
 	modelRequestID := requestID(r.Context())
-	_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO model_requests(id,employee_id,key_id,model_id,started_at,outcome) VALUES(?,?,?,?,?,'running')`, modelRequestID, auth.EmployeeID, auth.KeyID, model, utcNow())
-	a.admission.RUnlock()
-	if err != nil {
-		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
+	route, lease, failure := a.selectModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider}, true)
+	if failure != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		writeModelError(w, failure.status, failure.code, failure.message, modelRequestID)
 		return
 	}
+	if lease != nil {
+		r = r.WithContext(lease.Context())
+	}
+	defer a.releaseModelLease(lease, modelRequestID, true)
+
 	if route.ProviderKind == codexMembershipProvider {
 		a.handleCodexChatCompletion(w, r, payload, model, stream, route, modelRequestID)
 		return

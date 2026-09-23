@@ -69,34 +69,24 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 		payload["store"] = json.RawMessage("false")
 	}
 
-	a.admission.RLock()
 	auth, ok := a.authenticateEmployee(w, r)
 	if !ok {
-		a.admission.RUnlock()
-		return
-	}
-	if auth.Mode == "selected" {
-		var allowed int
-		if err := a.store.db.QueryRowContext(r.Context(), `SELECT 1 FROM employee_models WHERE employee_id=? AND model_id=?`, auth.EmployeeID, model).Scan(&allowed); err != nil {
-			a.admission.RUnlock()
-			writeModelError(w, http.StatusForbidden, "model_not_allowed", "Model is not allowed for this key.", requestID(r.Context()))
-			return
-		}
-	}
-	var selected route
-	err = a.store.db.QueryRowContext(r.Context(), `SELECT u.id,u.endpoint,m.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND u.enabled=1`, model).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion)
-	if err != nil {
-		a.admission.RUnlock()
-		writeModelError(w, http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", requestID(r.Context()))
 		return
 	}
 	reqID := requestID(r.Context())
-	_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO model_requests(id,employee_id,key_id,model_id,started_at,outcome) VALUES(?,?,?,?,?,'running')`, reqID, auth.EmployeeID, auth.KeyID, model, utcNow())
-	a.admission.RUnlock()
-	if err != nil {
-		writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.", reqID)
+	selected, lease, failure := a.selectModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider}, true)
+	if failure != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		writeModelError(w, failure.status, failure.code, failure.message, reqID)
 		return
 	}
+	if lease != nil {
+		r = r.WithContext(lease.Context())
+	}
+	defer a.releaseModelLease(lease, reqID, true)
+
 	payload["model"], _ = json.Marshal(selected.UpstreamModel)
 	outgoing, err := json.Marshal(payload)
 	if err != nil {

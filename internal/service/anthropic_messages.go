@@ -62,34 +62,28 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		return
 	}
 
-	a.admission.RLock()
 	auth, ok := a.authenticateAnthropicEmployee(w, r)
 	if !ok {
-		a.admission.RUnlock()
-		return
-	}
-	if auth.Mode == "selected" {
-		var allowed int
-		if err := a.store.db.QueryRowContext(r.Context(), `SELECT 1 FROM employee_models WHERE employee_id=? AND model_id=?`, auth.EmployeeID, model).Scan(&allowed); err != nil {
-			a.admission.RUnlock()
-			writeAnthropicError(w, http.StatusForbidden, "permission_error", "Model is not allowed for this key.", requestID(r.Context()))
-			return
-		}
-	}
-	var route route
-	err = a.store.db.QueryRowContext(r.Context(), `SELECT u.id,u.endpoint,m.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND u.enabled=1`, model).Scan(&route.AccountID, &route.Endpoint, &route.UpstreamModel, &route.Ciphertext, &route.ProviderKind, &route.Revision, &route.CredentialState, &route.KeyVersion)
-	if err != nil || route.ProviderKind != anthropicAPIKeyProvider || route.KeyVersion != 1 {
-		a.admission.RUnlock()
-		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", requestID(r.Context()))
 		return
 	}
 	modelRequestID := requestID(r.Context())
-	if !countTokens {
-		_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO model_requests(id,employee_id,key_id,model_id,started_at,outcome) VALUES(?,?,?,?,?,'running')`, modelRequestID, auth.EmployeeID, auth.KeyID, model, utcNow())
+	route, lease, failure := a.selectModelRoute(r, auth, model, []string{anthropicAPIKeyProvider}, !countTokens)
+	if failure != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		writeAnthropicError(w, failure.status, anthropicAdmissionType(failure.status), failure.message, modelRequestID)
+		return
 	}
-	a.admission.RUnlock()
-	if err != nil {
-		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "Service is temporarily unavailable.", modelRequestID)
+	if lease != nil {
+		r = r.WithContext(lease.Context())
+	}
+	defer a.releaseModelLease(lease, modelRequestID, !countTokens)
+	if route.KeyVersion != 1 {
+		if !countTokens {
+			a.finishRequest(modelRequestID, "failed", 0)
+		}
+		writeAnthropicError(w, 503, "api_error", "No available route for this model.", modelRequestID)
 		return
 	}
 

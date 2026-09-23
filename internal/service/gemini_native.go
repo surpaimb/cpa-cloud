@@ -55,8 +55,8 @@ func (a *App) listGeminiModels(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
 	}
-	query := `SELECT m.id FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND u.enabled=1 AND u.provider_kind=?`
-	args := []any{geminiAPIKeyProvider}
+	query := `SELECT m.id FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND ` + a.availableModelRouteSQL(true)
+	args := []any{}
 	if auth.Mode == "selected" {
 		query += ` AND EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id)`
 		args = append(args, auth.EmployeeID)
@@ -136,35 +136,32 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.admission.RLock()
 	auth, err := a.authenticateEmployeeRequest(r)
 	if err != nil {
-		a.admission.RUnlock()
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
 	}
-	if auth.Mode == "selected" {
-		var allowed int
-		if err := a.store.db.QueryRowContext(r.Context(), `SELECT 1 FROM employee_models WHERE employee_id=? AND model_id=?`, auth.EmployeeID, model).Scan(&allowed); err != nil {
-			a.admission.RUnlock()
-			writeGeminiError(w, http.StatusForbidden, "PERMISSION_DENIED", "Model is not allowed for this key.")
+	modelRequestID := requestID(r.Context())
+	route, lease, failure := a.selectModelRoute(r, auth, model, []string{geminiAPIKeyProvider}, true)
+	if failure != nil {
+		if r.Context().Err() != nil {
 			return
 		}
-	}
-	var route route
-	err = a.store.db.QueryRowContext(r.Context(), `SELECT u.id,u.endpoint,m.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND u.enabled=1`, model).Scan(&route.AccountID, &route.Endpoint, &route.UpstreamModel, &route.Ciphertext, &route.ProviderKind, &route.Revision, &route.CredentialState, &route.KeyVersion)
-	if err != nil || route.ProviderKind != geminiAPIKeyProvider || route.KeyVersion != 2 {
-		a.admission.RUnlock()
-		writeGeminiError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.")
+		writeGeminiError(w, failure.status, geminiAdmissionStatus(failure.status), failure.message)
 		return
 	}
-	modelRequestID := requestID(r.Context())
-	_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO model_requests(id,employee_id,key_id,model_id,started_at,outcome) VALUES(?,?,?,?,?,'running')`, modelRequestID, auth.EmployeeID, auth.KeyID, model, utcNow())
-	a.admission.RUnlock()
-	if err != nil {
-		writeGeminiError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "Service is temporarily unavailable.")
+	if lease != nil {
+		r = r.WithContext(lease.Context())
+	}
+	defer a.releaseModelLease(lease, modelRequestID, true)
+	if route.KeyVersion != 2 {
+		if true {
+			a.finishRequest(modelRequestID, "failed", 0)
+		}
+		writeGeminiError(w, 503, "UNAVAILABLE", "No available route for this model.")
 		return
 	}
+
 	credential, err := a.secrets.decryptGeminiAPIKey(route.AccountID, route.Ciphertext)
 	if err != nil {
 		a.finishRequest(modelRequestID, "failed", 0)

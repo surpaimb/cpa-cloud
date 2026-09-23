@@ -32,6 +32,7 @@ type App struct {
 	oauthHTTP    *http.Client
 	admission    sync.RWMutex
 	refresh      *codexRefreshCoordinator
+	accountPool  *accountPoolRuntime
 	loginMu      sync.Mutex
 	logins       map[string]*loginAttempt
 	catalogMu    sync.Mutex
@@ -76,7 +77,13 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		s.close()
 		return nil, err
 	}
+	app.accountPool, err = newAccountPoolRuntime(app)
+	if err != nil {
+		s.close()
+		return nil, err
+	}
 	if err := app.refresh.Start(); err != nil {
+		app.accountPool.Close()
 		s.close()
 		return nil, err
 	}
@@ -84,6 +91,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 }
 
 func (a *App) Close() error {
+	if a.accountPool != nil {
+		a.accountPool.Close()
+	}
 	if a.refresh != nil {
 		a.refresh.Close()
 	}
@@ -164,7 +174,7 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSession) {
 	limitations := []string{
 		"development preview; not production hardened",
-		"Responses resources, background execution, account pools, and reliable billing-grade usage are not implemented; Messages is available only for Anthropic API-key routes",
+		"Responses resources, background execution, automatic account failover, and reliable billing-grade usage are not implemented; Messages is available only for Anthropic API-key routes",
 		"backup/restore automation, production key custody, and multi-process storage are not implemented",
 		"the host administrator can access runtime secrets and must protect the data directory and master key",
 		"single process and single SQLite database only",
@@ -192,7 +202,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"codex_model_discovery":         a.cfg.ExperimentalCodexMembership,
 			"upstream_batch_import":         true,
 			"account_pool_configuration":    true,
-			"account_pool_routing":          false,
+			"account_pool_routing":          a.accountPool != nil,
 			"codex_membership_auto_refresh": a.refresh != nil && a.refresh.enabled(),
 		},
 		"limitations": limitations,
