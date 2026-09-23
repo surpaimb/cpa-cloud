@@ -396,6 +396,58 @@ export type GovernancePolicyInput = {
   hard: GovernanceHardLimits
   shadow: GovernanceShadowLimits
 }
+export type GovernanceObservationState = 'exceeded' | 'below' | 'unknown'
+export type GovernanceObservationFilters = {
+  scope_kind?: GovernanceScopeKind
+  scope_id?: string
+  policy_id?: string
+  limit?: number
+}
+export type GovernanceObservationSnapshot = {
+  settings_revision: string
+  scope_kind: GovernanceScopeKind
+  scope_id: string
+  policy_id: string
+  policy_revision: string
+  group_revision: string | null
+  shadow_tpm: string | null
+  shadow_cost_micro: string | null
+  shadow_currency: string
+  shadow_window: 'rolling_24h' | ''
+}
+export type GovernanceObservationCounts = {
+  pending_attempts: string
+  pending_requests_without_attempt: string
+  zero_attempt_requests: string
+}
+export type GovernanceObservationItem = {
+  snapshot: GovernanceObservationSnapshot
+  scope_totals: {
+    tpm: GovernanceObservationCounts & {
+      known_tokens: string
+      known_attempts: string
+      unknown_token_attempts: string
+    }
+    cost: GovernanceObservationCounts & {
+      known_attempts: string
+      unknown_cost_attempts: string
+      by_currency: Array<{ currency: string; known_cost_micro: string; attempts: string }>
+    }
+  }
+  interpretation: {
+    tpm_state: GovernanceObservationState | null
+    cost_state: GovernanceObservationState | null
+    incomparable_currency_attempts: string | null
+  }
+}
+export type GovernanceObservationsPage = {
+  window_end: string
+  observed_at: string
+  tpm_from: string
+  cost_from: string
+  items: GovernanceObservationItem[]
+  next_cursor: string | null
+}
 
 function usageSearch(filters: UsageFilters, cursor?: string) {
   const query = new URLSearchParams({ from: filters.from, to: filters.to })
@@ -403,6 +455,15 @@ function usageSearch(filters: UsageFilters, cursor?: string) {
     const value = filters[key]
     if (value) query.set(key, value)
   }
+  if (cursor) query.set('cursor', cursor)
+  return query.toString()
+}
+
+function governanceObservationSearch(filters: GovernanceObservationFilters, cursor?: string) {
+  const query = new URLSearchParams({ limit: String(filters.limit ?? 20) })
+  if (filters.scope_kind) query.set('scope_kind', filters.scope_kind)
+  if (filters.scope_id) query.set('scope_id', filters.scope_id)
+  if (filters.policy_id) query.set('policy_id', filters.policy_id)
   if (cursor) query.set('cursor', cursor)
   return query.toString()
 }
@@ -522,6 +583,8 @@ export const api = {
     request<GovernanceReceipt>(`/governance/policies/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body), signal }, csrf),
   governanceOperation: (operationId: string, signal?: AbortSignal) =>
     request<GovernanceReceipt>(`/governance/operations/${encodeURIComponent(operationId)}`, { signal }),
+  governanceObservations: (filters: GovernanceObservationFilters, cursor?: string, signal?: AbortSignal) =>
+    request<GovernanceObservationsPage>(`/governance/observations?${governanceObservationSearch(filters, cursor)}`, { signal }),
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
     request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   status: () => request<SystemStatus>('/system/status'),

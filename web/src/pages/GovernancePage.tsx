@@ -14,6 +14,7 @@ import {
   type GovernanceShadowLimits,
 } from '../api'
 import { Button, Dialog, EmptyState, Field, FormError, Icon, PageState, submitHandler } from '../ui'
+import { GovernanceObservations } from '../GovernanceObservations'
 import { PageHeader } from './EmployeesPage'
 
 type TargetKey = EmployeeKey & { employeeID: string; employeeName: string }
@@ -256,9 +257,10 @@ export function GovernancePage({ csrf }: { csrf: string }) {
     <PageHeader title="请求治理" description="为员工、Key 与独立治理组配置 RPM、并发硬限制，以及 TPM、成本 shadow 阈值。" />
     <section className="governance-boundary">
       <strong>首批治理边界</strong>
-      <p>RPM 和并发是硬限制；TPM 与成本目前只保存 shadow 配置与准入快照，不提供是否低于阈值、可用余额或实际阻断结论。</p>
+      <p>RPM 和并发是硬限制；TPM 与成本只做 shadow 观测。窗口三态不表示可用余额、正式账单或实际阻断结论。</p>
       <p><code>count_tokens</code> 不计入生成请求治理。治理组与上游账号组彼此独立，策略不会恢复已撤销 Key 或扩大模型权限。</p>
     </section>
+    <GovernanceObservations />
     <PageState loading={loading} error={error} onRetry={() => void reload()} />
     {!loading && !error && settings ? <>
       <section className="content-panel governance-settings">
@@ -375,7 +377,7 @@ function PolicyEditor({ initial, employees, keys, groups, csrf, onClose, onSaved
         <Field label="成本币种"><input value={currency} disabled={frozen || Boolean(conflict) || !cost} maxLength={3} onChange={(event) => setCurrency(event.target.value)} placeholder={cost ? 'USD' : '未配置成本'} /></Field>
         <label className="toggle-field governance-enabled"><input type="checkbox" checked={enabled} disabled={frozen || Boolean(conflict)} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>启用此策略</strong><small>停用只影响新治理准入，不删除历史 RPM 事件或租约。</small></span></label>
       </div>
-      <div className="governance-shadow-note"><strong>Shadow 不会阻断请求</strong><span>页面没有 shadow 统计接口，因此不会显示“低于阈值”“将会拦截”或可用余额。跨币种也不会合并。</span></div>
+      <div className="governance-shadow-note"><strong>Shadow 不会阻断请求</strong><span>用量观测只解释历史阈值，不表示“将会拦截”、可用余额或正式账单。跨币种不会合并。</span></div>
       <FormError error={validation} />
       {conflict ? <div className="governance-conflict"><strong>服务器当前策略 r{conflict.revision}</strong><p>当前编辑未覆盖新版本。请先采用最新状态，再明确提交一个新 operation。</p><Button type="button" variant="secondary" onClick={() => { applyCurrent(conflict); setConflict(null) }}>按最新状态重新编辑</Button></div> : null}
       <WriteRecovery state={write} />
