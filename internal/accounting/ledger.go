@@ -92,9 +92,10 @@ type UpperUsage struct {
 }
 
 // MutuallyExclusiveInputUpperUsage contains bounds for a profile whose caller
-// has proved that ordinary input, cache-read input, and cache-write input are
-// mutually exclusive accounting categories. InputMax bounds whichever one of
-// those categories is reported; OutputMax independently bounds output.
+// has proved that each input token belongs to exactly one of ordinary input,
+// cache-read input, or cache-write input. Multiple categories may be nonzero in
+// one response. InputMax bounds their sum; OutputMax independently bounds
+// output.
 type MutuallyExclusiveInputUpperUsage struct {
 	InputMax  int64
 	OutputMax int64
@@ -1035,9 +1036,10 @@ func CalculateUpperCost(usage UpperUsage, price PriceSnapshot) (int64, error) {
 }
 
 // CalculateMutuallyExclusiveInputUpperBound returns token and cost bounds for
-// a caller-proved mutually exclusive input group. It validates and reads the
-// original immutable price snapshot without modifying its identity or rates.
-// It performs arithmetic only and does not create or verify a bound proof.
+// a caller-proved disjoint input group whose three input categories sum to no
+// more than InputMax. It validates and reads the original immutable price
+// snapshot without modifying its identity or rates. It performs arithmetic
+// only and does not create or verify that proof against actual bucket usage.
 func CalculateMutuallyExclusiveInputUpperBound(usage MutuallyExclusiveInputUpperUsage, price PriceSnapshot) (int64, int64, error) {
 	if usage.InputMax < 0 || usage.OutputMax < 0 || !validUpperPrice(price) {
 		return 0, 0, ErrInvalid

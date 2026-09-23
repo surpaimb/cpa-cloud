@@ -64,9 +64,10 @@ func CalculateMutuallyExclusiveInputUpperBound(
 ) (tokenUpper int64, costUpper int64, err error)
 ```
 
-该接口仅适用于调用者已经证明 ordinary input、cache read 和 cache write 是互斥计量分类的 profile。`InputMax` 是三种
-输入分类中实际出现那一类的共同总上界，而不是每类各自可同时达到的上界；`OutputMax` 独立。函数使用 checked-add 得到
-`InputMax + OutputMax`，成本使用原始不可变 `PriceSnapshot` 计算：
+该接口仅适用于调用者已经证明 ordinary input、cache read 和 cache write 是不重计的输入分类：每个输入 Token 只属于
+其中一类，但同一响应可以有多个非零输入桶。`InputMax` 必须覆盖三类输入 Token 的**总和**，即
+`ordinary + cache_read + cache_write <= InputMax`；`OutputMax` 独立。函数使用 checked-add 得到 `InputMax + OutputMax`，
+成本使用原始不可变 `PriceSnapshot` 计算：
 
 `ceil((InputMax*max(input_rate,cache_read_rate,cache_write_rate) + OutputMax*output_rate) / 1_000_000)`。
 
@@ -74,8 +75,10 @@ func CalculateMutuallyExclusiveInputUpperBound(
 伪快照。它与四桶 `CalculateUpperCost` 共享 checked 128 位乘加和向上取整实现，但不改变四桶接口的独立相加语义。
 负数、Token 总和溢出、成本溢出和非法价格均返回 `ErrInvalid`。
 
-类型名与函数名故意保留互斥条件。函数不会验证 provider 的 usage 语义，不会生成 bound proof，也不会决定某个真实
-provider、协议、模型或转换版本能否使用该公式。生产 profile、reservation、HTTP 和预算开关仍未实现。
+类型名与函数名故意保留这个不重计条件。函数只接收两个总上界，不接收实际三桶 usage，因此不会自动验证三桶之和；
+实际或预期三桶之和超过 `InputMax` 表示调用者的 proof 条件不成立，必须拒绝或在结算时记为 overage，不能继续引用本次
+计算结果。函数不会验证 provider 的 usage 语义，不会生成 bound proof，也不会决定某个真实 provider、协议、模型或
+转换版本能否使用该公式。生产 profile、reservation、HTTP 和预算开关仍未实现。
 
 ## 已验证边界
 

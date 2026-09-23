@@ -121,6 +121,42 @@ func TestCalculateMutuallyExclusiveInputUpperBoundKeepsFourBucketCostIndependent
 	}
 }
 
+func TestCalculateMutuallyExclusiveInputUpperBoundCoversMultipleNonzeroDisjointBuckets(t *testing.T) {
+	price := groupedPrice(2, 20, 30, 80)
+	group := MutuallyExclusiveInputUpperUsage{InputMax: 1_000_000, OutputMax: 500_000}
+	groupTokens, groupCost, err := CalculateMutuallyExclusiveInputUpperBound(group, price)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ordinary, cacheRead, cacheWrite, output := int64(100_000), int64(300_000), int64(600_000), int64(500_000)
+	if ordinary+cacheRead+cacheWrite != group.InputMax {
+		t.Fatal("fixture must use the full disjoint input sum")
+	}
+	actualCost, err := CalculateUpperCost(UpperUsage{
+		InputTokens: ordinary, OutputTokens: output, CacheReadTokens: cacheRead, CacheWriteTokens: cacheWrite,
+	}, price)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actualTokens := ordinary + cacheRead + cacheWrite + output; actualTokens > groupTokens || actualCost > groupCost {
+		t.Fatalf("actual tokens/cost %d/%d exceed grouped bounds %d/%d", actualTokens, actualCost, groupTokens, groupCost)
+	}
+
+	// The grouping function receives no actual per-bucket usage and therefore
+	// cannot validate this condition itself. A sum over InputMax violates the
+	// caller's proof and must be rejected or recorded as an overage elsewhere.
+	violatingCost, err := CalculateUpperCost(UpperUsage{
+		InputTokens: ordinary, OutputTokens: output, CacheReadTokens: cacheRead, CacheWriteTokens: 1_000_001,
+	}, price)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if violatingCost <= groupCost {
+		t.Fatalf("violating actual cost=%d did not exceed grouped cost=%d", violatingCost, groupCost)
+	}
+}
+
 func mutuallyExclusiveInputOracle(usage MutuallyExclusiveInputUpperUsage, price PriceSnapshot) (int64, int64, bool) {
 	tokens := new(big.Int).Add(big.NewInt(usage.InputMax), big.NewInt(usage.OutputMax))
 	if !tokens.IsInt64() {
