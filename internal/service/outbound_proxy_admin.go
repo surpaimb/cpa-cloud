@@ -262,29 +262,38 @@ func (a *App) setUpstreamProxy(w http.ResponseWriter, r *http.Request, _ adminSe
 		writeProxyAdminError(w, errOutboundProxyInvalid)
 		return
 	}
-	a.admission.Lock()
-	defer a.admission.Unlock()
-	var provider, endpoint string
-	err := a.store.db.QueryRowContext(r.Context(), `SELECT provider_kind,endpoint FROM upstreams WHERE id=?`, r.PathValue("id")).Scan(&provider, &endpoint)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeProxyAdminError(w, errOutboundProxyNotFound)
-		return
+	committed, unsupported := false, false
+	result, err := func() (upstreamProxyDTO, error) {
+		a.admission.Lock()
+		defer a.admission.Unlock()
+		var provider, endpoint string
+		err := a.store.db.QueryRowContext(r.Context(), `SELECT provider_kind,endpoint FROM upstreams WHERE id=?`, r.PathValue("id")).Scan(&provider, &endpoint)
+		if errors.Is(err, sql.ErrNoRows) {
+			return upstreamProxyDTO{}, errOutboundProxyNotFound
+		}
+		if err != nil {
+			return upstreamProxyDTO{}, err
+		}
+		if !validProxyBindingProvider(provider) || !validHTTPSUpstreamEndpoint(endpoint) {
+			unsupported = true
+			return upstreamProxyDTO{}, errOutboundProxyInvalid
+		}
+		_, err = a.outboundProxies.SetBinding(r.Context(), upstreamProxyBindingInput{UpstreamID: r.PathValue("id"), ExpectedUpstreamRevision: body.ExpectedUpstreamRevision, ProxyID: body.ProxyID, ExpectedProxyRevision: body.ExpectedProxyRevision, Bind: *body.Bind})
+		if err != nil {
+			return upstreamProxyDTO{}, err
+		}
+		committed = true
+		return a.upstreamProxyView(r.Context(), r.PathValue("id"))
+	}()
+	// Wake queued admissions even when the post-commit read fails. Neither
+	// notifications nor a slow admin response may hold the admission write lock.
+	if committed {
+		a.notifyAccountPoolChanged()
 	}
-	if err != nil {
-		writeProxyAdminError(w, err)
-		return
-	}
-	if !validProxyBindingProvider(provider) || !validHTTPSUpstreamEndpoint(endpoint) {
+	if unsupported {
 		writeAdminError(w, 400, "unsupported_proxy_binding", "This upstream cannot use an outbound proxy.")
 		return
 	}
-	_, err = a.outboundProxies.SetBinding(r.Context(), upstreamProxyBindingInput{UpstreamID: r.PathValue("id"), ExpectedUpstreamRevision: body.ExpectedUpstreamRevision, ProxyID: body.ProxyID, ExpectedProxyRevision: body.ExpectedProxyRevision, Bind: *body.Bind})
-	if err != nil {
-		writeProxyAdminError(w, err)
-		return
-	}
-	a.notifyAccountPoolChanged()
-	result, err := a.upstreamProxyView(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeProxyAdminError(w, err)
 		return
