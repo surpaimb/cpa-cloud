@@ -13,7 +13,13 @@ import { messageFor } from '../hooks'
 import { Button, Dialog, EmptyState, Field, FormError, Icon, PageState } from '../ui'
 import { PageHeader } from './EmployeesPage'
 
-type Bindings = Record<string, UpstreamProxyState | null>
+type BindingRead = { state: UpstreamProxyState | null; failed: boolean }
+type Bindings = Record<string, BindingRead>
+type Verification = 'none' | 'verified' | 'failed'
+
+function uncertainWrite(error: unknown) {
+  return !(error instanceof ApiError) || error.status >= 500
+}
 
 function proxyError(error: unknown) {
   if (error instanceof ApiError) {
@@ -58,8 +64,8 @@ export function ProxiesPage({ csrf }: { csrf: string }) {
       setPage(proxyPage)
       setUpstreams(upstreamPage.items)
       const results = await Promise.all(upstreamPage.items.map(async (item) => {
-        try { return [item.id, await api.upstreamProxy(item.id)] as const }
-        catch { return [item.id, null] as const }
+        try { return [item.id, { state: await api.upstreamProxy(item.id), failed: false }] as const }
+        catch { return [item.id, { state: null, failed: true }] as const }
       }))
       if (current === generation.current) setBindings(Object.fromEntries(results))
     } catch (caught) {
@@ -113,8 +119,10 @@ export function ProxiesPage({ csrf }: { csrf: string }) {
       {upstreams.length ? <div className="table-scroll"><table className="proxy-table"><thead><tr><th>账号</th><th>目标</th><th>当前连接</th><th>操作</th></tr></thead><tbody>
         {upstreams.map((item) => {
           const reason = bindingUnsupported(item)
-          const current = bindings[item.id]?.binding
-          return <tr key={item.id}><td><strong>{item.name}</strong><small>{item.provider_kind}</small></td><td><code className="endpoint">{item.provider_kind === 'codex-membership' ? '服务端固定' : item.endpoint}</code></td><td>{current ? <><strong>{current.name}</strong><small>{current.enabled ? '代理已启用' : '代理已停用，绑定仍保留'}</small></> : <span className="muted-copy">直连</span>}</td><td>{reason ? <span className="proxy-binding-limit">{reason}</span> : <button className="link-button" onClick={() => setBinding(item)}>{current ? '修改 / 解绑' : '绑定代理'}</button>}</td></tr>
+          const read = bindings[item.id]
+          const current = read?.state?.binding
+          const status = read?.failed ? <span className="proxy-binding-limit">状态未确认 / 读取失败</span> : current ? <><strong>{current.name}</strong><small>{current.enabled ? '代理已启用' : '代理已停用，绑定仍保留'}</small></> : <span className="muted-copy">直连</span>
+          return <tr key={item.id}><td><strong>{item.name}</strong><small>{item.provider_kind}</small></td><td><code className="endpoint">{item.provider_kind === 'codex-membership' ? '服务端固定' : item.endpoint}</code></td><td>{status}</td><td>{reason ? <span className="proxy-binding-limit">{reason}</span> : read?.failed ? <button className="link-button" onClick={() => void reload()}>重新读取绑定</button> : <button className="link-button" onClick={() => setBinding(item)}>{current ? '修改 / 解绑' : '绑定代理'}</button>}</td></tr>
         })}
       </tbody></table></div> : null}
     </section>
@@ -156,8 +164,8 @@ function CreateProxyDialog({ csrf, onClose, onSaved }: { csrf: string; onClose: 
   const [error, setError] = useState<string | null>(null)
 
   function build(): CreateOutboundProxy | null {
-    const username = fields.username.trim()
-    if ((username === '') !== (fields.password === '')) { setError('用户名和密码必须同时填写，或同时留空。'); return null }
+    const username = fields.username
+    if (!username && fields.password) { setError('填写密码时必须同时填写用户名。'); return null }
     const body: CreateOutboundProxy = { operation_id: operationID, name: fields.name.trim(), scheme: 'https', host: fields.host.trim(), port: Number(fields.port), address_scope: fields.scope, enabled: fields.enabled }
     if (username) body.credentials = { username, password: fields.password }
     return body
@@ -166,7 +174,7 @@ function CreateProxyDialog({ csrf, onClose, onSaved }: { csrf: string; onClose: 
   async function send(body: CreateOutboundProxy) {
     setBusy(true); setError(null)
     try { await api.createOutboundProxy(body, csrf); setFields(emptyFields()); setAttempt(null); onSaved() }
-    catch (caught) { setUncertain(!(caught instanceof ApiError)); setError(proxyError(caught)); setBusy(false) }
+    catch (caught) { setUncertain(uncertainWrite(caught)); setError(proxyError(caught)); setBusy(false) }
   }
 
   function abandon() {
@@ -179,7 +187,6 @@ function CreateProxyDialog({ csrf, onClose, onSaved }: { csrf: string; onClose: 
     <form onSubmit={(event) => { event.preventDefault(); const body = attempt ?? build(); if (!body) return; if (!attempt) setAttempt(body); void send(body) }}>
       <ProxyForm fields={fields} setFields={setFields} locked={Boolean(attempt)} />
       {uncertain ? <div className="proxy-uncertain" role="alert"><strong>创建结果未知</strong><p>服务可能已经保存此代理。只能显式重试原创建操作，系统会复用同一操作编号和完全相同的载荷。</p></div> : <FormError error={error} />}
-      {!uncertain && error ? null : null}
       <div className="dialog__actions"><Button type="button" variant="secondary" onClick={attempt ? abandon : onClose}>{attempt ? '放弃本次操作并重新填写' : '取消'}</Button><Button type="submit" disabled={busy}>{busy ? '正在保存…' : uncertain ? '重试原创建操作' : attempt ? '重试相同操作' : '保存代理'}</Button></div>
     </form>
   </Dialog>
@@ -191,7 +198,7 @@ function EditProxyDialog({ proxyID, csrf, onClose, onSaved }: { proxyID: string;
   const [mode, setMode] = useState<UpdateOutboundProxy['credential_mode']>('keep')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  const [verifyRequired, setVerifyRequired] = useState(false)
+  const [verification, setVerification] = useState<Verification>('none')
   const [error, setError] = useState<string | null>(null)
 
   const loadActual = useCallback(async (signal?: AbortSignal) => {
@@ -211,20 +218,28 @@ function EditProxyDialog({ proxyID, csrf, onClose, onSaved }: { proxyID: string;
 
   async function verify(caught: unknown) {
     setFields((value) => ({ ...value, username: '', password: '' }))
-    setVerifyRequired(true)
+    setVerification('failed')
     setError(proxyError(caught))
-    try { await loadActual() } catch { setError('无法确认写入结果，也无法读取代理的实际状态。请重新读取实际状态。') }
+    try { await loadActual(); setVerification('verified') }
+    catch { setError('无法确认写入结果，也无法读取代理的实际状态。请重新读取实际状态。') }
+  }
+
+  async function retryVerification() {
+    setBusy(true)
+    try { await loadActual(); setVerification('verified'); setError('已读取代理的当前状态。') }
+    catch { setVerification('failed'); setError('仍无法读取代理的实际状态。写入保持锁定。') }
+    finally { setBusy(false) }
   }
 
   async function save() {
     if (!proxy) return
-    if (mode === 'replace' && (!fields.username.trim() || !fields.password)) { setError('替换认证时必须同时填写用户名和密码。'); return }
+    if (mode === 'replace' && !fields.username) { setError('替换认证时必须填写用户名；密码可以为空。'); return }
     const body: UpdateOutboundProxy = { expected_revision: proxy.revision, name: fields.name.trim(), scheme: 'https', host: fields.host.trim(), port: Number(fields.port), address_scope: fields.scope, enabled: fields.enabled, credential_mode: mode }
-    if (mode === 'replace') body.credentials = { username: fields.username.trim(), password: fields.password }
+    if (mode === 'replace') body.credentials = { username: fields.username, password: fields.password }
     setBusy(true); setError(null)
     try { await api.updateOutboundProxy(proxyID, body, csrf); setFields(emptyFields()); onSaved() }
     catch (caught) {
-      if (!(caught instanceof ApiError) || caught.status === 409) await verify(caught)
+      if (uncertainWrite(caught) || caught instanceof ApiError && caught.status === 409) await verify(caught)
       else { setFields((value) => ({ ...value, username: '', password: '' })); setError(proxyError(caught)) }
       setBusy(false)
     }
@@ -232,9 +247,9 @@ function EditProxyDialog({ proxyID, csrf, onClose, onSaved }: { proxyID: string;
 
   return <Dialog title="编辑出站代理" description="认证默认保持不变；密码不会从服务端读回。" onClose={onClose} closeDisabled={busy}>
     {loading ? <div className="loading" role="status"><span />正在读取实际状态…</div> : proxy ? <form onSubmit={(event) => { event.preventDefault(); void save() }}>
-      <ProxyForm fields={fields} setFields={setFields} locked={busy || verifyRequired} includeCredentialMode credentialMode={mode} setCredentialMode={(next) => { setMode(next); setFields((value) => ({ ...value, username: '', password: '' })) }} />
-      {verifyRequired ? <div className="proxy-uncertain" role="alert"><strong>已读取实际状态，请核对</strong><p>{error} 页面没有自动重放写入。当前显示版本 {proxy.revision}。</p></div> : <FormError error={error} />}
-      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button>{verifyRequired ? <Button type="button" onClick={() => { setVerifyRequired(false); setError(null) }}>按最新状态重新编辑</Button> : <Button type="submit" disabled={busy}>{busy ? '保存中…' : '保存变更'}</Button>}</div>
+      <ProxyForm fields={fields} setFields={setFields} locked={busy || verification !== 'none'} includeCredentialMode credentialMode={mode} setCredentialMode={(next) => { setMode(next); setFields((value) => ({ ...value, username: '', password: '' })) }} />
+      {verification !== 'none' ? <div className="proxy-uncertain" role="alert"><strong>{verification === 'verified' ? '已读取实际状态，请核对' : '实际状态尚未确认'}</strong><p>{error} 页面没有自动重放写入。{verification === 'verified' ? `当前显示版本 ${proxy.revision}。` : '在成功读取前不能继续写入。'}</p></div> : <FormError error={error} />}
+      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button>{verification === 'verified' ? <Button type="button" onClick={() => { setVerification('none'); setError(null) }}>按最新状态重新编辑</Button> : verification === 'failed' ? <Button type="button" disabled={busy} onClick={() => void retryVerification()}>{busy ? '读取中…' : '重新读取实际状态'}</Button> : <Button type="submit" disabled={busy}>{busy ? '保存中…' : '保存变更'}</Button>}</div>
     </form> : <><FormError error={error} /><div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>关闭</Button><Button type="button" onClick={() => { setLoading(true); setError(null); loadActual().catch((caught) => setError(messageFor(caught))).finally(() => setLoading(false)) }}>重新读取实际状态</Button></div></>}
   </Dialog>
 }
@@ -244,7 +259,7 @@ function BindingDialog({ upstream, proxies, csrf, onClose, onSaved }: { upstream
   const [selected, setSelected] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  const [verifyRequired, setVerifyRequired] = useState(false)
+  const [verification, setVerification] = useState<Verification>('none')
   const [error, setError] = useState<string | null>(null)
   const enabled = proxies.filter((item) => item.enabled)
 
@@ -264,14 +279,37 @@ function BindingDialog({ upstream, proxies, csrf, onClose, onSaved }: { upstream
   }, [upstream.id])
 
   async function verify(caught: unknown) {
-    setVerifyRequired(true); setError(proxyError(caught))
-    try { await loadActual() } catch { setError('无法确认绑定结果，也无法读取账号的实际状态。请重新读取实际状态。') }
+    setVerification('failed'); setError(proxyError(caught))
+    try { await loadActual(); setVerification('verified') }
+    catch { setError('无法确认绑定结果，也无法读取账号的实际状态。请重新读取实际状态。') }
+  }
+
+  async function retryVerification() {
+    setBusy(true)
+    try { await loadActual(); setVerification('verified'); setError('已读取账号的当前绑定。') }
+    catch { setVerification('failed'); setError('仍无法读取账号的实际绑定。写入保持锁定。') }
+    finally { setBusy(false) }
+  }
+
+  function bindingChanged(current: UpstreamProxyState) {
+    if (!actual || current.upstream_revision !== actual.upstream_revision) return true
+    const before = actual.binding
+    const after = current.binding
+    return before?.proxy_id !== after?.proxy_id || before?.proxy_revision !== after?.proxy_revision || before?.connection_revision !== after?.connection_revision || before?.enabled !== after?.enabled
   }
 
   async function write(bind: boolean) {
     setBusy(true); setError(null)
     try {
       const current = await api.upstreamProxy(upstream.id)
+      if (bindingChanged(current)) {
+        setActual(current)
+        setSelected(current.binding?.proxy_id ?? enabled[0]?.id ?? '')
+        setVerification('verified')
+        setError('账号版本或绑定已在操作前变化；已显示最新状态。')
+        setBusy(false)
+        return
+      }
       const proxyID = bind ? selected : current.binding?.proxy_id
       if (!proxyID) throw new ApiError(409, 'binding_conflict', '当前账号没有可解绑的代理。')
       let proxyRevision = current.binding?.proxy_revision ?? 0
@@ -283,7 +321,7 @@ function BindingDialog({ upstream, proxies, csrf, onClose, onSaved }: { upstream
       await api.putUpstreamProxy(upstream.id, { expected_upstream_revision: current.upstream_revision, proxy_id: proxyID, expected_proxy_revision: proxyRevision, bind }, csrf)
       onSaved()
     } catch (caught) {
-      if (!(caught instanceof ApiError) || caught.status === 409) await verify(caught)
+      if (uncertainWrite(caught) || caught instanceof ApiError && caught.status === 409) await verify(caught)
       else setError(proxyError(caught))
       setBusy(false)
     }
@@ -292,9 +330,9 @@ function BindingDialog({ upstream, proxies, csrf, onClose, onSaved }: { upstream
   return <Dialog title={`配置 ${upstream.name} 的代理`} description="绑定只选择连接路径，不代表代理或模型可用。" onClose={onClose} closeDisabled={busy}>
     {loading ? <div className="loading" role="status"><span />正在读取实际绑定…</div> : actual ? <>
       <div className="proxy-state-summary"><span>当前连接</span><strong>{actual.binding ? actual.binding.name : '直连'}</strong>{actual.binding && !actual.binding.enabled ? <small>该代理已停用，但绑定仍保留。</small> : null}</div>
-      <Field label="选择已启用代理" hint="停用代理不会用于新绑定；现有停用绑定仍可明确解绑。"><select value={selected} onChange={(event) => setSelected(event.target.value)} disabled={busy || verifyRequired}><option value="">请选择</option>{enabled.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.host}:{item.port}</option>)}</select></Field>
-      {verifyRequired ? <div className="proxy-uncertain" role="alert"><strong>已读取实际绑定，请核对</strong><p>{error} 页面没有自动重放写入。</p></div> : <FormError error={error} />}
-      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button>{actual.binding ? <Button type="button" variant="danger" disabled={busy || verifyRequired} onClick={() => void write(false)}>明确解绑为直连</Button> : null}{verifyRequired ? <Button type="button" onClick={() => { setVerifyRequired(false); setError(null) }}>按实际状态重新选择</Button> : <Button type="button" disabled={busy || !selected} onClick={() => void write(true)}>{busy ? '处理中…' : actual.binding ? '保存绑定' : '绑定代理'}</Button>}</div>
+      <Field label="选择已启用代理" hint="停用代理不会用于新绑定；现有停用绑定仍可明确解绑。"><select value={selected} onChange={(event) => setSelected(event.target.value)} disabled={busy || verification !== 'none'}><option value="">请选择</option>{enabled.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.host}:{item.port}</option>)}</select></Field>
+      {verification !== 'none' ? <div className="proxy-uncertain" role="alert"><strong>{verification === 'verified' ? '已读取实际绑定，请核对' : '实际绑定尚未确认'}</strong><p>{error} 页面没有自动重放写入。{verification === 'failed' ? '在成功读取前不能继续写入。' : ''}</p></div> : <FormError error={error} />}
+      <div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button>{verification === 'none' && actual.binding ? <Button type="button" variant="danger" disabled={busy} onClick={() => void write(false)}>明确解绑为直连</Button> : null}{verification === 'verified' ? <Button type="button" onClick={() => { setVerification('none'); setError(null) }}>按实际状态重新选择</Button> : verification === 'failed' ? <Button type="button" disabled={busy} onClick={() => void retryVerification()}>{busy ? '读取中…' : '重新读取实际状态'}</Button> : <Button type="button" disabled={busy || !selected} onClick={() => void write(true)}>{busy ? '处理中…' : actual.binding ? '保存绑定' : '绑定代理'}</Button>}</div>
     </> : <><FormError error={error} /><div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>关闭</Button></div></>}
   </Dialog>
 }

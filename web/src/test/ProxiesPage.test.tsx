@@ -81,7 +81,7 @@ describe('outbound proxy management', () => {
       if (url.endsWith('/upstreams')) return response({ body: { items: [] } })
       if (url.endsWith('/outbound-proxies') && init?.method === 'POST') {
         posts.push(String(init.body)); attempts += 1
-        if (attempts === 1) return Promise.reject(new TypeError('connection reset'))
+        if (attempts === 1) return response({ status: 503, body: { error: { code: 'storage_unavailable', message: 'temporarily unavailable' } } })
         return response({ body: proxy('created', { has_credentials: true }) })
       }
       throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
@@ -111,6 +111,43 @@ describe('outbound proxy management', () => {
     expect(screen.getByLabelText('密码')).toHaveValue('')
   })
 
+  it('does not turn a failed binding read into a direct-connection claim', async () => {
+    const account = upstream('unreadable')
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/outbound-proxies?')) return response({ body: { items: [proxy('proxy-1')], next_cursor: null } })
+      if (url.endsWith('/upstreams')) return response({ body: { items: [account] } })
+      if (url.endsWith('/upstreams/unreadable/proxy')) return response({ status: 503, body: { error: { code: 'storage_unavailable' } } })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ProxiesPage csrf="csrf" />)
+    expect(await screen.findByText('状态未确认 / 读取失败')).toBeInTheDocument()
+    expect(screen.queryByText('直连')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新读取绑定' })).toBeInTheDocument()
+  })
+
+  it('preserves a meaningful username and permits an empty Basic password', async () => {
+    let body: { credentials?: { username: string; password: string } } | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/outbound-proxies?')) return response({ body: { items: [], next_cursor: null } })
+      if (url.endsWith('/upstreams')) return response({ body: { items: [] } })
+      if (url.endsWith('/outbound-proxies') && init?.method === 'POST') { body = JSON.parse(String(init.body)); return response({ body: proxy('created') }) }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ProxiesPage csrf="csrf" />)
+    await screen.findByText('还没有出站代理')
+    await userEvent.click(screen.getAllByRole('button', { name: '添加代理' })[0])
+    await userEvent.type(screen.getByLabelText('显示名称'), '空密码代理')
+    await userEvent.type(screen.getByLabelText('代理主机'), 'proxy.example')
+    await userEvent.type(screen.getByLabelText('用户名'), ' operator ')
+    await userEvent.click(screen.getByRole('button', { name: '保存代理' }))
+    await waitFor(() => expect(body).toBeDefined())
+    expect(body?.credentials).toEqual({ username: ' operator ', password: '' })
+  })
+
   it('reads the actual proxy after a conflict, clears replacement credentials, and never replays PATCH', async () => {
     const item = proxy('proxy-1')
     let detailReads = 0
@@ -138,20 +175,44 @@ describe('outbound proxy management', () => {
     expect(detailReads).toBe(2)
   })
 
+  it('keeps proxy writes locked until a failed verification GET later succeeds', async () => {
+    let detailReads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/outbound-proxies?')) return response({ body: { items: [proxy('proxy-1')], next_cursor: null } })
+      if (url.endsWith('/upstreams')) return response({ body: { items: [] } })
+      if (url.endsWith('/outbound-proxies/proxy-1') && init?.method === 'PATCH') return response({ status: 503, body: { error: { code: 'storage_unavailable' } } })
+      if (url.endsWith('/outbound-proxies/proxy-1')) {
+        detailReads += 1
+        if (detailReads === 2) return response({ status: 503, body: { error: { code: 'storage_unavailable' } } })
+        return response({ body: proxy('proxy-1', { revision: detailReads === 1 ? 2 : 3 }) })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ProxiesPage csrf="csrf" />)
+    await userEvent.click(await screen.findByRole('button', { name: '编辑 / 启停' }))
+    await screen.findByDisplayValue('代理 proxy-1')
+    await userEvent.click(screen.getByRole('button', { name: '保存变更' }))
+    expect(await screen.findByText('实际状态尚未确认')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '按最新状态重新编辑' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '重新读取实际状态' }))
+    expect(await screen.findByText('已读取实际状态，请核对')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '按最新状态重新编辑' })).toBeInTheDocument()
+  })
+
   it('blocks Codex and HTTP bindings, excludes disabled proxies, and verifies a binding conflict without replay', async () => {
     const upstreams = [upstream('codex', 'codex-membership', ''), upstream('http', 'openai-compatible', 'http://legacy.example/v1'), upstream('https')]
     const proxies = [proxy('enabled'), proxy('disabled', { enabled: false })]
     let puts = 0
-    let bindingReads = 0
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.includes('/outbound-proxies?')) return response({ body: { items: proxies, next_cursor: null } })
       if (url.endsWith('/upstreams')) return response({ body: { items: upstreams } })
-      if (url.endsWith('/upstreams/https/proxy') && init?.method === 'PUT') { puts += 1; return response({ status: 409, body: { error: { code: 'revision_conflict', message: 'conflict' } } }) }
+      if (url.endsWith('/upstreams/https/proxy') && init?.method === 'PUT') { puts += 1; return response({ status: 503, body: { error: { code: 'storage_unavailable', message: 'unavailable' } } }) }
       if (/\/upstreams\/[^/]+\/proxy$/.test(url)) {
         const id = url.split('/').at(-2)
-        if (id === 'https') bindingReads += 1
-        return response({ body: { upstream_id: id, upstream_revision: id === 'https' && bindingReads > 2 ? 5 : 4, binding: null } })
+        return response({ body: { upstream_id: id, upstream_revision: 4, binding: null } })
       }
       if (url.endsWith('/outbound-proxies/enabled')) return response({ body: proxy('enabled') })
       throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
@@ -193,6 +254,29 @@ describe('outbound proxy management', () => {
     await userEvent.click(screen.getByRole('button', { name: '修改 / 解绑' }))
     await userEvent.click(await screen.findByRole('button', { name: '明确解绑为直连' }))
     await waitFor(() => expect(puts).toBe(1))
+  })
+
+  it('requires review when the account revision changes before binding and sends no PUT', async () => {
+    const account = upstream('https')
+    let reads = 0
+    let puts = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/outbound-proxies?')) return response({ body: { items: [proxy('enabled')], next_cursor: null } })
+      if (url.endsWith('/upstreams')) return response({ body: { items: [account] } })
+      if (url.endsWith('/upstreams/https/proxy') && init?.method === 'PUT') { puts += 1; return response({ body: {} }) }
+      if (url.endsWith('/upstreams/https/proxy')) { reads += 1; return response({ body: { upstream_id: 'https', upstream_revision: reads >= 3 ? 5 : 4, binding: null } }) }
+      if (url.endsWith('/outbound-proxies/enabled')) return response({ body: proxy('enabled') })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ProxiesPage csrf="csrf" />)
+    await userEvent.click(await screen.findByRole('button', { name: '绑定代理' }))
+    await userEvent.selectOptions(await screen.findByLabelText('选择已启用代理'), 'enabled')
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '绑定代理' }))
+    expect(await screen.findByText('已读取实际绑定，请核对')).toBeInTheDocument()
+    expect(screen.getByText(/账号版本或绑定已在操作前变化/)).toBeInTheDocument()
+    expect(puts).toBe(0)
   })
 
   it('does not let a delayed editor response replace a newly opened proxy', async () => {
