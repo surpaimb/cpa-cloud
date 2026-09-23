@@ -1,6 +1,6 @@
 # 生成恢复后台协调器：实施契约
 
-状态：源码已接线，正在完成本批故障回归与 CI 验收；证据见[集成状态](integration-status.md)。本契约承接
+状态：源码已接线，本批故障回归、隔离进程/浏览器与完整 Linux race CI 验收通过；证据见[集成状态](integration-status.md)。本契约承接
 `c9dc95f` 的[基础模块](system-probe-foundations-contract.md)，根据本仓独立规格实现。默认关闭，
 preview.3 下载版不包含本批功能，合成验收不代表真实提供商或完整 Sub2API 功能对齐。
 
