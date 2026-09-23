@@ -1,5 +1,15 @@
 # 集成状态
 
+## 2026-09-23：派发前一次安全换号
+
+- 账号运行时 `22c0300`、Claude/Gemini 接线 `17024df`、Chat/Responses/Codex 接线 `63c1988`、公共协调器与实际账号账本 `7ac7e5b` 已整合。实现依据本仓[安全换号契约](account-pool-failover-contract.md)独立编写，未复制参考产品代码。只有显式账号池中可证明尚未进入模型 HTTP/Codex 执行器的账号特定预检失败，才可选择一个不同账号一次；进入执行器后任何错误均不自动重放。
+- 共享协调器专项非缓存通过（service 8.299s）：权限与池 revision 变化、取消、Release 存储失败、候选耗尽、实际第二模型价格、一父请求/一 attempt、请求和存储故障不错误冷却账号。新增执行阶段正向枚举，零值 `Unknown` 拒绝安全建议；旧布尔字段为 false 不足以授权换号。
+- 原生专项及既有 Anthropic/Gemini/count_tokens 回归由协议任务执行通过（10.415s）；OpenAI/Codex 专项与既有 OAuth、Responses/Membership/OnDemand 回归由另一任务执行通过（56.809s）。Codex 新测试验证暂停写入失败直接终止、暂停成功但凭据保存失败也不换号、revision guard 失效时刷新端点只调用一次；合成凭据和 mock executor，不访问真实供应商。
+- 主任务构建最终真实 Go 程序，实际运行新增 `scripts/smoke-safe-failover.mjs` 通过：四协议首账号合成密文损坏后仅备用账号收到一次模型调用；账本仅五个父请求和五个真实 attempt（四个成功、一个 429），每个成功采用备用账号及实际模型价格 23 micro；count_tokens 不计生成账本。429 不重放，重启后员工 Key 保留、撤销后零上游请求，数据库与日志无合成密钥/提示/私有错误正文。Node 22.22.0 使用 `node:sqlite`；夹具只在测试进程停止时修改自己的临时数据库，验收后目录与进程已清理。
+- 最终程序另运行既有 `scripts/smoke-account-pool.mjs` 通过：四协议池映射、默认账号停用后的备用路由、目录一致性、429 不重放、cooldown 重启、排队 Key 撤销与会话元数据隔离。主任务完整 `go test -p 1 ./... -count=1 -timeout=8m` 非缓存通过（service 265.711s），`go vet -p 1 ./...` 与 Windows 本机编译通过。本机没有可用 C 编译器，race 由 Linux 轻量 CI 验证。
+- 双语 README 和四份运行/用量契约已更新；README PowerShell 命令块与批次前一致，文档本地链接和 6 项 CI 计划测试通过。本批计划为 core/web=true、三个安装平台=false。上批完整 Linux race 已耗时 845 秒，因此仅将 race 时间预算由 15 增为 20 分钟、core job 由 25 增为 30 分钟，保持完整套件和全部断言。
+- 本批源码本地验收完成，尚待 Linux CI 收尾，不发布新 tag 或安装包。恢复探测、代理池、预算、商业化和 Claude/Gemini 会员仍未完成；合成上游验收不能替代真实供应商兼容验证。
+
 ## 2026-09-23：用量查询、价格版本与网页管理
 
 - 查询 `1393d81`、价格目录/API `6740804`、网页 `7066620`/`e33cc15` 和请求接线 `507c7d3` 已集成。按实际账号与上游模型锁定价格，保持三表原子终结；无价、停用或部分用量未知时成本为 NULL。接口见 [用量与价格契约](usage-management-contract.md)。

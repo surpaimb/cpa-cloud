@@ -1,7 +1,7 @@
 # 账号池安全换号契约
 
-状态：**待实现**。截至 2026-09-23，服务只会为后续独立请求记录 cooldown，尚不会在同一请求内自动换号。
-本文定义下一批最小范围，依据本仓协议、租约和账本约束独立编写，不参考原产品源码。
+状态：**源码已接线，正在完成本批整体验收**。截至 2026-09-23，四协议的账号预检、一次安全切换、租约和实际账号账本已接入；公共协调器及隔离真实 Go 进程验收通过，完整测试与 CI 结果见[集成状态](integration-status.md)。不包含在 preview.3 安装包中。
+本文定义本批最小范围，依据本仓协议、租约和账本约束独立编写，不参考原产品源码。
 
 ## 范围与安全边界
 
@@ -24,7 +24,7 @@
 
 - provider、Key 版本或凭据状态与协议能力不兼容；
 - 该账号凭据无法在本地解密；
-- 该账号 endpoint、实际模型名或目标 URL 无效；
+- 该账号 endpoint 或目标 URL 无效；请求/协议模型映射错误直接终止，不以切换账号绕过校验；
 - 无法为该账号构造上游 HTTP request；
 - Codex 凭据获取或刷新在模型 executor 调用前确认失败，并且所需的凭据状态或刷新暂停标记已成功提交；
   不确定的刷新结果不能误标为明确撤销，也不能重放该账号的旧 refresh token。
@@ -77,7 +77,7 @@ attempt：直接使用首个账号时为 `primary`；预检换号后实际派发
 
 - `internal/scheduling/scheduler.go`：正向执行证据、排除集及安全建议，不处理 HTTP 或凭据。
 - `internal/service/account_pool_runtime.go`：初始 revision、排除集、逐次重查、持久化 Release 和第二次 Acquire。
-- `internal/service/model_admission.go`：父 request 一次建立、单次换号编排和最终 lease 清理。
+- `internal/service/model_admission.go`：父 request 一次建立、最终 lease 清理；`model_preflight.go`：结构化账号预检、一次换号及失败终结。
 - `internal/service/usage_hooks.go`、`usage_ledger.go`：按实际 route 定价、dispatch 类型和原子终结。
 - 四协议处理器：`modelapi.go`、`responses.go`、`anthropic_messages.go`、`gemini_native.go`、
   `codex_chat.go` 只返回结构化预检结果；不得自行扩大安全边界。
