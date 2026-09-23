@@ -400,7 +400,7 @@ After installing Node.js, run the mock-upstream acceptance test using absolute p
 node scripts/smoke-preview.mjs <absolute-executable-path> <absolute-web-directory>
 ```
 
-It covers initialization, the web entry point, management APIs, permanent keys, non-streaming/SSE, credential isolation, restart recovery, and persistent revocation without requiring real credentials. Race testing requires a CGO-capable toolchain and has not been run in the current Windows validation.
+It covers initialization, the web entry point, management APIs, permanent keys, non-streaming/SSE, credential isolation, restart recovery, and persistent revocation without requiring real credentials. Race testing requires a CGO-capable toolchain. The service and membership packages passed [Linux CI race validation](https://github.com/surpaimb/cpa-cloud/actions/runs/35802158197); race testing was not run on the local Windows host.
 
 Validate the source-only Responses implementation separately. This script starts a temporary service and fake upstream, checks tool-result rounds, failure events, employee permissions and revocation, and cleans up its test data:
 

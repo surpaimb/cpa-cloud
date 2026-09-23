@@ -135,3 +135,4 @@
 - 新 OAuth 进程脚本使用随机端口/临时数据、合成管理员密码，验证默认关闭、缺配置、CSRF、PKCE URL、会话幂等、无效 revision、同配置重启、改 client ID 拒绝及恢复原配置后 state 仍有效、数据库/日志无明文 state；不发送任何供应商授权交换或模型请求。全部临时进程和测试目录正常清理，未接触真实账号或当前用户运行实例。
 - 本机缺少 gcc/clang，Windows race 未通过环境前置条件；原任务此前的 race PASS 报告已撤回。轻量 Linux `core` CI 新增显式 `CGO_ENABLED=1` 的 `go test -race ./internal/service ./internal/membership -count=1 -timeout=5m`，运行结果在下方另记，不能用普通测试替代 race 证据。
 - 中英文 README、导入/生命周期契约、功能矩阵和分工说明同步为“源码实验、后台授权及手动刷新”。原 PowerShell 命令块逐块比对未变，文档本地链接、6 个 CI 路径分类测试及 diff 检查通过。默认关闭，无网页授权入口、后台自动刷新或真实会员验证，不新建 tag 或安装包，下载版仍为 preview.3。
+- 集成与验收提交 `a71ae3e3535ad14cb8a48083820b4e9dfdda8237` 已推送 main。[Code validation 35802158197](https://github.com/surpaimb/cpa-cloud/actions/runs/35802158197) 全部成功：core 的全量 Go 测试、`CGO_ENABLED=1` race、vet 和构建均通过，web 检查通过，windows/linux/macos 安装构建均 skipped。主任务读取 core job `106994752057` 日志核实 race 实际执行：service `223.479s`、membership `1.667s` 均为 `ok`；没有用 Windows 环境失败或普通测试冒充 race 结果。

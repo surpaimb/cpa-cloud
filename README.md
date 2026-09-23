@@ -400,7 +400,7 @@ go vet ./...
 node scripts/smoke-preview.mjs <absolute-executable-path> <absolute-web-directory>
 ```
 
-覆盖初始化、网页入口、管理 API、永久 Key、非流式/SSE、凭据隔离、重启与撤销持久化，不需要真实凭据。Race 测试需要支持 CGO 的工具链，当前 Windows 验证未运行 race。
+覆盖初始化、网页入口、管理 API、永久 Key、非流式/SSE、凭据隔离、重启与撤销持久化，不需要真实凭据。Race 测试需要支持 CGO 的工具链；服务与会员模块已通过 [Linux CI race 验证](https://github.com/surpaimb/cpa-cloud/actions/runs/35802158197)，本机 Windows 未运行 race。
 
 源码新增的 Responses 可独立验收；脚本启动临时服务和假上游，验证工具结果回合、失败事件、员工权限与撤销，并在退出时清理测试数据：
 
