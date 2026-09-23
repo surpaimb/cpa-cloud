@@ -416,6 +416,7 @@ export type GovernanceObservationSnapshot = {
   shadow_window: 'rolling_24h' | ''
 }
 export type GovernanceObservationCounts = {
+  pending_requests: string
   pending_attempts: string
   pending_requests_without_attempt: string
   zero_attempt_requests: string

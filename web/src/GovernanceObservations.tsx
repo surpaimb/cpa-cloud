@@ -30,6 +30,7 @@ function Counts({ item, kind }: { item: GovernanceObservationItem; kind: 'tpm' |
   return <div className="observation-counts">
     <span>已知尝试 <strong>{formatDecimalInteger(totals.known_attempts)}</strong></span>
     <span>未知尝试 <strong>{formatDecimalInteger(unknown)}</strong></span>
+    <span>处理中请求 <strong>{formatDecimalInteger(totals.pending_requests)}</strong></span>
     <span>处理中尝试 <strong>{formatDecimalInteger(totals.pending_attempts)}</strong></span>
     <span>待派发请求 <strong>{formatDecimalInteger(totals.pending_requests_without_attempt)}</strong></span>
     <span>零尝试请求 <strong>{formatDecimalInteger(totals.zero_attempt_requests)}</strong></span>
@@ -143,7 +144,7 @@ export function GovernanceObservations() {
       <PageState loading={loading && !page} error={error && !page ? error : null} onRetry={() => retry.current?.()} />
       {page ? <div className="observation-window"><div><span>Token 窗口</span><strong>{timeLabel(page.tpm_from)} 至 {timeLabel(page.window_end)}</strong></div><div><span>成本窗口</span><strong>{timeLabel(page.cost_from)} 至 {timeLabel(page.window_end)}</strong></div><small>本页读取于 {timeLabel(page.observed_at)}。游标固定窗口边界，但不是数据库历史快照；需要最新完整结果时请刷新首屏。</small></div> : null}
       {page ? <p className="observation-attribution-note">同一请求可同时计入员工、Key 与治理组。同一范围的不同历史阈值使用相同窗口总计，请勿把不同卡片的 Token 或金额相加。</p> : null}
-      {error && page ? <div className="inline-error usage-inline-error" role="alert">{error}<button onClick={() => retry.current?.()}>重试</button></div> : null}
+      {error && page ? <div className="inline-error usage-inline-error" role="alert"><span>{error}。读取失败，下面仍为上次成功结果。</span><button onClick={() => retry.current?.()}>重试</button></div> : null}
       {!loading && !error && page?.items.length === 0 ? <EmptyState title="窗口内无观测" body="没有准入快照时无法证明用量为零，也不会显示“未超过阈值”。可调整筛选或刷新首屏。" /> : null}
       {page?.items.length ? <div className="observation-list">{page.items.map((item) => <ObservationCard key={`${item.snapshot.scope_kind}:${item.snapshot.scope_id}:${item.snapshot.policy_id}:${item.snapshot.policy_revision}:${item.snapshot.group_revision ?? ''}:${item.snapshot.settings_revision}`} item={item} />)}</div> : null}
       {page ? <div className="pagination"><Button variant="secondary" disabled={loading || pageIndex === 0} onClick={() => void load(active, cursors[pageIndex - 1], cursors.slice(0, -1))}>上一页</Button><span>第 {pageIndex + 1} 页</span><Button variant="secondary" disabled={loading || !page.next_cursor} onClick={() => { if (page.next_cursor) void load(active, page.next_cursor, [...cursors, page.next_cursor]) }}>下一页</Button></div> : null}

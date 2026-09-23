@@ -24,10 +24,10 @@ function page(scopeID: string, nextCursor: string | null = null): GovernanceObse
       scope_totals: {
         tpm: {
           known_tokens: '900719925474099312344', known_attempts: '12', unknown_token_attempts: '1',
-          pending_attempts: '2', pending_requests_without_attempt: '3', zero_attempt_requests: '4',
+          pending_requests: '5', pending_attempts: '2', pending_requests_without_attempt: '3', zero_attempt_requests: '4',
         },
         cost: {
-          known_attempts: '12', unknown_cost_attempts: '1', pending_attempts: '2',
+          known_attempts: '12', unknown_cost_attempts: '1', pending_requests: '5', pending_attempts: '2',
           pending_requests_without_attempt: '3', zero_attempt_requests: '4',
           by_currency: [
             { currency: 'EUR', known_cost_micro: '700000', attempts: '2' },
@@ -67,6 +67,7 @@ describe('GovernanceObservations', () => {
     expect(screen.getByText('3.1 USD')).toBeInTheDocument()
     expect(screen.getByText('无法判断')).toBeInTheDocument()
     expect(screen.getByText('已超过')).toBeInTheDocument()
+    expect(screen.getAllByText('5')).toHaveLength(2)
     expect(screen.getByText(/不同币种不会相加或换算/)).toBeInTheDocument()
     expect(screen.getByText(/同一请求可同时计入员工、Key 与治理组/)).toBeInTheDocument()
     expect(screen.getByText(/请勿把不同卡片的 Token 或金额相加/)).toBeInTheDocument()
@@ -137,6 +138,27 @@ describe('GovernanceObservations', () => {
     expect(screen.getByText(/无法证明用量为零/)).toBeInTheDocument()
     expect(screen.queryByText('未超过阈值')).not.toBeInTheDocument()
     expect(calls).toBe(2)
+  })
+
+  it('labels retained results as stale when a changed filter fails', async () => {
+    let calls = 0
+    vi.stubGlobal('fetch', vi.fn(() => {
+      calls += 1
+      if (calls === 1) return response(page('previous-scope'))
+      if (calls === 2) return response({ error: { code: 'storage_unavailable', message: '暂时不可用' } }, 503)
+      return response(page('new-scope'))
+    }))
+    render(<GovernanceObservations />)
+    await userEvent.click(screen.getByRole('button', { name: '查看用量观测' }))
+    await screen.findByText('previous-scope')
+    await userEvent.selectOptions(screen.getByLabelText('范围类型'), 'group')
+    await userEvent.type(screen.getByLabelText('范围 ID（可选）'), 'new-scope')
+    await userEvent.click(screen.getByRole('button', { name: '应用筛选' }))
+    expect(await screen.findByText(/读取失败，下面仍为上次成功结果/)).toBeInTheDocument()
+    expect(screen.getByText('previous-scope')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '重试' }))
+    expect(await screen.findByText('new-scope')).toBeInTheDocument()
+    expect(screen.queryByText(/读取失败，下面仍为上次成功结果/)).not.toBeInTheDocument()
   })
 
   it('ignores a late response after a newer filtered request', async () => {
