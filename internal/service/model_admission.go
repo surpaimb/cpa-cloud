@@ -181,8 +181,8 @@ func poolAdmissionFailure(code accountPoolRuntimeCode) *modelAdmissionError {
 	}
 }
 
-// No automatic retry is performed. Failures are used only to cool accounts for
-// later independent requests; output and uncertain execution are never replayed.
+// Execution failures only cool accounts for later independent requests. The
+// separate preparation helper owns the bounded, never-dispatched failover path.
 func (a *App) releaseModelLease(lease *accountPoolLease, reqID string, record bool) {
 	defer a.cleanupRequestUsage(reqID)
 	if lease == nil {
@@ -191,12 +191,20 @@ func (a *App) releaseModelLease(lease *accountPoolLease, reqID string, record bo
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	result := scheduling.ReleaseResult{Failure: scheduling.FailureNone, StreamCommitted: true, ExecutionUncertain: true}
-	if record {
+	dispatched := true
+	if value, ok := a.usageRequests.Load(reqID); ok {
+		active := value.(*activeUsageRequest)
+		active.mu.Lock()
+		dispatched = active.attempt != nil
+		active.mu.Unlock()
+	}
+	if record && dispatched {
 		var outcome string
 		var status sql.NullInt64
 		err := a.store.db.QueryRowContext(ctx, `SELECT outcome,upstream_status FROM model_requests WHERE id=?`, reqID).Scan(&outcome, &status)
 		if err != nil {
-			result.Failure = scheduling.FailureTransient
+			// A storage read failure is not evidence of an account failure.
+			result.Failure = scheduling.FailureNone
 		} else if outcome == "failed" || outcome == "interrupted" || outcome == "running" {
 			switch status.Int64 {
 			case 401, 403:

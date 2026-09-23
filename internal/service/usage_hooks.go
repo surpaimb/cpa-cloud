@@ -15,14 +15,14 @@ import (
 )
 
 type activeUsageRequest struct {
-	mu          sync.Mutex
-	request     *usageLedgerRequest
-	actualModel string
-	attempt     *usageLedgerAttempt
-	outcome     string
-	status      int
-	endedAt     time.Time
-	finished    bool
+	mu       sync.Mutex
+	request  *usageLedgerRequest
+	failover bool
+	attempt  *usageLedgerAttempt
+	outcome  string
+	status   int
+	endedAt  time.Time
+	finished bool
 }
 
 func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string, selected route) error {
@@ -49,11 +49,26 @@ func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string
 	if err != nil {
 		return err
 	}
-	a.usageRequests.Store(requestID(r.Context()), &activeUsageRequest{request: request, actualModel: selected.UpstreamModel})
+	a.usageRequests.Store(requestID(r.Context()), &activeUsageRequest{request: request})
 	return nil
 }
 
-func (a *App) beginUpstreamUsage(ctx context.Context, id, accountID string) error {
+func (a *App) markRequestUsageFailover(id string) error {
+	value, ok := a.usageRequests.Load(id)
+	if !ok {
+		return nil // count_tokens does not create generation accounting records.
+	}
+	active := value.(*activeUsageRequest)
+	active.mu.Lock()
+	defer active.mu.Unlock()
+	if active.attempt != nil || active.outcome != "" || active.finished {
+		return errUsageLedgerConflict
+	}
+	active.failover = true
+	return nil
+}
+
+func (a *App) beginRouteUpstreamUsage(ctx context.Context, id string, selected route) error {
 	value, ok := a.usageRequests.Load(id)
 	if !ok {
 		return nil
@@ -67,12 +82,16 @@ func (a *App) beginUpstreamUsage(ctx context.Context, id, accountID string) erro
 	var price *accounting.PriceSnapshot
 	if lookup := active.request.coordinator.priceLookup; lookup != nil {
 		var err error
-		price, err = lookup(ctx, accountID, active.actualModel)
+		price, err = lookup(ctx, selected.AccountID, selected.UpstreamModel)
 		if err != nil {
 			return errUsageLedgerUnavailable
 		}
 	}
-	attempt, err := active.request.beginPricedAttempt(ctx, accountID, time.Now().UTC(), price)
+	dispatch := accounting.DispatchPrimary
+	if active.failover {
+		dispatch = accounting.DispatchFailover
+	}
+	attempt, err := active.request.beginDispatchedAttempt(ctx, selected.AccountID, time.Now().UTC(), price, dispatch)
 	if err == nil {
 		active.attempt = attempt
 	}

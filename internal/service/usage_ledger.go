@@ -54,6 +54,7 @@ type usageLedgerAttempt struct {
 	request   *usageLedgerRequest
 	id        string
 	accountID string
+	dispatch  accounting.Dispatch
 	startedAt time.Time
 	usage     *accounting.UsageAccumulator
 
@@ -135,7 +136,11 @@ func (r *usageLedgerRequest) beginAttempt(ctx context.Context, accountID string,
 }
 
 func (r *usageLedgerRequest) beginPricedAttempt(ctx context.Context, accountID string, startedAt time.Time, price *accounting.PriceSnapshot) (*usageLedgerAttempt, error) {
-	if r == nil || r.coordinator == nil || ctx == nil {
+	return r.beginDispatchedAttempt(ctx, accountID, startedAt, price, accounting.DispatchPrimary)
+}
+
+func (r *usageLedgerRequest) beginDispatchedAttempt(ctx context.Context, accountID string, startedAt time.Time, price *accounting.PriceSnapshot, dispatch accounting.Dispatch) (*usageLedgerAttempt, error) {
+	if r == nil || r.coordinator == nil || ctx == nil || (dispatch != accounting.DispatchPrimary && dispatch != accounting.DispatchFailover) {
 		return nil, errUsageLedgerInvalid
 	}
 	r.mu.Lock()
@@ -144,7 +149,7 @@ func (r *usageLedgerRequest) beginPricedAttempt(ctx context.Context, accountID s
 		return nil, errUsageLedgerConflict
 	}
 	if r.attempt != nil {
-		if r.attempt.accountID != accountID || !r.attempt.startedAt.Equal(startedAt) {
+		if r.attempt.accountID != accountID || !r.attempt.startedAt.Equal(startedAt) || r.attempt.dispatch != dispatch {
 			return nil, errUsageLedgerConflict
 		}
 		return r.attempt, nil
@@ -157,6 +162,7 @@ func (r *usageLedgerRequest) beginPricedAttempt(ctx context.Context, accountID s
 		request:   r,
 		id:        r.id + ":1",
 		accountID: accountID,
+		dispatch:  dispatch,
 		startedAt: startedAt,
 		usage:     accumulator,
 	}
@@ -165,7 +171,7 @@ func (r *usageLedgerRequest) beginPricedAttempt(ctx context.Context, accountID s
 		RequestID: r.id,
 		AccountID: accountID,
 		Provider:  r.provider,
-		Dispatch:  accounting.DispatchPrimary,
+		Dispatch:  dispatch,
 		StartedAt: startedAt,
 		Price:     price,
 	}); err != nil {
