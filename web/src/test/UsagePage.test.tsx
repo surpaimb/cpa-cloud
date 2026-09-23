@@ -214,4 +214,31 @@ describe('usage and pricing page', () => {
     resolveSecond(new Response(JSON.stringify({ items: [{ upstream_id: 'up-2', upstream_model: 'account-b-model', version: 'b-v1', revision: 1, created_at: '2026-09-23T00:00:00Z', price: null }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     expect(await screen.findByText('account-b-model')).toBeInTheDocument()
   })
+
+  it('keeps the in-flight catalog request when the selected account emits the same value', async () => {
+    let resolvePrices!: (response: Response) => void
+    const delayedPrices = new Promise<Response>((resolve) => { resolvePrices = resolve })
+    let priceReads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const common = commonRoute(url)
+      if (common) return common
+      if (url.includes('/usage/summary?')) return json(emptySummary)
+      if (url.includes('/usage/requests?')) return json(emptyPage)
+      if (url.endsWith('/upstreams/up-1/prices')) { priceReads += 1; return delayedPrices }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<UsagePage csrf="csrf" />)
+
+    const selector = await screen.findByLabelText('上游账号')
+    await waitFor(() => expect(selector).toHaveValue('up-1'))
+    await userEvent.selectOptions(selector, 'up-1')
+    expect(priceReads).toBe(1)
+
+    resolvePrices(new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const addPrice = await screen.findByRole('button', { name: '添加模型价格' })
+    await waitFor(() => expect(addPrice).toBeEnabled())
+    expect(priceReads).toBe(1)
+  })
 })
