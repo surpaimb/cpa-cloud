@@ -19,7 +19,7 @@ func (a *CodexDirectAdapter) Responses(ctx context.Context, credential *CodexAut
 	if ctx == nil || a == nil || a.client == nil || a.endpoint == "" || a.now == nil {
 		return nil, newCodexAdapterError(CodexErrorInvalidRequest)
 	}
-	accessToken, accountID, err := a.validateCredential(credential)
+	accessToken, accountID, err := a.validateCredential(credential, 0)
 	if err != nil {
 		return nil, err
 	}

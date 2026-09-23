@@ -444,24 +444,12 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body 
 		writeModelError(w, 503, "no_available_route", "No available route for this model.", reqID)
 		return
 	}
-	raw, err := a.secrets.decryptCodexAuth(selected.AccountID, selected.Ciphertext)
-	if err != nil {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", reqID)
-		return
-	}
-	credential, err := membership.ParseCodexAuthJSON(raw)
-	clear(raw)
-	if err != nil {
-		a.finishRequest(reqID, "failed", 0)
-		writeModelError(w, 503, "no_available_route", "No available route for this model.", reqID)
+	selected, credential, runErr := a.acquireCodexCredential(r.Context(), selected)
+	if runErr != nil {
+		a.handleCodexFailure(w, r, selected, reqID, runErr, false, writeResponsesStreamError)
 		return
 	}
 	defer credential.Destroy()
-	if validationErr := membership.NewCodexDirectAdapter().ValidateCredentialForScheduling(credential); validationErr != nil {
-		a.handleCodexFailure(w, r, selected, reqID, normalizeCodexRunError(validationErr), false, writeResponsesStreamError)
-		return
-	}
 	if !stream {
 		result, runErr := a.responses.Responses(r.Context(), credential, body, nil)
 		if runErr != nil {
@@ -503,7 +491,7 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, body 
 			committed = true
 		}
 	}
-	_, runErr := a.responses.Responses(r.Context(), credential, body, func(event json.RawMessage) error {
+	_, runErr = a.responses.Responses(r.Context(), credential, body, func(event json.RawMessage) error {
 		var head struct {
 			Type string `json:"type"`
 		}

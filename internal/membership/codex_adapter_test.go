@@ -510,8 +510,11 @@ func TestCodexDirectAdapterRequiresAccountIDAndUsableJWTBeforeNetwork(t *testing
 	assertCodexAdapterError(t, err, CodexErrorAccountIDRequired)
 
 	expiring := testCodexCredential(t, now.Add(4*time.Minute), testAccountIDMarker)
-	_, err = adapter.Complete(context.Background(), expiring, testCodexTextRequest())
+	err = adapter.ValidateCredentialForScheduling(expiring)
 	assertCodexAdapterError(t, err, CodexErrorReauthentication)
+	if err := adapter.ValidateCredentialForExecution(expiring); err != nil {
+		t.Fatalf("still-valid credential rejected for execution: %v", err)
+	}
 
 	malformedData := fmt.Sprintf(`{"auth_mode":"chatgpt","tokens":{"access_token":"%s","refresh_token":"%s","account_id":"%s"}}`, "not-a-jwt", testRefreshTokenMarker, testAccountIDMarker)
 	malformed, parseErr := ParseCodexAuthJSON([]byte(malformedData))

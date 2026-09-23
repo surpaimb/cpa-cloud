@@ -551,7 +551,9 @@ func TestCodexOAuthRefreshLostResponseIsNotRetriedOrMarkedReauth(t *testing.T) {
 		return nil, errors.New("provider rotated token but response was lost")
 	})}
 	response := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 1}, cookie, csrf, server.URL)
-	assertCodexAdminError(t, response, http.StatusBadGateway, "codex_refresh_failed")
+	assertCodexAdminError(t, response, http.StatusConflict, "codex_refresh_paused")
+	replay := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstream.ID+"/codex-refresh", map[string]any{"expected_revision": 1}, cookie, csrf, server.URL)
+	assertCodexAdminError(t, replay, http.StatusConflict, "codex_refresh_paused")
 	var after []byte
 	var revision int64
 	var state string
@@ -560,6 +562,13 @@ func TestCodexOAuthRefreshLostResponseIsNotRetriedOrMarkedReauth(t *testing.T) {
 	}
 	if calls.Load() != 1 || revision != 1 || state != codexStateImported || !bytes.Equal(before, after) {
 		t.Fatalf("lost response calls=%d revision=%d state=%q credential_equal=%v", calls.Load(), revision, state, bytes.Equal(before, after))
+	}
+	var refreshState, reason string
+	if err := app.store.db.QueryRow(`SELECT state,reason_code FROM codex_oauth_refresh_states WHERE upstream_id=?`, upstream.ID).Scan(&refreshState, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if refreshState != "paused" || reason != "uncertain_refresh_outcome" {
+		t.Fatalf("refresh state=%q reason=%q", refreshState, reason)
 	}
 }
 
@@ -584,6 +593,108 @@ func TestCodexOAuthRefreshExpectedRevisionValidationAlwaysResponds(t *testing.T)
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("invalid revisions reached token endpoint calls=%d", calls.Load())
+	}
+}
+
+func TestCodexOAuthSessionStatusIsScopedAndRecoversExchanging(t *testing.T) {
+	dataDir := t.TempDir()
+	app := openOAuthTestApp(t, dataDir)
+	server := httptest.NewServer(app.Handler())
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	createdResponse := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "Status session", "operation_id": "78bda71b-a39f-4cf3-bdad-5049e8149941",
+	}, cookie, csrf, server.URL)
+	var created codexOAuthSessionResponse
+	decodeResponse(t, createdResponse, &created)
+	if created.SessionID == "" {
+		t.Fatal("create response omitted session_id")
+	}
+	statusResponse := requestJSON(t, http.MethodGet, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions/"+created.SessionID, "", cookie, "", "")
+	body := readBody(statusResponse)
+	if statusResponse.StatusCode != http.StatusOK || strings.Contains(body, "authorization_url") || strings.Contains(body, "state") || strings.Contains(body, "token") {
+		t.Fatalf("status=%d body=%s", statusResponse.StatusCode, body)
+	}
+	var status codexOAuthSessionStatusResponse
+	if json.Unmarshal([]byte(body), &status) != nil || status.Status != "pending" {
+		t.Fatalf("status view=%+v body=%s", status, body)
+	}
+	otherCookie, _ := loginTestAdmin(t, server.URL)
+	other := requestJSON(t, http.MethodGet, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions/"+created.SessionID, "", otherCookie, "", "")
+	assertCodexAdminError(t, other, http.StatusNotFound, "not_found")
+	if _, err := app.store.db.Exec(`UPDATE codex_oauth_sessions SET status='exchanging',used_at=? WHERE id=?`, utcNow(), created.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	server.Close()
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	app, err := Open(context.Background(), Config{DataDir: dataDir, Listen: "127.0.0.1:0", ExperimentalCodexMembership: true, CodexOAuthClientID: testOAuthClientID, CodexOAuthRedirectURI: testOAuthRedirectURI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	server = httptest.NewServer(app.Handler())
+	defer server.Close()
+	recovered := requestJSON(t, http.MethodGet, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions/"+created.SessionID, "", cookie, "", "")
+	if recovered.StatusCode != http.StatusOK {
+		t.Fatalf("recovered status=%d body=%s", recovered.StatusCode, readBody(recovered))
+	}
+	status = codexOAuthSessionStatusResponse{}
+	decodeResponse(t, recovered, &status)
+	if status.Status != "failed" || status.ErrorCode == nil || *status.ErrorCode != "authorization_result_unknown" {
+		t.Fatalf("recovered view=%+v", status)
+	}
+}
+
+func TestCodexOAuthSessionStatusProjectsConfigurationChangeWithoutConsumption(t *testing.T) {
+	dataDir := t.TempDir()
+	app := openOAuthTestApp(t, dataDir)
+	server := httptest.NewServer(app.Handler())
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	createdResponse := codexAdminRequest(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions", map[string]any{
+		"name": "Config projection", "operation_id": "18e8dd55-23c1-4441-a48a-9f74cc369f0d",
+	}, cookie, csrf, server.URL)
+	var created codexOAuthSessionResponse
+	decodeResponse(t, createdResponse, &created)
+	server.Close()
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := Config{DataDir: dataDir, Listen: "127.0.0.1:0", ExperimentalCodexMembership: true, CodexOAuthClientID: "changed-client", CodexOAuthRedirectURI: testOAuthRedirectURI}
+	app, err := Open(context.Background(), changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server = httptest.NewServer(app.Handler())
+	projected := requestJSON(t, http.MethodGet, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions/"+created.SessionID, "", cookie, "", "")
+	var status codexOAuthSessionStatusResponse
+	decodeResponse(t, projected, &status)
+	if status.Status != "failed" || status.ErrorCode == nil || *status.ErrorCode != "codex_oauth_configuration_changed" {
+		t.Fatalf("projected view=%+v", status)
+	}
+	var stored string
+	var used sql.NullString
+	if err := app.store.db.QueryRow(`SELECT status,used_at FROM codex_oauth_sessions WHERE id=?`, created.SessionID).Scan(&stored, &used); err != nil || stored != "pending" || used.Valid {
+		t.Fatalf("stored status=%q used=%v err=%v", stored, used, err)
+	}
+	server.Close()
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	app, err = Open(context.Background(), Config{DataDir: dataDir, Listen: "127.0.0.1:0", ExperimentalCodexMembership: true, CodexOAuthClientID: testOAuthClientID, CodexOAuthRedirectURI: testOAuthRedirectURI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	server = httptest.NewServer(app.Handler())
+	defer server.Close()
+	restored := requestJSON(t, http.MethodGet, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions/"+created.SessionID, "", cookie, "", "")
+	status = codexOAuthSessionStatusResponse{}
+	decodeResponse(t, restored, &status)
+	if status.Status != "pending" || status.ErrorCode != nil {
+		t.Fatalf("restored view=%+v", status)
 	}
 }
 
@@ -733,6 +844,67 @@ func TestCodexOAuthBindingMigrationRollbackRetryAndLegacyData(t *testing.T) {
 	}
 	if err := migrated.db.QueryRow(`SELECT COUNT(*) FROM models WHERE id='legacy-oauth-model' AND upstream_id='ups_legacy_oauth'`).Scan(&modelCount); err != nil || modelCount != 1 {
 		t.Fatalf("legacy model after retry count=%d err=%v", modelCount, err)
+	}
+}
+
+func TestCodexOAuthLifecycleMigrationFailureLeavesLegacySessionSchemaUntouched(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := Initialize(context.Background(), dataDir, strings.NewReader("a-strong-preview-password\n")); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dataDir, "cpa-cloud.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE codex_oauth_refresh_states`,
+		`DROP TABLE codex_oauth_sessions`,
+		`CREATE TABLE codex_oauth_sessions (
+			id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
+			admin_id TEXT NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+			admin_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			state_digest BLOB NOT NULL UNIQUE, secret_ciphertext BLOB NOT NULL,
+			name TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE codex_oauth_refresh_states (blocking INTEGER)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("prepare legacy schema: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if migrated, err := openStore(dataDir); err == nil {
+		migrated.close()
+		t.Fatal("incompatible refresh schema unexpectedly migrated")
+	}
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, err := tableColumns(context.Background(), db, "codex_oauth_sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if columns["status"] || columns["upstream_id"] || columns["error_code"] {
+		t.Fatalf("failed migration partially altered session columns: %v", columns)
+	}
+	if _, err := db.Exec(`DROP TABLE codex_oauth_refresh_states`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := openStore(dataDir)
+	if err != nil {
+		t.Fatalf("retry lifecycle migration: %v", err)
+	}
+	defer migrated.close()
+	columns, err = tableColumns(context.Background(), migrated.db, "codex_oauth_sessions")
+	if err != nil || !columns["status"] || !columns["upstream_id"] || !columns["error_code"] {
+		t.Fatalf("migrated session columns=%v err=%v", columns, err)
 	}
 }
 

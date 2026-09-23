@@ -31,8 +31,7 @@ type App struct {
 	responses    codexResponsesExecutor
 	oauthHTTP    *http.Client
 	admission    sync.RWMutex
-	refreshMu    sync.Mutex
-	refreshes    map[string]*sync.Mutex
+	refresh      *codexRefreshCoordinator
 	loginMu      sync.Mutex
 	logins       map[string]*loginAttempt
 	catalogMu    sync.Mutex
@@ -69,14 +68,27 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	app := &App{
 		cfg: cfg, store: s, secrets: sec, http: client,
 		oauthHTTP: newCodexOAuthHTTPClient(), codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(),
-		refreshes: make(map[string]*sync.Mutex), logins: make(map[string]*loginAttempt),
+		logins: make(map[string]*loginAttempt),
 	}
+	app.refresh = newCodexRefreshCoordinator(app)
 	trimExpiredSessions(ctx, s.db)
-	trimCodexOAuthSessions(ctx, s.db)
+	if err := recoverCodexOAuthSessions(ctx, s.db); err != nil {
+		s.close()
+		return nil, err
+	}
+	if err := app.refresh.Start(); err != nil {
+		s.close()
+		return nil, err
+	}
 	return app, nil
 }
 
-func (a *App) Close() error { return a.store.close() }
+func (a *App) Close() error {
+	if a.refresh != nil {
+		a.refresh.Close()
+	}
+	return a.store.close()
+}
 
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -99,6 +111,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("PATCH /admin/api/v1/upstreams/{id}", a.requireAdmin(a.updateUpstream, true))
 	mux.HandleFunc("PUT /admin/api/v1/upstreams/{id}/codex-auth", a.requireAdmin(a.replaceCodexCredential, true))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/codex-oauth-sessions", a.requireAdmin(a.createCodexOAuthSession, true))
+	mux.HandleFunc("GET /admin/api/v1/upstreams/codex-oauth-sessions/{id}", a.requireAdmin(a.getCodexOAuthSession, false))
 	mux.HandleFunc("GET /admin/api/v1/codex/oauth/callback", a.requireAdmin(a.completeCodexOAuth, false))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/codex-refresh", a.requireAdmin(a.refreshCodexCredential, true))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/discover-models", a.requireAdmin(a.discoverUpstreamModels, true))
@@ -170,16 +183,17 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"ready":   true,
 		"storage": "sqlite-wal",
 		"features": map[string]bool{
-			"codex_membership_import":    a.cfg.ExperimentalCodexMembership,
-			"responses_api":              true,
-			"responses_streaming":        true,
-			"codex_membership_oauth":     a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
-			"gemini_native_api":          true,
-			"anthropic_native_api":       true,
-			"codex_model_discovery":      a.cfg.ExperimentalCodexMembership,
-			"upstream_batch_import":      true,
-			"account_pool_configuration": true,
-			"account_pool_routing":       false,
+			"codex_membership_import":       a.cfg.ExperimentalCodexMembership,
+			"responses_api":                 true,
+			"responses_streaming":           true,
+			"codex_membership_oauth":        a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
+			"gemini_native_api":             true,
+			"anthropic_native_api":          true,
+			"codex_model_discovery":         a.cfg.ExperimentalCodexMembership,
+			"upstream_batch_import":         true,
+			"account_pool_configuration":    true,
+			"account_pool_routing":          false,
+			"codex_membership_auto_refresh": a.refresh != nil && a.refresh.enabled(),
 		},
 		"limitations": limitations,
 	})

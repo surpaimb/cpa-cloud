@@ -108,6 +108,12 @@ func TestCodexOAuthRefreshFeedsBothEmployeeProtocolsAcrossRestart(t *testing.T) 
 	if err := app.store.db.QueryRow(`SELECT id,revision FROM upstreams WHERE operation_id=?`, operationID).Scan(&upstreamID, &revision); err != nil {
 		t.Fatal(err)
 	}
+	statusResponse := requestJSON(t, http.MethodGet, server.URL+"/admin/api/v1/upstreams/codex-oauth-sessions/"+session.SessionID, "", cookie, "", "")
+	var sessionStatus codexOAuthSessionStatusResponse
+	decodeResponse(t, statusResponse, &sessionStatus)
+	if sessionStatus.Status != "succeeded" || sessionStatus.UpstreamID == nil || *sessionStatus.UpstreamID != upstreamID || sessionStatus.ErrorCode != nil {
+		t.Fatalf("OAuth session status=%+v", sessionStatus)
+	}
 	refresh := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/upstreams/"+upstreamID+"/codex-refresh", `{"expected_revision":1}`, cookie, csrf, server.URL)
 	if refresh.StatusCode != http.StatusOK {
 		t.Fatalf("manual refresh: %d %s", refresh.StatusCode, readBody(refresh))

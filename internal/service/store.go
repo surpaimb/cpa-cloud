@@ -149,6 +149,9 @@ func (s *store) initialize(ctx context.Context) error {
 	if err := s.migrateCodexOAuthBindings(ctx); err != nil {
 		return fmt.Errorf("migrate Codex OAuth bindings: %w", err)
 	}
+	if err := s.migrateCodexOAuthLifecycle(ctx); err != nil {
+		return fmt.Errorf("migrate Codex OAuth lifecycle: %w", err)
+	}
 	if err := s.migrateUpstreamBatchItems(ctx); err != nil {
 		return fmt.Errorf("migrate upstream batch items: %w", err)
 	}
@@ -156,6 +159,78 @@ func (s *store) initialize(ctx context.Context) error {
 		return fmt.Errorf("migrate account pools: %w", err)
 	}
 	return nil
+}
+
+const codexOAuthRefreshStateTable = "codex_oauth_refresh_states"
+
+func (s *store) migrateCodexOAuthLifecycle(ctx context.Context) error {
+	columns, err := tableColumns(ctx, s.db, "codex_oauth_sessions")
+	if err != nil {
+		return err
+	}
+	var refreshTableCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, codexOAuthRefreshStateTable).Scan(&refreshTableCount); err != nil {
+		return err
+	}
+	if refreshTableCount != 0 {
+		refreshColumns, err := tableColumns(ctx, s.db, codexOAuthRefreshStateTable)
+		if err != nil {
+			return err
+		}
+		var schema string
+		if err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, codexOAuthRefreshStateTable).Scan(&schema); err != nil {
+			return err
+		}
+		normalized := strings.ToLower(strings.Join(strings.Fields(schema), " "))
+		if !refreshColumns["upstream_id"] || !refreshColumns["state"] || !refreshColumns["reason_code"] ||
+			!refreshColumns["attempt_revision"] || !refreshColumns["updated_at"] ||
+			!strings.Contains(normalized, "references upstreams(id) on delete cascade") ||
+			!strings.Contains(normalized, "'in_progress'") || !strings.Contains(normalized, "'paused'") {
+			return errors.New("existing Codex OAuth refresh state table has an incompatible schema")
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, migration := range []struct {
+		name string
+		sql  string
+	}{
+		{"status", `ALTER TABLE codex_oauth_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','exchanging','succeeded','failed','cancelled','expired'))`},
+		{"upstream_id", `ALTER TABLE codex_oauth_sessions ADD COLUMN upstream_id TEXT REFERENCES upstreams(id) ON DELETE SET NULL`},
+		{"error_code", `ALTER TABLE codex_oauth_sessions ADD COLUMN error_code TEXT`},
+	} {
+		if !columns[migration.name] {
+			if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE codex_oauth_sessions
+		SET status='failed',error_code='legacy_unknown_outcome'
+		WHERE status='pending' AND used_at IS NOT NULL`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS codex_oauth_refresh_states (
+		upstream_id TEXT PRIMARY KEY REFERENCES upstreams(id) ON DELETE CASCADE,
+		state TEXT NOT NULL CHECK(state IN ('ready','in_progress','paused','reauth_required')),
+		reason_code TEXT,
+		attempt_revision INTEGER,
+		updated_at TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO codex_oauth_refresh_states(upstream_id,state,reason_code,attempt_revision,updated_at)
+		SELECT b.upstream_id,
+			CASE WHEN u.credential_state='reauth_required' THEN 'reauth_required' ELSE 'ready' END,
+			NULL,u.revision,?
+		FROM codex_oauth_bindings b JOIN upstreams u ON u.id=b.upstream_id
+		WHERE NOT EXISTS(SELECT 1 FROM codex_oauth_refresh_states r WHERE r.upstream_id=b.upstream_id)`, utcNow()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 const codexOAuthBindingTable = "codex_oauth_bindings"

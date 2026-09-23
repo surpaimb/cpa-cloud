@@ -120,33 +120,13 @@ func (a *App) handleCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 		}
 		return
 	}
-	raw, err := a.secrets.decryptCodexAuth(selected.AccountID, selected.Ciphertext)
-	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", modelRequestID)
-		return
-	}
-	credential, err := membership.ParseCodexAuthJSON(raw)
-	clear(raw)
-	if err != nil {
-		a.finishRequest(modelRequestID, "failed", 0)
-		writeModelError(w, http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", modelRequestID)
-		return
-	}
-	defer credential.Destroy()
-	if validationErr := membership.NewCodexDirectAdapter().ValidateCredentialForScheduling(credential); validationErr != nil {
-		runErr := normalizeCodexRunError(validationErr)
-		if codexCredentialNeedsReimport(runErr.Code) {
-			if stateErr := a.markCodexReauthentication(selected.AccountID, selected.Revision); stateErr != nil {
-				a.finishRequest(modelRequestID, "failed", 0)
-				writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
-				return
-			}
-		}
+	selected, credential, runErr := a.acquireCodexCredential(r.Context(), selected)
+	if runErr != nil {
 		a.finishRequest(modelRequestID, "failed", runErr.UpstreamStatus)
 		a.writeCodexRunError(w, r, modelRequestID, runErr)
 		return
 	}
+	defer credential.Destroy()
 	if stream {
 		a.streamCodexChatCompletion(w, r, publicModel, mapped, credential, selected, modelRequestID)
 		return

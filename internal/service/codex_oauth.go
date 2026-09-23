@@ -15,11 +15,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
-
-	"cpacloud.local/server/internal/membership"
 )
 
 const (
@@ -39,8 +36,17 @@ type codexOAuthSessionRequest struct {
 }
 
 type codexOAuthSessionResponse struct {
+	SessionID        string `json:"session_id"`
 	AuthorizationURL string `json:"authorization_url"`
 	ExpiresAt        string `json:"expires_at"`
+}
+
+type codexOAuthSessionStatusResponse struct {
+	SessionID  string  `json:"session_id"`
+	Status     string  `json:"status"`
+	ExpiresAt  string  `json:"expires_at"`
+	UpstreamID *string `json:"upstream_id,omitempty"`
+	ErrorCode  *string `json:"error_code,omitempty"`
 }
 
 type codexOAuthSessionSecret struct {
@@ -191,8 +197,8 @@ func (a *App) createCodexOAuthSession(w http.ResponseWriter, r *http.Request, ad
 	}
 	expires := time.Now().UTC().Add(codexOAuthSessionTTL)
 	_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO codex_oauth_sessions(
-		id,operation_id,admin_id,admin_session_id,state_digest,secret_ciphertext,name,expires_at,used_at,created_at
-	) VALUES(?,?,?,?,?,?,?,?,NULL,?)`, id, input.OperationID, admin.AdminID, admin.SessionID,
+		id,operation_id,admin_id,admin_session_id,state_digest,secret_ciphertext,name,expires_at,used_at,created_at,status
+	) VALUES(?,?,?,?,?,?,?,?,NULL,?,'pending')`, id, input.OperationID, admin.AdminID, admin.SessionID,
 		a.secrets.digest("codex-oauth-state/v1", state), ciphertext, input.Name, expires.Format(time.RFC3339Nano), utcNow())
 	if err != nil {
 		if isConflict(err) {
@@ -209,7 +215,7 @@ func (a *App) createCodexOAuthSession(w http.ResponseWriter, r *http.Request, ad
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	writeJSON(w, http.StatusCreated, codexOAuthSessionResponse{AuthorizationURL: codexAuthorizationURL(secret), ExpiresAt: expires.Format(time.RFC3339Nano)})
+	writeJSON(w, http.StatusCreated, codexOAuthSessionResponse{SessionID: id, AuthorizationURL: codexAuthorizationURL(secret), ExpiresAt: expires.Format(time.RFC3339Nano)})
 }
 
 func (a *App) loadCodexOAuthSessionByOperation(ctx context.Context, operationID, adminSessionID string) (codexOAuthSessionResponse, error) {
@@ -236,7 +242,60 @@ func (a *App) loadCodexOAuthSessionByOperation(ctx context.Context, operationID,
 	if secret.ClientID == "" || secret.RedirectURI == "" || secret.ClientID != a.cfg.CodexOAuthClientID || secret.RedirectURI != a.cfg.CodexOAuthRedirectURI {
 		return codexOAuthSessionResponse{}, errCodexOAuthConfigurationChanged
 	}
-	return codexOAuthSessionResponse{AuthorizationURL: codexAuthorizationURL(secret), ExpiresAt: expires}, nil
+	return codexOAuthSessionResponse{SessionID: id, AuthorizationURL: codexAuthorizationURL(secret), ExpiresAt: expires}, nil
+}
+
+func (a *App) getCodexOAuthSession(w http.ResponseWriter, r *http.Request, admin adminSession) {
+	if !a.requireCodexOAuth(w) {
+		return
+	}
+	id := r.PathValue("id")
+	if !validText(id, 1, 128) {
+		writeAdminError(w, http.StatusNotFound, "not_found", "Authorization session was not found.")
+		return
+	}
+	if _, err := a.store.db.ExecContext(r.Context(), `UPDATE codex_oauth_sessions
+		SET status='expired',error_code='authorization_expired',used_at=COALESCE(used_at,?)
+		WHERE id=? AND admin_session_id=? AND status='pending' AND expires_at<=?`, utcNow(), id, admin.SessionID, utcNow()); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	var view codexOAuthSessionStatusResponse
+	var upstreamID, errorCode sql.NullString
+	var encrypted []byte
+	err := a.store.db.QueryRowContext(r.Context(), `SELECT id,status,expires_at,upstream_id,error_code,secret_ciphertext
+		FROM codex_oauth_sessions WHERE id=? AND admin_session_id=?`, id, admin.SessionID).
+		Scan(&view.SessionID, &view.Status, &view.ExpiresAt, &upstreamID, &errorCode, &encrypted)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeAdminError(w, http.StatusNotFound, "not_found", "Authorization session was not found.")
+		return
+	}
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	view.UpstreamID = nullString(upstreamID)
+	view.ErrorCode = nullString(errorCode)
+	if view.Status == "pending" {
+		plaintext, err := a.secrets.decryptCodexOAuthSession(id, encrypted)
+		if err != nil {
+			writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+		var secret codexOAuthSessionSecret
+		decodeErr := json.Unmarshal(plaintext, &secret)
+		clear(plaintext)
+		if decodeErr != nil {
+			writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+		if secret.ClientID != a.cfg.CodexOAuthClientID || secret.RedirectURI != a.cfg.CodexOAuthRedirectURI {
+			view.Status = "failed"
+			code := "codex_oauth_configuration_changed"
+			view.ErrorCode = &code
+		}
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func codexAuthorizationURL(secret codexOAuthSessionSecret) string {
@@ -268,7 +327,7 @@ func (a *App) completeCodexOAuth(w http.ResponseWriter, r *http.Request, admin a
 	var id, operationID, name, expires string
 	var encrypted []byte
 	err := a.store.db.QueryRowContext(r.Context(), `SELECT id,operation_id,name,expires_at,secret_ciphertext
-		FROM codex_oauth_sessions WHERE state_digest=? AND admin_id=? AND admin_session_id=? AND used_at IS NULL`,
+		FROM codex_oauth_sessions WHERE state_digest=? AND admin_id=? AND admin_session_id=? AND status='pending'`,
 		a.secrets.digest("codex-oauth-state/v1", state), admin.AdminID, admin.SessionID).
 		Scan(&id, &operationID, &name, &expires, &encrypted)
 	if err != nil {
@@ -278,12 +337,14 @@ func (a *App) completeCodexOAuth(w http.ResponseWriter, r *http.Request, admin a
 	expiry, expiryErr := parseTime(expires)
 	plaintext, err := a.secrets.decryptCodexOAuthSession(id, encrypted)
 	if err != nil {
+		a.failCodexOAuthSession(id, "failed", "session_unavailable")
 		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
 		return
 	}
 	defer clear(plaintext)
 	var secret codexOAuthSessionSecret
 	if json.Unmarshal(plaintext, &secret) != nil || subtle.ConstantTimeCompare([]byte(secret.State), []byte(state)) != 1 || secret.Verifier == "" {
+		a.failCodexOAuthSession(id, "failed", "invalid_session")
 		a.writeCodexOAuthPage(w, http.StatusBadRequest, false)
 		return
 	}
@@ -293,11 +354,11 @@ func (a *App) completeCodexOAuth(w http.ResponseWriter, r *http.Request, admin a
 		return
 	}
 	if expiryErr != nil || !time.Now().UTC().Before(expiry) {
-		_, _ = a.store.db.ExecContext(r.Context(), `UPDATE codex_oauth_sessions SET used_at=? WHERE id=? AND used_at IS NULL`, utcNow(), id)
+		a.failCodexOAuthSession(id, "expired", "authorization_expired")
 		a.writeCodexOAuthPage(w, http.StatusBadRequest, false)
 		return
 	}
-	result, err := a.store.db.ExecContext(r.Context(), `UPDATE codex_oauth_sessions SET used_at=? WHERE id=? AND used_at IS NULL`, utcNow(), id)
+	result, err := a.store.db.ExecContext(r.Context(), `UPDATE codex_oauth_sessions SET used_at=?,status='exchanging',error_code=NULL WHERE id=? AND status='pending'`, utcNow(), id)
 	if err != nil {
 		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
 		return
@@ -309,9 +370,15 @@ func (a *App) completeCodexOAuth(w http.ResponseWriter, r *http.Request, admin a
 	}
 	if providerError != "" {
 		if !validOAuthAuthorizationError(providerError) {
+			a.failCodexOAuthSession(id, "failed", "invalid_provider_error")
 			a.writeCodexOAuthPage(w, http.StatusBadRequest, false)
 			return
 		}
+		status := "failed"
+		if providerError == "access_denied" {
+			status = "cancelled"
+		}
+		a.failCodexOAuthSession(id, status, providerError)
 		a.writeCodexOAuthPage(w, http.StatusBadRequest, false)
 		return
 	}
@@ -320,33 +387,39 @@ func (a *App) completeCodexOAuth(w http.ResponseWriter, r *http.Request, admin a
 		RedirectURI: secret.RedirectURI, CodeVerifier: secret.Verifier,
 	})
 	if wireErr != nil {
+		a.failCodexOAuthSession(id, "failed", "token_exchange_failed")
 		a.writeCodexOAuthPage(w, http.StatusBadGateway, false)
 		return
 	}
 	rawAuth, err := codexAuthJSONFromTokens(tokens)
 	if err != nil {
+		a.failCodexOAuthSession(id, "failed", "invalid_token_response")
 		a.writeCodexOAuthPage(w, http.StatusBadGateway, false)
 		return
 	}
 	defer clear(rawAuth)
 	credential, err := parseSchedulableCodexAuth(rawAuth)
 	if err != nil {
+		a.failCodexOAuthSession(id, "failed", "invalid_credential")
 		a.writeCodexOAuthPage(w, http.StatusBadGateway, false)
 		return
 	}
 	credential.Destroy()
 	upstreamID, err := newID("ups")
 	if err != nil {
+		a.failCodexOAuthSession(id, "failed", "service_unavailable")
 		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
 		return
 	}
 	ciphertext, err := a.secrets.encryptCodexAuth(upstreamID, rawAuth)
 	if err != nil {
+		a.failCodexOAuthSession(id, "failed", "credential_save_failed")
 		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
 		return
 	}
 	tx, err := a.store.db.BeginTx(r.Context(), nil)
 	if err != nil {
+		a.failCodexOAuthSession(id, "failed", "storage_unavailable")
 		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
 		return
 	}
@@ -355,18 +428,47 @@ func (a *App) completeCodexOAuth(w http.ResponseWriter, r *http.Request, admin a
 		id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at,credential_state,verified_at,operation_id
 	) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)`, upstreamID, name, codexMembershipProvider, codexMembershipEndpoint, 1, ciphertext, 2, 1, utcNow(), codexStateImported, operationID)
 	if err != nil {
+		_ = tx.Rollback()
+		a.failCodexOAuthSession(id, "failed", "storage_unavailable")
 		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
 		return
 	}
 	if _, err := tx.ExecContext(r.Context(), `INSERT INTO codex_oauth_bindings(upstream_id,client_id,source,created_at) VALUES(?,?,?,?)`, upstreamID, secret.ClientID, "authorization_code", utcNow()); err != nil {
+		_ = tx.Rollback()
+		a.failCodexOAuthSession(id, "failed", "storage_unavailable")
 		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
 		return
 	}
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO codex_oauth_refresh_states(upstream_id,state,reason_code,attempt_revision,updated_at) VALUES(?,'ready',NULL,1,?)`, upstreamID, utcNow()); err != nil {
+		_ = tx.Rollback()
+		a.failCodexOAuthSession(id, "failed", "storage_unavailable")
+		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
+		return
+	}
+	if result, err := tx.ExecContext(r.Context(), `UPDATE codex_oauth_sessions SET status='succeeded',upstream_id=?,error_code=NULL WHERE id=? AND status='exchanging'`, upstreamID, id); err != nil {
+		_ = tx.Rollback()
+		a.failCodexOAuthSession(id, "failed", "storage_unavailable")
+		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
+		return
+	} else if changed, _ := result.RowsAffected(); changed != 1 {
+		_ = tx.Rollback()
+		a.failCodexOAuthSession(id, "failed", "session_conflict")
+		a.writeCodexOAuthPage(w, http.StatusConflict, false)
+		return
+	}
 	if err := tx.Commit(); err != nil {
+		a.failCodexOAuthSession(id, "failed", "storage_unavailable")
 		a.writeCodexOAuthPage(w, http.StatusServiceUnavailable, false)
 		return
 	}
 	a.writeCodexOAuthPage(w, http.StatusOK, true)
+}
+
+func (a *App) failCodexOAuthSession(id, status, code string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _ = a.store.db.ExecContext(ctx, `UPDATE codex_oauth_sessions SET status=?,error_code=?
+		WHERE id=? AND status IN ('pending','exchanging')`, status, code, id)
 }
 
 func (a *App) writeCodexOAuthPage(w http.ResponseWriter, status int, success bool) {
@@ -393,95 +495,31 @@ func (a *App) refreshCodexCredential(w http.ResponseWriter, r *http.Request, _ a
 		return
 	}
 	id := r.PathValue("id")
-	lock := a.codexRefreshLock(id)
-	lock.Lock()
-	defer lock.Unlock()
-
-	var provider, state string
-	var revision int64
-	var ciphertext []byte
-	var boundClient, boundSource sql.NullString
-	err := a.store.db.QueryRowContext(r.Context(), `SELECT u.provider_kind,u.revision,u.credential_ciphertext,COALESCE(u.credential_state,''),b.client_id,b.source
-		FROM upstreams u LEFT JOIN codex_oauth_bindings b ON b.upstream_id=u.id WHERE u.id=?`, id).
-		Scan(&provider, &revision, &ciphertext, &state, &boundClient, &boundSource)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeAdminError(w, http.StatusNotFound, "not_found", "Upstream was not found.")
-		return
-	}
+	_, err := a.refresh.refresh(r.Context(), id, input.ExpectedRevision, true)
 	if err != nil {
-		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
-		return
-	}
-	if provider != codexMembershipProvider {
-		writeAdminError(w, http.StatusBadRequest, "invalid_upstream_type", "This upstream does not use Codex membership credentials.")
-		return
-	}
-	if !boundClient.Valid || !boundSource.Valid || boundSource.String != "authorization_code" || boundClient.String != a.cfg.CodexOAuthClientID {
-		writeAdminError(w, http.StatusConflict, "codex_refresh_not_bound", "This Codex credential is not bound to the configured OAuth client.")
-		return
-	}
-	if revision != *input.ExpectedRevision {
-		writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
-		return
-	}
-	plaintext, err := a.secrets.decryptCodexAuth(id, ciphertext)
-	if err != nil {
-		writeAdminError(w, http.StatusServiceUnavailable, "credential_unavailable", "The upstream credential is unavailable.")
-		return
-	}
-	defer clear(plaintext)
-	credential, err := membership.ParseCodexAuthJSON(plaintext)
-	if err != nil {
-		writeAdminError(w, http.StatusServiceUnavailable, "credential_unavailable", "The upstream credential is unavailable.")
-		return
-	}
-	refreshToken := credential.RefreshTokenSecret()
-	credential.Destroy()
-	tokens, wireErr := a.requestCodexOAuthTokens(r.Context(), codexOAuthTokenRequest{GrantType: "refresh_token", ClientID: a.cfg.CodexOAuthClientID, RefreshToken: refreshToken})
-	if wireErr != nil {
-		if wireErr.Status == http.StatusUnauthorized || wireErr.Code == "invalid_grant" {
-			result, updateErr := a.store.db.ExecContext(r.Context(), `UPDATE upstreams SET credential_state=?,verified_at=NULL WHERE id=? AND provider_kind=? AND revision=?`, codexStateReauth, id, codexMembershipProvider, revision)
-			if updateErr != nil {
-				writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
-				return
-			}
-			changed, _ := result.RowsAffected()
-			if changed != 1 {
-				writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
-				return
-			}
-			writeAdminError(w, http.StatusConflict, "codex_reauthorization_required", "Codex authorization must be completed again.")
+		if errors.Is(err, sql.ErrNoRows) {
+			writeAdminError(w, http.StatusNotFound, "not_found", "Upstream was not found.")
 			return
 		}
-		writeAdminError(w, http.StatusBadGateway, "codex_refresh_failed", "Codex credential refresh failed.")
-		return
-	}
-	rawAuth, err := codexAuthJSONFromTokens(tokens)
-	if err != nil {
-		writeAdminError(w, http.StatusBadGateway, "codex_refresh_failed", "Codex credential refresh failed.")
-		return
-	}
-	defer clear(rawAuth)
-	validated, err := parseSchedulableCodexAuth(rawAuth)
-	if err != nil {
-		writeAdminError(w, http.StatusBadGateway, "codex_refresh_failed", "Codex credential refresh failed.")
-		return
-	}
-	validated.Destroy()
-	rotated, err := a.secrets.encryptCodexAuth(id, rawAuth)
-	if err != nil {
-		writeAdminError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is temporarily unavailable.")
-		return
-	}
-	result, err := a.store.db.ExecContext(r.Context(), `UPDATE upstreams SET credential_ciphertext=?,key_version=2,revision=revision+1,credential_state=?,verified_at=NULL WHERE id=? AND provider_kind=? AND revision=?`,
-		rotated, codexStateImported, id, codexMembershipProvider, revision)
-	if err != nil {
+		var failure *codexRefreshFailure
+		if errors.As(err, &failure) {
+			switch failure.code {
+			case "invalid_upstream_type":
+				writeAdminError(w, http.StatusBadRequest, "invalid_upstream_type", "This upstream does not use Codex membership credentials.")
+			case "refresh_not_bound":
+				writeAdminError(w, http.StatusConflict, "codex_refresh_not_bound", "This Codex credential is not bound to the configured OAuth client.")
+			case "revision_conflict":
+				writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
+			case "reauthorization_required":
+				writeAdminError(w, http.StatusConflict, "codex_reauthorization_required", "Codex authorization must be completed again.")
+			case "refresh_paused":
+				writeAdminError(w, http.StatusConflict, "codex_refresh_paused", "Refresh is paused because the previous token outcome is uncertain; authorize or import the account again.")
+			default:
+				writeAdminError(w, http.StatusBadGateway, "codex_refresh_failed", "Codex credential refresh failed.")
+			}
+			return
+		}
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
-		return
-	}
-	changed, _ := result.RowsAffected()
-	if changed != 1 {
-		writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
 		return
 	}
 	item, err := loadUpstreamView(r.Context(), a.store.db, id)
@@ -489,18 +527,11 @@ func (a *App) refreshCodexCredential(w http.ResponseWriter, r *http.Request, _ a
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	writeJSON(w, http.StatusOK, item)
-}
-
-func (a *App) codexRefreshLock(id string) *sync.Mutex {
-	a.refreshMu.Lock()
-	defer a.refreshMu.Unlock()
-	lock := a.refreshes[id]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		a.refreshes[id] = lock
+	if err := a.decorateUpstreamOAuthRefresh(r.Context(), &item); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
 	}
-	return lock
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (a *App) requestCodexOAuthTokens(ctx context.Context, payload codexOAuthTokenRequest) (codexOAuthTokenResponse, *codexOAuthWireError) {
@@ -649,8 +680,23 @@ func codexAccountIDFromIDToken(token string) (string, bool, error) {
 	return auth.AccountID, auth.FedRAMP, nil
 }
 
-func trimCodexOAuthSessions(ctx context.Context, db *sql.DB) {
+func recoverCodexOAuthSessions(ctx context.Context, db *sql.DB) error {
 	cleanup, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	_, _ = db.ExecContext(cleanup, `DELETE FROM codex_oauth_sessions WHERE used_at IS NOT NULL OR expires_at <= ?`, utcNow())
+	tx, err := db.BeginTx(cleanup, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(cleanup, `UPDATE codex_oauth_sessions
+		SET status='failed',error_code='authorization_result_unknown'
+		WHERE status='exchanging'`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(cleanup, `UPDATE codex_oauth_sessions
+		SET status='expired',error_code='authorization_expired',used_at=COALESCE(used_at,?)
+		WHERE status='pending' AND expires_at<=?`, utcNow(), utcNow()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

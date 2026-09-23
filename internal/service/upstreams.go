@@ -20,14 +20,21 @@ const (
 )
 
 type upstreamView struct {
-	ID              string  `json:"id"`
-	Name            string  `json:"name"`
-	ProviderKind    string  `json:"provider_kind"`
-	Endpoint        string  `json:"endpoint"`
-	Enabled         bool    `json:"enabled"`
-	Revision        int64   `json:"revision"`
-	CredentialState *string `json:"credential_state"`
-	VerifiedAt      *string `json:"verified_at"`
+	ID              string                 `json:"id"`
+	Name            string                 `json:"name"`
+	ProviderKind    string                 `json:"provider_kind"`
+	Endpoint        string                 `json:"endpoint"`
+	Enabled         bool                   `json:"enabled"`
+	Revision        int64                  `json:"revision"`
+	CredentialState *string                `json:"credential_state"`
+	VerifiedAt      *string                `json:"verified_at"`
+	OAuthRefresh    *codexOAuthRefreshView `json:"oauth_refresh,omitempty"`
+}
+
+type codexOAuthRefreshView struct {
+	Eligible   bool    `json:"eligible"`
+	State      string  `json:"state"`
+	ReasonCode *string `json:"reason_code,omitempty"`
 }
 
 type createUpstreamRequest struct {
@@ -38,7 +45,12 @@ type createUpstreamRequest struct {
 }
 
 func (a *App) listUpstreams(w http.ResponseWriter, r *http.Request, _ adminSession) {
-	rows, err := a.store.db.QueryContext(r.Context(), `SELECT id,name,provider_kind,endpoint,enabled,revision,credential_state,verified_at FROM upstreams ORDER BY created_at,id`)
+	rows, err := a.store.db.QueryContext(r.Context(), `SELECT u.id,u.name,u.provider_kind,u.endpoint,u.enabled,u.revision,u.credential_state,u.verified_at,
+		b.client_id,b.source,rs.state,rs.reason_code
+		FROM upstreams u
+		LEFT JOIN codex_oauth_bindings b ON b.upstream_id=u.id
+		LEFT JOIN codex_oauth_refresh_states rs ON rs.upstream_id=u.id
+		ORDER BY u.created_at,u.id`)
 	if err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -48,14 +60,16 @@ func (a *App) listUpstreams(w http.ResponseWriter, r *http.Request, _ adminSessi
 	for rows.Next() {
 		var item upstreamView
 		var enabled int
-		var state, verified sql.NullString
-		if err := rows.Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision, &state, &verified); err != nil {
+		var state, verified, clientID, source, refreshState, reason sql.NullString
+		if err := rows.Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision, &state, &verified,
+			&clientID, &source, &refreshState, &reason); err != nil {
 			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 			return
 		}
 		item.Enabled = enabled != 0
 		item.CredentialState = nullString(state)
 		item.VerifiedAt = nullString(verified)
+		item.OAuthRefresh = a.codexOAuthRefreshView(item.ProviderKind, clientID, source, refreshState, reason)
 		items = append(items, item)
 	}
 	iterationErr := rows.Err()
@@ -65,6 +79,62 @@ func (a *App) listUpstreams(w http.ResponseWriter, r *http.Request, _ adminSessi
 		return
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
+}
+
+func (a *App) codexOAuthRefreshView(provider string, clientID, source, state, reason sql.NullString) *codexOAuthRefreshView {
+	if provider != codexMembershipProvider {
+		return nil
+	}
+	view := &codexOAuthRefreshView{State: "unavailable"}
+	if !a.cfg.ExperimentalCodexMembership {
+		code := "feature_disabled"
+		view.ReasonCode = &code
+		return view
+	}
+	if !clientID.Valid || !source.Valid || source.String != "authorization_code" {
+		code := "source_unavailable"
+		view.ReasonCode = &code
+		return view
+	}
+	if !a.codexOAuthConfigured() || clientID.String != a.cfg.CodexOAuthClientID {
+		code := "client_mismatch"
+		view.ReasonCode = &code
+		return view
+	}
+	view.Eligible = true
+	switch state.String {
+	case "ready":
+		view.State = "ready"
+	case "in_progress":
+		view.State = "refreshing"
+	case "paused":
+		view.State = "paused"
+		view.ReasonCode = nullString(reason)
+	case "reauth_required":
+		view.State = "reauth_required"
+		view.ReasonCode = nullString(reason)
+	default:
+		view.Eligible = false
+		code := "lifecycle_unavailable"
+		view.ReasonCode = &code
+	}
+	return view
+}
+
+func (a *App) decorateUpstreamOAuthRefresh(ctx context.Context, item *upstreamView) error {
+	if item.ProviderKind != codexMembershipProvider {
+		return nil
+	}
+	var clientID, source, state, reason sql.NullString
+	err := a.store.db.QueryRowContext(ctx, `SELECT b.client_id,b.source,rs.state,rs.reason_code
+		FROM upstreams u LEFT JOIN codex_oauth_bindings b ON b.upstream_id=u.id
+		LEFT JOIN codex_oauth_refresh_states rs ON rs.upstream_id=u.id WHERE u.id=?`, item.ID).
+		Scan(&clientID, &source, &state, &reason)
+	if err != nil {
+		return err
+	}
+	item.OAuthRefresh = a.codexOAuthRefreshView(item.ProviderKind, clientID, source, state, reason)
+	return nil
 }
 
 func (a *App) createUpstream(w http.ResponseWriter, r *http.Request, _ adminSession) {
@@ -203,6 +273,10 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 	}
 	if err := tx.Commit(); err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if err := a.decorateUpstreamOAuthRefresh(r.Context(), &item); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
 	writeJSON(w, 200, item)

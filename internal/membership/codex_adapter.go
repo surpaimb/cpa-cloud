@@ -437,7 +437,15 @@ func (a *CodexDirectAdapter) Complete(ctx context.Context, credential *CodexAuth
 // ValidateCredentialForScheduling performs the same local-only credential
 // checks used immediately before a request. It never performs network I/O.
 func (a *CodexDirectAdapter) ValidateCredentialForScheduling(credential *CodexAuthCredential) error {
-	_, _, err := a.validateCredential(credential)
+	_, _, err := a.validateCredential(credential, minimumCodexTokenLifetime)
+	return err
+}
+
+// ValidateCredentialForExecution accepts a token until its actual expiry.
+// Refresh coordination may deliberately continue using a still-valid token
+// when rotation is paused after an uncertain provider outcome.
+func (a *CodexDirectAdapter) ValidateCredentialForExecution(credential *CodexAuthCredential) error {
+	_, _, err := a.validateCredential(credential, 0)
 	return err
 }
 
@@ -492,7 +500,7 @@ func (a *CodexDirectAdapter) execute(ctx context.Context, credential *CodexAuthC
 	if a == nil || a.client == nil || a.endpoint == "" || a.now == nil || a.rand == nil {
 		return nil, newCodexAdapterError(CodexErrorInvalidRequest)
 	}
-	accessToken, accountID, err := a.validateCredential(credential)
+	accessToken, accountID, err := a.validateCredential(credential, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -538,7 +546,7 @@ func (a *CodexDirectAdapter) execute(ctx context.Context, credential *CodexAuthC
 	return result, nil
 }
 
-func (a *CodexDirectAdapter) validateCredential(credential *CodexAuthCredential) (string, string, error) {
+func (a *CodexDirectAdapter) validateCredential(credential *CodexAuthCredential, minimumLifetime time.Duration) (string, string, error) {
 	if credential == nil || credential.CredentialKind() != "codex_chatgpt_oauth" {
 		return "", "", newCodexAdapterError(CodexErrorInvalidRequest)
 	}
@@ -560,10 +568,17 @@ func (a *CodexDirectAdapter) validateCredential(credential *CodexAuthCredential)
 	if expiryErr != nil {
 		return "", "", newCodexAdapterError(CodexErrorAccessTokenInvalid)
 	}
-	if !expiresAt.After(a.now().Add(minimumCodexTokenLifetime)) {
+	if !expiresAt.After(a.now().Add(minimumLifetime)) {
 		return "", "", newCodexAdapterError(CodexErrorReauthentication)
 	}
 	return accessToken, accountID, nil
+}
+
+// CodexAccessTokenExpiresAt returns the unverified expiry carried by a Codex
+// access token. It is used only for local refresh scheduling; it does not
+// authenticate the token or its claims.
+func CodexAccessTokenExpiresAt(token string) (time.Time, error) {
+	return codexAccessTokenExpiry(token)
 }
 
 func codexAccessTokenExpiry(token string) (time.Time, error) {

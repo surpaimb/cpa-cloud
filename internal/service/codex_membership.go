@@ -141,6 +141,7 @@ func (a *App) importCodexUpstream(w http.ResponseWriter, r *http.Request, _ admi
 		ID: id, Name: input.Name, ProviderKind: codexMembershipProvider, Endpoint: codexMembershipEndpoint,
 		Enabled: true, Revision: 1, CredentialState: &state,
 	}
+	item.OAuthRefresh = a.codexOAuthRefreshView(codexMembershipProvider, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{})
 	tx, err := a.store.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
@@ -239,10 +240,15 @@ func (a *App) replaceCodexCredential(w http.ResponseWriter, r *http.Request, _ a
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM codex_oauth_refresh_states WHERE upstream_id=?`, id); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
+	item.OAuthRefresh = a.codexOAuthRefreshView(codexMembershipProvider, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{})
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -264,7 +270,14 @@ func (a *App) loadUpstreamByOperation(ctx context.Context, operationID string) (
 	if err != nil {
 		return upstreamView{}, err
 	}
-	return loadUpstreamView(ctx, a.store.db, id)
+	item, err := loadUpstreamView(ctx, a.store.db, id)
+	if err != nil {
+		return upstreamView{}, err
+	}
+	if err := a.decorateUpstreamOAuthRefresh(ctx, &item); err != nil {
+		return upstreamView{}, err
+	}
+	return item, nil
 }
 
 func loadUpstreamView(ctx context.Context, query queryRower, id string) (upstreamView, error) {

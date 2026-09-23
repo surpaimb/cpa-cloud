@@ -41,6 +41,7 @@ Creates an authorization session and returns only:
 
 ```json
 {
+  "session_id":"oauth_opaque_id",
   "authorization_url":"https://auth.openai.com/oauth/authorize?...",
   "expires_at":"RFC3339"
 }
@@ -52,6 +53,18 @@ administrator session, name and expiry are persisted; plaintext state and
 verifier are never exposed by a separate read API.
 The operation ID is idempotent for the same active administrator session. An
 authorization session expires after ten minutes.
+
+`GET /admin/api/v1/upstreams/codex-oauth-sessions/{session_id}` is readable
+only by the exact administrator login session that created it. It returns only
+`session_id`, `status`, `expires_at`, and optional `upstream_id` or fixed
+`error_code`. Status is one of `pending`, `exchanging`, `succeeded`, `failed`,
+`cancelled`, or `expired`; authorization URLs, state, codes, tokens and account
+identifiers are never returned. A different login session receives 404. A
+configuration mismatch is projected as a redacted failure without consuming
+the pending authorization, so restoring the snapshot configuration restores
+the pending view. Startup converts a stranded `exchanging` session to failed
+with `authorization_result_unknown`; `used_at` alone is never interpreted as
+success.
 
 The encrypted session secret also snapshots the configured client ID and exact
 redirect URI. Idempotent retries and callbacks must match that snapshot. A
@@ -101,7 +114,8 @@ codex_refresh_not_bound` before decrypting a refresh token or contacting the
 token endpoint. Administrator replacement atomically deletes any previous
 OAuth binding.
 
-The status response adds `features.codex_membership_oauth` and a limitation
+The status response adds `features.codex_membership_oauth`,
+`features.codex_membership_auto_refresh`, and a limitation
 when the experiment is enabled but the client configuration is incomplete.
 This backend batch does not claim a complete web UI; the web client may add a
 button and callback status view in a later batch.
@@ -124,40 +138,56 @@ button and callback status view in a later batch.
   existing direct adapter can form its observed request. This is a structural
   extraction, not signature or account verification. Online inference success
   remains the transition that marks an account `verified`.
-- Exchange failure creates no upstream and leaves no reusable state. Refresh
-  failure does not update ciphertext, revision, verification timestamp or
-  account state, except that an allowlisted `invalid_grant` or HTTP 401 changes
-  the state to `reauth_required` under the same revision condition.
+- Exchange failure creates no upstream and leaves no reusable code. A refresh
+  network/read/5xx failure, malformed success response, or failure to save a
+  received rotation is an uncertain outcome: ciphertext and revision remain
+  unchanged and a durable pause marker prevents reuse of the old refresh token.
+  An allowlisted `invalid_grant` or HTTP 401 instead changes the state to
+  `reauth_required` under the same revision condition.
 
 ## Concurrency, retries, and re-import races
 
-- Refreshes are serialized per upstream within the service process. A waiter
-  reads the newest revision after acquiring the lock rather than reusing an
-  earlier credential snapshot.
+- Manual, background, Chat, Responses and discovery acquisition share one
+  per-upstream cancellable lock. A waiter reads the newest revision and
+  ciphertext after acquiring it rather than reusing an earlier route snapshot.
 - The token response is saved only with `WHERE revision = <revision read before
   refresh>`. Administrator re-import/replace therefore wins; a stale refresh
   never overwrites it. Success increments the upstream revision once and clears
   `verified_at` to `imported_unverified` because the rotated credential has not
   completed an inference request yet.
-- Refresh makes one request for network errors, timeouts, response read
-  failures and HTTP 5xx because a rotated response may have been lost. These
-  failures preserve ciphertext, revision, verified timestamp and credential
-  state. Only an explicit HTTP 429 response, excluding `invalid_grant` and 401,
-  uses bounded backoff with a capped `Retry-After`, for at most three total
-  attempts. There is no recursive or background retry generator in this batch.
+- Before any refresh HTTP request the service persists `in_progress` with the
+  credential revision. Network errors, timeouts, response read failures and
+  HTTP 5xx are sent once and transition that marker to `paused`; they are never
+  replayed automatically or manually. Only an explicit HTTP 429 response,
+  excluding `invalid_grant` and 401, uses bounded backoff with a capped
+  `Retry-After`, for at most three total attempts, then returns to `ready`.
+- The background worker scans at most 16 eligible rows per pass, runs at most
+  two refreshes concurrently, and advances a stable cursor so later rows cannot
+  be starved by long-lived earlier credentials. Disabled, imported, unknown-
+  source and client-mismatched rows are not refreshed or mutated. `Start` and
+  `Close` own worker cancellation; request waiters honor their own context.
+- While refresh is paused, an access token remains usable until its actual
+  expiry. No paused path sends the old refresh token again. Re-import deletes
+  both provenance and lifecycle state; a new authorization creates fresh
+  provenance and a `ready` marker.
 - The refresh endpoint uses the caller's expected revision as an admission
   check. If another refresh or administrator change wins first, the caller gets
   `revision_conflict`; the winning credential remains intact.
 
 ## Persistence and recovery
 
-A transactionally created `codex_oauth_sessions` table stores only state
+A transactionally migrated `codex_oauth_sessions` table stores only state
 digests, AEAD ciphertext for state/PKCE verifier and the client/redirect
 snapshot, administrator/session bindings, expiry, use time and non-secret
-metadata. Startup deletes expired or used sessions.
+metadata plus the redacted lifecycle result. Startup marks expired pending
+sessions and stranded exchanges; it does not infer success from use time.
 `codex_oauth_bindings` is created in a checked transaction and stores the
 non-secret client ID plus `authorization_code` provenance under an upstream
 foreign key. Legacy credentials intentionally receive no inferred binding.
+`codex_oauth_refresh_states` stores only `ready`, `in_progress`, `paused`, or
+`reauth_required`, a fixed reason code, attempt revision and update time.
+Startup turns every persisted `in_progress` row into `paused` before the worker
+starts, closing the process-crash replay window.
 Schema initialization and migration are idempotent; any failing statement rolls
 back without modifying existing upstream credentials, routes, employees, keys,
 or request history.
@@ -172,14 +202,15 @@ missing configuration, fixed target construction, PKCE/state, session binding,
 CSRF/Origin enforcement, TTL, callback replay, single-attempt code exchange,
 configuration drift without state consumption, AEAD at rest, OAuth provenance,
 token rotation, redaction, invalid-grant/401 reauthorization, bounded 429-only
-retry, ambiguous lost-response preservation, concurrent refresh serialization,
-re-import binding removal, failed-save rollback, binding migration retry,
-restart recovery and the existing import path. They do not send real
+retry, durable ambiguous-outcome pause, concurrent refresh serialization,
+cancellable wait, re-import binding removal, failed-save pause, migration
+rollback, fair bounded scanning, restart recovery and on-demand refresh through
+Chat and Responses. They do not send real
 credentials or requests to OpenAI.
 
-The implemented product surface in this batch is backend authorization plus an
-explicit administrator-triggered refresh endpoint. There is no web-console
-entry point, background/automatic refresh scheduler, or real-account
+The implemented product surface is backend authorization, redacted session
+status, explicit refresh, request-side refresh and a bounded in-process
+background scheduler. There is no web-console entry point or real-account
 compatibility verification yet.
 
 ## Public protocol sources
