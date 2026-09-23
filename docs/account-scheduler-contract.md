@@ -13,12 +13,14 @@ lease, decision := scheduler.Acquire(ctx, scheduling.Request{...})
 released, releaseDecision := lease.Release(scheduling.ReleaseResult{...})
 ```
 
-选择顺序为：allowlist → enabled/provider/model → 冷却与容量 → 最高优先级 → 同优先级权重。粘滞账号只在当前请求允许且可用的最高优先级池内复用；禁用、越权、冷却或满载时不会强行粘滞。
+选择顺序为：allowlist → enabled/provider/model → 冷却与容量 → 已有粘滞绑定 → 新选择的最高优先级 → 同优先级权重。已有粘滞账号只要仍在当前请求允许、兼容、健康且有容量的集合中就优先复用；priority 只影响没有可复用绑定时的新选择。禁用、越权、冷却或满载时不会强行粘滞。
+
+粘滞绑定有独立 TTL 和容量上限；复用或重新选择会刷新该键的 TTL，过期绑定会清理，达到上限时淘汰最早到期的绑定。因此，来自大量会话键的输入不会让进程内映射无限增长。候选数量、单账号权重和粘滞键长度也有界；权重累加在调用随机选择前检查整数溢出，越界请求返回 `invalid_request`。
 
 ## 租约、等待与恢复
 
 - `Acquire` 在容量暂不可用时进入有界等待队列；队列满、context 取消和无允许/兼容账号分别返回固定 reason。
-- 每个租约占一个账号容量并带 TTL。`Release` 只生效一次；重复释放不重复减容量或延长冷却。
+- 每个租约占一个账号容量并带 TTL。调用侧必须在长请求仍活跃时周期调用 `Lease.Renew()`，心跳间隔应短于租约 TTL；续租把有效期延到当前时间加 TTL。已经到期或释放的租约不能续租，也不会重新取得容量。`Release` 只生效一次；重复释放不重复减容量或延长冷却。
 - TTL 到期由后续 Acquire、Release 或 Snapshot 回收，并唤醒等待者。调用侧应及时持久化 `Snapshot()`；重启时把尚未过期的快照传入 `Config.RestoredLeases`。过期快照被忽略，因此崩溃不会永久占位。
 - Clock 和 Random 可注入。生产默认实现仅使用进程时间与本地伪随机选择；本模块没有跨节点一致性。未来多节点接线必须用共享租约存储重新设计，不能把单进程互斥当作分布式锁。
 

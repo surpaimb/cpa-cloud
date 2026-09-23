@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+const (
+	maxCandidates      = 10_000
+	maxCandidateWeight = 1_000_000
+	maxStickyKeyBytes  = 512
+)
+
 type ReasonCode string
 
 const (
@@ -87,6 +93,8 @@ type Config struct {
 	Clock          Clock
 	Random         Random
 	LeaseTTL       time.Duration
+	StickyTTL      time.Duration
+	MaxSticky      int
 	MaxWaiters     int
 	Cooldowns      map[FailureClass]time.Duration
 	RestoredLeases []LeaseSnapshot
@@ -97,6 +105,8 @@ type Scheduler struct {
 	clock     Clock
 	random    Random
 	leaseTTL  time.Duration
+	stickyTTL time.Duration
+	maxSticky int
 	maxWaiter int
 	cooldowns map[FailureClass]time.Duration
 	waiters   int
@@ -105,10 +115,16 @@ type Scheduler struct {
 	leases    map[string]LeaseSnapshot
 	inUse     map[string]int
 	cooldown  map[string]time.Time
-	sticky    map[string]string
+	sticky    map[string]stickyBinding
+}
+
+type stickyBinding struct {
+	accountID string
+	expiresAt time.Time
 }
 
 type Lease struct {
+	mu        sync.Mutex
 	scheduler *Scheduler
 	id        string
 	accountID string
@@ -131,7 +147,24 @@ func (l *Lease) ExpiresAt() time.Time {
 	if l == nil {
 		return time.Time{}
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.expiresAt
+}
+
+// Renew extends an active lease by the configured TTL. It fails after expiry
+// or release and never recreates capacity ownership.
+func (l *Lease) Renew() (time.Time, bool) {
+	if l == nil || l.scheduler == nil {
+		return time.Time{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	expiresAt, ok := l.scheduler.renew(l.id)
+	if ok {
+		l.expiresAt = expiresAt
+	}
+	return expiresAt, ok
 }
 
 // Release succeeds exactly once. Later calls return the original no-op signal
@@ -140,6 +173,8 @@ func (l *Lease) Release(result ReleaseResult) (bool, Decision) {
 	if l == nil || l.scheduler == nil {
 		return false, Decision{Code: ReasonInvalidRequest}
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.scheduler.release(l.id, result)
 }
 
@@ -170,10 +205,16 @@ func New(config Config) *Scheduler {
 	if config.LeaseTTL <= 0 {
 		config.LeaseTTL = 2 * time.Minute
 	}
+	if config.StickyTTL <= 0 {
+		config.StickyTTL = 30 * time.Minute
+	}
+	if config.MaxSticky <= 0 {
+		config.MaxSticky = 10_000
+	}
 	if config.MaxWaiters < 0 {
 		config.MaxWaiters = 0
 	}
-	s := &Scheduler{clock: config.Clock, random: config.Random, leaseTTL: config.LeaseTTL, maxWaiter: config.MaxWaiters, cooldowns: map[FailureClass]time.Duration{}, notify: make(chan struct{}), leases: map[string]LeaseSnapshot{}, inUse: map[string]int{}, cooldown: map[string]time.Time{}, sticky: map[string]string{}}
+	s := &Scheduler{clock: config.Clock, random: config.Random, leaseTTL: config.LeaseTTL, stickyTTL: config.StickyTTL, maxSticky: config.MaxSticky, maxWaiter: config.MaxWaiters, cooldowns: map[FailureClass]time.Duration{}, notify: make(chan struct{}), leases: map[string]LeaseSnapshot{}, inUse: map[string]int{}, cooldown: map[string]time.Time{}, sticky: map[string]stickyBinding{}}
 	for k, v := range config.Cooldowns {
 		if v > 0 {
 			s.cooldowns[k] = v
@@ -194,12 +235,15 @@ func New(config Config) *Scheduler {
 }
 
 func (s *Scheduler) Acquire(ctx context.Context, request Request) (*Lease, Decision) {
-	if ctx == nil || request.Provider == "" || request.Model == "" || len(request.AllowedAccountIDs) == 0 || len(request.Candidates) == 0 {
+	if ctx == nil || request.Provider == "" || request.Model == "" || len(request.AllowedAccountIDs) == 0 || len(request.Candidates) == 0 || len(request.Candidates) > maxCandidates || len(request.StickyKey) > maxStickyKeyBytes {
 		return nil, Decision{Code: ReasonInvalidRequest}
+	}
+	if ctx.Err() != nil {
+		return nil, Decision{Code: ReasonCancelled}
 	}
 	seenCandidates := make(map[string]struct{}, len(request.Candidates))
 	for _, candidate := range request.Candidates {
-		if candidate.ID == "" || candidate.Provider == "" || candidate.Weight < 0 || candidate.Capacity < 0 {
+		if candidate.ID == "" || candidate.Provider == "" || candidate.Weight < 0 || candidate.Weight > maxCandidateWeight || candidate.Capacity < 0 {
 			return nil, Decision{Code: ReasonInvalidRequest}
 		}
 		if _, duplicate := seenCandidates[candidate.ID]; duplicate {
@@ -228,9 +272,33 @@ func (s *Scheduler) Acquire(ctx context.Context, request Request) (*Lease, Decis
 		s.mu.Lock()
 		now := s.clock.Now()
 		s.cleanupExpiredLocked(now)
+		if ctx.Err() != nil {
+			if waiting {
+				s.waiters--
+				waiting = false
+			}
+			s.mu.Unlock()
+			return nil, Decision{Code: ReasonCancelled}
+		}
 		available, compatible, allowedFound, nextWake := s.availableLocked(request, allowed, now)
 		if len(available) > 0 {
-			candidate := s.chooseLocked(available, request.StickyKey)
+			candidate, ok := s.chooseLocked(available, request.StickyKey)
+			if !ok {
+				if waiting {
+					s.waiters--
+					waiting = false
+				}
+				s.mu.Unlock()
+				return nil, Decision{Code: ReasonInvalidRequest}
+			}
+			if ctx.Err() != nil {
+				if waiting {
+					s.waiters--
+					waiting = false
+				}
+				s.mu.Unlock()
+				return nil, Decision{Code: ReasonCancelled}
+			}
 			lease := s.createLeaseLocked(candidate.ID, request.StickyKey, now)
 			if waiting {
 				s.waiters--
@@ -330,7 +398,16 @@ func (s *Scheduler) availableLocked(request Request, allowed map[string]struct{}
 	return available, compatible, allowedFound, next
 }
 
-func (s *Scheduler) chooseLocked(candidates []Candidate, stickyKey string) Candidate {
+func (s *Scheduler) chooseLocked(candidates []Candidate, stickyKey string) (Candidate, bool) {
+	if stickyKey != "" {
+		if binding, ok := s.sticky[stickyKey]; ok {
+			for _, c := range candidates {
+				if c.ID == binding.accountID {
+					return c, true
+				}
+			}
+		}
+	}
 	best := candidates[0].Priority
 	for _, c := range candidates[1:] {
 		if c.Priority > best {
@@ -343,31 +420,28 @@ func (s *Scheduler) chooseLocked(candidates []Candidate, stickyKey string) Candi
 			pool = append(pool, c)
 		}
 	}
-	if stickyKey != "" {
-		if id := s.sticky[stickyKey]; id != "" {
-			for _, c := range pool {
-				if c.ID == id {
-					return c
-				}
-			}
-		}
-	}
 	total := 0
 	for _, c := range pool {
+		if c.Weight > maxInt()-total {
+			return Candidate{}, false
+		}
 		total += c.Weight
+	}
+	if total <= 0 {
+		return Candidate{}, false
 	}
 	pick := s.random.Intn(total)
 	if pick < 0 {
-		pick = -pick
+		pick = -(pick + 1)
 	}
 	pick %= total
 	for _, c := range pool {
 		if pick < c.Weight {
-			return c
+			return c, true
 		}
 		pick -= c.Weight
 	}
-	return pool[len(pool)-1]
+	return pool[len(pool)-1], true
 }
 
 func (s *Scheduler) createLeaseLocked(accountID, stickyKey string, now time.Time) *Lease {
@@ -383,9 +457,38 @@ func (s *Scheduler) createLeaseLocked(accountID, stickyKey string, now time.Time
 	s.leases[id] = snapshot
 	s.inUse[accountID]++
 	if stickyKey != "" {
-		s.sticky[stickyKey] = accountID
+		s.setStickyLocked(stickyKey, accountID, now)
 	}
 	return &Lease{scheduler: s, id: id, accountID: accountID, expiresAt: snapshot.ExpiresAt}
+}
+
+func (s *Scheduler) setStickyLocked(key, accountID string, now time.Time) {
+	if _, exists := s.sticky[key]; !exists && len(s.sticky) >= s.maxSticky {
+		var evictKey string
+		var evictAt time.Time
+		for candidateKey, binding := range s.sticky {
+			if evictKey == "" || binding.expiresAt.Before(evictAt) || (binding.expiresAt.Equal(evictAt) && candidateKey < evictKey) {
+				evictKey = candidateKey
+				evictAt = binding.expiresAt
+			}
+		}
+		delete(s.sticky, evictKey)
+	}
+	s.sticky[key] = stickyBinding{accountID: accountID, expiresAt: now.Add(s.stickyTTL)}
+}
+
+func (s *Scheduler) renew(id string) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.clock.Now()
+	s.cleanupExpiredLocked(now)
+	snapshot, ok := s.leases[id]
+	if !ok {
+		return time.Time{}, false
+	}
+	snapshot.ExpiresAt = now.Add(s.leaseTTL)
+	s.leases[id] = snapshot
+	return snapshot.ExpiresAt, true
 }
 
 func (s *Scheduler) release(id string, result ReleaseResult) (bool, Decision) {
@@ -443,11 +546,17 @@ func (s *Scheduler) cleanupExpiredLocked(now time.Time) {
 			changed = true
 		}
 	}
+	for key, binding := range s.sticky {
+		if !binding.expiresAt.After(now) {
+			delete(s.sticky, key)
+		}
+	}
 	if changed {
 		s.signalLocked()
 	}
 }
 func (s *Scheduler) signalLocked() { close(s.notify); s.notify = make(chan struct{}) }
+func maxInt() int                  { return int(^uint(0) >> 1) }
 func contains(values []string, want string) bool {
 	for _, v := range values {
 		if v == want {

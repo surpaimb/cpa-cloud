@@ -193,6 +193,180 @@ func TestSchedulerCapacityWaitCancellationQueueAndExactlyOnce(t *testing.T) {
 	}
 }
 
+type cancellingRandom struct {
+	cancel context.CancelFunc
+}
+
+func (r cancellingRandom) Intn(int) int {
+	r.cancel()
+	return 0
+}
+
+func TestSchedulerCancellationBeforeAndDuringLockedSelection(t *testing.T) {
+	a := candidate("a")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := New(Config{})
+	if lease, decision := s.Acquire(cancelled, request(a)); lease != nil || decision.Code != ReasonCancelled {
+		t.Fatalf("initial cancellation lease=%v decision=%+v", lease, decision)
+	}
+	if len(s.Snapshot()) != 0 {
+		t.Fatal("initially cancelled request consumed capacity")
+	}
+
+	lockedContext, cancelLocked := context.WithCancel(context.Background())
+	s = New(Config{Random: cancellingRandom{cancel: cancelLocked}})
+	if lease, decision := s.Acquire(lockedContext, request(a)); lease != nil || decision.Code != ReasonCancelled {
+		t.Fatalf("locked cancellation lease=%v decision=%+v", lease, decision)
+	}
+	if len(s.Snapshot()) != 0 {
+		t.Fatal("request cancelled during selection consumed capacity")
+	}
+}
+
+func TestSchedulerWeightSumOverflowIsRejected(t *testing.T) {
+	s := New(Config{Random: &sequenceRandom{}})
+	a, b := candidate("a"), candidate("b")
+	a.Weight = maxInt()
+	b.Weight = 1
+	if selected, ok := s.chooseLocked([]Candidate{a, b}, ""); ok {
+		t.Fatalf("overflowing pool selected %+v", selected)
+	}
+
+	a.Weight = maxCandidateWeight + 1
+	if lease, decision := s.Acquire(context.Background(), request(a)); lease != nil || decision.Code != ReasonInvalidRequest {
+		t.Fatalf("oversized candidate weight lease=%v decision=%+v", lease, decision)
+	}
+}
+
+func TestSchedulerStickyPrecedesPriorityAndIsBoundedByTTLAndCapacity(t *testing.T) {
+	clock := newFakeClock()
+	s := New(Config{Clock: clock, Random: &sequenceRandom{}, LeaseTTL: time.Minute, StickyTTL: 10 * time.Second, MaxSticky: 2})
+	a, b, c := candidate("a"), candidate("b"), candidate("c")
+	b.Priority = 100
+
+	lease, decision := s.Acquire(context.Background(), Request{Provider: "codex", Model: "gpt", AllowedAccountIDs: []string{"a"}, StickyKey: "one", Candidates: []Candidate{a, b}})
+	if decision.Code != ReasonAcquired || lease.AccountID() != "a" {
+		t.Fatalf("seed sticky decision=%+v lease=%v", decision, lease)
+	}
+	lease.Release(ReleaseResult{})
+	lease, decision = s.Acquire(context.Background(), Request{Provider: "codex", Model: "gpt", AllowedAccountIDs: []string{"a", "b"}, StickyKey: "one", Candidates: []Candidate{a, b}})
+	if decision.Code != ReasonAcquired || lease.AccountID() != "a" {
+		t.Fatalf("healthy sticky lost to priority decision=%+v account=%s", decision, lease.AccountID())
+	}
+	lease.Release(ReleaseResult{})
+
+	clock.Advance(time.Second)
+	lease, _ = s.Acquire(context.Background(), Request{Provider: "codex", Model: "gpt", AllowedAccountIDs: []string{"b"}, StickyKey: "two", Candidates: []Candidate{b}})
+	lease.Release(ReleaseResult{})
+	clock.Advance(time.Second)
+	lease, _ = s.Acquire(context.Background(), Request{Provider: "codex", Model: "gpt", AllowedAccountIDs: []string{"c"}, StickyKey: "three", Candidates: []Candidate{c}})
+	lease.Release(ReleaseResult{})
+
+	s.mu.Lock()
+	_, hasOne := s.sticky["one"]
+	_, hasTwo := s.sticky["two"]
+	_, hasThree := s.sticky["three"]
+	stickyCount := len(s.sticky)
+	s.mu.Unlock()
+	if hasOne || !hasTwo || !hasThree || stickyCount != 2 {
+		t.Fatalf("sticky eviction one=%v two=%v three=%v count=%d", hasOne, hasTwo, hasThree, stickyCount)
+	}
+
+	clock.Advance(11 * time.Second)
+	s.Snapshot()
+	s.mu.Lock()
+	stickyCount = len(s.sticky)
+	s.mu.Unlock()
+	if stickyCount != 0 {
+		t.Fatalf("expired sticky bindings retained: %d", stickyCount)
+	}
+}
+
+func TestSchedulerRenewKeepsCapacityAndFailsAfterExpiryOrRelease(t *testing.T) {
+	clock := newFakeClock()
+	s := New(Config{Clock: clock, LeaseTTL: 10 * time.Second, MaxWaiters: 1})
+	a := candidate("a")
+	active, decision := s.Acquire(context.Background(), request(a))
+	if decision.Code != ReasonAcquired {
+		t.Fatal(decision)
+	}
+
+	type result struct {
+		lease    *Lease
+		decision Decision
+	}
+	waited := make(chan result, 1)
+	go func() {
+		lease, got := s.Acquire(context.Background(), request(a))
+		waited <- result{lease: lease, decision: got}
+	}()
+	clock.waitForTimer(t)
+	clock.Advance(9 * time.Second)
+	renewedUntil, ok := active.Renew()
+	if !ok || !renewedUntil.Equal(clock.Now().Add(10*time.Second)) || !active.ExpiresAt().Equal(renewedUntil) {
+		t.Fatalf("renew ok=%v returned=%v lease=%v", ok, renewedUntil, active.ExpiresAt())
+	}
+	clock.Advance(time.Second)
+	clock.waitForTimer(t)
+	select {
+	case got := <-waited:
+		t.Fatalf("renewed capacity oversold: %+v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+	clock.Advance(9 * time.Second)
+	select {
+	case got := <-waited:
+		if got.lease == nil || got.decision.Code != ReasonAcquired {
+			t.Fatalf("waiter after renewed expiry: %+v", got)
+		}
+		got.lease.Release(ReleaseResult{})
+	case <-time.After(time.Second):
+		t.Fatal("waiter did not acquire after renewed expiry")
+	}
+	if expiresAt, ok := active.Renew(); ok || !expiresAt.IsZero() {
+		t.Fatalf("expired lease renewed ok=%v expires=%v", ok, expiresAt)
+	}
+
+	released, _ := s.Acquire(context.Background(), request(a))
+	if ok, _ := released.Release(ReleaseResult{}); !ok {
+		t.Fatal("fresh lease release failed")
+	}
+	if expiresAt, ok := released.Renew(); ok || !expiresAt.IsZero() {
+		t.Fatalf("released lease renewed ok=%v expires=%v", ok, expiresAt)
+	}
+}
+
+func TestSchedulerConcurrentRenewReleaseAndSnapshot(t *testing.T) {
+	s := New(Config{LeaseTTL: time.Minute})
+	lease, decision := s.Acquire(context.Background(), request(candidate("a")))
+	if decision.Code != ReasonAcquired {
+		t.Fatal(decision)
+	}
+
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for range 100 {
+				lease.Renew()
+				_ = lease.ExpiresAt()
+				_ = s.Snapshot()
+			}
+		}()
+	}
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		lease.Release(ReleaseResult{})
+	}()
+	workers.Wait()
+	if len(s.Snapshot()) != 0 {
+		t.Fatal("concurrent release left an active lease")
+	}
+}
+
 func TestSchedulerConcurrencyCapacityAndTTLRecovery(t *testing.T) {
 	clock := newFakeClock()
 	s := New(Config{Clock: clock, LeaseTTL: 10 * time.Second, MaxWaiters: 8})
