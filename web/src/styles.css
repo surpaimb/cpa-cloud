@@ -326,6 +326,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .proxy-state-summary span, .proxy-state-summary strong, .proxy-state-summary small { display: block; }
 .proxy-state-summary span, .proxy-state-summary small { color: var(--muted); font-size: 12px; }
 .proxy-state-summary strong { margin: 5px 0; }
+.proxy-test-snapshot { display: grid; gap: 5px; padding: 12px 14px; color: #31566c; background: #edf6fa; border: 1px solid #c5dee9; border-radius: 7px; font-size: 13px; }
+.proxy-test-snapshot strong { color: var(--navy); }
 
 .nav-scrim { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }

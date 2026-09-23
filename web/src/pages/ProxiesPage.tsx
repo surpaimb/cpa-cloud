@@ -12,6 +12,7 @@ import {
 import { messageFor } from '../hooks'
 import { Button, Dialog, EmptyState, Field, FormError, Icon, PageState } from '../ui'
 import { PageHeader } from './EmployeesPage'
+import { ProxyHandshakeDialog, type ProxyHandshakeAccount } from '../ProxyHandshake'
 
 type BindingRead = { state: UpstreamProxyState | null; failed: boolean }
 type Bindings = Record<string, BindingRead>
@@ -51,6 +52,7 @@ export function ProxiesPage({ csrf }: { csrf: string }) {
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<OutboundProxy | null>(null)
   const [binding, setBinding] = useState<Upstream | null>(null)
+  const [testingProxyID, setTestingProxyID] = useState<string | null>(null)
   const generation = useRef(0)
 
   const reload = useCallback(async () => {
@@ -95,6 +97,11 @@ export function ProxiesPage({ csrf }: { csrf: string }) {
   }
 
   const proxies = page?.items ?? []
+  const handshakeAccounts: ProxyHandshakeAccount[] = upstreams.flatMap((upstream) => {
+    const state = bindings[upstream.id]?.state
+    return state ? [{ upstream, proxyState: state }] : []
+  })
+  const testingProxy = proxies.find((item) => item.id === testingProxyID)
   return <>
     <PageHeader title="出站代理" description="管理 API Key 账号使用的 HTTPS CONNECT 代理。保存配置不代表代理连通或模型生成正常。">
       <Button onClick={() => setCreating(true)} disabled={unsupported}><Icon name="plus" />添加代理</Button>
@@ -102,14 +109,14 @@ export function ProxiesPage({ csrf }: { csrf: string }) {
     <section className="proxy-notice" aria-label="代理边界说明">
       <strong>连接边界</strong>
       <p>公网 scope 只允许公网地址；公司内网 scope 可访问公司内网代理，但仍不能把模型目标改为内网地址。停用代理不会自动解绑账号。</p>
-      <p>编辑代理不会清除账号的故障冷却或恢复隔离。页面不执行握手测试，也不展示代理密码。</p>
+      <p>编辑代理不会清除账号的故障冷却或恢复隔离。“仅握手检查”只验证 CONNECT 与目标 TLS，不发送模型请求，也不展示代理密码。</p>
     </section>
     <section className="content-panel proxy-panel">
       <div className="section-heading"><div><h2>代理目录</h2><p>连接版本用于执行快照；名称修改不代表连接已变化。</p></div></div>
       <PageState loading={loading} error={error} onRetry={() => void reload()} />
       {!loading && !error && proxies.length === 0 ? <EmptyState title="还没有出站代理" body="添加 HTTPS CONNECT 代理后，可再为支持的 API Key 账号绑定。" action={<Button onClick={() => setCreating(true)}>添加代理</Button>} /> : null}
       {proxies.length ? <div className="table-scroll"><table className="proxy-table"><thead><tr><th>名称</th><th>代理地址</th><th>范围</th><th>认证</th><th>状态</th><th>版本</th><th>操作</th></tr></thead><tbody>
-        {proxies.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small><code>{item.id}</code></small></td><td><code>{item.host}:{item.port}</code><small>HTTPS CONNECT</small></td><td>{item.address_scope === 'private' ? '公司内网' : '公网'}</td><td>{item.has_credentials ? '已保存' : '无认证'}</td><td><span className={`status status--${item.enabled ? 'active' : 'disabled'}`}><i />{item.enabled ? '启用' : '已停用'}</span></td><td>配置 {item.revision}<small>连接 {item.connection_revision}</small></td><td><button className="link-button" onClick={() => setEditing(item)}>编辑 / 启停</button></td></tr>)}
+        {proxies.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small><code>{item.id}</code></small></td><td><code>{item.host}:{item.port}</code><small>HTTPS CONNECT</small></td><td>{item.address_scope === 'private' ? '公司内网' : '公网'}</td><td>{item.has_credentials ? '已保存' : '无认证'}</td><td><span className={`status status--${item.enabled ? 'active' : 'disabled'}`}><i />{item.enabled ? '启用' : '已停用'}</span></td><td>配置 {item.revision}<small>连接 {item.connection_revision}</small></td><td><div className="row-actions"><button className="link-button" onClick={() => setTestingProxyID(item.id)}>仅握手检查</button><button className="link-button" onClick={() => setEditing(item)}>编辑 / 启停</button></div></td></tr>)}
       </tbody></table></div> : null}
       {page?.next_cursor ? <div className="pagination"><span>已显示 {proxies.length} 条</span><Button variant="secondary" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? '读取中…' : '加载更多'}</Button></div> : null}
     </section>
@@ -129,6 +136,7 @@ export function ProxiesPage({ csrf }: { csrf: string }) {
     {creating ? <CreateProxyDialog csrf={csrf} onClose={() => setCreating(false)} onSaved={() => { setCreating(false); void reload() }} /> : null}
     {editing ? <EditProxyDialog key={editing.id} proxyID={editing.id} csrf={csrf} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void reload() }} /> : null}
     {binding ? <BindingDialog key={binding.id} upstream={binding} proxies={proxies} csrf={csrf} onClose={() => setBinding(null)} onSaved={() => { setBinding(null); void reload() }} /> : null}
+    {testingProxy ? <ProxyHandshakeDialog key={testingProxy.id} proxy={testingProxy} accounts={handshakeAccounts} csrf={csrf} onClose={() => setTestingProxyID(null)} /> : null}
   </>
 }
 
