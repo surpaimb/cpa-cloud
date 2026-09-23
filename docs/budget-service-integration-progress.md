@@ -37,6 +37,8 @@
   验证所有 sibling 状态保持 pending/running；去除故障后重试成功，重复恢复不清空原租约。
 - `TestRequestLedgerRecoveryOwnedByAppStartup`：普通打开数据库不提前恢复；真实 `Open` 重启完成联合恢复。
 - 既有独立 accounting 重启及价格迁移测试通过；相关 Go 静态检查通过。
+- 根本地 `go test -p 1 ./internal/service -count=1` 全包回归通过（462.535 秒）；
+  `go vet ./internal/accounting ./internal/service` 通过。此回归仍不包含尚未合入的预算核心/管理配置/网页。
 
 全部为合成数据与本地自动化。尚未执行本分支 Linux race、真实提供商调用、完整预算进程/浏览器验收。
 不发布安装包，不据此宣称已对齐 Sub2API 预算机制。
