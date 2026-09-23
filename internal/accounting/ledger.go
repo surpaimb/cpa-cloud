@@ -508,6 +508,9 @@ func finishRequestTx(ctx context.Context, tx *sql.Tx, input RequestFinish, finis
 }
 
 func (l *Ledger) RecoverInterrupted(ctx context.Context, at time.Time) (RecoveryResult, error) {
+	if l == nil || l.db == nil || ctx == nil {
+		return RecoveryResult{}, ErrInvalid
+	}
 	finishedAt, err := canonicalTime(at)
 	if err != nil {
 		return RecoveryResult{}, err
@@ -517,6 +520,32 @@ func (l *Ledger) RecoverInterrupted(ctx context.Context, at time.Time) (Recovery
 		return RecoveryResult{}, err
 	}
 	defer tx.Rollback()
+	result, err := recoverInterruptedTx(ctx, tx, at, finishedAt)
+	if err != nil {
+		return RecoveryResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RecoveryResult{}, err
+	}
+	return result, nil
+}
+
+// RecoverInterruptedTx marks pending accounting facts interrupted in a
+// caller-owned transaction. It neither commits nor rolls back; its counts
+// describe tentative writes, not confirmed persistence. A caller must reconcile
+// an uncertain commit before inferring recovery succeeded or releasing capacity.
+func (l *Ledger) RecoverInterruptedTx(ctx context.Context, tx *sql.Tx, at time.Time) (RecoveryResult, error) {
+	if l == nil || l.db == nil || ctx == nil || tx == nil {
+		return RecoveryResult{}, ErrInvalid
+	}
+	finishedAt, err := canonicalTime(at)
+	if err != nil {
+		return RecoveryResult{}, err
+	}
+	return recoverInterruptedTx(ctx, tx, at, finishedAt)
+}
+
+func recoverInterruptedTx(ctx context.Context, tx *sql.Tx, at time.Time, finishedAt string) (RecoveryResult, error) {
 	if err := validateRecoveryTime(ctx, tx, at); err != nil {
 		return RecoveryResult{}, err
 	}
@@ -533,9 +562,6 @@ func (l *Ledger) RecoverInterrupted(ctx context.Context, at time.Time) (Recovery
 		return RecoveryResult{}, err
 	}
 	if result.Requests, err = requests.RowsAffected(); err != nil {
-		return RecoveryResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
 		return RecoveryResult{}, err
 	}
 	return result, nil
