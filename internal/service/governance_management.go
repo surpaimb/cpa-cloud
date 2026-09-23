@@ -55,7 +55,7 @@ const governanceGroupMembersDDL = `CREATE TABLE IF NOT EXISTS governance_group_m
 const governanceGroupMembersIndexDDL = `CREATE INDEX IF NOT EXISTS governance_group_members_employee_idx
 	ON governance_group_members(employee_id,group_id)`
 
-const governancePoliciesDDL = `CREATE TABLE IF NOT EXISTS governance_policies (
+const legacyGovernancePoliciesDDL = `CREATE TABLE IF NOT EXISTS governance_policies (
 	id TEXT PRIMARY KEY,
 	scope_kind TEXT NOT NULL CHECK(scope_kind IN ('employee','key','group')),
 	scope_id TEXT NOT NULL,
@@ -71,6 +71,38 @@ const governancePoliciesDDL = `CREATE TABLE IF NOT EXISTS governance_policies (
 	updated_at TEXT NOT NULL,
 	UNIQUE(scope_kind,scope_id),
 	CHECK(rpm_limit IS NOT NULL OR concurrency_limit IS NOT NULL OR shadow_tpm IS NOT NULL OR shadow_cost_micro IS NOT NULL),
+	CHECK(
+		(shadow_cost_micro IS NULL AND shadow_currency IS NULL AND shadow_window IS NULL)
+		OR (shadow_cost_micro IS NOT NULL AND length(shadow_currency)=3 AND shadow_currency GLOB '[A-Z][A-Z][A-Z]' AND shadow_window='rolling_24h')
+	),
+	CHECK(updated_at>=created_at)
+)`
+
+const governancePoliciesDDL = `CREATE TABLE IF NOT EXISTS governance_policies (
+	id TEXT PRIMARY KEY,
+	scope_kind TEXT NOT NULL CHECK(scope_kind IN ('employee','key','group')),
+	scope_id TEXT NOT NULL,
+	enabled INTEGER NOT NULL CHECK(typeof(enabled)='integer' AND enabled IN (0,1)),
+	rpm_limit INTEGER CHECK(rpm_limit IS NULL OR (typeof(rpm_limit)='integer' AND rpm_limit BETWEEN 1 AND 9007199254740991)),
+	concurrency_limit INTEGER CHECK(concurrency_limit IS NULL OR (typeof(concurrency_limit)='integer' AND concurrency_limit BETWEEN 1 AND 9007199254740991)),
+	hard_tpm INTEGER CHECK(hard_tpm IS NULL OR (typeof(hard_tpm)='integer' AND hard_tpm BETWEEN 1 AND 9007199254740991)),
+	hard_cost_micro INTEGER CHECK(hard_cost_micro IS NULL OR (typeof(hard_cost_micro)='integer' AND hard_cost_micro>0)),
+	hard_currency TEXT,
+	hard_window TEXT,
+	unknown_mode TEXT NOT NULL CHECK(unknown_mode IN ('shadow','deny_unknown')),
+	shadow_tpm INTEGER CHECK(shadow_tpm IS NULL OR (typeof(shadow_tpm)='integer' AND shadow_tpm BETWEEN 1 AND 9007199254740991)),
+	shadow_cost_micro INTEGER CHECK(shadow_cost_micro IS NULL OR (typeof(shadow_cost_micro)='integer' AND shadow_cost_micro>0)),
+	shadow_currency TEXT,
+	shadow_window TEXT,
+	revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 9007199254740991),
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	UNIQUE(scope_kind,scope_id),
+	CHECK(rpm_limit IS NOT NULL OR concurrency_limit IS NOT NULL OR hard_tpm IS NOT NULL OR hard_cost_micro IS NOT NULL OR shadow_tpm IS NOT NULL OR shadow_cost_micro IS NOT NULL),
+	CHECK(
+		(hard_cost_micro IS NULL AND hard_currency IS NULL AND hard_window IS NULL)
+		OR (hard_cost_micro IS NOT NULL AND length(hard_currency)=3 AND hard_currency GLOB '[A-Z][A-Z][A-Z]' AND hard_window='rolling_24h')
+	),
 	CHECK(
 		(shadow_cost_micro IS NULL AND shadow_currency IS NULL AND shadow_window IS NULL)
 		OR (shadow_cost_micro IS NOT NULL AND length(shadow_currency)=3 AND shadow_currency GLOB '[A-Z][A-Z][A-Z]' AND shadow_window='rolling_24h')
@@ -134,12 +166,21 @@ type governanceShadowLimits struct {
 	Window    *string `json:"window"`
 }
 
+type governanceBudgetLimits struct {
+	TPM         *int64  `json:"tpm"`
+	CostMicro   *int64  `json:"cost_micro,string"`
+	Currency    *string `json:"currency"`
+	Window      *string `json:"window"`
+	UnknownMode string  `json:"unknown_mode"`
+}
+
 type governancePolicyView struct {
 	ID        string                 `json:"id"`
 	ScopeKind governance.ScopeKind   `json:"scope_kind"`
 	ScopeID   string                 `json:"scope_id"`
 	Enabled   bool                   `json:"enabled"`
 	Hard      governanceHardLimits   `json:"hard"`
+	Budget    governanceBudgetLimits `json:"-"`
 	Shadow    governanceShadowLimits `json:"-"`
 	Revision  int64                  `json:"revision"`
 	CreatedAt string                 `json:"created_at"`
@@ -151,6 +192,7 @@ type governancePolicyInput struct {
 	ScopeID   string
 	Enabled   bool
 	Hard      governanceHardLimits
+	Budget    *governanceBudgetLimits
 	Shadow    governanceShadowLimits
 }
 
@@ -170,16 +212,7 @@ func (s *governanceManagementStore) Migrate(ctx context.Context) error {
 		return errGovernanceManagementUnavailable
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{governanceGroupsDDL, governanceGroupMembersDDL, governanceGroupMembersIndexDDL,
-		governancePoliciesDDL, governanceOperationsDDL, governanceAuditDDL} {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return errGovernanceManagementUnavailable
-		}
-	}
-	if err := validateGovernanceManagementSchema(ctx, tx); err != nil {
-		return err
-	}
-	if err := validateGovernanceManagementData(ctx, tx); err != nil {
+	if err := s.MigrateTx(ctx, tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -188,11 +221,94 @@ func (s *governanceManagementStore) Migrate(ctx context.Context) error {
 	return nil
 }
 
+func (s *governanceManagementStore) schemaVersionTx(ctx context.Context, tx *sql.Tx) (int, error) {
+	if s == nil || s.db == nil || s.core == nil || ctx == nil || tx == nil {
+		return 0, errGovernanceManagementInvalid
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+		'governance_groups','governance_group_members','governance_group_members_employee_idx','governance_policies',
+		'governance_management_operations','governance_management_audit')`).Scan(&count); err != nil {
+		return 0, errGovernanceManagementUnavailable
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	matched, err := governanceManagementSchemaMatches(ctx, tx, governancePoliciesDDL)
+	if err != nil {
+		return 0, err
+	}
+	if matched {
+		return 2, nil
+	}
+	matched, err = governanceManagementSchemaMatches(ctx, tx, legacyGovernancePoliciesDDL)
+	if err != nil {
+		return 0, err
+	}
+	if matched {
+		return 1, nil
+	}
+	return 0, errGovernanceManagementSchema
+}
+
+// MigrateTx upgrades or validates management metadata inside a caller-owned
+// transaction. It does not commit or roll back.
+func (s *governanceManagementStore) MigrateTx(ctx context.Context, tx *sql.Tx) error {
+	version, err := s.schemaVersionTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if version == 1 {
+		if err := validateGovernanceManagementDataVersion(ctx, tx, 1); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE governance_policies RENAME TO governance_policies_legacy_budget`); err != nil {
+			return errGovernanceManagementUnavailable
+		}
+		if _, err := tx.ExecContext(ctx, governancePoliciesDDL); err != nil {
+			return errGovernanceManagementUnavailable
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO governance_policies(id,scope_kind,scope_id,enabled,rpm_limit,concurrency_limit,
+			hard_tpm,hard_cost_micro,hard_currency,hard_window,unknown_mode,shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window,
+			revision,created_at,updated_at)
+			SELECT id,scope_kind,scope_id,enabled,rpm_limit,concurrency_limit,NULL,NULL,NULL,NULL,'shadow',shadow_tpm,shadow_cost_micro,
+			shadow_currency,shadow_window,revision,created_at,updated_at FROM governance_policies_legacy_budget`); err != nil {
+			return errGovernanceManagementUnavailable
+		}
+		if _, err := tx.ExecContext(ctx, `DROP TABLE governance_policies_legacy_budget`); err != nil {
+			return errGovernanceManagementUnavailable
+		}
+	} else if version == 0 {
+		for _, statement := range []string{governanceGroupsDDL, governanceGroupMembersDDL, governanceGroupMembersIndexDDL,
+			governancePoliciesDDL, governanceOperationsDDL, governanceAuditDDL} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return errGovernanceManagementUnavailable
+			}
+		}
+	}
+	if err := validateGovernanceManagementSchema(ctx, tx); err != nil {
+		return err
+	}
+	return validateGovernanceManagementDataVersion(ctx, tx, 2)
+}
+
 func (s *governanceManagementStore) updateSettings(ctx context.Context, actorID, operationID string, expectedRevision int64, enabled bool) (governanceOperationReceipt, error) {
-	payload := struct {
+	return s.updateSettingsPatch(ctx, actorID, operationID, expectedRevision, enabled, nil)
+}
+
+func (s *governanceManagementStore) updateSettingsPatch(ctx context.Context, actorID, operationID string, expectedRevision int64, enabled bool, budgetEnabled *bool) (governanceOperationReceipt, error) {
+	legacyPayload := struct {
 		ExpectedRevision int64 `json:"expected_revision"`
 		Enabled          bool  `json:"enabled"`
 	}{expectedRevision, enabled}
+	var payload any = legacyPayload
+	if budgetEnabled != nil {
+		payload = struct {
+			ExpectedRevision int64 `json:"expected_revision"`
+			Enabled          bool  `json:"enabled"`
+			BudgetEnabled    bool  `json:"budget_enabled"`
+		}{expectedRevision, enabled, *budgetEnabled}
+	}
 	digest, err := governancePayloadDigest(payload)
 	if err != nil || !validGovernanceActor(actorID) || !validGovernanceOperationID(operationID) || !validGovernanceRevision(expectedRevision) {
 		return governanceOperationReceipt{}, errGovernanceManagementInvalid
@@ -212,7 +328,8 @@ func (s *governanceManagementStore) updateSettings(ctx context.Context, actorID,
 		return governanceOperationReceipt{}, err
 	}
 	updatedAt := s.effectiveTime(settings.UpdatedAt)
-	updated, err := s.core.SetEnabledTx(ctx, tx, governance.SettingsUpdate{ExpectedRevision: expectedRevision, Enabled: enabled, UpdatedAt: updatedAt})
+	updated, err := s.core.SetSettingsTx(ctx, tx, governance.SettingsChange{ExpectedRevision: expectedRevision, Enabled: &enabled,
+		BudgetEnabled: budgetEnabled, UpdatedAt: updatedAt})
 	if errors.Is(err, governance.ErrConflict) {
 		return governanceOperationReceipt{}, errGovernanceManagementRevisionConflict
 	}
@@ -376,10 +493,14 @@ func (s *governanceManagementStore) createPolicy(ctx context.Context, actorID, o
 		return governanceOperationReceipt{}, errGovernanceManagementUnavailable
 	}
 	stamp := formatGovernanceTime(s.effectiveTime(time.Time{}))
+	budget := normalizedGovernanceBudget(input.Budget)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO governance_policies(
-		id,scope_kind,scope_id,enabled,rpm_limit,concurrency_limit,shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window,revision,created_at,updated_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?)`, id, input.ScopeKind, input.ScopeID, boolGovernance(input.Enabled), nullableGovernanceInt(input.Hard.RPM),
-		nullableGovernanceInt(input.Hard.Concurrency), nullableGovernanceInt(input.Shadow.TPM), nullableGovernanceInt(input.Shadow.CostMicro),
+		id,scope_kind,scope_id,enabled,rpm_limit,concurrency_limit,hard_tpm,hard_cost_micro,hard_currency,hard_window,unknown_mode,
+		shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window,revision,created_at,updated_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, id, input.ScopeKind, input.ScopeID, boolGovernance(input.Enabled), nullableGovernanceInt(input.Hard.RPM),
+		nullableGovernanceInt(input.Hard.Concurrency), nullableGovernanceInt(budget.TPM), nullableGovernanceInt(budget.CostMicro),
+		nullableGovernanceString(budget.Currency), nullableGovernanceString(budget.Window), budget.UnknownMode,
+		nullableGovernanceInt(input.Shadow.TPM), nullableGovernanceInt(input.Shadow.CostMicro),
 		nullableGovernanceString(input.Shadow.Currency), nullableGovernanceString(input.Shadow.Window), stamp, stamp); err != nil {
 		return governanceOperationReceipt{}, errGovernanceManagementUnavailable
 	}
@@ -395,7 +516,7 @@ func (s *governanceManagementStore) createPolicy(ctx context.Context, actorID, o
 
 func (s *governanceManagementStore) updatePolicy(ctx context.Context, actorID, operationID, id string, expectedRevision int64, input governancePolicyInput) (governanceOperationReceipt, error) {
 	if !validGovernanceActor(actorID) || !validGovernanceOperationID(operationID) || !validGovernanceMetadata(id, 256) ||
-		!validGovernanceRevision(expectedRevision) || !validGovernancePolicyLimits(input) {
+		!validGovernanceRevision(expectedRevision) || !validGovernancePolicyComponents(input) {
 		return governanceOperationReceipt{}, errGovernanceManagementInvalid
 	}
 	digest, _ := governancePayloadDigest(governancePolicyDigestInput(id, expectedRevision, input))
@@ -416,15 +537,26 @@ func (s *governanceManagementStore) updatePolicy(ctx context.Context, actorID, o
 	if policy.Revision != expectedRevision || policy.Revision >= governance.MaxRevision {
 		return governanceOperationReceipt{}, errGovernanceManagementRevisionConflict
 	}
+	if input.Budget == nil {
+		preserved := policy.Budget
+		input.Budget = &preserved
+	}
+	if !validGovernancePolicyLimits(input) {
+		return governanceOperationReceipt{}, errGovernanceManagementInvalid
+	}
 	input.ScopeKind, input.ScopeID = policy.ScopeKind, policy.ScopeID
 	if err := validateGovernanceScopeExists(ctx, tx, input.ScopeKind, input.ScopeID); err != nil {
 		return governanceOperationReceipt{}, err
 	}
 	now := s.effectiveTime(mustParseGovernanceTime(policy.UpdatedAt))
 	stamp := formatGovernanceTime(now)
-	result, err := tx.ExecContext(ctx, `UPDATE governance_policies SET enabled=?,rpm_limit=?,concurrency_limit=?,shadow_tpm=?,shadow_cost_micro=?,
-		shadow_currency=?,shadow_window=?,revision=revision+1,updated_at=? WHERE id=? AND revision=? AND revision<?`, boolGovernance(input.Enabled),
-		nullableGovernanceInt(input.Hard.RPM), nullableGovernanceInt(input.Hard.Concurrency), nullableGovernanceInt(input.Shadow.TPM),
+	budget := normalizedGovernanceBudget(input.Budget)
+	result, err := tx.ExecContext(ctx, `UPDATE governance_policies SET enabled=?,rpm_limit=?,concurrency_limit=?,hard_tpm=?,hard_cost_micro=?,
+		hard_currency=?,hard_window=?,unknown_mode=?,shadow_tpm=?,shadow_cost_micro=?,shadow_currency=?,shadow_window=?,
+		revision=revision+1,updated_at=? WHERE id=? AND revision=? AND revision<?`, boolGovernance(input.Enabled),
+		nullableGovernanceInt(input.Hard.RPM), nullableGovernanceInt(input.Hard.Concurrency), nullableGovernanceInt(budget.TPM),
+		nullableGovernanceInt(budget.CostMicro), nullableGovernanceString(budget.Currency), nullableGovernanceString(budget.Window), budget.UnknownMode,
+		nullableGovernanceInt(input.Shadow.TPM),
 		nullableGovernanceInt(input.Shadow.CostMicro), nullableGovernanceString(input.Shadow.Currency), nullableGovernanceString(input.Shadow.Window),
 		stamp, id, expectedRevision, governance.MaxRevision)
 	if err != nil {
@@ -465,12 +597,14 @@ func (s *governanceManagementStore) ResolveScopesTx(ctx context.Context, tx *sql
 		return governance.Settings{}, nil, errGovernanceManagementInvalid
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT p.scope_kind,p.scope_id,p.id,p.revision,NULL,
-		p.rpm_limit,p.concurrency_limit,p.shadow_tpm,p.shadow_cost_micro,p.shadow_currency,p.shadow_window
+		p.rpm_limit,p.concurrency_limit,p.hard_tpm,p.hard_cost_micro,p.hard_currency,p.hard_window,p.unknown_mode,
+		p.shadow_tpm,p.shadow_cost_micro,p.shadow_currency,p.shadow_window
 		FROM governance_policies p
 		WHERE p.enabled=1 AND ((p.scope_kind='employee' AND p.scope_id=?) OR (p.scope_kind='key' AND p.scope_id=?))
 		UNION ALL
 		SELECT p.scope_kind,p.scope_id,p.id,p.revision,g.revision,
-		p.rpm_limit,p.concurrency_limit,p.shadow_tpm,p.shadow_cost_micro,p.shadow_currency,p.shadow_window
+		p.rpm_limit,p.concurrency_limit,p.hard_tpm,p.hard_cost_micro,p.hard_currency,p.hard_window,p.unknown_mode,
+		p.shadow_tpm,p.shadow_cost_micro,p.shadow_currency,p.shadow_window
 		FROM governance_group_members m
 		JOIN governance_groups g ON g.id=m.group_id
 		JOIN governance_policies p ON p.scope_kind='group' AND p.scope_id=g.id AND p.enabled=1
@@ -483,15 +617,24 @@ func (s *governanceManagementStore) ResolveScopesTx(ctx context.Context, tx *sql
 	scopes := make([]governance.ScopeSnapshot, 0)
 	for rows.Next() {
 		var scope governance.ScopeSnapshot
-		var groupRevision, rpm, concurrency, shadowTPM, shadowCost sql.NullInt64
-		var currency, window sql.NullString
+		var groupRevision, rpm, concurrency, hardTPM, hardCost, shadowTPM, shadowCost sql.NullInt64
+		var hardCurrency, hardWindow, currency, window sql.NullString
 		if err := rows.Scan(&scope.Kind, &scope.ID, &scope.PolicyID, &scope.PolicyRevision, &groupRevision, &rpm, &concurrency,
+			&hardTPM, &hardCost, &hardCurrency, &hardWindow, &scope.UnknownMode,
 			&shadowTPM, &shadowCost, &currency, &window); err != nil {
 			return governance.Settings{}, nil, errGovernanceManagementUnavailable
 		}
 		setGovernanceOptionalInt(&scope.GroupRevision, groupRevision)
 		setGovernanceOptionalInt(&scope.RPMLimit, rpm)
 		setGovernanceOptionalInt(&scope.ConcurrencyLimit, concurrency)
+		setGovernanceOptionalInt(&scope.HardTPM, hardTPM)
+		setGovernanceOptionalInt(&scope.HardCostMicro, hardCost)
+		if hardCurrency.Valid {
+			scope.HardCurrency = hardCurrency.String
+		}
+		if hardWindow.Valid {
+			scope.HardWindow = hardWindow.String
+		}
 		setGovernanceOptionalInt(&scope.ShadowTPM, shadowTPM)
 		setGovernanceOptionalInt(&scope.ShadowCostMicro, shadowCost)
 		if currency.Valid {
@@ -518,17 +661,18 @@ func (s *governanceManagementStore) effectiveTime(floor time.Time) time.Time {
 
 func readGovernanceSettingsTx(ctx context.Context, tx *sql.Tx) (governance.Settings, error) {
 	var item governance.Settings
-	var enabled int
+	var enabled, budgetEnabled int
 	var last sql.NullString
 	var updated string
-	if err := tx.QueryRowContext(ctx, `SELECT enabled,revision,last_effective_admission_at,updated_at FROM governance_settings WHERE singleton=1`).
-		Scan(&enabled, &item.Revision, &last, &updated); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT enabled,budget_enabled,revision,last_effective_admission_at,updated_at FROM governance_settings WHERE singleton=1`).
+		Scan(&enabled, &budgetEnabled, &item.Revision, &last, &updated); err != nil {
 		return governance.Settings{}, errGovernanceManagementUnavailable
 	}
-	if enabled != 0 && enabled != 1 || !validGovernanceRevision(item.Revision) {
+	if enabled != 0 && enabled != 1 || budgetEnabled != 0 && budgetEnabled != 1 || !validGovernanceRevision(item.Revision) {
 		return governance.Settings{}, errGovernanceManagementSchema
 	}
 	item.Enabled = enabled == 1
+	item.BudgetEnabled = budgetEnabled == 1
 	parsed, err := parseCanonicalGovernanceTime(updated)
 	if err != nil {
 		return governance.Settings{}, errGovernanceManagementSchema
@@ -676,9 +820,18 @@ func validGovernancePolicyInput(input governancePolicyInput) bool {
 }
 
 func validGovernancePolicyLimits(input governancePolicyInput) bool {
+	if !validGovernancePolicyComponents(input) {
+		return false
+	}
+	budget := normalizedGovernanceBudget(input.Budget)
+	return input.Hard.RPM != nil || input.Hard.Concurrency != nil || budget.TPM != nil || budget.CostMicro != nil || input.Shadow.TPM != nil || input.Shadow.CostMicro != nil
+}
+
+func validGovernancePolicyComponents(input governancePolicyInput) bool {
+	budget := normalizedGovernanceBudget(input.Budget)
 	if !validGovernanceSafeLimit(input.Hard.RPM) || !validGovernanceSafeLimit(input.Hard.Concurrency) ||
-		!validGovernanceSafeLimit(input.Shadow.TPM) || !validGovernanceCostLimit(input.Shadow.CostMicro) ||
-		input.Hard.RPM == nil && input.Hard.Concurrency == nil && input.Shadow.TPM == nil && input.Shadow.CostMicro == nil {
+		!validGovernanceSafeLimit(budget.TPM) || !validGovernanceCostLimit(budget.CostMicro) || !validGovernanceBudget(budget) ||
+		!validGovernanceSafeLimit(input.Shadow.TPM) || !validGovernanceCostLimit(input.Shadow.CostMicro) {
 		return false
 	}
 	if input.Shadow.CostMicro == nil {
@@ -695,8 +848,37 @@ func validGovernancePolicyLimits(input governancePolicyInput) bool {
 	return true
 }
 
+func normalizedGovernanceBudget(input *governanceBudgetLimits) governanceBudgetLimits {
+	if input == nil {
+		return governanceBudgetLimits{UnknownMode: "shadow"}
+	}
+	value := *input
+	if value.UnknownMode == "" {
+		value.UnknownMode = "shadow"
+	}
+	return value
+}
+
+func validGovernanceBudget(input governanceBudgetLimits) bool {
+	if input.UnknownMode != "shadow" && input.UnknownMode != "deny_unknown" {
+		return false
+	}
+	if input.CostMicro == nil {
+		return input.Currency == nil && input.Window == nil
+	}
+	if input.Currency == nil || input.Window == nil || len(*input.Currency) != 3 || *input.Window != governance.ShadowWindowRolling24h {
+		return false
+	}
+	for _, b := range []byte(*input.Currency) {
+		if b < 'A' || b > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
 func governancePolicyDigestInput(id string, expected int64, input governancePolicyInput) any {
-	return struct {
+	legacy := struct {
 		ID               string                 `json:"id,omitempty"`
 		ExpectedRevision int64                  `json:"expected_revision,omitempty"`
 		ScopeKind        governance.ScopeKind   `json:"scope_kind,omitempty"`
@@ -705,6 +887,19 @@ func governancePolicyDigestInput(id string, expected int64, input governancePoli
 		Hard             governanceHardLimits   `json:"hard"`
 		Shadow           governanceShadowLimits `json:"shadow"`
 	}{id, expected, input.ScopeKind, input.ScopeID, input.Enabled, input.Hard, input.Shadow}
+	if input.Budget == nil {
+		return legacy
+	}
+	return struct {
+		ID               string                 `json:"id,omitempty"`
+		ExpectedRevision int64                  `json:"expected_revision,omitempty"`
+		ScopeKind        governance.ScopeKind   `json:"scope_kind,omitempty"`
+		ScopeID          string                 `json:"scope_id,omitempty"`
+		Enabled          bool                   `json:"enabled"`
+		Hard             governanceHardLimits   `json:"hard"`
+		Budget           governanceBudgetLimits `json:"budget"`
+		Shadow           governanceShadowLimits `json:"shadow"`
+	}{id, expected, input.ScopeKind, input.ScopeID, input.Enabled, input.Hard, normalizedGovernanceBudget(input.Budget), input.Shadow}
 }
 
 type governanceManagementQueryer interface {
@@ -760,11 +955,13 @@ func loadGovernancePolicy(ctx context.Context, query interface {
 }, id string) (governancePolicyView, error) {
 	var item governancePolicyView
 	var enabled int
-	var rpm, concurrency, tpm, cost sql.NullInt64
-	var currency, window sql.NullString
-	err := query.QueryRowContext(ctx, `SELECT id,scope_kind,scope_id,enabled,rpm_limit,concurrency_limit,shadow_tpm,shadow_cost_micro,
-		shadow_currency,shadow_window,revision,created_at,updated_at FROM governance_policies WHERE id=?`, id).Scan(
-		&item.ID, &item.ScopeKind, &item.ScopeID, &enabled, &rpm, &concurrency, &tpm, &cost, &currency, &window,
+	var rpm, concurrency, hardTPM, hardCost, tpm, cost sql.NullInt64
+	var hardCurrency, hardWindow, currency, window sql.NullString
+	err := query.QueryRowContext(ctx, `SELECT id,scope_kind,scope_id,enabled,rpm_limit,concurrency_limit,hard_tpm,hard_cost_micro,
+		hard_currency,hard_window,unknown_mode,shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window,revision,created_at,updated_at
+		FROM governance_policies WHERE id=?`, id).Scan(
+		&item.ID, &item.ScopeKind, &item.ScopeID, &enabled, &rpm, &concurrency, &hardTPM, &hardCost, &hardCurrency, &hardWindow,
+		&item.Budget.UnknownMode, &tpm, &cost, &currency, &window,
 		&item.Revision, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return item, errGovernanceManagementNotFound
@@ -775,6 +972,16 @@ func loadGovernancePolicy(ctx context.Context, query interface {
 	item.Enabled = enabled == 1
 	setGovernanceOptionalInt(&item.Hard.RPM, rpm)
 	setGovernanceOptionalInt(&item.Hard.Concurrency, concurrency)
+	setGovernanceOptionalInt(&item.Budget.TPM, hardTPM)
+	setGovernanceOptionalInt(&item.Budget.CostMicro, hardCost)
+	if hardCurrency.Valid {
+		value := hardCurrency.String
+		item.Budget.Currency = &value
+	}
+	if hardWindow.Valid {
+		value := hardWindow.String
+		item.Budget.Window = &value
+	}
 	setGovernanceOptionalInt(&item.Shadow.TPM, tpm)
 	setGovernanceOptionalInt(&item.Shadow.CostMicro, cost)
 	if currency.Valid {
@@ -842,6 +1049,60 @@ func formatGovernanceTime(value time.Time) string { return value.UTC().Format(ti
 func mustParseGovernanceTime(value string) time.Time {
 	parsed, _ := time.Parse(time.RFC3339Nano, value)
 	return parsed
+}
+
+func governanceManagementSchemaMatches(ctx context.Context, tx *sql.Tx, policyDDL string) (bool, error) {
+	expected := map[string]string{
+		"governance_groups": governanceGroupsDDL, "governance_group_members": governanceGroupMembersDDL,
+		"governance_policies": policyDDL, "governance_management_operations": governanceOperationsDDL,
+		"governance_management_audit": governanceAuditDDL,
+	}
+	for name, ddl := range expected {
+		var kind, actual string
+		if err := tx.QueryRowContext(ctx, `SELECT type,sql FROM sqlite_master WHERE name=?`, name).Scan(&kind, &actual); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return false, nil
+			}
+			return false, errGovernanceManagementUnavailable
+		}
+		if kind != "table" || normalizeGovernanceDDL(actual) != normalizeGovernanceDDL(storedGovernanceDDL(ddl)) {
+			return false, nil
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name IN (
+		'governance_groups','governance_group_members','governance_policies','governance_management_operations','governance_management_audit') AND sql IS NOT NULL`)
+	if err != nil {
+		return false, errGovernanceManagementUnavailable
+	}
+	count := 0
+	mismatch := false
+	for rows.Next() {
+		var name, ddl string
+		if err := rows.Scan(&name, &ddl); err != nil {
+			rows.Close()
+			return false, errGovernanceManagementUnavailable
+		}
+		if name != "governance_group_members_employee_idx" || normalizeGovernanceDDL(ddl) != normalizeGovernanceDDL(storedGovernanceDDL(governanceGroupMembersIndexDDL)) {
+			mismatch = true
+		}
+		count++
+	}
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil || closeErr != nil {
+		return false, errGovernanceManagementUnavailable
+	}
+	if mismatch {
+		return false, nil
+	}
+	if count != 1 {
+		return false, nil
+	}
+	var triggers int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name IN (
+		'governance_groups','governance_group_members','governance_policies','governance_management_operations','governance_management_audit')`).Scan(&triggers); err != nil {
+		return false, errGovernanceManagementUnavailable
+	}
+	return triggers == 0, nil
 }
 
 func validateGovernanceManagementSchema(ctx context.Context, tx *sql.Tx) error {
@@ -917,7 +1178,11 @@ func validateGovernanceManagementSchema(ctx context.Context, tx *sql.Tx) error {
 }
 
 func validateGovernanceManagementData(ctx context.Context, tx *sql.Tx) error {
-	if _, err := readGovernanceSettingsTx(ctx, tx); err != nil {
+	return validateGovernanceManagementDataVersion(ctx, tx, 2)
+}
+
+func validateGovernanceManagementDataVersion(ctx context.Context, tx *sql.Tx, version int) error {
+	if err := validateGovernanceSettingsForMigration(ctx, tx); err != nil {
 		return errGovernanceManagementSchema
 	}
 	groupRows, err := tx.QueryContext(ctx, `SELECT id,name,revision,created_at,updated_at FROM governance_groups ORDER BY id`)
@@ -958,7 +1223,14 @@ func validateGovernanceManagementData(ctx context.Context, tx *sql.Tx) error {
 	if tooLarge != 0 {
 		return errGovernanceManagementSchema
 	}
-	policyRows, err := tx.QueryContext(ctx, `SELECT id,scope_kind,scope_id,enabled,rpm_limit,concurrency_limit,shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window,revision,created_at,updated_at FROM governance_policies ORDER BY id`)
+	policyQuery := `SELECT id,scope_kind,scope_id,enabled,rpm_limit,concurrency_limit,NULL,NULL,NULL,NULL,'shadow',
+		shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window,revision,created_at,updated_at FROM governance_policies ORDER BY id`
+	if version == 2 {
+		policyQuery = `SELECT id,scope_kind,scope_id,enabled,rpm_limit,concurrency_limit,hard_tpm,hard_cost_micro,hard_currency,
+			hard_window,unknown_mode,shadow_tpm,shadow_cost_micro,shadow_currency,shadow_window,revision,created_at,updated_at
+			FROM governance_policies ORDER BY id`
+	}
+	policyRows, err := tx.QueryContext(ctx, policyQuery)
 	if err != nil {
 		return errGovernanceManagementUnavailable
 	}
@@ -966,15 +1238,29 @@ func validateGovernanceManagementData(ctx context.Context, tx *sql.Tx) error {
 		var id, kind, scopeID, created, updated string
 		var enabled int
 		var revision int64
-		var rpm, concurrency, tpm, cost sql.NullInt64
-		var currency, window sql.NullString
-		if err := policyRows.Scan(&id, &kind, &scopeID, &enabled, &rpm, &concurrency, &tpm, &cost, &currency, &window, &revision, &created, &updated); err != nil {
+		var rpm, concurrency, hardTPM, hardCost, tpm, cost sql.NullInt64
+		var hardCurrency, hardWindow, currency, window sql.NullString
+		var unknownMode string
+		if err := policyRows.Scan(&id, &kind, &scopeID, &enabled, &rpm, &concurrency, &hardTPM, &hardCost, &hardCurrency, &hardWindow,
+			&unknownMode, &tpm, &cost, &currency, &window, &revision, &created, &updated); err != nil {
 			policyRows.Close()
 			return errGovernanceManagementSchema
 		}
 		input := governancePolicyInput{ScopeKind: governance.ScopeKind(kind), ScopeID: scopeID, Enabled: enabled == 1}
 		setGovernanceOptionalInt(&input.Hard.RPM, rpm)
 		setGovernanceOptionalInt(&input.Hard.Concurrency, concurrency)
+		budget := governanceBudgetLimits{UnknownMode: unknownMode}
+		setGovernanceOptionalInt(&budget.TPM, hardTPM)
+		setGovernanceOptionalInt(&budget.CostMicro, hardCost)
+		if hardCurrency.Valid {
+			v := hardCurrency.String
+			budget.Currency = &v
+		}
+		if hardWindow.Valid {
+			v := hardWindow.String
+			budget.Window = &v
+		}
+		input.Budget = &budget
 		setGovernanceOptionalInt(&input.Shadow.TPM, tpm)
 		setGovernanceOptionalInt(&input.Shadow.CostMicro, cost)
 		if currency.Valid {
@@ -1092,6 +1378,40 @@ func validateGovernanceManagementData(ctx context.Context, tx *sql.Tx) error {
 		}
 		if violation {
 			return errGovernanceManagementSchema
+		}
+	}
+	return nil
+}
+
+func validateGovernanceSettingsForMigration(ctx context.Context, tx *sql.Tx) error {
+	var budgetColumns int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('governance_settings') WHERE name='budget_enabled'`).Scan(&budgetColumns); err != nil {
+		return errGovernanceManagementUnavailable
+	}
+	if budgetColumns == 1 {
+		_, err := readGovernanceSettingsTx(ctx, tx)
+		return err
+	}
+	if budgetColumns != 0 {
+		return errGovernanceManagementSchema
+	}
+	var enabled int
+	var revision int64
+	var last sql.NullString
+	var updated string
+	if err := tx.QueryRowContext(ctx, `SELECT enabled,revision,last_effective_admission_at,updated_at FROM governance_settings WHERE singleton=1`).
+		Scan(&enabled, &revision, &last, &updated); err != nil {
+		return errGovernanceManagementSchema
+	}
+	if enabled < 0 || enabled > 1 || !validGovernanceRevision(revision) {
+		return errGovernanceManagementSchema
+	}
+	if _, err := parseCanonicalGovernanceTime(updated); err != nil {
+		return err
+	}
+	if last.Valid {
+		if _, err := parseCanonicalGovernanceTime(last.String); err != nil {
+			return err
 		}
 	}
 	return nil

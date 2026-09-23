@@ -355,7 +355,7 @@ func TestGovernanceManagementStrictMigrationRollbackAndStoredValidation(t *testi
 	}
 	insertGovernanceManagementPrincipals(t, base.db)
 	stamp := governanceManagementTestTime.Format(time.RFC3339Nano)
-	if _, err := base.db.Exec(`INSERT INTO governance_policies(id,scope_kind,scope_id,enabled,rpm_limit,revision,created_at,updated_at) VALUES('orphan','employee','missing',1,1,1,?,?)`, stamp, stamp); err != nil {
+	if _, err := base.db.Exec(`INSERT INTO governance_policies(id,scope_kind,scope_id,enabled,rpm_limit,unknown_mode,revision,created_at,updated_at) VALUES('orphan','employee','missing',1,1,'shadow',1,?,?)`, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.Migrate(context.Background()); !errors.Is(err, errGovernanceManagementSchema) {

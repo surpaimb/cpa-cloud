@@ -460,6 +460,9 @@ func TestObservationIndexMigrationStrictRollbackAndRetry(t *testing.T) {
 			if _, err := db.Exec(test.drop); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := db.Exec(`DROP TABLE governance_requests`); err != nil {
+				t.Fatal(err)
+			}
 			if err := coordinator.Migrate(context.Background()); err != nil {
 				t.Fatalf("retry migration: %v", err)
 			}
@@ -478,6 +481,9 @@ func TestObservationIndexMigrationStrictRollbackAndRetry(t *testing.T) {
 		fixture.admit("historical", governanceStart, shadowObservationScope("policy", 1, 100, 0, ""))
 		fixture.finishGovernanceOnly("historical", accounting.StatusSucceeded)
 		if _, err := fixture.db.Exec(`DROP INDEX governance_requests_effective_idx`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.db.Exec(requestsEffectiveIndexDDL); err != nil {
 			t.Fatal(err)
 		}
 		if err := fixture.core.Migrate(context.Background()); err != nil {
