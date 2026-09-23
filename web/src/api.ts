@@ -367,6 +367,35 @@ export type UpstreamPrice = {
   created_at: string
   price: PriceRate | null
 }
+export type GovernanceSettings = { enabled: boolean; revision: number; updated_at: string }
+export type GovernanceGroup = { id: string; name: string; employee_ids: string[]; revision: number; created_at: string; updated_at: string }
+export type GovernanceHardLimits = { rpm: number | null; concurrency: number | null }
+export type GovernanceShadowLimits = { tpm: number | null; cost_micro: string | null; currency: string | null; window: 'rolling_24h' | null }
+export type GovernanceScopeKind = 'employee' | 'key' | 'group'
+export type GovernancePolicy = {
+  id: string
+  scope_kind: GovernanceScopeKind
+  scope_id: string
+  enabled: boolean
+  hard: GovernanceHardLimits
+  shadow: GovernanceShadowLimits
+  revision: number
+  created_at: string
+  updated_at: string
+}
+export type GovernancePage<T> = { items: T[]; next_cursor: string | null }
+export type GovernanceReceipt = {
+  operation_id: string
+  resource_kind: 'settings' | 'group' | 'policy'
+  resource_id: string
+  revision: number
+  created_at: string
+}
+export type GovernancePolicyInput = {
+  enabled: boolean
+  hard: GovernanceHardLimits
+  shadow: GovernanceShadowLimits
+}
 
 function usageSearch(filters: UsageFilters, cursor?: string) {
   const query = new URLSearchParams({ from: filters.from, to: filters.to })
@@ -468,6 +497,31 @@ export const api = {
     request<{ items: UsageAttempt[] }>(`/usage/requests/${encodeURIComponent(requestId)}/attempts`, { signal }),
   upstreamPrices: (upstreamId: string, signal?: AbortSignal) =>
     request<{ items: UpstreamPrice[] }>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { signal }),
+  governanceSettings: (signal?: AbortSignal) => request<GovernanceSettings>('/governance/settings', { signal }),
+  putGovernanceSettings: (body: { operation_id: string; expected_revision: number; enabled: boolean }, csrf: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>('/governance/settings', { method: 'PUT', body: JSON.stringify(body), signal }, csrf),
+  governanceGroups: (afterId?: string, limit = 50, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: String(limit) })
+    if (afterId) query.set('after_id', afterId)
+    return request<GovernancePage<GovernanceGroup>>(`/governance/groups?${query}`, { signal })
+  },
+  governanceGroup: (id: string, signal?: AbortSignal) => request<GovernanceGroup>(`/governance/groups/${encodeURIComponent(id)}`, { signal }),
+  createGovernanceGroup: (body: { operation_id: string; name: string; employee_ids: string[] }, csrf: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>('/governance/groups', { method: 'POST', body: JSON.stringify(body), signal }, csrf),
+  updateGovernanceGroup: (id: string, body: { operation_id: string; expected_revision: number; name: string; employee_ids: string[] }, csrf: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>(`/governance/groups/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body), signal }, csrf),
+  governancePolicies: (afterId?: string, limit = 50, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: String(limit) })
+    if (afterId) query.set('after_id', afterId)
+    return request<GovernancePage<GovernancePolicy>>(`/governance/policies?${query}`, { signal })
+  },
+  governancePolicy: (id: string, signal?: AbortSignal) => request<GovernancePolicy>(`/governance/policies/${encodeURIComponent(id)}`, { signal }),
+  createGovernancePolicy: (body: { operation_id: string; scope_kind: GovernanceScopeKind; scope_id: string } & GovernancePolicyInput, csrf: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>('/governance/policies', { method: 'POST', body: JSON.stringify(body), signal }, csrf),
+  updateGovernancePolicy: (id: string, body: { operation_id: string; expected_revision: number } & GovernancePolicyInput, csrf: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>(`/governance/policies/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body), signal }, csrf),
+  governanceOperation: (operationId: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>(`/governance/operations/${encodeURIComponent(operationId)}`, { signal }),
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
     request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   status: () => request<SystemStatus>('/system/status'),
