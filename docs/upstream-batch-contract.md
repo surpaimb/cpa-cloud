@@ -79,6 +79,12 @@ input returns top-level `409 operation_conflict` before processing any new
 items in that request. Concurrent identical requests converge on one upstream;
 the loser re-reads the committed record.
 
+Credential parsing, endpoint validation, ID generation, and encryption occur
+before entering a dedicated, cancellation-aware batch gate. Only the complete
+idempotency preflight and the short per-item SQLite transactions are serialized.
+Batch preparation therefore does not take the employee request admission lock,
+and a disconnected request does not wait indefinitely for another batch.
+
 Failed validation, encryption, transaction start, insert, or commit is not
 written as an idempotency result. A transient failure can therefore be retried.
 Successfully committed siblings remain idempotent across later item failures,

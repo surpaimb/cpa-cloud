@@ -18,6 +18,11 @@ const (
 	upstreamBatchTable    = "upstream_batch_items"
 )
 
+// The batch gate protects the preflight-and-commit sequence from another
+// in-process batch without blocking employee traffic guarded by App.admission.
+// A channel is used so a disconnected request can stop waiting for the gate.
+var upstreamBatchGate = make(chan struct{}, 1)
+
 type upstreamBatchRequest struct {
 	OperationID string               `json:"operation_id"`
 	Items       []upstreamBatchInput `json:"items"`
@@ -42,6 +47,18 @@ type upstreamBatchResult struct {
 type upstreamBatchRecord struct {
 	Digest     []byte
 	UpstreamID string
+}
+
+type preparedUpstreamBatchItem struct {
+	input           upstreamBatchInput
+	digest          []byte
+	id              string
+	endpoint        string
+	keyVersion      int
+	credentialState any
+	operationValue  any
+	ciphertext      []byte
+	errorCode       string
 }
 
 func (s *store) migrateUpstreamBatchItems(ctx context.Context) error {
@@ -135,10 +152,21 @@ func (a *App) batchImportUpstreams(w http.ResponseWriter, r *http.Request, _ adm
 		digests[i] = digest
 	}
 
-	// Serializing the preflight and item transactions makes conflicting
-	// concurrent requests observe a complete prior result before creating data.
-	a.admission.Lock()
-	defer a.admission.Unlock()
+	prepared := make([]preparedUpstreamBatchItem, len(input.Items))
+	for i := range input.Items {
+		prepared[i] = a.prepareUpstreamBatchItem(r.Context(), input.OperationID, input.Items[i], digests[i])
+	}
+
+	// Only the idempotency preflight and SQLite writes are serialized. Endpoint
+	// resolution, credential parsing, ID generation, and encryption above must
+	// never hold the admission lock used by employee model requests.
+	select {
+	case upstreamBatchGate <- struct{}{}:
+		defer func() { <-upstreamBatchGate }()
+	case <-r.Context().Done():
+		writeAdminError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 
 	for i := range input.Items {
 		record, err := loadUpstreamBatchRecord(r.Context(), a.store.db, input.OperationID, input.Items[i].ItemID)
@@ -161,7 +189,11 @@ func (a *App) batchImportUpstreams(w http.ResponseWriter, r *http.Request, _ adm
 			results[i] = failedUpstreamBatchItem(input.Items[i].ItemID, "storage_unavailable")
 			continue
 		}
-		results[i] = a.createUpstreamBatchItem(r.Context(), input.OperationID, input.Items[i], digests[i])
+		if prepared[i].errorCode != "" {
+			results[i] = failedUpstreamBatchItem(input.Items[i].ItemID, prepared[i].errorCode)
+			continue
+		}
+		results[i] = a.commitUpstreamBatchItem(r.Context(), input.OperationID, prepared[i])
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": results})
 }
@@ -181,21 +213,24 @@ func (a *App) upstreamBatchDigest(operationID string, item *upstreamBatchInput) 
 	return a.secrets.digest("upstream-batch-input/v1", operationID+"\x00"+string(encoded)), nil
 }
 
-func (a *App) createUpstreamBatchItem(ctx context.Context, operationID string, input upstreamBatchInput, digest []byte) upstreamBatchResult {
-	result := upstreamBatchResult{ItemID: input.ItemID}
+func (a *App) prepareUpstreamBatchItem(ctx context.Context, operationID string, input upstreamBatchInput, digest []byte) preparedUpstreamBatchItem {
+	prepared := preparedUpstreamBatchItem{input: input, digest: digest}
 	if !validText(input.Name, 1, 120) {
-		return failedUpstreamBatchItem(input.ItemID, "invalid_item")
+		prepared.errorCode = "invalid_item"
+		return prepared
 	}
 
 	endpoint, keyVersion, credentialState, operationValue, credential, errorCode := a.prepareUpstreamBatchCredential(ctx, operationID, input)
 	if errorCode != "" {
-		return failedUpstreamBatchItem(input.ItemID, errorCode)
+		prepared.errorCode = errorCode
+		return prepared
 	}
 	defer clear(credential)
 
 	id, err := newID("ups")
 	if err != nil {
-		return failedUpstreamBatchItem(input.ItemID, "service_unavailable")
+		prepared.errorCode = "service_unavailable"
+		return prepared
 	}
 	var ciphertext []byte
 	if input.ProviderKind == codexMembershipProvider {
@@ -206,9 +241,20 @@ func (a *App) createUpstreamBatchItem(ctx context.Context, operationID string, i
 		ciphertext, err = a.secrets.encryptCredential(id, string(credential))
 	}
 	if err != nil {
-		return failedUpstreamBatchItem(input.ItemID, "service_unavailable")
+		prepared.errorCode = "service_unavailable"
+		return prepared
 	}
+	prepared.id = id
+	prepared.endpoint = endpoint
+	prepared.keyVersion = keyVersion
+	prepared.credentialState = credentialState
+	prepared.operationValue = operationValue
+	prepared.ciphertext = ciphertext
+	return prepared
+}
 
+func (a *App) commitUpstreamBatchItem(ctx context.Context, operationID string, prepared preparedUpstreamBatchItem) upstreamBatchResult {
+	input := prepared.input
 	tx, err := a.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return failedUpstreamBatchItem(input.ItemID, "storage_unavailable")
@@ -216,9 +262,9 @@ func (a *App) createUpstreamBatchItem(ctx context.Context, operationID string, i
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO upstreams(
 		id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at,credential_state,verified_at,operation_id
-	) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)`, id, input.Name, input.ProviderKind, endpoint, 1, ciphertext, keyVersion, 1, utcNow(), credentialState, operationValue)
+	) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)`, prepared.id, input.Name, input.ProviderKind, prepared.endpoint, 1, prepared.ciphertext, prepared.keyVersion, 1, utcNow(), prepared.credentialState, prepared.operationValue)
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `INSERT INTO upstream_batch_items(operation_id,item_id,input_digest,upstream_id,created_at) VALUES(?,?,?,?,?)`, operationID, input.ItemID, digest, id, utcNow())
+		_, err = tx.ExecContext(ctx, `INSERT INTO upstream_batch_items(operation_id,item_id,input_digest,upstream_id,created_at) VALUES(?,?,?,?,?)`, operationID, input.ItemID, prepared.digest, prepared.id, utcNow())
 	}
 	if err == nil {
 		err = tx.Commit()
@@ -226,15 +272,13 @@ func (a *App) createUpstreamBatchItem(ctx context.Context, operationID string, i
 	if err != nil {
 		_ = tx.Rollback()
 		if isConflict(err) {
-			if record, lookupErr := loadUpstreamBatchRecord(ctx, a.store.db, operationID, input.ItemID); lookupErr == nil && subtle.ConstantTimeCompare(record.Digest, digest) == 1 {
+			if record, lookupErr := loadUpstreamBatchRecord(ctx, a.store.db, operationID, input.ItemID); lookupErr == nil && subtle.ConstantTimeCompare(record.Digest, prepared.digest) == 1 {
 				return upstreamBatchResult{ItemID: input.ItemID, Status: "existing", UpstreamID: record.UpstreamID}
 			}
 		}
 		return failedUpstreamBatchItem(input.ItemID, "storage_unavailable")
 	}
-	result.Status = "created"
-	result.UpstreamID = id
-	return result
+	return upstreamBatchResult{ItemID: input.ItemID, Status: "created", UpstreamID: prepared.id}
 }
 
 func (a *App) prepareUpstreamBatchCredential(ctx context.Context, operationID string, input upstreamBatchInput) (endpoint string, keyVersion int, credentialState any, operationValue any, credential []byte, errorCode string) {

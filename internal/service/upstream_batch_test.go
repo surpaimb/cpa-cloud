@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -64,6 +66,7 @@ func (f *upstreamBatchFixture) startServer() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /admin/api/v1/sessions", f.app.login)
 	mux.HandleFunc("POST /admin/api/v1/upstreams/batch-import", f.app.requireAdmin(f.app.batchImportUpstreams, true))
+	mux.HandleFunc("POST /v1/chat/completions", f.app.chatCompletions)
 	f.server = httptest.NewServer(requestMiddleware(mux))
 	f.cookie, f.csrf = loginTestAdmin(f.t, f.server.URL)
 }
@@ -291,6 +294,103 @@ func TestUpstreamBatchSQLiteFailureRollsBackAndCanRetry(t *testing.T) {
 		t.Fatalf("log representation exposed sensitive fields: %s", rendered)
 	}
 	assertNoBatchPlaintextOnDisk(t, fixture.dataDir, "sqlite-retry-secret")
+}
+
+func TestUpstreamBatchSlowValidationDoesNotBlockEmployeeRequests(t *testing.T) {
+	fixture := newUpstreamBatchFixture(t, false)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	oldResolver := net.DefaultResolver
+	net.DefaultResolver = &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			once.Do(func() { close(started) })
+			select {
+			case <-release:
+				return nil, errors.New("synthetic slow DNS failure")
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	}
+	defer func() {
+		net.DefaultResolver = oldResolver
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+
+	batchDone := make(chan *http.Response, 1)
+	go func() {
+		batchDone <- fixture.request(map[string]any{"operation_id": "780e8400-e29b-41d4-a716-446655440000", "items": []map[string]any{{
+			"item_id": "slow", "name": "Slow", "provider_kind": "openai-compatible", "endpoint": "https://slow-batch.example/v1", "api_key": "slow-validation-secret",
+		}}})
+	}()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("batch endpoint validation did not start")
+	}
+
+	employeeContext, cancelEmployee := context.WithTimeout(context.Background(), time.Second)
+	defer cancelEmployee()
+	employeeResponse := employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/chat/completions", `{"model":"missing","messages":[]}`, "cpac_invalid.invalid", employeeContext)
+	if employeeResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("employee status=%d body=%s", employeeResponse.StatusCode, readBody(employeeResponse))
+	}
+	employeeResponse.Body.Close()
+	close(release)
+
+	select {
+	case response := <-batchDone:
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("batch status=%d body=%s", response.StatusCode, readBody(response))
+		}
+		var result upstreamBatchEnvelope
+		decodeResponse(t, response, &result)
+		if len(result.Items) != 1 || result.Items[0].ErrorCode != "invalid_endpoint" {
+			t.Fatalf("batch result=%+v", result.Items)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("batch did not finish after DNS validation was released")
+	}
+	assertBatchCounts(t, fixture.app, 0, 0)
+}
+
+func TestUpstreamBatchGateWaitHonorsCancellation(t *testing.T) {
+	fixture := newUpstreamBatchFixture(t, false)
+	upstreamBatchGate <- struct{}{}
+	gateHeld := true
+	defer func() {
+		if gateHeld {
+			<-upstreamBatchGate
+		}
+	}()
+
+	body := `{"operation_id":"790e8400-e29b-41d4-a716-446655440000","items":[{"item_id":"cancelled","name":"Cancelled","provider_kind":"gemini-api-key","api_key":"cancelled-secret"}]}`
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, "/admin/api/v1/upstreams/batch-import", strings.NewReader(body)).WithContext(ctx)
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		fixture.app.batchImportUpstreams(recorder, request, adminSession{})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled batch remained blocked on the batch gate")
+	}
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"code":"service_unavailable"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	<-upstreamBatchGate
+	gateHeld = false
+	assertBatchCounts(t, fixture.app, 0, 0)
 }
 
 func TestUpstreamBatchMigrationRestartAndConcurrentRetry(t *testing.T) {
