@@ -103,6 +103,17 @@ export type ModelRoute = {
   upstream_model: string
   enabled: boolean
 }
+export type AccountGroup = { id: string; name: string; revision: number }
+export type AccountChannel = { id: string; name: string; group_id?: string | null; revision: number }
+export type ModelAccount = {
+  upstream_id: string
+  upstream_model: string
+  priority: number
+  weight: number
+  max_concurrency: number
+  channel_id?: string | null
+}
+export type ModelAccounts = { model_id: string; revision: number; items: ModelAccount[] }
 export type DiscoveredModel = {
   id: string
   display_name?: string
@@ -127,6 +138,8 @@ export type SystemStatus = {
     codex_model_discovery?: boolean
     anthropic_native_api?: boolean
     gemini_native_api?: boolean
+    account_pool_configuration?: boolean
+    account_pool_routing?: boolean
   }
 }
 
@@ -153,7 +166,7 @@ export const api = {
     }, csrf),
   revokeKey: (keyId: string, csrf: string) =>
     request<{ ok: true }>(`/keys/${encodeURIComponent(keyId)}/revoke`, { method: 'POST', body: '{}' }, csrf),
-  upstreams: () => request<{ items: Upstream[] }>('/upstreams'),
+  upstreams: (signal?: AbortSignal) => request<{ items: Upstream[] }>('/upstreams', { signal }),
   createUpstream: (body: Record<string, unknown>, csrf: string) =>
     request<Upstream>('/upstreams', { method: 'POST', body: JSON.stringify(body) }, csrf),
   batchImportUpstreams: (body: { operation_id: string; items: UpstreamBatchItem[] }, csrf: string) =>
@@ -175,5 +188,17 @@ export const api = {
   models: () => request<{ items: ModelRoute[] }>('/models'),
   createModel: (body: Record<string, unknown>, csrf: string) =>
     request<ModelRoute>('/models', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  accountGroups: (signal?: AbortSignal) => request<{ items: AccountGroup[] }>('/account-groups', { signal }),
+  createAccountGroup: (body: { name: string }, csrf: string) =>
+    request<AccountGroup>('/account-groups', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  updateAccountGroup: (id: string, body: { expected_revision: number; name: string }, csrf: string) =>
+    request<AccountGroup>(`/account-groups/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
+  accountChannels: (signal?: AbortSignal) => request<{ items: AccountChannel[] }>('/channels', { signal }),
+  createAccountChannel: (body: { name: string; group_id?: string }, csrf: string) =>
+    request<AccountChannel>('/channels', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  modelAccounts: (id: string, signal?: AbortSignal) =>
+    request<ModelAccounts>(`/models/${encodeURIComponent(id)}/accounts`, { signal }),
+  putModelAccounts: (id: string, body: { expected_revision: number; items: ModelAccount[] }, csrf: string) =>
+    request<ModelAccounts>(`/models/${encodeURIComponent(id)}/accounts`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
   status: () => request<SystemStatus>('/system/status'),
 }

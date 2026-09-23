@@ -178,6 +178,29 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .batch-result--existing { color: #536b83; }
 .batch-result--failed { color: var(--danger); }
 .batch-uncertain { margin-top: 12px; padding: 11px 13px; color: #734213; background: #fff7e8; border: 1px solid #f1d39b; border-radius: 7px; font-size: 13px; line-height: 1.55; }
+.pool-directory { display: grid; gap: 26px; }
+.pool-section h3 { margin: 0 0 14px; color: var(--navy); font-size: 17px; }
+.pool-create-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; }
+.pool-create-row--channel { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+.pool-directory-list, .pool-channel-list { display: grid; gap: 10px; margin-top: 14px; }
+.pool-directory-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.pool-directory-row label { color: var(--muted); font-size: 13px; }
+.pool-directory-row input { min-width: 0; width: 100%; padding: 9px 10px; color: #172a40; border: 1px solid #cbd6e0; border-radius: 7px; }
+.pool-channel-list > div { display: flex; justify-content: space-between; gap: 14px; padding: 11px 13px; background: #f7f9fb; border: 1px solid var(--border); border-radius: 7px; }
+.pool-channel-list span { color: var(--muted); font-size: 13px; }
+.pool-reload { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 14px; padding: 12px 13px; color: #734213; background: #fff7e8; border: 1px solid #f1d39b; border-radius: 7px; font-size: 13px; line-height: 1.5; }
+.pool-routing-note, .pool-global-note { margin-bottom: 16px; padding: 12px 14px; color: #5d4a27; background: #fff9ed; border: 1px solid #edd8aa; border-radius: 7px; font-size: 13px; line-height: 1.55; }
+.pool-routing-note--enabled { color: #17654f; background: #eef9f5; border-color: #bfe3d5; }
+.pool-global-note { color: #31566c; background: #edf6fa; border-color: #c5dee9; }
+.pool-account-list { display: grid; gap: 14px; }
+.pool-account-card { min-width: 0; margin: 0; padding: 14px; border: 1px solid var(--border); border-radius: 8px; }
+.pool-account-card legend { padding: 0 7px; color: var(--muted); font-size: 12px; font-weight: 650; }
+.pool-account-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.pool-account-heading strong, .pool-account-heading small { display: block; }
+.pool-account-heading small { margin-top: 5px; color: var(--muted); }
+.pool-disabled-badge { display: inline-block; margin-left: 8px; padding: 2px 6px; color: #8a2f36; background: #fff1f2; border-radius: 4px; font-size: 11px; font-weight: 650; }
+.pool-account-grid { display: grid; grid-template-columns: 1.4fr 1.1fr .7fr .7fr .8fr; gap: 10px; align-items: start; }
+.pool-add-account { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
 .key-create { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 12px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
 .key-list { display: grid; }
 .key-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 15px 0; border-bottom: 1px solid var(--border); }
@@ -234,6 +257,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .membership-panel { align-items: flex-start; flex-direction: column; gap: 14px; }
   .membership-panel__actions { width: 100%; justify-content: flex-start; }
   .status-layout { grid-template-columns: 1fr; }
+  .pool-account-grid { grid-template-columns: 1fr 1fr; }
 }
 
 @media (max-width: 540px) {
@@ -248,4 +272,10 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .batch-preview-heading { flex-direction: column; }
   .discovery-row { grid-template-columns: 1fr; }
   .discovery-row > span { padding-left: 26px; }
+  .pool-create-row, .pool-create-row--channel, .pool-add-account, .pool-directory-row { grid-template-columns: 1fr; }
+  .pool-create-row .button, .pool-add-account .button, .pool-directory-row .button { width: 100%; }
+  .pool-directory-row label { margin-top: 4px; }
+  .pool-account-grid { grid-template-columns: 1fr; }
+  .pool-reload { align-items: stretch; flex-direction: column; }
+  .pool-reload .button { width: 100%; }
 }

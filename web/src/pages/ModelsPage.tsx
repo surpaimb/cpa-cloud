@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, type DiscoveredModel } from '../api'
+import { AccountPoolDirectory, ModelAccountPoolEditor } from '../AccountPool'
 import { messageFor, useResource } from '../hooks'
 import { Button, Dialog, EmptyState, Field, FormError, Icon, PageState } from '../ui'
 import { PageHeader } from './EmployeesPage'
@@ -7,14 +8,23 @@ import { PageHeader } from './EmployeesPage'
 export function ModelsPage({ csrf }: { csrf: string }) {
   const loadModels = useCallback(() => api.models(), [])
   const { data, loading, error, reload } = useResource(loadModels)
+  const loadStatus = useCallback(() => api.status(), [])
+  const { data: status } = useResource(loadStatus)
   const [creating, setCreating] = useState(false)
+  const [managingDirectory, setManagingDirectory] = useState(false)
+  const [poolModel, setPoolModel] = useState<NonNullable<typeof data>['items'][number] | null>(null)
+  const poolConfiguration = status?.features?.account_pool_configuration === true
+  const poolRouting = status?.features?.account_pool_routing === true
   return <>
-    <PageHeader title="模型路由" description="将员工可用的模型名称映射到已配置的上游模型。"><Button onClick={() => setCreating(true)}><Icon name="plus" />添加模型路由</Button></PageHeader>
+    <PageHeader title="模型路由" description="将员工可用的模型名称映射到已配置的上游模型。"><div className="page-header-buttons">{poolConfiguration ? <Button variant="secondary" onClick={() => setManagingDirectory(true)}><Icon name="settings" />分组与渠道</Button> : null}<Button onClick={() => setCreating(true)}><Icon name="plus" />添加模型路由</Button></div></PageHeader>
+    {poolConfiguration ? <div className={`membership-panel ${poolRouting ? 'membership-panel--enabled' : ''}`}><div><h2>{poolRouting ? '账号池路由已启用' : '账号池配置可用，路由尚未启用'}</h2><p>{poolRouting ? '可以为每个模型配置同服务商的多个账号，并按优先级、权重与并发上限调度。' : '可以提前保存账号池配置，但当前请求仍使用原有单账号路由，保存内容暂不参与请求调度。'}</p></div></div> : null}
     <div className="content-panel"><PageState loading={loading} error={error} onRetry={() => void reload()} />
       {!loading && !error && data?.items.length === 0 ? <EmptyState title="还没有模型路由" body="先添加上游连接，再建立第一个模型路由。" action={<Button onClick={() => setCreating(true)}>添加模型路由</Button>} /> : null}
-      {data?.items.length ? <div className="table-scroll"><table><thead><tr><th>对外模型 ID</th><th>上游</th><th>上游模型</th><th>状态</th></tr></thead><tbody>{data.items.map((item) => <tr key={item.id}><td><strong>{item.id}</strong></td><td><code>{item.upstream_id}</code></td><td>{item.upstream_model}</td><td><span className={`status status--${item.enabled ? 'active' : 'disabled'}`}><i />{item.enabled ? '启用' : '已停用'}</span></td></tr>)}</tbody></table></div> : null}
+      {data?.items.length ? <div className="table-scroll"><table><thead><tr><th>对外模型 ID</th><th>上游</th><th>上游模型</th><th>状态</th>{poolConfiguration ? <th>操作</th> : null}</tr></thead><tbody>{data.items.map((item) => <tr key={item.id}><td><strong>{item.id}</strong></td><td><code>{item.upstream_id}</code></td><td>{item.upstream_model}</td><td><span className={`status status--${item.enabled ? 'active' : 'disabled'}`}><i />{item.enabled ? '启用' : '已停用'}</span></td>{poolConfiguration ? <td><button type="button" className="link-button" onClick={() => setPoolModel(item)}>编辑账号池</button></td> : null}</tr>)}</tbody></table></div> : null}
     </div>
     {creating ? <CreateModel csrf={csrf} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void reload() }} /> : null}
+    {managingDirectory ? <AccountPoolDirectory csrf={csrf} onClose={() => setManagingDirectory(false)} /> : null}
+    {poolModel ? <ModelAccountPoolEditor key={poolModel.id} model={poolModel} csrf={csrf} routingEnabled={poolRouting} onClose={() => setPoolModel(null)} /> : null}
   </>
 }
 
