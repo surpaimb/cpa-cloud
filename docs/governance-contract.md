@@ -1,7 +1,7 @@
 # 员工请求治理契约
 
-状态：独立规格，2026-09-23。RPM/并发核心、管理 API、网页、四协议接线及续租恢复正在完成集成验收；
-实际证据见[集成状态](integration-status.md)。下文 shadow 观测尚未实现，当前仅保存阈值和准入快照，不能显示三态统计。当前已实现的员工鉴权、账号池、用量账本和成本价格
+状态：独立规格，2026-09-23。RPM/并发核心、管理 API、网页、四协议接线及续租恢复已通过源码验收和轻量 CI；
+实际证据见[集成状态](integration-status.md)。shadow 观测读路径已进入源码集成，具体窗口、三态与分页以[观测契约](governance-observation-contract.md)为准，验收另列。当前已实现的员工鉴权、账号池、用量账本和成本价格
 继续以各自契约为准；本批不得用治理功能改变上游原生路由或把内部成本估算称为正式账单。
 
 本规格对应[完整功能对齐计划](feature-parity-plan.md)中的 KEY-02、LIMIT-01 和 BILL-02 子集，
@@ -16,7 +16,7 @@
 - 独立的 employee governance group。
 
 硬限制只有每分钟请求数（RPM）和活跃请求并发数。Token 每分钟数（TPM）及内部估算成本预算只做
-shadow 观测：计算“若启用会否超过配置阈值”，但绝不拒绝请求。shadow 结果必须同时展示已知合计和未知
+shadow 观测：用历史阈值解释当前窗口的稳定 scope 总计，绝不拒绝请求，也不推断某次历史准入本应被拦截。shadow 结果必须同时展示已知合计和未知
 请求或尝试数，不能把未知用量、未知价格或不同币种折算成零后比较。
 
 首批不实现租户限额、会话数、IP allowlist、售价、余额、扣款、套餐、支付、多节点协调或员工自助入口。
@@ -250,7 +250,7 @@ hard TPM 和成本预算仍是产品总需求，但只有在可证明预留上�
 - `GET/PUT /settings`：读取或以 `expected_revision + operation_id` 更新总开关；
 - `GET/POST/PUT /groups`：创建和 CAS 更新专用治理组；成员变更和 group revision 同事务；
 - `GET/POST/PUT /policies`：按 scope 创建或 CAS 更新策略；
-- `GET /observations`：只返回固定窗口、known totals、unknown counts 和 would-block 计数。
+- `GET /observations`：返回固定窗口、稳定 scope totals、pending/unknown counts 和历史阈值解释；首批不返回无法由账本证明的 would-block 计数。
 
 相同 operation ID 与相同 payload 返回首次结果；相同 ID 不同 payload 冲突。网络结果不确定时，网页保留原
 operation ID 和原 payload，由管理员查询或同 ID 重试，不自动生成新操作。策略停用或总开关关闭不删除历史

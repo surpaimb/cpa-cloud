@@ -4,7 +4,7 @@
 
 ## 当前执行批次
 
-请求治理已进入源码集成：员工、Key 与独立治理组的 RPM/并发硬限制默认关闭，管理网页和持久幂等操作已接线；旧库升级、关闭/开启、超限零派发、取消、重启及撤销的隔离进程验收通过。完整回归结果以[集成状态](integration-status.md)为准。TPM/成本现阶段仅保存阈值及调用快照，实际 shadow 观测和硬预算尚未完成，不把配置入口当成预算执行。来源与边界见[治理总契约](governance-contract.md)和[管理契约](governance-management-contract.md)。
+请求治理已进入源码集成：员工、Key 与独立治理组的 RPM/并发硬限制默认关闭，管理网页和持久幂等操作已接线；旧库升级、关闭/开启、超限零派发、取消、重启及撤销的隔离进程验收通过。完整回归结果以[集成状态](integration-status.md)为准。TPM/成本只读 shadow 观测已通过本地进程与浏览器验收，本轮 Linux CI 结果另列，硬预算尚未实现，不把统计结论当成派发前预算执行。来源与边界见[治理总契约](governance-contract.md)和[管理契约](governance-management-contract.md)。
 
 Responses 首批、Claude/Gemini API Key 原生协议、Codex 网页 OAuth 与会员模型目录已合入当前源码。Codex 共享生命周期现已包含后台自动刷新、请求前刷新和手动刷新，合成测试覆盖来源/client binding 锁定、暂停与修复恢复；该能力仍是默认关闭的源码实验，供应商侧撤销、真实账号及第三方 OAuth 注册均未验收。
 
@@ -23,7 +23,7 @@ Responses 首批、Claude/Gemini API Key 原生协议、Codex 网页 OAuth 与�
 普通提交只跑相关测试/编译，文档不触发安装构建；阶段交付验收后再集中发布，不为每个功能生成全平台安装包。
 
 [出站代理首批](outbound-proxy-contract.md)已接入 API Key 生成/目录/测试/恢复与网页，包含版本绑定及持久化仅握手检查；独立证据见[集成状态](integration-status.md)。Codex 全生命周期出口、其他代理协议与自动轮换仍未实现。
-[员工治理](governance-contract.md)在独立分支集成，核心和管理页面不能单独视为完成。
+[员工治理](governance-contract.md)的 RPM/并发已合入主线且通过轻量 CI；[观测读路径](governance-observation-contract.md)继续独立验收。
 治理先接 RPM/并发，Token/成本未知值不当作零；完整硬预算、租户及其余矩阵需求继续保留。测试夹具优化独立审阅，
 不得降低生产密码强度或删除认证、迁移、并发断言来缩短验证时间。
 

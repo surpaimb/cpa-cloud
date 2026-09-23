@@ -125,6 +125,7 @@ try {
   block = true; const pending = generate(key.key); await until(() => blocked, 'pending generation');
   page = await admin(endpoint); assert.equal(page.items.length, 3);
   for (const row of page.items) {
+    assert.equal(row.scope_totals.tpm.pending_requests, '1'); assert.equal(row.scope_totals.cost.pending_requests, '1');
     assert.equal(row.scope_totals.tpm.pending_attempts, '1'); assert.equal(row.scope_totals.tpm.known_tokens, '150');
     assert.equal(row.interpretation.tpm_state, row.snapshot.shadow_tpm === null ? null : row.snapshot.scope_kind === 'employee' ? 'exceeded' : 'unknown');
   }
@@ -137,6 +138,7 @@ try {
   for (const row of page.items) {
     const { tpm, cost } = row.scope_totals;
     assert.equal(tpm.known_tokens, '600'); assert.equal(tpm.known_attempts, '4'); assert.equal(tpm.unknown_token_attempts, '1');
+    assert.equal(tpm.pending_requests, '0'); assert.equal(cost.pending_requests, '0');
     assert.equal(tpm.pending_attempts, '0'); assert.equal(tpm.pending_requests_without_attempt, '0');
     assert.equal(cost.known_attempts, '4'); assert.equal(cost.unknown_cost_attempts, '1');
     assert.deepEqual(cost.by_currency, [{ currency: 'EUR', known_cost_micro: '187', attempts: '1' }, { currency: 'USD', known_cost_micro: '748', attempts: '3' }]);

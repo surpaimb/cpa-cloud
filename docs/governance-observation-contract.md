@@ -1,8 +1,9 @@
 # 治理 Shadow 观测契约
 
-状态：待实现草案，2026-09-23。补充[员工请求治理契约](governance-contract.md)与
-[治理管理契约](governance-management-contract.md)。本文件只定义管理员只读观测，不表示当前服务、网页或发布包
-已经提供 shadow 统计。TPM 与内部成本继续只做 shadow；本批不得据此拒绝员工请求、扣减余额、收费或产生供应商账单。
+状态：源码实现已通过本地聚合、管理 HTTP、旧库升级及真实进程/浏览器验收，2026-09-23；本轮 Linux CI 结果见
+[集成记录](integration-status.md)。补充[员工请求治理契约](governance-contract.md)与
+[治理管理契约](governance-management-contract.md)。下载版 preview.3 不包含本功能。
+TPM 与内部成本继续只做 shadow；本批不得据此拒绝员工请求、扣减余额、收费或产生供应商账单。
 
 ## 事实来源与归因
 
@@ -43,6 +44,8 @@ revision contribution，它只能作为构成明细，不能用该子集直接�
 
 若相同解释行键在库中出现不同阈值快照、accounting request 的 employee/Key/model 与 governance request 不一致，
 或存在其他违反既有 schema 的关系，查询固定返回存储失败；不得任选一行、按当前策略修补或把异常值当成零。
+另校验 accounting 父子终态：terminal 父不得含 pending attempt，succeeded 父必须至少有一条 succeeded attempt。
+表级 CHECK 能存下这些坏关联并不使其合法；pending 父已有 terminal 子则是合法中间状态，保持 unknown。
 
 ## 时间口径
 
@@ -70,6 +73,10 @@ attempt 完成时间或可能回拨的墙钟字符串。长请求因此归入其
 Token 只在一个 terminal attempt 的 ordinary input、output、cache read、cache write 四个桶全部非 NULL 时已知。
 四桶相加必须做有符号 64 位逐步溢出检查；任一桶 NULL 时整个 attempt 进入 `unknown_token_attempts`，不能把已知
 部分相加后称为 total。pending attempt 单列为 `pending_attempts`，也使结论保持 unknown。
+每个窗口另返回 `pending_requests`：所有尚未终结父请求每个计一次，包含已有真实 attempt 的父请求。
+即使已有 attempt 完成且返回完整 usage，只要父请求仍 pending，整个请求仍可能派发后续 attempt，因此仍参与
+unknown 判定；已知部分严格超过阈值时依旧是 exceeded。`pending_requests_without_attempt` 是其中尚无 attempt 的子集，
+两项不可相加。父请求终结后才消除这项不确定性，实际已知 attempt 用量始终保留。
 
 成本只使用 attempt 在派发时冻结的 `cost_micro + currency`。价格缺失、任一 usage 桶未知或 cost 为 NULL 的
 terminal attempt 进入 `unknown_cost_attempts`。已知成本按币种分别汇总；不同币种绝不相加或换算。对配置币种
@@ -131,6 +138,7 @@ terminal attempt 进入 `unknown_cost_attempts`。已知成本按币种分别汇
         "known_tokens": "93000",
         "known_attempts": "12",
         "unknown_token_attempts": "1",
+        "pending_requests": "0",
         "pending_attempts": "0",
         "pending_requests_without_attempt": "0",
         "zero_attempt_requests": "2"
@@ -138,6 +146,7 @@ terminal attempt 进入 `unknown_cost_attempts`。已知成本按币种分别汇
       "cost": {
         "known_attempts": "12",
         "unknown_cost_attempts": "1",
+        "pending_requests": "0",
         "pending_attempts": "0",
         "pending_requests_without_attempt": "0",
         "zero_attempt_requests": "2",
@@ -161,7 +170,8 @@ terminal attempt 进入 `unknown_cost_attempts`。已知成本按币种分别汇
 `scope_kind + scope_id` 的完整窗口总计；同一 scope 的多个快照解释行必须引用相同总计，不得按 revision 过滤。
 aggregate counts、revision、Token 和金额全部用规范十进制字符串返回，避免浏览器安全整数损失；nullable group
 revision 保持 null。数组固定按币种排序。
-没有成本阈值时也没有用于比较的配置币种，`incomparable_currency_attempts` 为 `null`；有成本阈值时始终返回
+没有成本阈值时，快照的 `shadow_currency` 与 `shadow_window` 返回空字符串，也没有用于比较的配置币种，
+`incomparable_currency_attempts` 为 `null`；有成本阈值时始终返回
 规范十进制字符串，包括 `"0"`。只有 RPM/并发阈值的真实准入快照仍需返回观测，两种 interpretation state 均为 null。
 响应不包含策略名称、员工 Key、Authorization、请求正文、响应、原始错误、上游凭据或数据库路径。
 
@@ -233,7 +243,7 @@ index 使启动失败并完整回滚，修复后可重试。首批不删除或�
 - 派发前换号零失败候选、一个真实 attempt；未来多个真实 attempts 各贡献一次但逻辑 request 不重复；
 - usage 重复快照与相同 FinishTx 重试不加倍，终结事务任一 sibling 写失败时观测保持旧快照；
 - 总开关默认关闭无新行，关闭后旧 in-flight 正常结算、历史仍可查，重新启用不追溯关闭期请求；
-- Token 四桶逐步相加、SQL SUM、counts 和成本溢出固定 503，无浮点或饱和；
+- Token 四桶逐步相加、counts 和成本溢出固定 503，无浮点或饱和；
 - 单页只读事务一致；分页 keyset 不重复已遍历键，cursor/filter/window 绑定；构造并发新键排在 cursor 前和晚到
   terminal 时允许遗漏或页间总计变化，并要求刷新第一页；严格 query、limit、ID 长度和 5 秒取消；
 - 管理员成功、员工 Key/无 session/错误 Origin 拒绝，响应、错误、日志和数据库不含秘密或正文；

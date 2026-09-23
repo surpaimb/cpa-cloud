@@ -199,6 +199,7 @@ func (a *App) Handler() http.Handler {
 	if a.governancePolicies != nil {
 		a.governancePolicies.Register(a, mux)
 	}
+	a.registerGovernanceObservationHandlers(mux)
 	a.registerPricingHandlers(mux)
 	a.registerUsageHandlers(mux)
 	a.registerSystemProbeHandlers(mux)

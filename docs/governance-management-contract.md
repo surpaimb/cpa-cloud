@@ -1,8 +1,8 @@
 # 治理管理与准入快照契约
 
 状态：已进入源码集成，管理 API、网页与运行时接线已有隔离验收，完整结果见[集成状态](integration-status.md)。补充 [治理总契约](governance-contract.md)。
-来源为 CPA Cloud 自有需求，2026-09-23。首批硬限制只有 RPM、并发；TPM 与成本只保存 shadow 配置与准入快照，
-没有账本观察器时不提供任何“低于阈值”“将会拦截”或可用余额结论。默认总开关为关闭。
+来源为 CPA Cloud 自有需求，2026-09-23。首批硬限制只有 RPM、并发；TPM 与成本保存 shadow 配置及准入快照，只读统计由[观测契约](governance-observation-contract.md)定义。
+管理配置本身不能推导“将会拦截”或可用余额；默认总开关为关闭。
 
 ## HTTP 面
 

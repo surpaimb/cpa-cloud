@@ -53,6 +53,8 @@ jobs:
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud" ./cmd/cpa-cloud
       - name: Test default-off governance and atomic lifecycle with synthetic traffic
         run: node scripts/smoke-governance.mjs "$RUNNER_TEMP/cpa-cloud"
+      - name: Test governance observations with isolated synthetic usage
+        run: node scripts/smoke-governance-observations.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test proxy storage and restart without outbound requests
         run: node scripts/smoke-outbound-proxy.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test upstream health with isolated synthetic providers
