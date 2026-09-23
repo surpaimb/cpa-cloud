@@ -64,6 +64,11 @@ func (a *App) registerOutboundProxyHandlers(mux *http.ServeMux) {
 	// A generic final segment leaves the existing OAuth session prefix more
 	// specific; two crossing wildcards would panic in Go ServeMux.
 	mux.HandleFunc("GET /admin/api/v1/upstreams/{id}/{resource}", a.requireAdmin(func(w http.ResponseWriter, r *http.Request, session adminSession) {
+		if r.PathValue("resource") == "prices" {
+			r.SetPathValue("price_action", "prices")
+			a.listUpstreamPrices(w, r, session)
+			return
+		}
 		if r.PathValue("resource") != "proxy" {
 			writeAdminError(w, 404, "not_found", "The requested object was not found.")
 			return

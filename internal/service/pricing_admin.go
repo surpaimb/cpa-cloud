@@ -33,9 +33,7 @@ type priceVersionView struct {
 // registerPricingHandlers is separate so App startup can migrate the catalog
 // before exposing either management or model routes.
 func (a *App) registerPricingHandlers(mux *http.ServeMux) {
-	// The final wildcard keeps the existing literal codex-oauth-sessions route
-	// strictly more specific under Go 1.22 ServeMux precedence rules.
-	mux.HandleFunc("GET /admin/api/v1/upstreams/{id}/{price_action}", a.requireAdmin(a.listUpstreamPrices, false))
+	// Reads share the resource dispatcher registered by App with proxy views.
 	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/prices", a.requireAdmin(a.saveUpstreamPrice, true))
 }
 
