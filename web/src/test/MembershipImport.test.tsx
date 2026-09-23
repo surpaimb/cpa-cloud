@@ -33,6 +33,7 @@ describe('Codex membership file import', () => {
     expect(screen.queryByText(/虚假/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '导入 Codex auth.json' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '添加上游' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '批量导入' })).toBeEnabled()
     expect(screen.getByRole('button', { name: '同步模型' })).toBeEnabled()
     expect(screen.getByText('OpenAI 兼容 API')).toBeInTheDocument()
   })

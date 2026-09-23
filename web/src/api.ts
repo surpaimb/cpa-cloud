@@ -83,6 +83,20 @@ export type CodexOAuthSessionStatus = {
   upstream_id?: string
   error_code?: string
 }
+export type UpstreamBatchItem = {
+  item_id: string
+  name: string
+  provider_kind: Upstream['provider_kind']
+  endpoint?: string
+  api_key?: string
+  auth_json?: string
+}
+export type UpstreamBatchResult = {
+  item_id: string
+  status: 'created' | 'existing' | 'failed'
+  upstream_id?: string
+  error_code?: string
+}
 export type ModelRoute = {
   id: string
   upstream_id: string
@@ -142,6 +156,8 @@ export const api = {
   upstreams: () => request<{ items: Upstream[] }>('/upstreams'),
   createUpstream: (body: Record<string, unknown>, csrf: string) =>
     request<Upstream>('/upstreams', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  batchImportUpstreams: (body: { operation_id: string; items: UpstreamBatchItem[] }, csrf: string) =>
+    request<{ items: UpstreamBatchResult[] }>('/upstreams/batch-import', { method: 'POST', body: JSON.stringify(body) }, csrf),
   importCodexMembership: (body: { name: string; auth_json: string; operation_id: string }, csrf: string) =>
     request<Upstream>('/upstreams/codex-import', { method: 'POST', body: JSON.stringify(body) }, csrf),
   replaceCodexMembershipAuth: (id: string, body: { expected_revision: number; auth_json: string }, csrf: string) =>

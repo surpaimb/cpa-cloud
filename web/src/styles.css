@@ -64,6 +64,7 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .page-header h1 { margin: 0 0 8px; font-size: 34px; line-height: 1.18; letter-spacing: -.035em; }
 .page-header p { margin: 0; color: var(--muted); line-height: 1.65; }
 .page-header__action { flex: 0 0 auto; }
+.page-header-buttons { display: flex; align-items: center; gap: 10px; }
 .content-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-height: 280px; overflow: hidden; box-shadow: 0 1px 2px rgb(15 34 56 / .03); }
 .membership-panel { display: flex; align-items: center; justify-content: space-between; gap: 28px; margin-bottom: 20px; padding: 20px 22px; color: #35455a; background: #f7f9fb; border: 1px solid var(--border); border-left: 4px solid #91a0af; border-radius: var(--radius); }
 .membership-panel--enabled { background: #f2f8f8; border-left-color: var(--teal); }
@@ -155,6 +156,28 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .oauth-callout p { margin: 7px 0 0; font-size: 13px; line-height: 1.6; }
 .oauth-open-link { width: 100%; text-decoration: none; }
 .oauth-progress { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px; color: var(--muted); font-size: 14px; }
+.batch-import-notice { margin-bottom: 18px; padding: 14px 16px; color: #31566c; background: #edf6fa; border: 1px solid #c5dee9; border-radius: 7px; }
+.batch-import-notice strong { display: block; margin-bottom: 6px; color: var(--navy); }
+.batch-import-notice p, .batch-preview-heading p { margin: 0; font-size: 13px; line-height: 1.6; }
+.batch-example { margin-bottom: 20px; padding: 13px 15px; border: 1px solid var(--border); border-radius: 7px; }
+.batch-example summary { color: #35455a; cursor: pointer; font-size: 14px; font-weight: 650; }
+.batch-example pre { max-height: 260px; margin: 14px 0; padding: 13px; overflow: auto; color: #35455a; background: #f5f8fb; border-radius: 6px; font-size: 12px; line-height: 1.55; }
+.batch-example .button { min-height: 34px; }
+.batch-import-editor { margin-top: 2px; }
+.sensitive-textarea { -webkit-text-security: disc; font-family: monospace; letter-spacing: 2px; }
+.batch-reveal { justify-self: start; margin-top: -5px; }
+.batch-preview-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
+.batch-preview-heading strong { display: block; margin-bottom: 5px; color: var(--navy); }
+.batch-preview-heading code { max-width: 300px; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.batch-table-scroll { margin-bottom: 18px; overflow: auto; border: 1px solid var(--border); border-radius: 7px; }
+.batch-table { min-width: 620px; }
+.batch-table th { padding: 12px 14px; }
+.batch-table td { padding: 13px 14px; }
+.batch-result { font-weight: 650; }
+.batch-result--created { color: var(--success); }
+.batch-result--existing { color: #536b83; }
+.batch-result--failed { color: var(--danger); }
+.batch-uncertain { margin-top: 12px; padding: 11px 13px; color: #734213; background: #fff7e8; border: 1px solid #f1d39b; border-radius: 7px; font-size: 13px; line-height: 1.55; }
 .key-create { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 12px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
 .key-list { display: grid; }
 .key-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 15px 0; border-bottom: 1px solid var(--border); }
@@ -207,6 +230,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .page-header h1 { font-size: 28px; }
   .page-header__action .button { font-size: 0; width: 42px; padding: 0; }
   .page-header__action .button .icon { margin: 0; }
+  .page-header-buttons { gap: 8px; }
   .membership-panel { align-items: flex-start; flex-direction: column; gap: 14px; }
   .membership-panel__actions { width: 100%; justify-content: flex-start; }
   .status-layout { grid-template-columns: 1fr; }
@@ -221,6 +245,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .key-create, .copy-field { grid-template-columns: 1fr; }
   .key-create .button, .copy-field .button { width: 100%; }
   .saved-upstream { align-items: flex-start; flex-direction: column; }
+  .batch-preview-heading { flex-direction: column; }
   .discovery-row { grid-template-columns: 1fr; }
   .discovery-row > span { padding-left: 26px; }
 }

@@ -3,6 +3,7 @@ import { ApiError, api, type Upstream } from '../api'
 import { CodexOAuthAuthorization } from '../CodexOAuth'
 import { membershipMessageFor, messageFor, refreshMessageFor, useResource } from '../hooks'
 import { ModelDiscovery } from '../ModelDiscovery'
+import { UpstreamBatchImport } from '../UpstreamBatchImport'
 import { presetForEndpoint, providerPreset, providerPresets, type ProviderChoice, type ProviderPresetId } from '../providerPresets'
 import { Button, Dialog, EmptyState, Field, FormError, Icon, PageState } from '../ui'
 import { PageHeader } from './EmployeesPage'
@@ -14,6 +15,7 @@ export function UpstreamsPage({ csrf }: { csrf: string }) {
   const { data: status, loading: statusLoading, error: statusError, reload: reloadStatus } = useResource(loadStatus)
   const [creating, setCreating] = useState(false)
   const [authorizing, setAuthorizing] = useState(false)
+  const [batchImporting, setBatchImporting] = useState(false)
   const [importing, setImporting] = useState(false)
   const [reimporting, setReimporting] = useState<Upstream | null>(null)
   const [syncing, setSyncing] = useState<Upstream | null>(null)
@@ -26,13 +28,14 @@ export function UpstreamsPage({ csrf }: { csrf: string }) {
     return upstreamID ? next.items.find((item) => item.id === upstreamID) : undefined
   }, [setData])
   return <>
-    <PageHeader title="上游连接" description="连接 OpenAI 兼容 API、Anthropic Messages API、Gemini 原生 API 或 Codex 会员。密钥加密保存且不会再次显示。"><Button onClick={() => setCreating(true)}><Icon name="plus" />添加上游</Button></PageHeader>
+    <PageHeader title="上游连接" description="连接 OpenAI 兼容 API、Anthropic Messages API、Gemini 原生 API 或 Codex 会员。密钥加密保存且不会再次显示。"><div className="page-header-buttons"><Button variant="secondary" onClick={() => setBatchImporting(true)}><Icon name="link" />批量导入</Button><Button onClick={() => setCreating(true)}><Icon name="plus" />添加上游</Button></div></PageHeader>
     <MembershipFeaturePanel importEnabled={membershipEnabled} oauthEnabled={oauthEnabled} autoRefreshEnabled={autoRefreshEnabled} loading={statusLoading} error={statusError} onRetry={() => void reloadStatus()} onImport={() => setImporting(true)} onOAuth={() => setAuthorizing(true)} />
     <div className="content-panel"><PageState loading={loading} error={error} onRetry={() => void reload()} />
       {!loading && !error && data?.items.length === 0 ? <EmptyState title="还没有上游连接" body="添加 API Key 上游或授权 Codex 会员，再配置模型路由。" action={<Button onClick={() => setCreating(true)}>添加上游</Button>} /> : null}
       {data?.items.length ? <div className="table-scroll"><table className="upstreams-table"><thead><tr><th>名称</th><th>提供商</th><th>端点</th><th>凭据</th><th>状态</th><th>操作</th></tr></thead><tbody>{data.items.map((item) => <UpstreamRow key={item.id} item={item} csrf={csrf} membershipEnabled={membershipEnabled} autoRefreshEnabled={autoRefreshEnabled} onSync={() => setSyncing(item)} onReimport={() => setReimporting(item)} onDone={() => void reload()} />)}</tbody></table></div> : null}
     </div>
     {creating ? <CreateUpstream csrf={csrf} onClose={() => setCreating(false)} onSaved={() => void reload()} /> : null}
+    {batchImporting ? <UpstreamBatchImport csrf={csrf} membershipEnabled={membershipEnabled} onClose={() => setBatchImporting(false)} onImported={reload} /> : null}
     {authorizing ? <CodexOAuthAuthorization csrf={csrf} onClose={() => setAuthorizing(false)} onUpstreamsChanged={reloadUpstreamsAndFind} onSync={(upstream) => { setAuthorizing(false); setSyncing(upstream) }} /> : null}
     {importing ? <CodexAuthImport csrf={csrf} onClose={() => setImporting(false)} onSaved={() => { setImporting(false); void reload() }} /> : null}
     {reimporting ? <CodexAuthImport csrf={csrf} upstream={reimporting} onClose={() => setReimporting(null)} onSaved={() => { setReimporting(null); void reload() }} /> : null}
