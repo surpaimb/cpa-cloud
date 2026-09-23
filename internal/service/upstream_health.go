@@ -303,7 +303,13 @@ func verifyUpstreamHealthSchema(ctx context.Context, tx *sql.Tx) error {
 }
 
 func normalizeHealthDDL(value string) string {
-	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+	// SQL keywords are case-insensitive; quoted CHECK values are not. Splitting
+	// at every quote also preserves doubled quotes inside a string literal.
+	parts := strings.Split(value, "'")
+	for index := 0; index < len(parts); index += 2 {
+		parts[index] = strings.ToLower(strings.Join(strings.Fields(parts[index]), " "))
+	}
+	return strings.Join(parts, "'")
 }
 
 func (a *App) runUpstreamTest(w http.ResponseWriter, r *http.Request, _ adminSession) {

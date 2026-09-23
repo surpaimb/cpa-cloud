@@ -220,7 +220,11 @@ func cooldownSchemaError() error {
 }
 
 func normalizeCooldownDDL(value string) string {
-	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+	parts := strings.Split(value, "'")
+	for index := 0; index < len(parts); index += 2 {
+		parts[index] = strings.ToLower(strings.Join(strings.Fields(parts[index]), " "))
+	}
+	return strings.Join(parts, "'")
 }
 
 func verifyCooldownForeignKey(ctx context.Context, tx *sql.Tx) error {

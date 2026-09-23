@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +27,11 @@ func TestAccountPoolCooldownMigrationRollbackRetryAndLegacyUpgrade(t *testing.T)
 		indexDDL   string
 		hasEventID bool
 	}{
+		{
+			name:       "current case-sensitive CHECK values",
+			ddl:        strings.ReplaceAll(cooldownCurrentDDL, "'transient'", "'TRANSIENT'"),
+			hasEventID: true,
+		},
 		{
 			name: "legacy missing primary key",
 			ddl: `CREATE TABLE account_pool_runtime_cooldowns (

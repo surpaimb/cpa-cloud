@@ -390,6 +390,7 @@ func TestUpstreamHealthMigrationStrictRetryAndInterruptedRecovery(t *testing.T) 
 		ddl  func() string
 	}{
 		{name: "wrong type", ddl: func() string { return strings.Replace(healthCreateDDL(), "latency_ms INTEGER", "latency_ms TEXT", 1) }},
+		{name: "case-sensitive CHECK values", ddl: func() string { return strings.ReplaceAll(healthCreateDDL(), "'pending'", "'PENDING'") }},
 		{name: "wrong foreign key action", ddl: func() string { return strings.Replace(healthCreateDDL(), "ON DELETE RESTRICT", "ON DELETE CASCADE", 1) }},
 		{name: "extra secret column", ddl: func() string {
 			return strings.Replace(healthCreateDDL(), "\tCHECK((state=", "\tsecret_value TEXT,\n\tCHECK((state=", 1)

@@ -10,6 +10,7 @@
 - 严格迁移补丁 `b32a25e` 已审阅：旧/新 cooldown 表精确验证主键、type/nullability、外键、唯一约束及 expiry index，失败事务回滚并支持修复后重试。专项 12.590s 通过；根任务完整非缓存 `go test -p 1 ./... -count=1 -timeout=8m` 通过（service 307.515s），全仓 `go vet -p 1 ./...` 通过。随后 `eefb8ef` 的 Codex 无效/超大目录错误分类小修另由根任务专项非缓存验证 3.753s，通过后重建并执行上述最终 smoke。本机无 C 编译器，Linux race 留给本批轻量 CI。
 - 根任务独立网页 TypeScript、70 项测试及 Vite 构建通过。真实 Go + Playwright Chrome（Browser plugin not available）在随机隔离地址验证：本地测试零网络、目录测试、保存响应丢失后关闭/重开并查询同一操作且上游只调用一次、手机导航和冷却清除。桌面 1440×1000、手机 390×844 均无横向溢出，0 JavaScript 页面异常；仅预期 session401 与主动注入的 ERR_FAILED。最终手机截图已查看，合成数据/服务进程已清理。截图目录：`C:/Users/apple/AppData/Local/Temp/cpac-health-ui-evidence-swW1fS`。
 - 最后仅修订网页错误文案，避免把本地凭据失败说成上游已经拒绝、把静态配置无效说成刚发生变更；TypeScript、6 项健康入口测试和 Vite 构建再次通过，未改变布局或请求逻辑。两份 README PowerShell 块与基线保持一致，87 个本地 Markdown 目标及 CI 路径计划检查通过；core/web=true，三个安装平台=false。
+- 收尾审阅补充 CHECK 字面值区分大小写：DDL 规范化只折叠引号外的关键词，不能把 `'PENDING'` 或 `'TRANSIENT'` 当成当前小写状态约束。健康记录及冷却迁移的拒绝/修复重试专项由根任务非缓存执行 5.016s 通过，全仓 vet 再次通过。该小修推送后由最新 CI 覆盖，不使用前一轮仍在执行的 CI 作为最终证据。
 - 本批仅源码，preview.3 和已发布资产保持不变；生成恢复探测、代理池、预算、商业化及 Claude/Gemini 会员仍在总目标中。没有真实会员或供应商账号验收。
 
 ## 2026-09-23：派发前一次安全换号
