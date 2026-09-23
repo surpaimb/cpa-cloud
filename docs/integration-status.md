@@ -9,6 +9,8 @@
 - 根任务在最终源码编译 `dist/recovery-smoke.exe`，实际运行 `scripts/smoke-recovery-foundations.mjs` PASS。旧 `dist/health-smoke.exe` 初始化隔离库，脚本确认三张新表原先不存在，再升级验证员工 Key 与旧数据保留、独立汇总、启动 pending→interrupted、关闭自动探测时零重放、冷却已到期仍保持恢复隔离、事件 clear、保守恢复维护容量及 TTL 后员工可用。模拟凭据/临时目录/随机端口，数据库和日志无明文秘密，测试服务与数据已清理。
 - 既有 `scripts/smoke-upstream-health.mjs` 在本批集成程序上 PASS，覆盖管理员/员工隔离、目录与分页、幂等、替换竞争、崩溃中断、冷却事件 CAS、重启和撤销；后续 clear 取消小修另有专项覆盖。没有浏览器页面改动，本批不新增 GUI 实测声明。
 - 两份 README 的 PowerShell 块与基线一致，相关文档 85 个本地链接、6 项 CI 路径计划及 diff 检查通过。core/web=true、Windows/Linux/macOS 安装任务=false。根据前一批 race 的 1175 秒实测，将完整 race 上限 20→25 分钟、core job 30→35 分钟，保留完整套件与断言；CI 新增独立进程恢复 smoke。
+- 源码 `c9dc95fcce9ef2ea7d7ff749b4d124119b69adf9` 已推 main，[Code validation 35848320519](https://github.com/surpaimb/cpa-cloud/actions/runs/35848320519) 全部成功。根任务读取 core job `107139774056` 日志核实：Linux 普通 service 117.542s；完整 race 的 service 1160.406s、membership 1.882s、scheduling 1.087s、accounting 54.230s 全部 PASS；vet、编译和两组隔离进程 smoke 均 PASS。读取 web job `107139774192` 核实 TypeScript、70 项测试及 Vite 构建通过，三个安装 job 均 skipped。之后只有文档修订，不另触发构建。
+- 下一批[后台协调器契约](account-recovery-coordinator-contract.md)经过三个原任务只读复核，明确默认关闭开关、实际失败快照、长冷却原因一致性、SQL-only Codex adoption、持久人工阻塞和公平扫描、同事件次数上限，以及不确定 Commit 的终态核对。这是已审阅的后续规格，尚未实现。
 - 本批尚未启用自动生成探测，没有新 tag/安装包，preview.3 不变。Codex 的可证明刷新 revision 采纳、失败路径快照、默认关闭开关、退避和后台协调器、网页控制继续按[执行计划](account-recovery-execution-plan.md)实现；模拟成功不等于真实会员或供应商兼容验收。
 
 ## 2026-09-23：上游凭据/目录测试与冷却管理
