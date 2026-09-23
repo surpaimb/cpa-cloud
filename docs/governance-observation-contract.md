@@ -161,6 +161,8 @@ terminal attempt 进入 `unknown_cost_attempts`。已知成本按币种分别汇
 `scope_kind + scope_id` 的完整窗口总计；同一 scope 的多个快照解释行必须引用相同总计，不得按 revision 过滤。
 aggregate counts、revision、Token 和金额全部用规范十进制字符串返回，避免浏览器安全整数损失；nullable group
 revision 保持 null。数组固定按币种排序。
+没有成本阈值时也没有用于比较的配置币种，`incomparable_currency_attempts` 为 `null`；有成本阈值时始终返回
+规范十进制字符串，包括 `"0"`。只有 RPM/并发阈值的真实准入快照仍需返回观测，两种 interpretation state 均为 null。
 响应不包含策略名称、员工 Key、Authorization、请求正文、响应、原始错误、上游凭据或数据库路径。
 
 cursor 使用版本、固定 `window_end`、最后一个完整解释行键和规范 filters fingerprint；解释行按
@@ -168,6 +170,10 @@ cursor 使用版本、固定 `window_end`、最后一个完整解释行键和规
 filters 或时间不匹配均为 400，不能退回第一页。每页所有 items 必须来自同一个 SQLite 只读事务快照并共用该页的
 `observed_at`。keyset 不会重复已经遍历的解释行键，但并发插入排在 cursor 之前的新键可能遗漏，且晚到结算可以使
 不同页看到不同的 scope 总计；cursor 不得被描述为跨页数据库快照。
+
+核心查询的 cursor 仅作严格形状和过滤器绑定校验，不持有服务密钥。HTTP 入口必须使用持久服务密钥派生的独立
+HMAC 用途为 cursor 加完整性保护，只接收签名外壳，恒时验证后才向核心传递 cursor；伪造或修改窗口、过滤条件和
+分页键均拒绝。响应返回的外壳及下一次请求均遵守 2048 字节上限。`observed_at` 只由服务注入当前时间，不接受 query 覆盖。
 
 管理员 session 是唯一权限入口，员工 Key 返回 401/403 固定错误。请求 context 上限 5 秒；取消、DB busy、
 扫描错误、SQL integer overflow、Go checked-add overflow 或 rows close 错误统一返回固定 503，不能返回部分页。
@@ -184,8 +190,8 @@ filters 或时间不匹配均为 400，不能退回第一页。每页所有 item
 2. 先按窗口和解释行键选择最多 `limit+1` 个不同阈值快照；
 3. 对本页涉及的每个唯一 `(scope_kind,scope_id)`，LEFT JOIN 该稳定 scope 在对应 60 秒或 24 小时窗口中的所有
    governance request、accounting request 和真实 attempts；不能按 settings/policy/group revision 限制总计；
-4. SQL 分别 SUM 四个已知 Token 桶，再在 Go 中 checked-add，避免 SQL 行内四桶相加溢出或转成浮点；
-5. 成本按 currency GROUP BY，SQLite SUM overflow 视为存储错误；在 Go 中把稳定 scope 总计与每个解释行保存的
+4. 流式读取这些关联行，在 Go 中对四个已知 Token 桶和计数逐项 checked-add，避免 SQL 行内四桶相加溢出或转成浮点；
+5. 成本以 currency 为键逐项 checked-add；在 Go 中把稳定 scope 总计与每个解释行保存的
    历史阈值组合，计算固定三态。
 
 现有 usage summary 只能按 accounting request/attempt 聚合，缺少 policy/group/settings 快照，不能直接作为治理
