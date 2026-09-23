@@ -6,14 +6,14 @@
 
 `internal/scheduling` 是线程安全的单进程租约调度器，不访问 HTTP、数据库、凭据、提示、响应或日志。调用侧先完成员工 Key、模型权限和账号可见性检查，再通过 `Request.AllowedAccountIDs` 显式交付允许集合。调度器绝不从候选全集扩大权限。
 
-候选只含账号 ID、provider、兼容模型、启用状态、优先级、权重、并发容量和外部冷却截止时间。请求只含 provider、模型、显式 allowlist、可选粘滞键和候选快照。返回 `Lease` 与固定 `ReasonCode`，没有凭据或模型内容。
+候选只含账号 ID、provider、兼容模型、启用状态、优先级、权重、并发容量和外部冷却截止时间。请求只含 provider、模型、显式 allowlist、排除账号集合、可选粘滞键和候选快照。返回 `Lease` 与固定 `ReasonCode`，没有凭据或模型内容。
 
 ```go
 lease, decision := scheduler.Acquire(ctx, scheduling.Request{...})
 released, releaseDecision := lease.Release(scheduling.ReleaseResult{...})
 ```
 
-选择顺序为：allowlist → enabled/provider/model → 冷却与容量 → 已有粘滞绑定 → 新选择的最高优先级 → 同优先级权重。已有粘滞账号只要仍在当前请求允许、兼容、健康且有容量的集合中就优先复用；priority 只影响没有可复用绑定时的新选择。禁用、越权、冷却或满载时不会强行粘滞。
+选择顺序为：allowlist 且不在排除集合 → enabled/provider/model → 冷却与容量 → 已有粘滞绑定 → 新选择的最高优先级 → 同优先级权重。已有粘滞账号只要仍在当前请求允许、兼容、未冷却且有容量的集合中就优先复用；priority 只影响没有可复用绑定时的新选择。禁用、越权、排除、冷却或满载时不会强行粘滞。未冷却不代表真实供应商生成健康已验证。
 
 粘滞绑定有独立 TTL 和容量上限；复用或重新选择会刷新该键的 TTL，过期绑定会清理，达到上限时淘汰最早到期的绑定。因此，来自大量会话键的输入不会让进程内映射无限增长。候选数量、单账号权重和粘滞键长度也有界；权重累加在调用随机选择前检查整数溢出，越界请求返回 `invalid_request`。
 
@@ -28,8 +28,8 @@ released, releaseDecision := lease.Release(scheduling.ReleaseResult{...})
 
 调用侧用有限 `FailureClass` 释放租约。配置可为 rate limit、overload、transient、authentication 等类别设置冷却；内部冷却与候选携带的外部冷却取较晚截止时间。fake clock 测试覆盖冷却恢复。
 
-`RetrySuggested` 只在 rate limited、overloaded 或 transient，且 `StreamCommitted` 与 `ExecutionUncertain` 均为 false 时可能为 true。任一为 true 时始终 false；认证和永久失败也不建议自动重放。该布尔值只是安全资格，不是自动重试命令；当前服务不自动重试或换号。
+`RetrySuggested` 只在显式 `Phase=DispatchNotStarted`、失败类为 rate limited、overloaded、transient、authentication 或 permanent，且两个旧风险字段没有正向危险证据时可能为 true。`DispatchUnknown` 是零值，默认拒绝；`MayHaveSent` 和 `OutputCommitted` 永远拒绝。旧 `StreamCommitted=false` 与 `ExecutionUncertain=false` 不能单独授权换号；任一为 true 仍然拒绝。该建议只是核心提供的资格，运行时还检查已观察到的执行阶段、取消、过期与持久化结果，服务协调器最后限制为[模型派发前一次账号预检换号](account-pool-failover-contract.md)。
 
 ## 服务集成与剩余范围
 
-服务已有账号池表、管理 API、网页编辑、四协议请求分派、租约持久化/重启恢复，以及请求与尝试的用量归属；权限过滤、revision 竞争和撤销已自动验收。跨进程调度、自动故障换号、恢复探测、配额和代理仍待实现；已提交流绝不换号，日志不含凭据和模型内容。
+服务已有账号池表、管理 API、网页编辑、四协议请求分派、租约持久化/重启恢复，以及请求与尝试的用量归属；权限过滤、revision 竞争和撤销已自动验收。源码已增加一次有界账号预检换号，具体本批验证记录见[集成状态](integration-status.md)。跨进程调度、执行后的故障重放、恢复探测、配额和代理仍未实现；进入模型 HTTP/Codex 执行器后绝不换号，日志不含凭据和模型内容。

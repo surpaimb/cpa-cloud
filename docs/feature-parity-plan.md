@@ -49,8 +49,8 @@ Claude、Gemini 会员的具体接入条件和官方来源见 [会员接入阻�
 | KEY-02 | Key 级权限：协议、模型/分组、IP、有效期、并发、RPM/TPM、预算 | 待实现 | KEY-01, ACCT-02, BILL-01 | M2 | 每个限制独立及组合测试；错误稳定且不泄露策略秘密 |
 | MEM-01 | ChatGPT/Codex 凭据文件导入、替换、状态与手动重新认证 | 实验 | SEC-01 | M1 | 合成凭据覆盖幂等、revision、过期/401、重启、脱敏；真实账号另列证据 |
 | MEM-02 | ChatGPT/Codex 网页授权、授权码交换、自动刷新、撤销和会员模型发现 | 实验：网页授权、共享后台自动刷新、请求前刷新、手动刷新和模型目录已接入源码；合成测试覆盖来源/client binding 锁定、暂停与修复恢复，供应商侧撤销和真实账号仍待完成 | MEM-01 | M1 | 独立协议规格、官方来源、允许方式、刷新竞争与失败恢复均通过 |
-| MEM-03 | Claude 会员/API 凭据导入、授权、刷新、配额与调用 | 需协议核实 | SEC-01 | M1 | 每种凭据类型分开声明范围，真实沙箱/账号证据与失效测试 |
-| MEM-04 | Gemini/Google 会员或 CLI 授权、刷新、项目/配额与调用 | 需协议核实 | SEC-01 | M1 | 同 MEM-03；项目选择、刷新和配额错误可诊断且脱敏 |
+| MEM-03 | Claude 会员凭据导入、授权、刷新、配额与调用 | 阻塞：当前官方认证政策不支持本产品收集/中介订阅凭据的账号池模式；需供应商明确允许的第三方接入安排。API Key 原生子集见 PROTO-04，不能抵作会员交付 | SEC-01 | M1 | 各凭据类型分开声明；满足接入条件后验证生命周期与失效，真实账号证据另列 |
+| MEM-04 | Gemini/Google 会员或 CLI 授权、刷新、项目/配额与调用 | 阻塞：官方 FAQ 限制第三方复用 Gemini CLI OAuth；需官方第三方会员接入安排。AI Studio API Key 子集见 PROTO-05，Vertex 等认证待实现，均不能抵作会员交付 | SEC-01 | M1 | 同 MEM-03；项目选择、刷新和配额错误可诊断且脱敏 |
 | MEM-05 | 多提供商账号：OpenAI、Anthropic、Google，以及快照出现的 Grok、Antigravity、国内/兼容提供商与可插拔 API Key 渠道 | 待实现/需协议核实 | ACCT-01, PROTO-01 | M2-M4 | 提供商能力注册表；逐项报告授权、协议、模型与测试证据，不用“兼容”概括 |
 | PROTO-01 | `GET /v1/models` 和模型权限目录 | 已实现（基础子集） | KEY-01 | M1 | 只列可用且获授权模型，停用账号/路由实时反映 |
 | PROTO-02 | `POST /v1/chat/completions` 非流式/SSE、取消、错误与工具调用 | 已实现（API Key 基础；会员文本实验） | KEY-01 | M1-M2 | 字段支持表、工具回合、SSE 拆包、取消、上游错误脱敏 |
@@ -94,6 +94,8 @@ Claude、Gemini 会员的具体接入条件和官方来源见 [会员接入阻�
 | EXT-02 | 插件/提供商扩展点、能力注册和隔离 | 待实现 | PROTO-07, GOV-01 | M4 | API 版本、超时/取消、权限、崩溃隔离、依赖许可证 |
 
 ## 4. 分阶段执行与出口条件
+
+MEM-03/04 的接入限制于 2026-09-23 复核 [Anthropic 认证与凭据政策](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)及 [Gemini CLI FAQ](https://geminicli.com/docs/resources/faq/#why-cant-i-use-third-party-software-like-claude-code-openclaw-or-opencode-with-gemini-cli)。这是当前管理员订阅账号池方案的具体阻塞，不是对所有 OAuth 或未来供应商安排的普遍法律判断。详细出口条件见[会员接入记录](research/membership-provider-readiness.md)；两项继续保留在总目标中。
 
 ### M0：Responses 与 Codex 工具首批
 

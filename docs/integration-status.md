@@ -8,7 +8,9 @@
 - 主任务构建最终真实 Go 程序，实际运行新增 `scripts/smoke-safe-failover.mjs` 通过：四协议首账号合成密文损坏后仅备用账号收到一次模型调用；账本仅五个父请求和五个真实 attempt（四个成功、一个 429），每个成功采用备用账号及实际模型价格 23 micro；count_tokens 不计生成账本。429 不重放，重启后员工 Key 保留、撤销后零上游请求，数据库与日志无合成密钥/提示/私有错误正文。Node 22.22.0 使用 `node:sqlite`；夹具只在测试进程停止时修改自己的临时数据库，验收后目录与进程已清理。
 - 最终程序另运行既有 `scripts/smoke-account-pool.mjs` 通过：四协议池映射、默认账号停用后的备用路由、目录一致性、429 不重放、cooldown 重启、排队 Key 撤销与会话元数据隔离。主任务完整 `go test -p 1 ./... -count=1 -timeout=8m` 非缓存通过（service 265.711s），`go vet -p 1 ./...` 与 Windows 本机编译通过。本机没有可用 C 编译器，race 由 Linux 轻量 CI 验证。
 - 双语 README 和四份运行/用量契约已更新；README PowerShell 命令块与批次前一致，文档本地链接和 6 项 CI 计划测试通过。本批计划为 core/web=true、三个安装平台=false。上批完整 Linux race 已耗时 845 秒，因此仅将 race 时间预算由 15 增为 20 分钟、core job 由 25 增为 30 分钟，保持完整套件和全部断言。
-- 本批源码本地验收完成，尚待 Linux CI 收尾，不发布新 tag 或安装包。恢复探测、代理池、预算、商业化和 Claude/Gemini 会员仍未完成；合成上游验收不能替代真实供应商兼容验证。
+- `40667835fb70d5281e2acccac3dc71d5b23b203a` 已推 main，[Code validation 35832659777](https://github.com/surpaimb/cpa-cloud/actions/runs/35832659777) 全部通过。主任务读取实际 job 日志核实：Linux 普通 Go service 90.601s；完整 race 的 service 940.426s、membership 1.934s、scheduling 1.083s、accounting 4.234s 全通过；vet 和编译通过。网页 TypeScript、64 项测试和 Vite 构建通过，Windows/Linux/macOS 三个安装 job 均 skipped。后续仅研究/契约文档提交，不另触发代码或安装构建。
+- 已审阅并保存下一批[上游测试与恢复提案](upstream-health-contract.md)（`c6797d2`），明确待实现。研究修订 `b0af223` 更新 Claude/Gemini 当前官方接入限制并撤回管理员池化 `setup-token` Runner 候选，来源和具体出口见[会员接入条件](research/membership-provider-readiness.md)；用户的会员目标继续保留，API Key 子集不能替代会员交付。
+- 本批源码验收完成，不发布新 tag 或安装包。账号测试/恢复探测、代理池、预算、商业化和 Claude/Gemini 会员仍未完成；合成上游验收不能替代真实供应商兼容验证。14 份本批 Markdown 的本地链接及两份 README PowerShell 块再次检查通过。
 
 ## 2026-09-23：用量查询、价格版本与网页管理
 

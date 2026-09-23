@@ -1,6 +1,6 @@
 # 账号池运行时适配契约
 
-状态：2026-09-23 源码已接入 Chat、Responses、Messages 和 Gemini HTTP 处理器；既有账号池接线的隔离进程与真实浏览器证据见 [集成状态](integration-status.md)。当前源码另实现下述有界预检换号，仍待本轮总验收；未提供包含该能力的新安装包，也不表示已经发布。执行后的自动换号、恢复探测和代理池仍未实现。
+状态：2026-09-23 源码已接入 Chat、Responses、Messages 和 Gemini HTTP 处理器；既有账号池接线的隔离进程与真实浏览器证据见 [集成状态](integration-status.md)。当前源码另实现下述有界预检换号，隔离进程、完整 Go 及 Linux race 已通过；未提供包含该能力的新安装包。执行后的自动换号、恢复探测和代理池仍未实现。
 
 ## 接口与调用边界
 
@@ -102,6 +102,6 @@ cooldown 按 account ID 持久化，重启后仍生效。同一账号收到重�
 3. 四协议处理器完成现有认证后释放 admission 锁，再调用 `Acquire`。显式池成功时使用返回 route 和 `Lease.Context()`；legacy 结果继续旧单路由并重新锁内校验。
 4. 所有协议和 count-tokens 路径都必须 Release。只有本地账号预检失败可经共享协调层执行一次固定 revision、排除首账号的换号；`MarkDispatch` 后不得进入任何换号入口。
 5. 下列写入成功提交后调用 `accountPool.NotifyChanged()`：撤销 Key、更新员工状态、更新员工模型权限、更新/停用上游、写入模型池、替换凭据，以及 OAuth 刷新导致 upstream revision、credential state、source 或 client binding 变化。回滚或提交失败时不得通知。
-6. 当前源码及合成验收记录不能替代本轮总验收，也不能用来声明新安装包已经发布。
+6. 当前源码及合成验收记录不能替代真实供应商兼容验证，也不能用来声明新安装包已经发布。
 
 本实现依据本项目规格独立编写，没有复制 CLIProxyAPI、Sub2API 或归档 CPA 的实现、迁移或测试。
