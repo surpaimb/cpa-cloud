@@ -56,16 +56,7 @@ func (a *App) runCodexCatalogTest(ctx context.Context, snapshot upstreamHealthSn
 		if ctx.Err() != nil {
 			return &tested, healthResultForContext(ctx)
 		}
-		switch kind, _ := membership.CodexModelsErrorCodeOf(err); kind {
-		case membership.CodexModelsUnauthorized, membership.CodexModelsForbidden:
-			return &tested, "authentication_failed"
-		case membership.CodexModelsRateLimited:
-			return &tested, "rate_limited"
-		case membership.CodexModelsTimeout:
-			return &tested, "timeout"
-		default:
-			return &tested, "internal_failure"
-		}
+		return &tested, codexHealthCatalogErrorResult(err)
 	}
 	seen := make(map[string]struct{}, len(catalog.Models))
 	ids := make([]string, 0, len(catalog.Models))
@@ -87,4 +78,21 @@ func (a *App) runCodexCatalogTest(ctx context.Context, snapshot upstreamHealthSn
 	}
 	sort.Strings(ids)
 	return &tested, "catalog_ok"
+}
+
+func codexHealthCatalogErrorResult(err error) string {
+	switch kind, _ := membership.CodexModelsErrorCodeOf(err); kind {
+	case membership.CodexModelsUnauthorized, membership.CodexModelsForbidden:
+		return "authentication_failed"
+	case membership.CodexModelsRateLimited:
+		return "rate_limited"
+	case membership.CodexModelsTimeout:
+		return "timeout"
+	case membership.CodexModelsInvalidRequest:
+		return "configuration_changed"
+	case membership.CodexModelsBodyTooLarge, membership.CodexModelsTooManyItems, membership.CodexModelsInvalidPayload:
+		return "invalid_response"
+	default:
+		return "internal_failure"
+	}
 }
