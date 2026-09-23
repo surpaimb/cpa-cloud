@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 	"sync"
 	"time"
 
@@ -50,17 +51,20 @@ type accountPoolReleaseResult struct {
 }
 
 type accountPoolRuntime struct {
-	app       *App
-	scheduler *scheduling.Scheduler
-	clock     scheduling.Clock
-	leaseTTL  time.Duration
-	cooldowns map[scheduling.FailureClass]time.Duration
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	closed    bool
-	wg        sync.WaitGroup
-	active    map[*accountPoolLease]struct{}
+	app           *App
+	scheduler     *scheduling.Scheduler
+	clock         scheduling.Clock
+	leaseTTL      time.Duration
+	cooldowns     map[scheduling.FailureClass]time.Duration
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	closed        bool
+	wg            sync.WaitGroup
+	active        map[*accountPoolLease]struct{}
+	changeEpoch   uint64
+	changeContext context.Context
+	changeCancel  context.CancelFunc
 }
 
 type accountPoolLease struct {
@@ -292,7 +296,18 @@ func newAccountPoolRuntimeWithConfig(app *App, config accountPoolRuntimeConfig) 
 		return nil, err
 	}
 	runtimeContext, cancel := context.WithCancel(context.Background())
-	rt := &accountPoolRuntime{app: app, clock: config.Clock, leaseTTL: config.LeaseTTL, cooldowns: config.Cooldowns, ctx: runtimeContext, cancel: cancel, active: make(map[*accountPoolLease]struct{})}
+	changeContext, changeCancel := context.WithCancel(context.Background())
+	rt := &accountPoolRuntime{
+		app:           app,
+		clock:         config.Clock,
+		leaseTTL:      config.LeaseTTL,
+		cooldowns:     config.Cooldowns,
+		ctx:           runtimeContext,
+		cancel:        cancel,
+		active:        make(map[*accountPoolLease]struct{}),
+		changeContext: changeContext,
+		changeCancel:  changeCancel,
+	}
 	rt.scheduler = scheduling.New(scheduling.Config{Clock: config.Clock, Random: config.Random, LeaseTTL: config.LeaseTTL, StickyTTL: config.StickyTTL, MaxSticky: config.MaxSticky, MaxWaiters: config.MaxWaiters, Cooldowns: config.Cooldowns, RestoredLeases: restored})
 	return rt, nil
 }
@@ -319,53 +334,98 @@ func (rt *accountPoolRuntime) Acquire(ctx context.Context, publicModel string, a
 		stopOperation()
 		cancelOperation()
 	}()
-	rt.app.admission.RLock()
-	authorized, modelAvailable, modelAllowed, err := rt.authorizationCurrent(opContext, nil, publicModel, auth)
-	if err != nil {
-		rt.app.admission.RUnlock()
-		return accountPoolAcquireResult{Code: accountPoolStorageUnavailable}
+	sticky := ""
+	if stickyOpaque != "" {
+		sticky = auth.EmployeeID + "\x00" + publicModel + "\x00" + stickyOpaque
 	}
-	if !authorized || !modelAvailable || !modelAllowed {
+	var waitingPool *poolSnapshot
+	for {
+		epoch, changed := rt.changeSnapshot()
+		rt.app.admission.RLock()
+		authorized, modelAvailable, modelAllowed, err := rt.authorizationCurrent(opContext, nil, publicModel, auth)
+		var pool poolSnapshot
+		var legacy bool
+		var code accountPoolRuntimeCode
+		if err == nil && authorized && modelAvailable && modelAllowed {
+			pool, legacy, code = rt.loadPool(opContext, publicModel, allowedProviders)
+		}
 		rt.app.admission.RUnlock()
+
+		// A committed mutation may race any of the reads above. Reload from a
+		// single newer generation rather than interpreting a mixed snapshot.
+		if !rt.changeIsCurrent(epoch) {
+			if opContext.Err() != nil {
+				return accountPoolAcquireResult{Code: accountPoolCancelled}
+			}
+			continue
+		}
+		if err != nil {
+			return accountPoolAcquireResult{Code: accountPoolStorageUnavailable}
+		}
 		if !authorized {
 			return accountPoolAcquireResult{Code: accountPoolAuthorizationChanged}
 		}
 		if !modelAvailable {
 			return accountPoolAcquireResult{Code: accountPoolNoCompatible}
 		}
-		return accountPoolAcquireResult{Code: accountPoolModelNotAllowed}
+		if !modelAllowed {
+			return accountPoolAcquireResult{Code: accountPoolModelNotAllowed}
+		}
+		if code != "" {
+			return accountPoolAcquireResult{Code: code}
+		}
+		if legacy {
+			if waitingPool != nil {
+				return accountPoolAcquireResult{Code: accountPoolConfigurationChanged}
+			}
+			return accountPoolAcquireResult{Legacy: true, Code: accountPoolLegacy}
+		}
+		if waitingPool != nil && !reflect.DeepEqual(*waitingPool, pool) {
+			return accountPoolAcquireResult{Code: accountPoolConfigurationChanged}
+		}
+		poolForWait := pool
+		waitingPool = &poolForWait
+
+		waitContext, cancelWait := context.WithCancel(opContext)
+		stopChange := context.AfterFunc(changed, cancelWait)
+		// Register cancellation before this second check. A notification either
+		// changes the epoch here or cancels waitContext inside scheduler.Acquire.
+		if !rt.changeIsCurrent(epoch) {
+			stopChange()
+			cancelWait()
+			continue
+		}
+		inner, decision := rt.scheduler.Acquire(waitContext, scheduling.Request{Provider: pool.provider, Model: publicModel, AllowedAccountIDs: candidateIDs(pool.candidates), StickyKey: sticky, Candidates: pool.candidates})
+		stopChange()
+		cancelWait()
+		if !rt.changeIsCurrent(epoch) {
+			if inner != nil {
+				inner.Release(scheduling.ReleaseResult{})
+			}
+			if opContext.Err() != nil {
+				return accountPoolAcquireResult{Code: accountPoolCancelled}
+			}
+			continue
+		}
+		if inner == nil {
+			return accountPoolAcquireResult{Code: mapSchedulingCode(decision.Code)}
+		}
+		rt.app.admission.RLock()
+		selected, code := rt.persistRevalidatedLease(opContext, publicModel, auth, allowedProviders, pool, inner)
+		rt.app.admission.RUnlock()
+		if code != "" {
+			inner.Release(scheduling.ReleaseResult{})
+			return accountPoolAcquireResult{Code: code}
+		}
+		leaseContext, cancelLease := context.WithCancel(ctx)
+		lease := &accountPoolLease{runtime: rt, inner: inner, ctx: leaseContext, cancel: cancelLease, done: make(chan struct{})}
+		lease.stopRuntime = context.AfterFunc(rt.ctx, cancelLease)
+		if !rt.startHeartbeat(lease) {
+			lease.Release(context.Background(), scheduling.ReleaseResult{})
+			return accountPoolAcquireResult{Code: accountPoolClosed}
+		}
+		return accountPoolAcquireResult{Lease: lease, Route: selected, PoolRevision: pool.revision, Code: accountPoolAcquired}
 	}
-	pool, legacy, code := rt.loadPool(opContext, publicModel, allowedProviders)
-	rt.app.admission.RUnlock()
-	if code != "" {
-		return accountPoolAcquireResult{Code: code}
-	}
-	if legacy {
-		return accountPoolAcquireResult{Legacy: true, Code: accountPoolLegacy}
-	}
-	sticky := ""
-	if stickyOpaque != "" {
-		sticky = auth.EmployeeID + "\x00" + publicModel + "\x00" + stickyOpaque
-	}
-	inner, decision := rt.scheduler.Acquire(opContext, scheduling.Request{Provider: pool.provider, Model: publicModel, AllowedAccountIDs: candidateIDs(pool.candidates), StickyKey: sticky, Candidates: pool.candidates})
-	if inner == nil {
-		return accountPoolAcquireResult{Code: mapSchedulingCode(decision.Code)}
-	}
-	rt.app.admission.RLock()
-	selected, code := rt.persistRevalidatedLease(opContext, publicModel, auth, allowedProviders, pool, inner)
-	rt.app.admission.RUnlock()
-	if code != "" {
-		inner.Release(scheduling.ReleaseResult{})
-		return accountPoolAcquireResult{Code: code}
-	}
-	leaseContext, cancelLease := context.WithCancel(ctx)
-	lease := &accountPoolLease{runtime: rt, inner: inner, ctx: leaseContext, cancel: cancelLease, done: make(chan struct{})}
-	lease.stopRuntime = context.AfterFunc(rt.ctx, cancelLease)
-	if !rt.startHeartbeat(lease) {
-		lease.Release(context.Background(), scheduling.ReleaseResult{})
-		return accountPoolAcquireResult{Code: accountPoolClosed}
-	}
-	return accountPoolAcquireResult{Lease: lease, Route: selected, PoolRevision: pool.revision, Code: accountPoolAcquired}
 }
 
 func (rt *accountPoolRuntime) authorizationCurrent(ctx context.Context, tx *sql.Tx, model string, auth employeeAuth) (bool, bool, bool, error) {
@@ -601,7 +661,7 @@ func (l *accountPoolLease) Release(ctx context.Context, result scheduling.Releas
 	}
 	if duration := l.runtime.cooldowns[result.Failure]; duration > 0 {
 		until := formatAccountPoolTime(l.runtime.clock.Now().Add(duration))
-		_, err = tx.ExecContext(ctx, `INSERT INTO account_pool_runtime_cooldowns(account_id,failure_class,cooldown_until,updated_at) VALUES(?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET failure_class=excluded.failure_class,cooldown_until=MAX(account_pool_runtime_cooldowns.cooldown_until,excluded.cooldown_until),updated_at=excluded.updated_at`, l.inner.AccountID(), string(result.Failure), until, rtNow(l.runtime))
+		_, err = tx.ExecContext(ctx, `INSERT INTO account_pool_runtime_cooldowns(account_id,failure_class,cooldown_until,updated_at) VALUES(?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET failure_class=excluded.failure_class,cooldown_until=excluded.cooldown_until,updated_at=excluded.updated_at WHERE excluded.cooldown_until>account_pool_runtime_cooldowns.cooldown_until`, l.inner.AccountID(), string(result.Failure), until, rtNow(l.runtime))
 		if err != nil {
 			return false, accountPoolReleaseResult{Code: accountPoolStorageUnavailable}
 		}
@@ -662,11 +722,40 @@ func (rt *accountPoolRuntime) begin() bool {
 	return true
 }
 
+// NotifyChanged invalidates the generation observed by queued admissions. It
+// never cancels leases that have already been returned to an upstream handler.
+// Callers invoke it only after committing an authorization or routing change.
+func (rt *accountPoolRuntime) NotifyChanged() {
+	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		return
+	}
+	previous := rt.changeCancel
+	rt.changeEpoch++
+	rt.changeContext, rt.changeCancel = context.WithCancel(context.Background())
+	rt.mu.Unlock()
+	previous()
+}
+
+func (rt *accountPoolRuntime) changeSnapshot() (uint64, context.Context) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.changeEpoch, rt.changeContext
+}
+
+func (rt *accountPoolRuntime) changeIsCurrent(epoch uint64) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return !rt.closed && rt.changeEpoch == epoch
+}
+
 func (rt *accountPoolRuntime) Close() error {
 	rt.mu.Lock()
 	if !rt.closed {
 		rt.closed = true
 		rt.cancel()
+		rt.changeCancel()
 		for lease := range rt.active {
 			lease.cancel()
 		}
