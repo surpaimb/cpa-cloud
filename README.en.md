@@ -93,6 +93,16 @@ The optional `X-CPA-Session` header accepts a 1–256-byte identifier. Only an e
 
 The source usage ledger records employee requests separately from upstream attempts. It retains call metadata and explicitly reported token counts, without prompts, replies, or tool arguments. Unknown usage and costs without configured prices remain null, not zero. See the [usage integration contract](docs/usage-service-contract.md).
 
+## Request governance (off by default, latest source only)
+
+In **请求治理 / Request governance**, set requests per minute (RPM) and concurrency limits for an employee, an individual key, or a governance group with explicit employee members, then enable the master switch. Every applicable policy must pass. Exceeding any hard limit returns HTTP 429 without dispatching upstream. Waiting for an account still occupies employee concurrency; one safe account switch remains one employee request.
+
+RPM uses a rolling 60-second window that policy edits do not reset. Chat, Responses, Claude Messages and Gemini generation share governance; `count_tokens` is currently excluded. Disabling the switch only affects new admissions; existing requests still settle. After an abnormal restart, previous concurrency reservations remain until their original lease expiry, without replaying requests.
+
+Governance groups are separate from departments and upstream account groups. Policies cannot grant model access or restore revoked keys. After a network interruption, reconcile the original save operation; after a version conflict, load and confirm the current configuration before saving again. **TPM and cost currently only retain shadow thresholds and admission snapshots. They have no observation results, do not reject requests and do not charge users.** Budget enforcement, tenant limits and billing remain in the feature plan.
+
+Back up the complete data directory before upgrading. To roll back, restore the matching pre-upgrade data and binary; do not run an old binary against the upgraded database. See the [governance contract](docs/governance-contract.md) and [management contract](docs/governance-management-contract.md). Acceptance uses disposable databases and synthetic upstreams. **This feature is not in preview.3 downloads.**
+
 ## Outbound proxies (latest source only)
 
 In the **Outbound proxies** page, add an HTTPS CONNECT proxy with its host, port, address scope and optional Basic credentials, then explicitly bind a saved HTTPS API-key account. OpenAI-compatible, Anthropic and Gemini generation, model catalogs, catalog tests and generation recovery share that account's selected connection. Employees keep their existing CPA Cloud keys. Proxy credentials are encrypted and neither usernames nor passwords are read back.
