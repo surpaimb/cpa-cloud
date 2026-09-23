@@ -1,17 +1,19 @@
-export type ProviderPresetId = 'deepseek' | 'openai' | 'groq' | 'mistral' | 'openrouter'
+export type ProviderPresetId = 'anthropic' | 'deepseek' | 'openai' | 'groq' | 'mistral' | 'openrouter'
 
 export type ProviderPreset = {
   id: ProviderPresetId
   name: string
   endpoint: string
+  providerKind: 'openai-compatible' | 'anthropic-api-key'
 }
 
 export const providerPresets: readonly ProviderPreset[] = [
-  { id: 'deepseek', name: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1' },
-  { id: 'openai', name: 'OpenAI', endpoint: 'https://api.openai.com/v1' },
-  { id: 'groq', name: 'Groq', endpoint: 'https://api.groq.com/openai/v1' },
-  { id: 'mistral', name: 'Mistral', endpoint: 'https://api.mistral.ai/v1' },
-  { id: 'openrouter', name: 'OpenRouter', endpoint: 'https://openrouter.ai/api/v1' },
+  { id: 'anthropic', name: 'Anthropic', endpoint: 'https://api.anthropic.com', providerKind: 'anthropic-api-key' },
+  { id: 'deepseek', name: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1', providerKind: 'openai-compatible' },
+  { id: 'openai', name: 'OpenAI', endpoint: 'https://api.openai.com/v1', providerKind: 'openai-compatible' },
+  { id: 'groq', name: 'Groq', endpoint: 'https://api.groq.com/openai/v1', providerKind: 'openai-compatible' },
+  { id: 'mistral', name: 'Mistral', endpoint: 'https://api.mistral.ai/v1', providerKind: 'openai-compatible' },
+  { id: 'openrouter', name: 'OpenRouter', endpoint: 'https://openrouter.ai/api/v1', providerKind: 'openai-compatible' },
 ] as const
 
 export type ProviderChoice = ProviderPresetId | 'custom'

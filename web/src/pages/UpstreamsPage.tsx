@@ -17,10 +17,10 @@ export function UpstreamsPage({ csrf }: { csrf: string }) {
   const [syncing, setSyncing] = useState<Upstream | null>(null)
   const membershipEnabled = status?.features?.codex_membership_import === true
   return <>
-    <PageHeader title="上游连接" description="连接兼容 OpenAI 协议的上游服务。密钥加密保存且不会再次显示。"><Button onClick={() => setCreating(true)}><Icon name="plus" />添加上游</Button></PageHeader>
+    <PageHeader title="上游连接" description="连接 OpenAI 兼容 API 或 Anthropic Messages API。密钥加密保存且不会再次显示。"><Button onClick={() => setCreating(true)}><Icon name="plus" />添加上游</Button></PageHeader>
     <MembershipFeaturePanel enabled={membershipEnabled} loading={statusLoading} error={statusError} onRetry={() => void reloadStatus()} onImport={() => setImporting(true)} />
     <div className="content-panel"><PageState loading={loading} error={error} onRetry={() => void reload()} />
-      {!loading && !error && data?.items.length === 0 ? <EmptyState title="还没有上游连接" body="添加一个兼容 OpenAI 协议的上游，再配置模型路由。" action={<Button onClick={() => setCreating(true)}>添加上游</Button>} /> : null}
+      {!loading && !error && data?.items.length === 0 ? <EmptyState title="还没有上游连接" body="添加 OpenAI 兼容 API 或 Anthropic API，再配置模型路由。" action={<Button onClick={() => setCreating(true)}>添加上游</Button>} /> : null}
       {data?.items.length ? <div className="table-scroll"><table className="upstreams-table"><thead><tr><th>名称</th><th>提供商</th><th>端点</th><th>凭据</th><th>状态</th><th>操作</th></tr></thead><tbody>{data.items.map((item) => <UpstreamRow key={item.id} item={item} csrf={csrf} membershipEnabled={membershipEnabled} onSync={() => setSyncing(item)} onReimport={() => setReimporting(item)} onDone={() => void reload()} />)}</tbody></table></div> : null}
     </div>
     {creating ? <CreateUpstream csrf={csrf} onClose={() => setCreating(false)} onSaved={() => void reload()} /> : null}
@@ -39,7 +39,7 @@ function MembershipFeaturePanel({ enabled, loading, error, onRetry, onImport }: 
       {loading ? <p>正在读取实验开关…</p> : error ? <p>无法确认实验开关状态；为安全起见，导入入口已隐藏。</p> : enabled
         ? <p>仅导入管理员主动选择的 <code>auth.json</code>，导入只校验结构，不代表授权成功。模型路由需要手动创建。</p>
         : <p>此实例未启用文件导入。请使用 <code>--experimental-codex-membership</code> 启动服务后重试。</p>}
-      <p className="membership-panel__limits">不提供网页登录或自动刷新；凭据过期后需重新导入；不支持 Claude/Gemini。员工仍使用普通 CPA Cloud Key。</p>
+      <p className="membership-panel__limits">不提供网页登录或自动刷新；凭据过期后需重新导入；不支持 Claude/Gemini 会员导入。Anthropic API Key 需从“添加上游”配置。</p>
     </div>
     {enabled ? <Button type="button" onClick={onImport}>导入 Codex auth.json</Button> : error ? <Button type="button" variant="secondary" onClick={onRetry}>重试读取开关</Button> : null}
   </section>
@@ -55,8 +55,9 @@ function UpstreamRow({ item, csrf, membershipEnabled, onSync, onReimport, onDone
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const membership = item.provider_kind === 'codex-membership'
+  const anthropic = item.provider_kind === 'anthropic-api-key'
   const credential = item.credential_state ? credentialStateCopy[item.credential_state] : null
-  return <tr><td><strong>{item.name}</strong></td><td>{membership ? 'Codex 会员' : 'OpenAI 兼容 API'}</td><td>{membership ? <span className="muted-copy">服务端固定</span> : <code className="endpoint">{item.endpoint}</code>}</td><td>{membership && credential ? <span className={`status status--${credential.tone}`}><i />{credential.label}</span> : <span className="muted-copy">API Key</span>}</td><td><span className={`status status--${item.enabled ? 'active' : 'disabled'}`}><i />{item.enabled ? '启用' : '已停用'}</span></td><td><div className="row-actions">{membership ? <><span className="manual-route-note">模型需手动配置</span><button className="link-button" disabled={busy || !membershipEnabled} title={membershipEnabled ? undefined : '需先启用 --experimental-codex-membership'} onClick={onReimport}>重新导入</button></> : <button className="link-button" disabled={busy} onClick={onSync}>同步模型</button>}<span className="inline-action"><button className="link-button" disabled={busy} onClick={async () => {
+  return <tr><td><strong>{item.name}</strong></td><td>{membership ? 'Codex 会员' : anthropic ? 'Anthropic API' : 'OpenAI 兼容 API'}</td><td>{membership ? <span className="muted-copy">服务端固定</span> : <code className="endpoint">{item.endpoint}</code>}</td><td>{membership && credential ? <span className={`status status--${credential.tone}`}><i />{credential.label}</span> : <span className="muted-copy">API Key</span>}</td><td><span className={`status status--${item.enabled ? 'active' : 'disabled'}`}><i />{item.enabled ? '启用' : '已停用'}</span></td><td><div className="row-actions">{membership ? <><span className="manual-route-note">模型需手动配置</span><button className="link-button" disabled={busy || !membershipEnabled} title={membershipEnabled ? undefined : '需先启用 --experimental-codex-membership'} onClick={onReimport}>重新导入</button></> : <button className="link-button" disabled={busy} onClick={onSync}>同步模型</button>}<span className="inline-action"><button className="link-button" disabled={busy} onClick={async () => {
     setBusy(true); setError(null)
     try { await api.updateUpstream(item.id, { expected_revision: item.revision, enabled: !item.enabled }, csrf); onDone() }
     catch (caught) { setError(messageFor(caught)); setBusy(false) }
@@ -99,7 +100,7 @@ export function CodexAuthImport({ csrf, upstream, onClose, onSaved }: { csrf: st
     <div className="membership-limitations"><strong>导入前请确认</strong><ul>
       <li>只接受你主动选择的 Codex <code>auth.json</code>，最大 1 MiB。</li>
       <li>导入只验证文件结构；不会显示文件正文、Token 或账号内容，也不代表授权成功。</li>
-      <li>当前不提供网页登录、自动刷新、Claude/Gemini 或模型发现；凭据过期后需重新导入。</li>
+      <li>当前不提供网页登录、自动刷新、Claude/Gemini 会员导入或 Codex 模型发现；凭据过期后需重新导入。</li>
     </ul></div>
     <form onSubmit={async (event) => {
       event.preventDefault()
@@ -131,6 +132,7 @@ export function CreateUpstream({ csrf, onClose, onSaved }: { csrf: string; onClo
   const [name, setName] = useState(initial.name)
   const [nameIsAutomatic, setNameIsAutomatic] = useState(true)
   const [endpoint, setEndpoint] = useState(initial.endpoint)
+  const [customProviderKind, setCustomProviderKind] = useState<'openai-compatible' | 'anthropic-api-key'>(initial.providerKind)
   const [apiKey, setApiKey] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -141,6 +143,7 @@ export function CreateUpstream({ csrf, onClose, onSaved }: { csrf: string; onClo
     setProvider(choice)
     if (choice === 'custom') return
     const preset = providerPreset(choice as ProviderPresetId)
+    setCustomProviderKind(preset.providerKind)
     setName(preset.name)
     setNameIsAutomatic(true)
     setEndpoint(preset.endpoint)
@@ -151,7 +154,12 @@ export function CreateUpstream({ csrf, onClose, onSaved }: { csrf: string; onClo
     setEndpoint(next)
     const matched = presetForEndpoint(next)
     setProvider(matched?.id ?? 'custom')
-    if (matched && nameIsAutomatic) setName(matched.name)
+    if (matched) {
+      setCustomProviderKind(matched.providerKind)
+      if (nameIsAutomatic) setName(matched.name)
+    } else if (provider !== 'custom') {
+      setCustomProviderKind(providerPreset(provider as ProviderPresetId).providerKind)
+    }
   }
 
   if (saved) return <Dialog title="上游已保存" description="正在读取模型列表；只有你明确选择的模型才会创建路由。" onClose={onClose} wide>
@@ -165,7 +173,8 @@ export function CreateUpstream({ csrf, onClose, onSaved }: { csrf: string; onClo
       event.preventDefault()
       setBusy(true); setError(null)
       try {
-        const created = await api.createUpstream({ name: name.trim(), provider_kind: 'openai-compatible', endpoint: endpoint.trim(), api_key: apiKey }, csrf)
+        const providerKind = provider === 'custom' ? customProviderKind : providerPreset(provider as ProviderPresetId).providerKind
+        const created = await api.createUpstream({ name: name.trim(), provider_kind: providerKind, endpoint: endpoint.trim(), api_key: apiKey }, csrf)
         setSaved(created)
         onSaved()
       } catch (caught) {
@@ -176,12 +185,12 @@ export function CreateUpstream({ csrf, onClose, onSaved }: { csrf: string; onClo
       <div className="form-grid">
         <Field label="服务商"><select value={provider} autoFocus onChange={(event) => selectProvider(event.target.value as ProviderChoice)}>
           {providerPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
-          <option value="custom">自定义 OpenAI 兼容服务</option>
+          <option value="custom">自定义地址（保持当前协议）</option>
         </select></Field>
         <Field label="显示名称"><input name="name" value={name} onChange={(event) => { setName(event.target.value); setNameIsAutomatic(false) }} required /></Field>
         <Field label="API 端点" hint="仅精确匹配已核实的 HTTPS origin 与路径；自定义地址是否可用由服务端验证。"><input name="endpoint" type="url" value={endpoint} onChange={(event) => changeEndpoint(event.target.value)} required /></Field>
         {provider === 'custom' ? <div className="field-note" role="status">当前地址按自定义服务处理。修改服务商或地址后，API Key 必须重新填写。</div> : null}
-        <Field label="API Key" hint="切换服务商或修改地址会立即清空此字段，避免凭据误发。"><input name="api_key" type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} required /></Field>
+        <Field label="API Key" hint="切换服务商或修改地址会立即清空此字段，避免凭据误发。Anthropic 此处只接受 Console API Key，不是 Claude 会员凭据。"><input name="api_key" type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} required /></Field>
       </div>
       <FormError error={error} /><div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button><Button type="submit" disabled={busy}>{busy ? '正在保存…' : '保存并同步模型'}</Button></div>
     </form>

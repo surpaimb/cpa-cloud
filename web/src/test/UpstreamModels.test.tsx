@@ -12,6 +12,7 @@ const response = (route: Route) => Promise.resolve(new Response(JSON.stringify(r
 
 describe('provider presets', () => {
   it('matches only exact HTTPS origins and paths', () => {
+    expect(presetForEndpoint('https://api.anthropic.com/')?.providerKind).toBe('anthropic-api-key')
     expect(presetForEndpoint('https://api.openai.com/v1/')?.id).toBe('openai')
     expect(presetForEndpoint('https://api.openai.com.evil.example/v1')).toBeNull()
     expect(presetForEndpoint('https://api.openai.com/v1/extra')).toBeNull()
@@ -59,6 +60,29 @@ describe('upstream and model discovery flows', () => {
     expect(provider).toHaveValue('custom')
     expect(key).toHaveValue('')
     expect(screen.getByText('当前地址按自定义服务处理。修改服务商或地址后，API Key 必须重新填写。')).toBeInTheDocument()
+  })
+
+  it('creates the Anthropic preset as an Anthropic API-key upstream', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/upstreams') && init?.method === 'POST') return response({ body: { id: 'anthropic-1', name: 'Anthropic', provider_kind: 'anthropic-api-key', endpoint: 'https://api.anthropic.com/v1', enabled: true, revision: 1 } })
+      if (url.endsWith('/upstreams/anthropic-1/discover-models')) return response({ body: { items: [] } })
+      throw new Error(`unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<CreateUpstream csrf="csrf" onClose={() => undefined} onSaved={() => undefined} />)
+    await userEvent.selectOptions(screen.getByLabelText('服务商'), 'anthropic')
+    const endpoint = screen.getByLabelText('API 端点')
+    await userEvent.clear(endpoint)
+    await userEvent.type(endpoint, 'https://gateway.example.com/anthropic')
+    await userEvent.type(screen.getByLabelText('API Key'), 'sk-ant-test')
+    await userEvent.click(screen.getByRole('button', { name: '保存并同步模型' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    const createCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/upstreams'))
+    expect(JSON.parse(String((createCall?.[1] as RequestInit).body))).toMatchObject({
+      provider_kind: 'anthropic-api-key',
+      endpoint: 'https://gateway.example.com/anthropic',
+    })
   })
 
   it('retries discovery after saving without creating the upstream twice', async () => {

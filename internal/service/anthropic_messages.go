@@ -1,0 +1,369 @@
+package service
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+)
+
+const (
+	anthropicAPIKeyProvider = "anthropic-api-key"
+	anthropicMaxResponse    = 16 << 20
+	anthropicMaxSSELine     = 1 << 20
+)
+
+func (a *App) messages(w http.ResponseWriter, r *http.Request) {
+	a.handleAnthropicRequest(w, r, false)
+}
+
+func (a *App) countMessageTokens(w http.ResponseWriter, r *http.Request) {
+	a.handleAnthropicRequest(w, r, true)
+}
+
+func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, countTokens bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, modelMaxBody)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request.", requestID(r.Context()))
+		return
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request.", requestID(r.Context()))
+		return
+	}
+	var model string
+	if raw, ok := payload["model"]; !ok || json.Unmarshal(raw, &model) != nil || !validIdentifier(model, 128) {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "A valid model is required.", requestID(r.Context()))
+		return
+	}
+	stream := false
+	if raw, ok := payload["stream"]; ok {
+		if countTokens || json.Unmarshal(raw, &stream) != nil {
+			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "The stream field is not valid for this request.", requestID(r.Context()))
+			return
+		}
+	}
+	version := r.Header.Get("Anthropic-Version")
+	if !validAnthropicVersion(version) {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "A valid anthropic-version header is required.", requestID(r.Context()))
+		return
+	}
+	beta := r.Header.Get("Anthropic-Beta")
+	if !validAnthropicBeta(beta) {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "The anthropic-beta header is invalid.", requestID(r.Context()))
+		return
+	}
+
+	a.admission.RLock()
+	auth, ok := a.authenticateAnthropicEmployee(w, r)
+	if !ok {
+		a.admission.RUnlock()
+		return
+	}
+	if auth.Mode == "selected" {
+		var allowed int
+		if err := a.store.db.QueryRowContext(r.Context(), `SELECT 1 FROM employee_models WHERE employee_id=? AND model_id=?`, auth.EmployeeID, model).Scan(&allowed); err != nil {
+			a.admission.RUnlock()
+			writeAnthropicError(w, http.StatusForbidden, "permission_error", "Model is not allowed for this key.", requestID(r.Context()))
+			return
+		}
+	}
+	var route route
+	err = a.store.db.QueryRowContext(r.Context(), `SELECT u.id,u.endpoint,m.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND u.enabled=1`, model).Scan(&route.AccountID, &route.Endpoint, &route.UpstreamModel, &route.Ciphertext, &route.ProviderKind, &route.Revision, &route.CredentialState, &route.KeyVersion)
+	if err != nil || route.ProviderKind != anthropicAPIKeyProvider || route.KeyVersion != 1 {
+		a.admission.RUnlock()
+		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", requestID(r.Context()))
+		return
+	}
+	modelRequestID := requestID(r.Context())
+	if !countTokens {
+		_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO model_requests(id,employee_id,key_id,model_id,started_at,outcome) VALUES(?,?,?,?,?,'running')`, modelRequestID, auth.EmployeeID, auth.KeyID, model, utcNow())
+	}
+	a.admission.RUnlock()
+	if err != nil {
+		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "Service is temporarily unavailable.", modelRequestID)
+		return
+	}
+
+	credential, err := a.secrets.decryptCredential(route.AccountID, route.Ciphertext)
+	if err != nil {
+		if !countTokens {
+			a.finishRequest(modelRequestID, "failed", 0)
+		}
+		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", modelRequestID)
+		return
+	}
+	payload["model"], _ = json.Marshal(route.UpstreamModel)
+	outgoing, err := json.Marshal(payload)
+	if err != nil {
+		if !countTokens {
+			a.finishRequest(modelRequestID, "failed", 0)
+		}
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request.", modelRequestID)
+		return
+	}
+	endpoint, err := validateEndpoint(r.Context(), route.Endpoint, a.cfg.AllowLoopbackUpstream)
+	if err != nil {
+		if !countTokens {
+			a.finishRequest(modelRequestID, "failed", 0)
+		}
+		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", modelRequestID)
+		return
+	}
+	target, err := upstreamAnthropicURL(endpoint, countTokens)
+	if err != nil {
+		if !countTokens {
+			a.finishRequest(modelRequestID, "failed", 0)
+		}
+		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", modelRequestID)
+		return
+	}
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
+	if err != nil {
+		if !countTokens {
+			a.finishRequest(modelRequestID, "failed", 0)
+		}
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Upstream is unavailable.", modelRequestID)
+		return
+	}
+	upstreamReq.Header.Set("Authorization", "Bearer "+credential)
+	upstreamReq.Header.Set("Anthropic-Version", version)
+	if beta != "" {
+		upstreamReq.Header.Set("Anthropic-Beta", beta)
+	}
+	upstreamReq.Header.Set("Content-Type", "application/json")
+	if stream {
+		upstreamReq.Header.Set("Accept", "text/event-stream")
+	} else {
+		upstreamReq.Header.Set("Accept", "application/json")
+	}
+	response, err := a.http.Do(upstreamReq)
+	if err != nil {
+		if !countTokens {
+			outcome := "failed"
+			if errors.Is(r.Context().Err(), context.Canceled) {
+				outcome = "cancelled"
+			}
+			a.finishRequest(modelRequestID, outcome, 0)
+		}
+		if r.Context().Err() == nil {
+			writeAnthropicError(w, http.StatusBadGateway, "api_error", "Upstream is unavailable.", modelRequestID)
+		}
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		if !countTokens {
+			a.finishRequest(modelRequestID, "failed", response.StatusCode)
+		}
+		if retry := safeRetryAfter(response.Header.Get("Retry-After")); retry != "" {
+			w.Header().Set("Retry-After", retry)
+		}
+		writeAnthropicUpstreamError(w, response.StatusCode, modelRequestID)
+		return
+	}
+	if stream {
+		a.forwardAnthropicStream(w, r, response, modelRequestID)
+		return
+	}
+	a.forwardAnthropicJSON(w, r, response, modelRequestID, !countTokens)
+}
+
+func (a *App) authenticateAnthropicEmployee(w http.ResponseWriter, r *http.Request) (employeeAuth, bool) {
+	authorizations := r.Header.Values("Authorization")
+	apiKeys := r.Header.Values("X-API-Key")
+	var key string
+	switch {
+	case len(authorizations) == 1 && len(apiKeys) == 0:
+		parts := strings.Fields(authorizations[0])
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			key = parts[1]
+		}
+	case len(authorizations) == 0 && len(apiKeys) == 1:
+		key = strings.TrimSpace(apiKeys[0])
+	}
+	auth, valid := a.lookupEmployeeKey(r.Context(), key)
+	if !valid {
+		writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "Invalid API key.", requestID(r.Context()))
+		return employeeAuth{}, false
+	}
+	return auth, true
+}
+
+func validAnthropicVersion(value string) bool {
+	if len(value) != 10 || value[4] != '-' || value[7] != '-' {
+		return false
+	}
+	for i, char := range value {
+		if i == 4 || i == 7 {
+			continue
+		}
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validAnthropicBeta(value string) bool {
+	if len(value) > 1024 {
+		return false
+	}
+	for _, char := range value {
+		if char < 0x20 || char > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func upstreamAnthropicURL(endpoint string, countTokens bool) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	path := strings.TrimRight(u.Path, "/")
+	if strings.HasSuffix(path, "/v1") {
+		path += "/messages"
+	} else {
+		path += "/v1/messages"
+	}
+	if countTokens {
+		path += "/count_tokens"
+	}
+	u.Path = path
+	u.RawPath = ""
+	return u.String(), nil
+}
+
+func writeAnthropicError(w http.ResponseWriter, status int, kind, message, reqID string) {
+	writeJSON(w, status, map[string]any{
+		"type":       "error",
+		"error":      map[string]string{"type": kind, "message": message},
+		"request_id": reqID,
+	})
+}
+
+func writeAnthropicUpstreamError(w http.ResponseWriter, upstreamStatus int, reqID string) {
+	switch upstreamStatus {
+	case http.StatusTooManyRequests:
+		writeAnthropicError(w, http.StatusTooManyRequests, "rate_limit_error", "Upstream rate limit was reached.", reqID)
+	case 529:
+		writeAnthropicError(w, 529, "overloaded_error", "Upstream is overloaded.", reqID)
+	case http.StatusUnauthorized, http.StatusForbidden:
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Upstream authentication failed.", reqID)
+	default:
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Upstream request failed.", reqID)
+	}
+}
+
+func (a *App) forwardAnthropicJSON(w http.ResponseWriter, r *http.Request, response *http.Response, reqID string, record bool) {
+	if !strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "application/json") {
+		if record {
+			a.finishRequest(reqID, "failed", response.StatusCode)
+		}
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Upstream returned an invalid response.", reqID)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, anthropicMaxResponse+1))
+	if err != nil || len(body) > anthropicMaxResponse || !json.Valid(body) {
+		if record {
+			a.finishRequest(reqID, "failed", response.StatusCode)
+		}
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Upstream returned an invalid response.", reqID)
+		return
+	}
+	if r.Context().Err() != nil {
+		if record {
+			a.finishRequest(reqID, "cancelled", response.StatusCode)
+		}
+		return
+	}
+	if record {
+		a.finishRequest(reqID, "succeeded", response.StatusCode)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+func (a *App) forwardAnthropicStream(w http.ResponseWriter, r *http.Request, response *http.Response, reqID string) {
+	if !strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
+		a.finishRequest(reqID, "failed", response.StatusCode)
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Upstream returned an invalid response.", reqID)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		a.finishRequest(reqID, "failed", response.StatusCode)
+		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "Streaming is unavailable.", reqID)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	reader := bufio.NewReaderSize(response.Body, 64<<10)
+	outcome := "interrupted"
+	sawStop := false
+	sawError := false
+	eventName := ""
+	for {
+		line, err := readBoundedSSELine(reader, anthropicMaxSSELine)
+		if len(line) > 0 {
+			trimmed := strings.TrimRight(string(line), "\r\n")
+			if strings.HasPrefix(trimmed, "event:") {
+				eventName = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
+			}
+			if trimmed == "" {
+				switch eventName {
+				case "message_stop":
+					sawStop = true
+				case "error":
+					sawError = true
+				}
+				eventName = ""
+			}
+			if _, writeErr := w.Write(line); writeErr != nil {
+				outcome = "cancelled"
+				break
+			}
+			flusher.Flush()
+		}
+		if err != nil {
+			if r.Context().Err() != nil {
+				outcome = "cancelled"
+			} else if !errors.Is(err, io.EOF) {
+				outcome = "failed"
+			} else if eventName == "error" || sawError {
+				outcome = "failed"
+			} else if eventName == "message_stop" || sawStop {
+				outcome = "succeeded"
+			}
+			break
+		}
+	}
+	a.finishRequest(reqID, outcome, response.StatusCode)
+}
+
+func readBoundedSSELine(reader *bufio.Reader, limit int) ([]byte, error) {
+	var line []byte
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > limit {
+			return nil, errors.New("SSE line exceeds limit")
+		}
+		line = append(line, fragment...)
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return line, err
+		}
+	}
+}

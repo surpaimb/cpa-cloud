@@ -59,7 +59,7 @@ export type EmployeeKey = {
 export type Upstream = {
   id: string
   name: string
-  provider_kind: 'openai-compatible' | 'codex-membership'
+  provider_kind: 'openai-compatible' | 'anthropic-api-key' | 'codex-membership'
   endpoint: string
   enabled: boolean
   revision: number

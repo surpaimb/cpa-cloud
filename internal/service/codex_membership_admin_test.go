@@ -559,6 +559,9 @@ func assertLegacyMigrationState(t *testing.T, dbPath string, migrated bool) {
 	if strings.Contains(strings.ToLower(schema), "codex-membership") != migrated {
 		t.Fatalf("migration schema state=%v schema=%s", migrated, schema)
 	}
+	if strings.Contains(strings.ToLower(schema), anthropicAPIKeyProvider) != migrated {
+		t.Fatalf("Anthropic provider migration state=%v schema=%s", migrated, schema)
+	}
 	var upstreamCount, modelCount, employeeCount, keyCount, requestCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM upstreams WHERE id='ups_legacy' AND revision=7`).Scan(&upstreamCount); err != nil {
 		t.Fatal(err)

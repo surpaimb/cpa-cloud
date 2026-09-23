@@ -103,6 +103,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", a.listModels)
 	mux.HandleFunc("POST /v1/chat/completions", a.chatCompletions)
 	mux.HandleFunc("POST /v1/responses", a.responsesAPI)
+	mux.HandleFunc("POST /v1/messages", a.messages)
+	mux.HandleFunc("POST /v1/messages/count_tokens", a.countMessageTokens)
 	if strings.TrimSpace(a.cfg.WebDir) != "" {
 		mux.HandleFunc("GET /", a.serveWeb)
 	}
@@ -142,7 +144,7 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSession) {
 	limitations := []string{
 		"development preview; not production hardened",
-		"Responses resources, background execution, Messages, account pools, and reliable billing-grade usage are not implemented",
+		"Responses resources, background execution, account pools, and reliable billing-grade usage are not implemented; Messages is available only for Anthropic API-key routes",
 		"backup/restore automation, production key custody, and multi-process storage are not implemented",
 		"the host administrator can access runtime secrets and must protect the data directory and master key",
 		"single process and single SQLite database only",
@@ -153,7 +155,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			limitations = append(limitations, "Codex OAuth requires explicit --codex-oauth-client-id and --codex-oauth-redirect-uri configuration")
 		}
 	} else {
-		limitations = append(limitations, "only OpenAI-compatible API-key upstreams are enabled")
+		limitations = append(limitations, "only OpenAI-compatible and Anthropic API-key upstreams are enabled")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version": a.cfg.Version,

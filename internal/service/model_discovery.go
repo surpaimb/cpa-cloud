@@ -51,7 +51,7 @@ func (a *App) discoverUpstreamModels(w http.ResponseWriter, r *http.Request, _ a
 		return
 	}
 
-	if providerKind != "openai-compatible" || keyVersion != 1 {
+	if (providerKind != "openai-compatible" && providerKind != anthropicAPIKeyProvider) || keyVersion != 1 {
 		writeAdminError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is temporarily unavailable.")
 		return
 	}
@@ -79,6 +79,9 @@ func (a *App) discoverUpstreamModels(w http.ResponseWriter, r *http.Request, _ a
 		return
 	}
 	upstreamRequest.Header.Set("Authorization", "Bearer "+credential)
+	if providerKind == anthropicAPIKeyProvider {
+		upstreamRequest.Header.Set("Anthropic-Version", "2023-06-01")
+	}
 	upstreamRequest.Header.Set("Accept", "application/json")
 
 	response, err := a.http.Do(upstreamRequest)

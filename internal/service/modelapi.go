@@ -82,28 +82,33 @@ func (a *App) authenticateEmployee(w http.ResponseWriter, r *http.Request) (empl
 		writeModelError(w, 401, "invalid_api_key", "Invalid API key.", requestID(r.Context()))
 		return employeeAuth{}, false
 	}
-	key := parts[1]
-	if !strings.HasPrefix(key, "cpac_") {
+	auth, valid := a.lookupEmployeeKey(r.Context(), parts[1])
+	if !valid {
 		writeModelError(w, 401, "invalid_api_key", "Invalid API key.", requestID(r.Context()))
+		return employeeAuth{}, false
+	}
+	return auth, true
+}
+
+func (a *App) lookupEmployeeKey(ctx context.Context, key string) (employeeAuth, bool) {
+	if !strings.HasPrefix(key, "cpac_") {
 		return employeeAuth{}, false
 	}
 	pair := strings.Split(strings.TrimPrefix(key, "cpac_"), ".")
 	if len(pair) != 2 || pair[0] == "" || pair[1] == "" {
-		writeModelError(w, 401, "invalid_api_key", "Invalid API key.", requestID(r.Context()))
 		return employeeAuth{}, false
 	}
 	var auth employeeAuth
 	var digest []byte
 	var status string
 	var expires, revoked sql.NullString
-	err := a.store.db.QueryRowContext(r.Context(), `SELECT k.employee_id,k.id,k.digest,k.expires_at,k.revoked_at,e.status,e.model_mode FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.selector=?`, pair[0]).Scan(&auth.EmployeeID, &auth.KeyID, &digest, &expires, &revoked, &status, &auth.Mode)
+	err := a.store.db.QueryRowContext(ctx, `SELECT k.employee_id,k.id,k.digest,k.expires_at,k.revoked_at,e.status,e.model_mode FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.selector=?`, pair[0]).Scan(&auth.EmployeeID, &auth.KeyID, &digest, &expires, &revoked, &status, &auth.Mode)
 	valid := err == nil && subtle.ConstantTimeCompare(a.secrets.digest("employee-key/v1\x00"+pair[0], pair[1]), digest) == 1 && status == "active" && !revoked.Valid
 	if valid && expires.Valid {
 		t, e := parseTime(expires.String)
 		valid = e == nil && time.Now().UTC().Before(t)
 	}
 	if !valid {
-		writeModelError(w, 401, "invalid_api_key", "Invalid API key.", requestID(r.Context()))
 		return employeeAuth{}, false
 	}
 	return auth, true

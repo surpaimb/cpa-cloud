@@ -69,7 +69,7 @@ func (a *App) createUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 	}
 	input.Name = strings.TrimSpace(input.Name)
 	input.Endpoint = strings.TrimSpace(input.Endpoint)
-	if !validText(input.Name, 1, 120) || input.ProviderKind != "openai-compatible" || !validText(input.APIKey, 1, 4096) {
+	if !validText(input.Name, 1, 120) || (input.ProviderKind != "openai-compatible" && input.ProviderKind != anthropicAPIKeyProvider) || !validText(input.APIKey, 1, 4096) {
 		writeAdminError(w, 400, "invalid_request", "Invalid upstream fields.")
 		return
 	}

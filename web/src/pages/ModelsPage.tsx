@@ -32,7 +32,7 @@ export function CreateModel({ csrf, onClose, onCreated }: { csrf: string; onClos
   const requestVersion = useRef(0)
   const enabled = useMemo(() => data?.items.filter((item) => item.enabled) ?? [], [data])
   const selectedUpstream = useMemo(() => enabled.find((item) => item.id === upstreamID), [enabled, upstreamID])
-  const canDiscover = selectedUpstream?.provider_kind === 'openai-compatible'
+  const canDiscover = selectedUpstream?.provider_kind === 'openai-compatible' || selectedUpstream?.provider_kind === 'anthropic-api-key'
 
   useEffect(() => {
     if (enabled.length === 0) {
