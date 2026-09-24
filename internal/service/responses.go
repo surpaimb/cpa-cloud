@@ -85,6 +85,11 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	if sourceFailure != nil {
+		writeModelError(w, sourceFailure.status, sourceFailure.code, sourceFailure.message, requestID(r.Context()))
+		return
+	}
 	auth, policyFailure := authorizeKeyPolicy(auth, keypolicy.ProtocolOpenAIResponses, model)
 	if policyFailure != nil {
 		writeModelError(w, policyFailure.status, policyFailure.code, policyFailure.message, requestID(r.Context()))
@@ -107,6 +112,7 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 		view, createErr := a.responseResources.Create(r.Context(), responseResourceCreateInput{
 			OperationID: requestID(r.Context()), EmployeeID: auth.EmployeeID, KeyID: auth.KeyID,
 			PublicModel: model, ParentResponseID: lifecycle.previousID, ProviderKind: providerKind,
+			SourceAddr: auth.SourceAddr, PolicyRevision: auth.Policy.Revision,
 			Background: true, StoreBody: true, Items: persistence.items, CreatedAt: persistence.createdAt,
 		})
 		if createErr != nil {

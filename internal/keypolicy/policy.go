@@ -49,6 +49,8 @@ type Policy struct {
 	Protocols    []ClientProtocol `json:"protocols"`
 	ModelMode    Mode             `json:"model_mode"`
 	Models       []string         `json:"models"`
+	SourceMode   Mode             `json:"source_mode"`
+	SourceCIDRs  []string         `json:"source_cidrs"`
 }
 
 type Replacement struct {
@@ -56,6 +58,8 @@ type Replacement struct {
 	Protocols    []ClientProtocol `json:"protocols"`
 	ModelMode    Mode             `json:"model_mode"`
 	Models       []string         `json:"models"`
+	SourceMode   Mode             `json:"source_mode"`
+	SourceCIDRs  []string         `json:"source_cidrs"`
 }
 
 // Normalize validates an API replacement and returns deterministic, detached
@@ -67,6 +71,7 @@ func Normalize(input Replacement) (Replacement, error) {
 func CreateDefaultTx(ctx context.Context, tx *sql.Tx, keyID string, at time.Time) error {
 	_, err := CreateTx(ctx, tx, keyID, Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
+		SourceMode: ModeAll, SourceCIDRs: []string{},
 	}, at)
 	return err
 }
@@ -90,7 +95,10 @@ func CreateTx(ctx context.Context, tx *sql.Tx, keyID string, replacement Replace
 	if err := replaceMembersTx(ctx, tx, keyID, normalized); err != nil {
 		return Policy{}, err
 	}
-	return Policy{Revision: 1, ProtocolMode: normalized.ProtocolMode, Protocols: normalized.Protocols, ModelMode: normalized.ModelMode, Models: normalized.Models}, nil
+	if err := createSourceTx(ctx, tx, keyID, normalized); err != nil {
+		return Policy{}, err
+	}
+	return Policy{Revision: 1, ProtocolMode: normalized.ProtocolMode, Protocols: normalized.Protocols, ModelMode: normalized.ModelMode, Models: normalized.Models, SourceMode: normalized.SourceMode, SourceCIDRs: normalized.SourceCIDRs}, nil
 }
 
 func LoadTx(ctx context.Context, tx *sql.Tx, keyID string) (Policy, error) {
@@ -118,6 +126,9 @@ func LoadTx(ctx context.Context, tx *sql.Tx, keyID string) (Policy, error) {
 	}
 	item.Models, err = loadModels(ctx, tx, keyID)
 	if err != nil {
+		return Policy{}, err
+	}
+	if err := loadSourceTx(ctx, tx, keyID, &item); err != nil {
 		return Policy{}, err
 	}
 	if err := validateStored(item); err != nil {
@@ -179,9 +190,12 @@ func ReplaceTx(ctx context.Context, tx *sql.Tx, keyID string, expected int64, re
 	if err := replaceMembersTx(ctx, tx, keyID, normalized); err != nil {
 		return Policy{}, err
 	}
+	if err := replaceSourceTx(ctx, tx, keyID, normalized); err != nil {
+		return Policy{}, err
+	}
 	return Policy{
 		Revision: nextRevision, ProtocolMode: normalized.ProtocolMode, Protocols: normalized.Protocols,
-		ModelMode: normalized.ModelMode, Models: normalized.Models,
+		ModelMode: normalized.ModelMode, Models: normalized.Models, SourceMode: normalized.SourceMode, SourceCIDRs: normalized.SourceCIDRs,
 	}, nil
 }
 
@@ -248,14 +262,18 @@ func normalizeReplacement(input Replacement) (Replacement, error) {
 		seenModels[model] = struct{}{}
 	}
 	sort.Strings(models)
-	return Replacement{ProtocolMode: input.ProtocolMode, Protocols: protocols, ModelMode: input.ModelMode, Models: models}, nil
+	sourceCIDRs, err := normalizeSources(input.SourceMode, input.SourceCIDRs)
+	if err != nil {
+		return Replacement{}, err
+	}
+	return Replacement{ProtocolMode: input.ProtocolMode, Protocols: protocols, ModelMode: input.ModelMode, Models: models, SourceMode: input.SourceMode, SourceCIDRs: sourceCIDRs}, nil
 }
 
 func validateStored(policy Policy) error {
-	if policy.Revision < 1 || !validMode(policy.ProtocolMode) || !validMode(policy.ModelMode) || policy.Protocols == nil || policy.Models == nil {
+	if policy.Revision < 1 || !validMode(policy.ProtocolMode) || !validMode(policy.ModelMode) || !validMode(policy.SourceMode) || policy.Protocols == nil || policy.Models == nil || policy.SourceCIDRs == nil {
 		return ErrInvalidPolicy
 	}
-	_, err := normalizeReplacement(Replacement{ProtocolMode: policy.ProtocolMode, Protocols: policy.Protocols, ModelMode: policy.ModelMode, Models: policy.Models})
+	_, err := normalizeReplacement(Replacement{ProtocolMode: policy.ProtocolMode, Protocols: policy.Protocols, ModelMode: policy.ModelMode, Models: policy.Models, SourceMode: policy.SourceMode, SourceCIDRs: policy.SourceCIDRs})
 	return err
 }
 
