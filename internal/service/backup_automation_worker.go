@@ -352,14 +352,6 @@ func (c *backupAutomationCoordinator) Ready() bool {
 	return false
 }
 
-func (c *backupAutomationCoordinator) keyProviderReady() bool {
-	if c == nil || c.keys == nil {
-		return false
-	}
-	ready, _ := c.keys.Ready()
-	return ready
-}
-
 func (c *backupAutomationCoordinator) Running() bool {
 	if c == nil || !c.cfg.Enabled || !c.Ready() {
 		return false
