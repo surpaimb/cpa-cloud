@@ -13,8 +13,8 @@
 | --- | --- | --- | --- |
 | Chat Completions → Responses | 文本 message、developer/system/user/assistant、function tools、tool choice、并行工具、assistant tool calls、字符串 tool result | 单 choice 的文本和 function calls；usage 与 cache/reasoning 子计数 | 文本及函数参数增量；生成 Responses item/content/done/completed 事件；只有显式 `[DONE]` 且 finish reason 一致才完成 |
 | Responses → Chat Completions | 字符串或文本 message input、instructions、function tools、相邻并行 function calls、字符串 function_call_output | completed response 的文本和 function calls；usage 与 cache/reasoning 子计数 | 严格验证 sequence、item ID、output/content index、累计文本/参数、done item 和 terminal output；只在 `response.completed` 后生成 Chat finish chunk 与 `[DONE]` |
-| Messages → Responses | 文本/system、客户端 function tools、tool choice、`tool_use`/`tool_result` | 文本与客户端工具块、停止原因、usage | 文本/function 块、严格累计 usage 与 completed/incomplete/failed；未知事件失败关闭 |
-| Responses → Messages | 无状态文本/instructions、客户端 function tools、function call/output | 文本与客户端工具块、停止原因、usage | 文本/function 块与严格 Anthropic usage；created usage 未知时有界暂存到已知事件，终态仍未知则拒绝 |
+| Client Messages → wire Responses | 文本/system、客户端 function tools、tool choice、`tool_use`/`tool_result` | 文本与客户端工具块、停止原因、usage | Responses 上游事件转换为 Messages 客户端事件；目标 Anthropic usage 必需，较早已知可生成期间增量，仅终态已知则有界全流延迟，始终未知则输出前拒绝 |
+| Client Responses → wire Messages | 无状态文本/instructions、客户端 function tools、function call/output | 文本与客户端工具块、停止原因、usage | Messages 上游事件转换为 Responses 客户端事件；严格验证 message_start/message_delta 累计 usage 与 completed/incomplete/failed，未知事件失败关闭 |
 | Gemini generateContent → Responses | 文本、system instruction、function declarations/calls/responses、生成参数子集 | 文本与函数调用、finish reason、usage | 未接入；共享 HTTP 路由派发前拒绝 |
 | Responses → Gemini generateContent | 无状态文本/instructions、function tools/calls/results、生成参数子集 | 文本与函数调用、finish reason、usage | 未接入；共享 HTTP 路由派发前拒绝 |
 

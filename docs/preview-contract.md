@@ -38,7 +38,7 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 ### Messages↔Responses SSE（2026-09-25 源码增量）
 
-显式 wire 只支持契约列出的 text/function 子集、严格事件顺序与累计 usage；Gemini 跨协议 SSE、thinking、cache-control、媒体、引用、托管工具、有状态/后台跨协议转换仍拒绝。completed/incomplete/failed 分别结算为成功/中断/失败。Messages→Responses 请求方向（Responses 上游事件转换为 Messages 客户端事件）在 created 或较早 in_progress 已有完整 usage 时可生成期间增量；若 usage 只在 terminal 可知则有界全流延迟，终态仍未知则零合法目标事件并失败关闭。合成上游测试不等于真实 Anthropic SDK/CLI 或供应商账号兼容验收。
+显式 wire 只支持契约列出的 text/function 子集、严格事件顺序与累计 usage；Gemini 跨协议 SSE、thinking、cache-control、媒体、引用、托管工具、有状态/后台跨协议转换仍拒绝。completed/incomplete/failed 分别结算为成功/中断/失败。Client Messages + wire Responses（Responses 上游事件转换为 Messages 客户端事件）在 created 或较早 in_progress 已有完整 usage 时可生成期间增量；若 usage 只在 terminal 可知则有界全流延迟。从 created 到 terminal 始终未知时，在任何目标语义事件输出前失败关闭；若较早 usage 已知而 terminal usage 缺失、为 null 或冲突，则已有流失败关闭且不输出成功 terminal。合成上游测试不等于真实 Anthropic SDK/CLI 或供应商账号兼容验收。
 
 ### 账号与模型生命周期（开发预览增量）
 
