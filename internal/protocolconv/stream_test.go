@@ -126,32 +126,11 @@ func TestResponsesToChatStreamRejectsFailureAndEarlyEOF(t *testing.T) {
 	}
 }
 
-func TestChatToResponsesStreamPreservesFirstSeenOutputOrder(t *testing.T) {
+func TestChatToResponsesStreamRejectsOutOfOrderToolIndexes(t *testing.T) {
 	stream := new(ChatToResponsesStream)
-	chunks := []string{
-		`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_second","type":"function","function":{"name":"second","arguments":"{}"}}]},"finish_reason":null}]}`,
-		`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_first","type":"function","function":{"name":"first","arguments":"{}"}}]},"finish_reason":null}]}`,
-		`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"after tools"},"finish_reason":"tool_calls"}]}`,
-	}
-	for _, chunk := range chunks {
-		if _, err := stream.Feed([]byte(chunk)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	events, err := stream.Finish()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var terminal struct {
-		Response struct {
-			Output []map[string]any `json:"output"`
-		} `json:"response"`
-	}
-	if err := json.Unmarshal(events[len(events)-1].Data, &terminal); err != nil {
-		t.Fatal(err)
-	}
-	if len(terminal.Response.Output) != 3 || terminal.Response.Output[0]["call_id"] != "call_second" || terminal.Response.Output[1]["call_id"] != "call_first" || terminal.Response.Output[2]["type"] != "message" {
-		t.Fatalf("output order no longer matches emitted indexes: %#v", terminal.Response.Output)
+	_, err := stream.Feed([]byte(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_second","type":"function","function":{"name":"second","arguments":"{}"}}]},"finish_reason":null}]}`))
+	if !errors.Is(err, ErrInvalidUpstream) {
+		t.Fatalf("expected out-of-order tool index rejection, got %v", err)
 	}
 }
 
