@@ -49,12 +49,24 @@ export type Employee = {
   models: string[]
   revision: number
 }
+export type ClientProtocol = 'openai-chat' | 'openai-responses' | 'anthropic-messages' | 'gemini-generate-content'
+export type KeyAccessPolicy = {
+  revision: number
+  protocol_mode: 'all' | 'selected'
+  protocols: ClientProtocol[]
+  model_mode: 'all' | 'selected'
+  models: string[]
+  effective_protocols: ClientProtocol[]
+  effective_models: string[]
+}
+export type KeyPolicyInput = Pick<KeyAccessPolicy, 'protocol_mode' | 'protocols' | 'model_mode' | 'models'>
 export type EmployeeKey = {
   id: string
   name: string
   key?: string
   expires_at: string | null
   revoked_at: string | null
+  policy?: KeyAccessPolicy
 }
 export type Upstream = {
   id: string
@@ -299,6 +311,7 @@ export type SystemStatus = {
     account_pool_routing?: boolean
     account_lifecycle_management?: boolean
     single_instance_billing?: boolean
+    key_access_policy?: boolean
   }
 }
 
@@ -691,11 +704,15 @@ export const api = {
   updateModelPolicy: (id: string, body: Record<string, unknown>, csrf: string) =>
     request<Employee>(`/employees/${encodeURIComponent(id)}/model-policy`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
   keys: (employeeId: string) => request<{ items: EmployeeKey[] }>(`/employees/${encodeURIComponent(employeeId)}/keys`),
-  createKey: (employeeId: string, name: string, csrf: string) =>
+  createKey: (employeeId: string, name: string, csrf: string, policy?: KeyPolicyInput) =>
     request<EmployeeKey>(`/employees/${encodeURIComponent(employeeId)}/keys`, {
       method: 'POST',
-      body: JSON.stringify({ name, operation_id: crypto.randomUUID(), expires_at: null }),
+      body: JSON.stringify({ name, operation_id: crypto.randomUUID(), expires_at: null, ...(policy ? { policy } : {}) }),
     }, csrf),
+  keyPolicy: (keyId: string) =>
+    request<KeyAccessPolicy>(`/keys/${encodeURIComponent(keyId)}/policy`),
+  putKeyPolicy: (keyId: string, body: KeyPolicyInput & { expected_revision: number }, csrf: string) =>
+    request<KeyAccessPolicy>(`/keys/${encodeURIComponent(keyId)}/policy`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
   revokeKey: (keyId: string, csrf: string) =>
     request<{ ok: true }>(`/keys/${encodeURIComponent(keyId)}/revoke`, { method: 'POST', body: '{}' }, csrf),
   upstreams: (signal?: AbortSignal, includeArchived = false) => request<UpstreamsResponse>(`/upstreams${includeArchived ? '?include_archived=true' : ''}`, { signal }),
