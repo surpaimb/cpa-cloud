@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 	"cpacloud.local/server/internal/protocolconv"
 	"cpacloud.local/server/internal/scheduling"
 )
@@ -59,11 +60,19 @@ func (a *App) listGeminiModels(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
 	}
+	if !keyPolicyAllowsProtocol(auth.Policy, keypolicy.ProtocolGeminiGenerate) {
+		writeJSON(w, http.StatusOK, map[string]any{"models": []any{}})
+		return
+	}
 	query := `SELECT m.id FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND m.archived=0 AND ` + a.availableModelRouteSQL(true)
 	args := []any{}
 	if auth.Mode == "selected" {
 		query += ` AND EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id)`
 		args = append(args, auth.EmployeeID)
+	}
+	if auth.Policy.ModelMode == keypolicy.ModeSelected {
+		query += ` AND EXISTS(SELECT 1 FROM access_key_policy_models kpm WHERE kpm.key_id=? AND kpm.model_id=m.id)`
+		args = append(args, auth.KeyID)
 	}
 	query += ` ORDER BY m.id LIMIT ? OFFSET ?`
 	args = append(args, pageSize+1, offset)
@@ -144,6 +153,11 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 	auth, err := a.authenticateGeminiEmployeeRequest(r)
 	if err != nil {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
+		return
+	}
+	auth, policyFailure := authorizeKeyPolicy(auth, keypolicy.ProtocolGeminiGenerate, model)
+	if policyFailure != nil {
+		writeGeminiError(w, policyFailure.status, geminiAdmissionStatus(policyFailure.status), policyFailure.message)
 		return
 	}
 	if failure := a.validatePoolSession(r, auth, model); failure != nil {

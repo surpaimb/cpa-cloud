@@ -37,7 +37,7 @@ func TestNativeProviderMigrationPreservesOAuthBindingAndRetries(t *testing.T) {
 		`INSERT INTO codex_oauth_bindings VALUES('ups_oauth','synthetic-client','authorization_code','2026-01-01T00:00:00Z')`,
 		`INSERT INTO models(id,upstream_id,upstream_model,enabled,created_at) VALUES('public-model','ups_oauth','native-model',1,'2026-01-01T00:00:00Z')`,
 		`INSERT INTO employees VALUES('employee','synthetic','','','active','all',3,'2026-01-01T00:00:00Z')`,
-		`INSERT INTO access_keys VALUES('key','employee','synthetic','selector',X'05060708',1,'key-operation',NULL,NULL,'2026-01-01T00:00:00Z')`,
+		`INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,operation_fingerprint,expires_at,revoked_at,created_at) VALUES('key','employee','synthetic','selector',X'05060708',1,'key-operation','',NULL,NULL,'2026-01-01T00:00:00Z')`,
 		`PRAGMA foreign_keys=ON`,
 		`CREATE TABLE _upstreams_membership_migration (sentinel TEXT)`,
 		`INSERT INTO _upstreams_membership_migration VALUES('preserve')`,

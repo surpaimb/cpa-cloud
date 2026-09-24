@@ -19,6 +19,7 @@ import (
 	"cpacloud.local/server/internal/accounting"
 	"cpacloud.local/server/internal/egress"
 	"cpacloud.local/server/internal/governance"
+	"cpacloud.local/server/internal/keypolicy"
 )
 
 const (
@@ -89,6 +90,10 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	s, err := openStore(cfg.DataDir)
 	if err != nil {
 		return nil, err
+	}
+	if err := keypolicy.Migrate(ctx, s.db); err != nil {
+		s.close()
+		return nil, fmt.Errorf("migrate access key policies: %w", err)
 	}
 	if err := ensureInitialized(ctx, s.db); err != nil {
 		s.close()
@@ -302,6 +307,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("PUT /admin/api/v1/employees/{id}/model-policy", a.requireAdmin(a.updateModelPolicy, true))
 	mux.HandleFunc("GET /admin/api/v1/employees/{id}/keys", a.requireAdmin(a.listKeys, false))
 	mux.HandleFunc("POST /admin/api/v1/employees/{id}/keys", a.requireAdmin(a.createKey, true))
+	mux.HandleFunc("GET /admin/api/v1/keys/{id}/policy", a.requireAdmin(a.getKeyPolicy, false))
+	mux.HandleFunc("PUT /admin/api/v1/keys/{id}/policy", a.requireAdmin(a.putKeyPolicy, true))
 	mux.HandleFunc("POST /admin/api/v1/keys/{id}/revoke", a.requireAdmin(a.revokeKey, true))
 	mux.HandleFunc("GET /admin/api/v1/upstreams", a.requireAdmin(a.listUpstreams, false))
 	mux.HandleFunc("POST /admin/api/v1/upstreams", a.requireAdmin(a.createUpstream, true))
@@ -426,6 +433,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"account_recovery":                a.recovery != nil,
 			"codex_membership_auto_refresh":   a.refresh != nil && a.refresh.enabled(),
 			"account_lifecycle_management":    true,
+			"key_access_policy":               true,
 		},
 		"limitations": limitations,
 	})
