@@ -1,5 +1,22 @@
 # 集成状态
 
+## 2026-09-24：显式 Wire 协议路由与跨协议非流式接线
+
+- 集成提交 `8f948a4` 把纯转换模块接入共享 HTTP 执行路径。模型与账号池路由持久化显式
+  `wire_protocol`，旧库迁移及旧管理客户端省略字段都保持 `legacy-native`；provider/wire 不匹配、账号池内
+  wire 不一致、派发前 revision/wire 改变均失败关闭，不按 provider 猜测或试探端点。
+- 合成上游验收覆盖 Chat↔Responses、Messages↔Responses、Gemini↔Responses 六个非流式方向。每个员工请求
+  只有一个 parent 和一次实际派发，attempt 记录实际上游协议；原始上游 JSON 先做用量观察再转换。显式跨协议
+  SSE 在派发和 attempt 创建前拒绝；state/background/previous/conversation 及 Messages token counting 仍只允许
+  各自原生路由。Codex Chat 继续保留既有兼容路径，但其实际 Responses 出站现按 Responses usage/attempt 归因。
+- 管理网页可创建、修改和查看 wire，并在账号池逐路由保存；切换 provider 会重置不兼容选择。全量网页
+  17 文件/123 项测试、TypeScript 检查和生产构建通过。全仓非缓存 Go 测试通过：service 736.008s，
+  governance 135.923s，accounting 85.290s，backup 44.573s，financial 22.175s，两个 CLI 及其余包通过；
+  `go vet ./...` 与 `scripts/test-ci-plan.py` 通过。
+- 上述只是随机临时目录、本地合成 HTTP 上游和组件测试证据，没有访问真实供应商、真实会员账号或既有 8787
+  服务，不证明真实 provider 兼容。Linux race 与 CI 以本批 PR 新 HEAD 的实际结果为准；旧 25 分钟 race
+  总命令已因 service 套件增长稳定超时，现保留全部覆盖并把 service 与其他有状态包分组执行。
+
 ## 2026-09-24：剩余能力首个可验收截止
 
 - 从 main `19388be` 开始，本批集成默认关闭的加密有状态 Responses 与后台创建/查询/取消、可靠用量事实与更正、selector-aware 通用预算、单实例金额/套餐/充值/兑换/退款流程，以及自动加密备份。实现仍保持员工模型请求鉴权、上游执行和管理面在一个 Go 服务进程内；没有引入多租户、员工 SSO 或管理员密码重置，也未创建发布包、tag 或部署。
