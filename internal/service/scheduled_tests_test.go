@@ -374,6 +374,67 @@ func TestScheduledTestsClaimCloseRaceAndEligibilityStorageFailureAreTerminal(t *
 	})
 }
 
+func TestArchivedUpstreamAtomicallyDisablesAndCancelsScheduledTests(t *testing.T) {
+	app, server, cookie, csrf := newModelAdmissionApp(t, false)
+	upstream := createModelAdmissionUpstream(t, server.URL, cookie, csrf, "Archive schedule", "openai-compatible", "http://127.0.0.1:1", "archive-private")
+	plan := createScheduledPlanForTest(t, server.URL, cookie, csrf, upstream.ID, true)
+	now := time.Now().UTC()
+	app.scheduledTests.now = func() time.Time { return now }
+	if _, err := app.store.db.Exec(`UPDATE scheduled_test_plans SET next_run_at=? WHERE id=?`, formatAccountPoolTime(now.Add(-time.Second)), plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := app.scheduledTests.claimDue(context.Background())
+	if err != nil || claim == nil {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	started := make(chan struct{})
+	app.scheduledTests.execute = func(ctx context.Context, _ string, _ string, _ int64, _ string) (upstreamTestOperationView, int, string, error) {
+		close(started)
+		<-ctx.Done()
+		code := "cancelled"
+		return upstreamTestOperationView{ResultCode: &code}, http.StatusOK, "", nil
+	}
+	app.scheduledTests.start(*claim)
+	<-started
+
+	response := requestJSON(t, http.MethodDelete, server.URL+"/admin/api/v1/upstreams/"+upstream.ID, fmt.Sprintf(`{"expected_revision":%d}`, upstream.Revision), cookie, csrf, server.URL)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("archive upstream status=%d body=%s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
+
+	var upstreamArchived, enabled int
+	var revision int64
+	var next sql.NullString
+	if err := app.store.db.QueryRow(`SELECT archived FROM upstreams WHERE id=?`, upstream.ID).Scan(&upstreamArchived); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.db.QueryRow(`SELECT enabled,revision,next_run_at FROM scheduled_test_plans WHERE id=?`, plan.ID).Scan(&enabled, &revision, &next); err != nil {
+		t.Fatal(err)
+	}
+	if upstreamArchived != 1 || enabled != 0 || revision != plan.Revision+1 || next.Valid {
+		t.Fatalf("archive transaction upstream=%d enabled=%d revision=%d next=%v", upstreamArchived, enabled, revision, next)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		var state, result string
+		err := app.store.db.QueryRow(`SELECT state,result_code FROM scheduled_test_runs WHERE operation_id=?`, claim.OperationID).Scan(&state, &result)
+		if err == nil && state == "completed" && result == "cancelled" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("archived upstream run did not finalize as cancelled: state=%q result=%q err=%v", state, result, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	create := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/scheduled-tests", scheduledPlanBody(upstream.ID, false), cookie, csrf, server.URL)
+	if create.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(create), `"code":"invalid_upstream"`) {
+		t.Fatal("archived upstream accepted for a new scheduled test")
+	}
+}
+
 func scheduledPlanBody(upstreamID string, enabled bool) string {
 	return fmt.Sprintf(`{"name":"Credential schedule","upstream_id":%q,"scope":"local_credential","interval_seconds":300,"enabled":%t}`, upstreamID, enabled)
 }

@@ -157,6 +157,7 @@ func TestCreateTakesConsistentSnapshotDuringConcurrentWALWrites(t *testing.T) {
 	defer db.Close()
 	stop := make(chan struct{})
 	done := make(chan error, 1)
+	firstCommitted := make(chan struct{})
 	go func() {
 		for index := 0; ; index++ {
 			select {
@@ -169,9 +170,17 @@ func TestCreateTakesConsistentSnapshotDuringConcurrentWALWrites(t *testing.T) {
 				done <- err
 				return
 			}
+			if index == 0 {
+				close(firstCommitted)
+			}
 			time.Sleep(time.Millisecond)
 		}
 	}()
+	select {
+	case <-firstCommitted:
+	case err := <-done:
+		t.Fatalf("first concurrent commit failed: %v", err)
+	}
 	packagePath := filepath.Join(root, "concurrent.cpacb")
 	_, createErr := Create(context.Background(), source, packagePath, testPassword, "test")
 	close(stop)

@@ -226,7 +226,7 @@ func (a *App) updateModelPolicy(w http.ResponseWriter, r *http.Request, _ adminS
 	}
 	for _, modelID := range input.Models {
 		var exists int
-		if err := tx.QueryRowContext(r.Context(), `SELECT 1 FROM models WHERE id=?`, modelID).Scan(&exists); err != nil {
+		if err := tx.QueryRowContext(r.Context(), `SELECT 1 FROM models WHERE id=? AND archived=0`, modelID).Scan(&exists); err != nil {
 			writeAdminError(w, 400, "invalid_request", "Model policy refers to an unknown model.")
 			return
 		}

@@ -140,6 +140,15 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	app.archiveUpstreamTxHook = func(ctx context.Context, tx *sql.Tx, upstreamID, adminID, archivedAt string) error {
+		when, err := parseTime(archivedAt)
+		if err != nil {
+			return err
+		}
+		_, err = archiveScheduledTestsForUpstreamTx(ctx, tx, upstreamID, adminID, when)
+		return err
+	}
+	app.upstreamArchivedHook = app.scheduledTests.cancelUpstream
 	if err := app.refresh.Start(); err != nil {
 		return nil, err
 	}
@@ -149,6 +158,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	}
 	app.proxyTests, err = newOutboundProxyTestCoordinator(app)
 	if err != nil {
+		return nil, err
+	}
+	if err := app.scheduledTests.Start(); err != nil {
 		return nil, err
 	}
 	opened = true

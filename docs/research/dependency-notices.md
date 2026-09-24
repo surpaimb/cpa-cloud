@@ -39,7 +39,7 @@
 | `github.com/ncruces/go-strftime` | `v0.1.9` | indirect | MIT | `LICENSE` |
 | `github.com/remyoudompheng/bigfft` | `v0.0.0-20230129092748-24d4a6f8daec` | indirect | BSD-3-Clause | `LICENSE` |
 | `golang.org/x/exp` | `v0.0.0-20250620022241-b7579e27df2b` | indirect | BSD-3-Clause | `LICENSE` |
-| `golang.org/x/sys` | `v0.36.0` | indirect | BSD-3-Clause | `LICENSE` |
+| `golang.org/x/sys` | `v0.36.0` | direct（Windows ACL） | BSD-3-Clause | `LICENSE` |
 | `modernc.org/libc` | `v1.66.3` | indirect | BSD-3-Clause；内含 Go Authors BSD-3-Clause 与 Dominik Honnef MIT 材料 | `LICENSE`, `LICENSE-GO`, `honnef.co/go/netdb/LICENSE` |
 | `modernc.org/mathutil` | `v1.7.1` | indirect | BSD-3-Clause；内含 mersenne BSD-3-Clause 材料 | `LICENSE`, `mersenne/LICENSE` |
 | `modernc.org/memory` | `v1.11.0` | indirect | BSD-3-Clause；内含 Go Authors 和 mmap-go BSD-3-Clause 材料 | `LICENSE`, `LICENSE-GO`, `LICENSE-MMAP-GO` |

@@ -22,16 +22,16 @@ type scheduledTestCoordinator struct {
 	newOperationID func() (string, error)
 	execute        func(context.Context, string, string, int64, string) (upstreamTestOperationView, int, string, error)
 	checkUpstream  func(context.Context, string, int64) (bool, error)
-	hasArchived    bool
 	afterClaim     func()
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
-	wake   chan struct{}
-	mu     sync.Mutex
-	active map[string]scheduledTestActive
-	closed bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	done    chan struct{}
+	wake    chan struct{}
+	mu      sync.Mutex
+	active  map[string]scheduledTestActive
+	started bool
+	closed  bool
 }
 
 func newScheduledTestCoordinator(ctx context.Context, app *App) (*scheduledTestCoordinator, error) {
@@ -43,12 +43,6 @@ func newScheduledTestCoordinator(ctx context.Context, app *App) (*scheduledTestC
 		app: app, now: func() time.Time { return time.Now().UTC() }, newOperationID: newRecoveryOperationID,
 		execute: app.healthTests.run, ctx: workerCtx, cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1), active: make(map[string]scheduledTestActive),
 	}
-	columns, err := tableColumns(ctx, app.store.db, "upstreams")
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	c.hasArchived = columns["archived"]
 	c.checkUpstream = c.upstreamEligible
 	migrateCtx, migrateCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer migrateCancel()
@@ -56,12 +50,27 @@ func newScheduledTestCoordinator(ctx context.Context, app *App) (*scheduledTestC
 		cancel()
 		return nil, err
 	}
-	if app.cfg.ScheduledTestsEnabled {
-		go c.loop()
-	} else {
+	if !app.cfg.ScheduledTestsEnabled {
 		close(c.done)
 	}
 	return c, nil
+}
+
+func (c *scheduledTestCoordinator) Start() error {
+	if c == nil || !c.app.cfg.ScheduledTestsEnabled {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return errors.New("scheduled test coordinator is closed")
+	}
+	if c.started {
+		return nil
+	}
+	c.started = true
+	go c.loop()
+	return nil
 }
 
 func (c *scheduledTestCoordinator) Close() {
@@ -77,6 +86,10 @@ func (c *scheduledTestCoordinator) Close() {
 	c.cancel()
 	for _, item := range c.active {
 		item.cancel()
+	}
+	started := c.started
+	if !started && c.app.cfg.ScheduledTestsEnabled {
+		close(c.done)
 	}
 	c.mu.Unlock()
 	<-c.done
@@ -190,11 +203,7 @@ func (c *scheduledTestCoordinator) claimDue(ctx context.Context) (*scheduledTest
 	var interval int64
 	claimSQL := `SELECT p.id,p.revision,p.upstream_id,u.revision,p.scope,p.interval_seconds
 		FROM scheduled_test_plans p JOIN upstreams u ON u.id=p.upstream_id
-		WHERE p.enabled=1 AND p.archived_at IS NULL AND p.next_run_at<=? AND u.enabled=1`
-	if c.hasArchived {
-		claimSQL += ` AND u.archived=0`
-	}
-	claimSQL += `
+		WHERE p.enabled=1 AND p.archived_at IS NULL AND p.next_run_at<=? AND u.enabled=1 AND u.archived=0
 		  AND NOT EXISTS(SELECT 1 FROM scheduled_test_runs r WHERE r.upstream_id=p.upstream_id AND r.state='running')
 		ORDER BY p.next_run_at,p.id LIMIT 1`
 	err = tx.QueryRowContext(ctx, claimSQL, stamp).Scan(&claim.PlanID, &claim.PlanRevision, &claim.UpstreamID, &claim.UpstreamRevision, &claim.Scope, &interval)
@@ -301,11 +310,7 @@ func (c *scheduledTestCoordinator) finishClaim(claim scheduledTestClaim, resultC
 func (c *scheduledTestCoordinator) upstreamEligible(ctx context.Context, id string, expectedRevision int64) (bool, error) {
 	var enabled int
 	var revision int64
-	query := `SELECT enabled,revision FROM upstreams WHERE id=?`
-	if c.hasArchived {
-		query += ` AND archived=0`
-	}
-	if err := c.app.store.db.QueryRowContext(ctx, query, id).Scan(&enabled, &revision); errors.Is(err, sql.ErrNoRows) {
+	if err := c.app.store.db.QueryRowContext(ctx, `SELECT enabled,revision FROM upstreams WHERE id=? AND archived=0`, id).Scan(&enabled, &revision); errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	} else if err != nil {
 		return false, err

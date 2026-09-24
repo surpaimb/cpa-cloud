@@ -435,12 +435,13 @@ unset CPA_EMPLOYEE_KEY
 | `--experimental-codex-membership` | 仅最新源码；默认关闭 Codex 文件导入、会员请求及 OAuth 实验 |
 | `--codex-oauth-client-id` / `--codex-oauth-redirect-uri` | 仅最新源码；同时设置才启用网页 OAuth 与自动/手动刷新，另需开启会员实验 |
 | `--allow-loopback-upstream` | 默认关闭，仅本机开发测试 |
+| `--scheduled-tests-enabled` | 默认关闭；启用已保存的本地凭据/目录定时测试 worker |
 
 用 `cpa-cloud --help` 查看二进制参数。
 
 数据目录包含 `cpa-cloud.db`、可能存在的 WAL/SHM 文件和 **`master.key`**。员工 Key 保存为带密钥摘要，上游凭据加密保存；主机管理员仍能访问运行中的秘密。丢失或替换 `master.key` 会破坏已有凭据的可用性。
 
-当前没有自动备份、恢复命令或升级迁移保证。手动升级前停止服务，复制**完整数据目录**到受保护位置，并保留旧程序和网页。恢复时停服务，还原同一份完整数据快照和对应程序版本，并先在隔离环境检查。不要仅复制运行中的主数据库文件。此手动维护流程尚无完整自动恢复验收。
+最新源码提供独立的 `cpa-cloud-backup create|verify|restore` 加密备份命令，可从活动 WAL 数据库取得一致快照，并只恢复到不存在的新目录；用法、安全边界和 128 MiB 首批上限见[加密备份文档](docs/backup-restore.md)。它不包含自动计划、保留、远程上传或原地回退。升级前仍应保留匹配的旧程序和网页，并先在隔离环境验证恢复结果；不要仅复制运行中的主数据库文件。
 
 ## 8. 从源码构建
 

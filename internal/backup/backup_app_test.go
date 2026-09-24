@@ -41,8 +41,17 @@ func TestEncryptedBackupRestoresIntoRealAppWithEmployeeKey(t *testing.T) {
 	keyView := adminJSON(t, client, http.MethodPost, server.URL+"/admin/api/v1/employees/"+employeeID+"/keys", csrf,
 		map[string]any{"name": "Synthetic Key", "operation_id": "backup-e2e-key"}, http.StatusCreated)
 	employeeKey := keyView["key"].(string)
-	adminJSON(t, client, http.MethodPost, server.URL+"/admin/api/v1/upstreams", csrf,
+	activeUpstream := adminJSON(t, client, http.MethodPost, server.URL+"/admin/api/v1/upstreams", csrf,
 		map[string]any{"name": "Synthetic API", "provider_kind": "openai-compatible", "endpoint": "https://example.com", "api_key": "synthetic-upstream-secret"}, http.StatusCreated)
+	activeUpstreamID := activeUpstream["id"].(string)
+	plan := adminJSON(t, client, http.MethodPost, server.URL+"/admin/api/v1/scheduled-tests", csrf,
+		map[string]any{"name": "Backup schedule", "upstream_id": activeUpstreamID, "scope": "local_credential", "interval_seconds": 300, "enabled": true}, http.StatusCreated)
+	planID := plan["id"].(string)
+	archivedUpstream := adminJSON(t, client, http.MethodPost, server.URL+"/admin/api/v1/upstreams", csrf,
+		map[string]any{"name": "Archived API", "provider_kind": "openai-compatible", "endpoint": "https://example.net", "api_key": "synthetic-archived-secret"}, http.StatusCreated)
+	archivedUpstreamID := archivedUpstream["id"].(string)
+	adminJSON(t, client, http.MethodDelete, server.URL+"/admin/api/v1/upstreams/"+archivedUpstreamID, csrf,
+		map[string]any{"expected_revision": archivedUpstream["revision"]}, http.StatusOK)
 
 	observer, err := sql.Open("sqlite", filepath.Join(source, "cpa-cloud.db"))
 	if err != nil {
@@ -77,6 +86,11 @@ func TestEncryptedBackupRestoresIntoRealAppWithEmployeeKey(t *testing.T) {
 		observer.Close()
 		t.Fatal(err)
 	}
+	if _, err := observer.Exec(`INSERT INTO scheduled_test_runs(plan_id,plan_revision,upstream_id,operation_id,scope,state,result_code,started_at,finished_at,latency_ms,actor)
+		VALUES(?,?,?,'34000000-0000-4000-8000-000000000001','local_credential','running',NULL,'2026-09-24T00:00:00Z',NULL,NULL,'system')`, planID, 1, activeUpstreamID); err != nil {
+		observer.Close()
+		t.Fatal(err)
+	}
 	observer.Close()
 
 	packagePath := filepath.Join(root, "real-app.cpacb")
@@ -92,14 +106,21 @@ func TestEncryptedBackupRestoresIntoRealAppWithEmployeeKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var preservedBudgetClock string
+	var preservedBudgetClock, preOpenRunState string
 	if err := preOpenDB.QueryRow(`SELECT last_effective_at FROM governance_budget_clock WHERE singleton=1`).Scan(&preservedBudgetClock); err != nil {
+		preOpenDB.Close()
+		t.Fatal(err)
+	}
+	if err := preOpenDB.QueryRow(`SELECT state FROM scheduled_test_runs WHERE operation_id='34000000-0000-4000-8000-000000000001'`).Scan(&preOpenRunState); err != nil {
 		preOpenDB.Close()
 		t.Fatal(err)
 	}
 	preOpenDB.Close()
 	if preservedBudgetClock != "2026-01-02T12:34:56.000000000Z" {
 		t.Fatalf("pre-start budget clock=%q", preservedBudgetClock)
+	}
+	if preOpenRunState != "running" {
+		t.Fatalf("restore unexpectedly rewrote scheduled run before service startup: %q", preOpenRunState)
 	}
 
 	if err := app.Close(); err != nil {
@@ -152,6 +173,20 @@ func TestEncryptedBackupRestoresIntoRealAppWithEmployeeKey(t *testing.T) {
 	}
 	if refreshState != "paused" || reason != "backup_restore_uncertain_refresh" {
 		t.Fatalf("refresh state=%q reason=%q", refreshState, reason)
+	}
+	var restoredRunState, restoredRunResult string
+	if err := db.QueryRow(`SELECT state,result_code FROM scheduled_test_runs WHERE operation_id='34000000-0000-4000-8000-000000000001'`).Scan(&restoredRunState, &restoredRunResult); err != nil {
+		t.Fatal(err)
+	}
+	if restoredRunState != "completed" || restoredRunResult != "interrupted" {
+		t.Fatalf("restored scheduled run state=%q result=%q", restoredRunState, restoredRunResult)
+	}
+	var archived, enabled, credentialBytes int
+	if err := db.QueryRow(`SELECT archived,enabled,length(credential_ciphertext) FROM upstreams WHERE id=?`, archivedUpstreamID).Scan(&archived, &enabled, &credentialBytes); err != nil {
+		t.Fatal(err)
+	}
+	if archived != 1 || enabled != 0 || credentialBytes != 0 {
+		t.Fatalf("restored upstream tombstone archived=%d enabled=%d credential_bytes=%d", archived, enabled, credentialBytes)
 	}
 	var preserved int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM codex_oauth_bindings b JOIN upstreams u ON u.id=b.upstream_id WHERE b.upstream_id='ups_backup_codex' AND length(u.credential_ciphertext)>0`).Scan(&preserved); err != nil || preserved != 1 {

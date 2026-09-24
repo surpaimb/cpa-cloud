@@ -97,7 +97,12 @@ func (a *App) createScheduledTest(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	defer tx.Rollback()
-	if !scheduledTestUpstreamExists(r.Context(), tx, upstreamID) {
+	upstreamExists, err := scheduledTestUpstreamExists(r.Context(), tx, upstreamID)
+	if err != nil {
+		writeScheduledTestError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	if !upstreamExists {
 		writeScheduledTestError(w, http.StatusBadRequest, "invalid_upstream")
 		return
 	}
@@ -168,7 +173,16 @@ func (a *App) updateScheduledTest(w http.ResponseWriter, r *http.Request, sessio
 	}
 	if value, exists := object["upstream_id"]; exists {
 		text, ok := value.(string)
-		if !ok || !validIdentifier(text, 128) || !scheduledTestUpstreamExists(r.Context(), tx, text) {
+		if !ok || !validIdentifier(text, 128) {
+			writeScheduledTestError(w, http.StatusBadRequest, "invalid_upstream")
+			return
+		}
+		exists, err := scheduledTestUpstreamExists(r.Context(), tx, text)
+		if err != nil {
+			writeScheduledTestError(w, http.StatusServiceUnavailable, "storage_unavailable")
+			return
+		}
+		if !exists {
 			writeScheduledTestError(w, http.StatusBadRequest, "invalid_upstream")
 			return
 		}
@@ -372,9 +386,13 @@ func validScheduledTestScope(value string) bool {
 	return value == "local_credential" || value == "catalog"
 }
 
-func scheduledTestUpstreamExists(ctx context.Context, query queryRower, id string) bool {
-	var count int
-	return query.QueryRowContext(ctx, `SELECT COUNT(*) FROM upstreams WHERE id=?`, id).Scan(&count) == nil && count == 1
+func scheduledTestUpstreamExists(ctx context.Context, query queryRower, id string) (bool, error) {
+	var exists int
+	err := query.QueryRowContext(ctx, `SELECT 1 FROM upstreams WHERE id=? AND archived=0`, id).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil && exists == 1, err
 }
 
 func writeScheduledTestError(w http.ResponseWriter, status int, code string) {

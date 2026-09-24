@@ -1,5 +1,13 @@
 # 集成状态
 
+## 2026-09-24：生命周期、持久定时测试与加密备份本地组合验收
+
+- 账号/模型墓碑与 revision、默认关闭的定时凭据/目录测试、独立 `cpa-cloud-backup` 已按 A→B→C 顺序合入集成分支。调度运行期直接要求 `upstreams.archived=0`，缺字段或 SQL 错误失败关闭；上游归档在同一事务停用相关计划、增加 revision、清空 `next_run_at`，提交后取消本进程拥有的运行。
+- 恢复会作废管理员及未完成 OAuth 会话、暂停不确定 refresh；恢复后的 App 启动把遗留 scheduled running 标为 `interrupted` 且不重放。员工 Key 摘要、OAuth binding、上游墓碑、价格/账本/治理/预算保留。备份只恢复到新目录，首批数据库硬上限 128 MiB。
+- 根最终串行 `go test -p 1 ./... -count=1 -timeout=15m` 通过：service 490.520s，backup 11.300s，accounting 17.125s，governance 40.583s，其余包及两个 CLI 均通过；`go vet -p 1 ./...` 通过。Windows/Linux/macOS amd64 的服务和备份 CLI 普通构建通过。Windows 本机 `CGO_ENABLED=0`，不声称本地 race 通过。
+- 网页 typecheck、15 文件/116 项测试和生产构建通过。真实 Playwright 桌面与 390×844 验收覆盖上游生命周期入口、定时计划/历史、窄屏导航；body 无横向溢出，认证后控制台无错误/警告。三段独立进程 smoke 通过：归档后零派发；scheduler 默认关闭零调用、开启一次目录调用、重启不重放；加密 create/verify、错误密码/篡改拒绝、新目录 restore、旧会话失效、员工 Key 连续及源 durable 文件不变。
+- 全部证据只使用临时目录、随机端口和合成凭据/上游，未访问既有 8787 服务或真实提供商。Linux race 和 symlink 拒绝路径以本 PR 的实际 CI 为最终门槛；本批不创建 tag、安装包或部署，也不代表完整功能对齐。
+
 ## 2026-09-24：预算预留、结算与请求执行集成
 
 - `ac4d820` 已集成持久预留、最终派发前确认、冻结价格、预算/账本/治理联合终结、严格迁移和启动恢复，
