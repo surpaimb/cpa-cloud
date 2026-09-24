@@ -369,7 +369,11 @@ func (c *responseResourceCoordinator) Recover(ctx context.Context) error {
 		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 			return errResponseResourceUnavailable
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE response_resources SET status='interrupted',terminal_at=?,updated_at=?,expires_at=?,revision=revision+1 WHERE id=? AND status=?`, stamp, stamp, terminal.Add(responseResourceTTL).Format(time.RFC3339Nano), item.responseID, item.status); err != nil {
+		result, err = tx.ExecContext(ctx, `UPDATE response_resources SET status='interrupted',terminal_at=?,updated_at=?,expires_at=?,revision=revision+1 WHERE id=? AND status=?`, stamp, stamp, terminal.Add(responseResourceTTL).Format(time.RFC3339Nano), item.responseID, item.status)
+		if err != nil {
+			return errResponseResourceUnavailable
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 			return errResponseResourceUnavailable
 		}
 	}

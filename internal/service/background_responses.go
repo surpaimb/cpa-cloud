@@ -209,9 +209,17 @@ func (w *backgroundResponseWorker) execute(claim *backgroundResponseClaim) {
 		w.finishClaim(claim, usageRequest, nil, "failed", 0)
 		return
 	}
+	if selected.ProviderKind != claim.providerKind {
+		if codexPrepared != nil {
+			codexPrepared.Destroy()
+		}
+		w.finishClaim(claim, usageRequest, nil, "failed", 0)
+		return
+	}
 	if lease != nil {
 		r = r.WithContext(lease.Context())
 	}
+	executionCtx := r.Context()
 	defer a.releaseModelLease(lease, requestID, true)
 	if codexPrepared != nil {
 		defer codexPrepared.Destroy()
@@ -226,8 +234,14 @@ func (w *backgroundResponseWorker) execute(claim *backgroundResponseClaim) {
 		if changed != 1 {
 			return errResponseResourceConflict
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE response_resources SET status='dispatch_authorized',updated_at=?,revision=revision+1 WHERE id=? AND status='queued'`, stamp, claim.view.ID)
-		return err
+		result, err = tx.ExecContext(ctx, `UPDATE response_resources SET status='dispatch_authorized',updated_at=?,revision=revision+1 WHERE id=? AND status='queued'`, stamp, claim.view.ID)
+		if err != nil {
+			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return errResponseResourceConflict
+		}
+		return nil
 	})
 	client, failure := a.dispatchModelRoute(r, claim.auth, claim.view.PublicModel, selected, lease, true, upstreamReq)
 	if failure != nil {
@@ -250,7 +264,7 @@ func (w *backgroundResponseWorker) execute(claim *backgroundResponseClaim) {
 	status := 200
 	if codexPrepared != nil {
 		var runErr *codexRunError
-		result, runErr = a.responses.Responses(taskCtx, codexPrepared.credential, codexPrepared.body, nil)
+		result, runErr = a.responses.Responses(executionCtx, codexPrepared.credential, codexPrepared.body, nil)
 		if runErr != nil {
 			outcome := "failed"
 			if taskCtx.Err() != nil {
@@ -260,7 +274,7 @@ func (w *backgroundResponseWorker) execute(claim *backgroundResponseClaim) {
 			return
 		}
 	} else {
-		upstreamReq = upstreamReq.WithContext(taskCtx)
+		upstreamReq = upstreamReq.WithContext(executionCtx)
 		response, doErr := client.Do(upstreamReq)
 		if doErr == nil {
 			defer response.Body.Close()
@@ -318,7 +332,11 @@ func (w *backgroundResponseWorker) markInProgress(claim *backgroundResponseClaim
 	if changed != 1 {
 		return false
 	}
-	if _, err := tx.ExecContext(w.ctx, `UPDATE response_resources SET status='in_progress',updated_at=?,revision=revision+1 WHERE id=? AND status='dispatch_authorized'`, stamp, claim.view.ID); err != nil {
+	result, err = tx.ExecContext(w.ctx, `UPDATE response_resources SET status='in_progress',updated_at=?,revision=revision+1 WHERE id=? AND status='dispatch_authorized'`, stamp, claim.view.ID)
+	if err != nil {
+		return false
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 		return false
 	}
 	return tx.Commit() == nil

@@ -400,7 +400,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"responses_api":                   true,
 			"responses_streaming":             true,
 			"responses_stateful_resources":    a.cfg.ResponsesStatefulResources,
-			"responses_background_tasks":      a.cfg.ResponsesStatefulResources && a.cfg.ResponsesBackgroundTasks,
+			"responses_background_tasks":      a.cfg.ResponsesStatefulResources && a.cfg.ResponsesBackgroundTasks && a.backgroundResponses != nil,
 			"managed_tools":                   false,
 			"codex_membership_oauth":          a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
 			"gemini_native_api":               true,

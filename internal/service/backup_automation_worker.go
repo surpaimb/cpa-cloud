@@ -706,6 +706,8 @@ func prepareBackupRehearsalConfig(cfg *Config) {
 	cfg.AccountRecoveryEnabled = false
 	cfg.ScheduledTestsEnabled = false
 	cfg.AutomatedBackupsEnabled = false
+	cfg.ResponsesStatefulResources = false
+	cfg.ResponsesBackgroundTasks = false
 	cfg.ExperimentalCodexMembership = false
 	cfg.CodexOAuthClientID = ""
 	cfg.CodexOAuthRedirectURI = ""

@@ -47,16 +47,25 @@ func TestSystemStatusReportsBackupCapabilities(t *testing.T) {
 	if !response.Features["automated_backups_configuration"] || response.Features["backup_key_provider_ready"] || response.Features["automated_backups_running"] {
 		t.Fatalf("unexpected backup features: %+v", response.Features)
 	}
+	for _, feature := range []string{"reliable_usage_accounting", "general_budget_enforcement", "single_instance_billing"} {
+		if !response.Features[feature] {
+			t.Fatalf("expected %s capability: %+v", feature, response.Features)
+		}
+	}
+	if response.Features["managed_tools"] || response.Features["responses_stateful_resources"] || response.Features["responses_background_tasks"] {
+		t.Fatalf("unexpected default Responses features: %+v", response.Features)
+	}
 }
 
 func TestPrepareBackupRehearsalConfigDisablesBackgroundAndNetworkFeatures(t *testing.T) {
 	cfg := Config{
 		Listen: "0.0.0.0:8787", TLSCert: "cert", TLSKey: "key", AllowLoopbackUpstream: true,
 		AccountRecoveryEnabled: true, ScheduledTestsEnabled: true, AutomatedBackupsEnabled: true,
+		ResponsesStatefulResources: true, ResponsesBackgroundTasks: true,
 		ExperimentalCodexMembership: true, CodexOAuthClientID: "client", CodexOAuthRedirectURI: "https://example.test/admin/api/v1/codex/oauth/callback",
 	}
 	prepareBackupRehearsalConfig(&cfg)
-	if cfg.Listen != "127.0.0.1:0" || cfg.TLSCert != "" || cfg.TLSKey != "" || cfg.AllowLoopbackUpstream || cfg.AccountRecoveryEnabled || cfg.ScheduledTestsEnabled || cfg.AutomatedBackupsEnabled || cfg.ExperimentalCodexMembership || cfg.CodexOAuthClientID != "" || cfg.CodexOAuthRedirectURI != "" || !cfg.backupAutomationRehearsal {
+	if cfg.Listen != "127.0.0.1:0" || cfg.TLSCert != "" || cfg.TLSKey != "" || cfg.AllowLoopbackUpstream || cfg.AccountRecoveryEnabled || cfg.ScheduledTestsEnabled || cfg.AutomatedBackupsEnabled || cfg.ResponsesStatefulResources || cfg.ResponsesBackgroundTasks || cfg.ExperimentalCodexMembership || cfg.CodexOAuthClientID != "" || cfg.CodexOAuthRedirectURI != "" || !cfg.backupAutomationRehearsal {
 		t.Fatalf("unsafe rehearsal config: %+v", cfg)
 	}
 }
