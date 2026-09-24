@@ -238,6 +238,10 @@ func TestCanonicalConversionsRejectUnrepresentableBeforeDispatch(t *testing.T) {
 			_, err := ResponsesRequestToMessages([]byte(`{"model":"m","max_output_tokens":1,"input":"x","tools":[{"type":"function","name":"f","parameters":{"type":"object"},"strict":true}]}`))
 			return err
 		}, "tools[0].strict"},
+		{"Responses string result to Gemini", func() error {
+			_, _, err := ResponsesRequestToGemini([]byte(`{"model":"m","max_output_tokens":1,"input":[{"type":"function_call","call_id":"c","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":"plain text"}]}`))
+			return err
+		}, "messages[1].content"},
 		{"Gemini safety", func() error {
 			_, err := GeminiRequestToResponses("m", []byte(`{"contents":[],"safetySettings":[]}`))
 			return err

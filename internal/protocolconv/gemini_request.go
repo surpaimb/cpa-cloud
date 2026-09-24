@@ -415,13 +415,10 @@ func responsesRequestToGemini(raw []byte) (string, []byte, FeatureSet, error) {
 			if name == "" {
 				return "", nil, 0, unsupported(joinField(indexField("messages", index), "tool_call_id"))
 			}
-			var response any
+			var response map[string]any
 			text, _ := requireString(message["content"], "", false)
-			if json.Unmarshal([]byte(text), &response) != nil {
-				response = map[string]any{"output": text}
-			}
-			if _, ok := response.(map[string]any); !ok {
-				response = map[string]any{"output": response}
+			if json.Unmarshal([]byte(text), &response) != nil || response == nil {
+				return "", nil, 0, unsupported(joinField(indexField("messages", index), "content"))
 			}
 			parts = append(parts, map[string]any{"functionResponse": map[string]any{"id": callID, "name": name, "response": response}})
 			features |= Features(FeatureFunctionResults)

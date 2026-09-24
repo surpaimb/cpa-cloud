@@ -43,6 +43,12 @@ func parseResponsesOutput(raw []byte) (canonicalOutput, error) {
 		"id": true, "object": true, "created_at": true, "completed_at": true, "model": true,
 		"status": true, "output": true, "usage": true, "background": true, "store": true,
 		"error": true, "incomplete_details": true, "previous_response_id": true, "conversation": true,
+		"instructions": true, "metadata": true, "max_output_tokens": true, "max_tool_calls": true,
+		"parallel_tool_calls": true, "prompt_cache_key": true, "prompt_cache_retention": true,
+		"reasoning": true, "safety_identifier": true, "service_tier": true, "temperature": true,
+		"text": true, "tool_choice": true, "tools": true, "top_logprobs": true, "top_p": true,
+		"truncation": true, "user": true, "context_management": true, "access_programs": true,
+		"moderation": true, "prompt": true, "prompt_cache_options": true, "prompt_cache_diagnostics": true,
 	}, ""); err != nil {
 		return canonicalOutput{}, err
 	}
@@ -110,6 +116,12 @@ func parseResponsesOutput(raw []byte) (canonicalOutput, error) {
 			if err := rejectUnknown(item, map[string]bool{"id": true, "type": true, "status": true, "role": true, "content": true, "phase": true}, field); err != nil {
 				return canonicalOutput{}, err
 			}
+			if err := validateCanonicalOutputIdentity(item, field, status); err != nil {
+				return canonicalOutput{}, err
+			}
+			if err := validateMessagePhase(item["phase"], joinField(field, "phase")); err != nil {
+				return canonicalOutput{}, err
+			}
 			role, err := requireString(item["role"], joinField(field, "role"), true)
 			if err != nil || role != "assistant" {
 				return canonicalOutput{}, invalidUpstream(joinField(field, "role"), "expected assistant")
@@ -121,6 +133,9 @@ func parseResponsesOutput(raw []byte) (canonicalOutput, error) {
 			result.Parts = append(result.Parts, canonicalOutputPart{Text: &text})
 		case "function_call":
 			if err := rejectUnknown(item, map[string]bool{"id": true, "type": true, "status": true, "call_id": true, "name": true, "arguments": true}, field); err != nil {
+				return canonicalOutput{}, err
+			}
+			if err := validateCanonicalOutputIdentity(item, field, status); err != nil {
 				return canonicalOutput{}, err
 			}
 			callID, err := nonEmptyString(item["call_id"], joinField(field, "call_id"), true)
@@ -152,6 +167,20 @@ func parseResponsesOutput(raw []byte) (canonicalOutput, error) {
 		result.Usage = &usage
 	}
 	return result, nil
+}
+
+func validateCanonicalOutputIdentity(item map[string]json.RawMessage, field, responseStatus string) error {
+	if _, err := nonEmptyString(item["id"], joinField(field, "id"), true); err != nil {
+		return err
+	}
+	status, err := requireString(item["status"], joinField(field, "status"), true)
+	if err != nil {
+		return err
+	}
+	if status == "completed" || responseStatus == "incomplete" && status == "incomplete" {
+		return nil
+	}
+	return invalidUpstream(joinField(field, "status"), "output item status is inconsistent with the response")
 }
 
 func parseResponsesCanonicalUsage(raw json.RawMessage) (canonicalUsage, error) {

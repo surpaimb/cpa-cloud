@@ -136,8 +136,13 @@ func requestFeatures(raw []byte) FeatureSet {
 				case "instructions", "system", "systemInstruction":
 					features |= Features(FeatureSystemInstruction)
 				case "role":
-					if role, ok := item.(string); ok && role == "developer" {
-						features |= Features(FeatureDeveloperMessage)
+					if role, ok := item.(string); ok {
+						switch role {
+						case "developer":
+							features |= Features(FeatureDeveloperMessage)
+						case "system":
+							features |= Features(FeatureSystemInstruction)
+						}
 					}
 				}
 				visit(item)
