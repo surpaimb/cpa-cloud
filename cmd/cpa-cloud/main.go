@@ -50,6 +50,8 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.StringVar(&cfg.AutomatedBackupsOutputDir, "automated-backups-output-dir", "", "encrypted backup package directory (default: a sibling of the data directory)")
 	flags.StringVar(&cfg.BackupKeyProviderStoreDir, "backup-key-provider-store-dir", "", "host-protected backup key directory (default: a separate sibling of the data directory)")
 	flags.BoolVar(&cfg.ExperimentalCodexMembership, "experimental-codex-membership", false, "enable experimental Codex membership credential import and routing")
+	flags.BoolVar(&cfg.ResponsesStatefulResources, "responses-stateful-resources", false, "enable encrypted employee-owned Responses resources (development preview)")
+	flags.BoolVar(&cfg.ResponsesBackgroundTasks, "responses-background-tasks", false, "enable durable background Responses tasks; requires --responses-stateful-resources")
 	flags.StringVar(&cfg.CodexOAuthClientID, "codex-oauth-client-id", "", "registered OAuth client ID for the experimental Codex membership lifecycle")
 	flags.StringVar(&cfg.CodexOAuthRedirectURI, "codex-oauth-redirect-uri", "", "registered OAuth callback URI ending in /admin/api/v1/codex/oauth/callback")
 	flags.BoolVar(&initialize, "init", false, "initialize the data directory using an administrator password from stdin, then exit")
@@ -82,6 +84,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	if cfg.InstanceID != "" && (initialize || checkInitialized) {
 		return 1, errors.New("--instance-id is only valid when running the service")
+	}
+	if cfg.ResponsesBackgroundTasks && !cfg.ResponsesStatefulResources {
+		return 1, errors.New("--responses-background-tasks requires --responses-stateful-resources")
 	}
 	cfg.Version = version
 	absDataDir, err := filepath.Abs(cfg.DataDir)

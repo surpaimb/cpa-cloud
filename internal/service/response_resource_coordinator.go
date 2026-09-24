@@ -32,12 +32,13 @@ var (
 )
 
 type responseResourceCoordinator struct {
-	app      *App
-	db       *sql.DB
-	secrets  *secrets
-	events   accounting.TransactionalEventRecorder
-	now      func() time.Time
-	commitTx func(*sql.Tx) error
+	app        *App
+	db         *sql.DB
+	secrets    *secrets
+	events     accounting.TransactionalEventRecorder
+	now        func() time.Time
+	commitTx   func(*sql.Tx) error
+	cancelTask func(string)
 }
 
 type responseStateItem struct {
@@ -305,6 +306,192 @@ func (c *responseResourceCoordinator) Delete(ctx context.Context, auth employeeA
 		return errResponseResourceUnavailable
 	}
 	return nil
+}
+
+// Recover makes the no-replay rule durable across process restarts. Any task
+// which may have crossed its dispatch barrier is terminally interrupted. A
+// queued task is retained unless its fixed pre-dispatch TTL has elapsed.
+func (c *responseResourceCoordinator) Recover(ctx context.Context) error {
+	if c == nil || c.db == nil || c.events == nil || c.now == nil || ctx == nil {
+		return errResponseResourceUnavailable
+	}
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return errResponseResourceUnavailable
+	}
+	defer tx.Rollback()
+	stamp := c.now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE background_tasks SET claim_token=NULL,claimed_at=NULL,updated_at=?,revision=revision+1 WHERE status='queued' AND claim_token IS NOT NULL`, stamp); err != nil {
+		return errResponseResourceUnavailable
+	}
+	now := c.now().UTC()
+	rows, err := tx.QueryContext(ctx, `SELECT t.id,t.response_id,t.request_id,COALESCE(t.attempt_id,''),t.status,t.created_at FROM background_tasks t WHERE t.status IN ('dispatch_authorized','in_progress') OR (t.status='queued' AND t.expires_at<=?) ORDER BY t.created_at,t.id`, now.Format(time.RFC3339Nano))
+	if err != nil {
+		return errResponseResourceUnavailable
+	}
+	type recovery struct{ taskID, responseID, requestID, attemptID, status, createdAt string }
+	var recoveries []recovery
+	for rows.Next() {
+		var item recovery
+		if err := rows.Scan(&item.taskID, &item.responseID, &item.requestID, &item.attemptID, &item.status, &item.createdAt); err != nil {
+			rows.Close()
+			return errResponseResourceUnavailable
+		}
+		recoveries = append(recoveries, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return errResponseResourceUnavailable
+	}
+	if err := rows.Close(); err != nil {
+		return errResponseResourceUnavailable
+	}
+	for _, item := range recoveries {
+		terminal := now
+		if created, parseErr := parseTime(item.createdAt); parseErr != nil {
+			return errResponseResourceUnavailable
+		} else if terminal.Before(created) {
+			terminal = created
+		}
+		if item.attemptID != "" {
+			if err := c.events.FinishAttemptTx(ctx, tx, accounting.AttemptFinish{ID: item.attemptID, Status: accounting.StatusInterrupted, FinishedAt: terminal, ReliableUsage: true}); err != nil {
+				return errResponseResourceUnavailable
+			}
+		}
+		if err := c.events.FinishRequestTx(ctx, tx, accounting.RequestFinish{ID: item.requestID, Status: accounting.StatusInterrupted, FinishedAt: terminal}); err != nil {
+			return errResponseResourceUnavailable
+		}
+		stamp := terminal.Format(time.RFC3339Nano)
+		result, err := tx.ExecContext(ctx, `UPDATE background_tasks SET status='interrupted',claim_token=NULL,claimed_at=NULL,finished_at=?,updated_at=?,revision=revision+1 WHERE id=? AND status=?`, stamp, stamp, item.taskID, item.status)
+		if err != nil {
+			return errResponseResourceUnavailable
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return errResponseResourceUnavailable
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE response_resources SET status='interrupted',terminal_at=?,updated_at=?,expires_at=?,revision=revision+1 WHERE id=? AND status=?`, stamp, stamp, terminal.Add(responseResourceTTL).Format(time.RFC3339Nano), item.responseID, item.status); err != nil {
+			return errResponseResourceUnavailable
+		}
+	}
+	if err := c.commitTx(tx); err != nil {
+		return errResponseResourceUnavailable
+	}
+	return nil
+}
+
+func (c *responseResourceCoordinator) Cancel(ctx context.Context, auth employeeAuth, responseID string) (responseResourceView, error) {
+	if c == nil || c.db == nil || c.events == nil || c.now == nil || !validIdentifier(responseID, 128) {
+		return responseResourceView{}, errResponseResourceInvalid
+	}
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return responseResourceView{}, errResponseResourceUnavailable
+	}
+	defer tx.Rollback()
+	view, _, _, err := loadOwnedResponseResourceTx(ctx, tx, auth, responseID)
+	if err != nil {
+		return responseResourceView{}, err
+	}
+	if err := c.authorizeOwnerTx(ctx, tx, auth.EmployeeID, auth.KeyID, view.PublicModel, c.now().UTC()); err != nil {
+		return responseResourceView{}, err
+	}
+	if !view.Background || responseTerminalStatus(view.Status) {
+		if err := tx.Commit(); err != nil {
+			return responseResourceView{}, errResponseResourceUnavailable
+		}
+		return view, nil
+	}
+	now := c.now().UTC()
+	stamp := now.Format(time.RFC3339Nano)
+	if view.Status == "queued" {
+		if err := c.events.FinishRequestTx(ctx, tx, accounting.RequestFinish{ID: view.RequestID, Status: accounting.StatusCancelled, FinishedAt: now}); err != nil {
+			return responseResourceView{}, errResponseResourceUnavailable
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE background_tasks SET status='cancelled',claim_token=NULL,claimed_at=NULL,cancel_requested_at=?,finished_at=?,updated_at=?,revision=revision+1 WHERE id=? AND status='queued'`, stamp, stamp, stamp, view.TaskID)
+		if err != nil {
+			return responseResourceView{}, errResponseResourceUnavailable
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return responseResourceView{}, errResponseResourceConflict
+		}
+		result, err = tx.ExecContext(ctx, `UPDATE response_resources SET status='cancelled',terminal_at=?,updated_at=?,expires_at=?,revision=revision+1 WHERE id=? AND status='queued'`, stamp, stamp, now.Add(responseResourceTTL).Format(time.RFC3339Nano), responseID)
+		if err != nil {
+			return responseResourceView{}, errResponseResourceUnavailable
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return responseResourceView{}, errResponseResourceConflict
+		}
+		view.Status, view.UpdatedAt, view.TerminalAt, view.ExpiresAt, view.Revision = "cancelled", now, &now, now.Add(responseResourceTTL), view.Revision+1
+	} else {
+		result, err := tx.ExecContext(ctx, `UPDATE background_tasks SET cancel_requested_at=COALESCE(cancel_requested_at,?),updated_at=?,revision=revision+1 WHERE id=? AND status IN ('dispatch_authorized','in_progress')`, stamp, stamp, view.TaskID)
+		if err != nil {
+			return responseResourceView{}, errResponseResourceUnavailable
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return responseResourceView{}, errResponseResourceConflict
+		}
+	}
+	if err := c.commitTx(tx); err != nil {
+		return responseResourceView{}, errResponseResourceUnavailable
+	}
+	if !responseTerminalStatus(view.Status) && c.cancelTask != nil {
+		c.cancelTask(view.TaskID)
+	}
+	return view, nil
+}
+
+func (c *responseResourceCoordinator) InterruptQueuedClaim(ctx context.Context, taskID, responseID, requestID, claimToken string) error {
+	if c == nil || c.events == nil || !validIdentifier(taskID, 128) || !validIdentifier(responseID, 128) || !validIdentifier(requestID, 128) || !validIdentifier(claimToken, 128) {
+		return errResponseResourceInvalid
+	}
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return errResponseResourceUnavailable
+	}
+	defer tx.Rollback()
+	now := c.now().UTC()
+	var createdText string
+	if err := tx.QueryRowContext(ctx, `SELECT created_at FROM background_tasks WHERE id=? AND response_id=? AND request_id=? AND status='queued' AND claim_token=?`, taskID, responseID, requestID, claimToken).Scan(&createdText); err != nil {
+		return errResponseResourceConflict
+	}
+	created, err := parseTime(createdText)
+	if err != nil {
+		return errResponseResourceUnavailable
+	}
+	if now.Before(created) {
+		now = created
+	}
+	stamp := now.Format(time.RFC3339Nano)
+	if err := c.events.FinishRequestTx(ctx, tx, accounting.RequestFinish{ID: requestID, Status: accounting.StatusInterrupted, FinishedAt: now}); err != nil {
+		return errResponseResourceUnavailable
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE background_tasks SET status='interrupted',claim_token=NULL,claimed_at=NULL,finished_at=?,updated_at=?,revision=revision+1 WHERE id=? AND response_id=? AND request_id=? AND status='queued' AND claim_token=?`, stamp, stamp, taskID, responseID, requestID, claimToken)
+	if err != nil {
+		return errResponseResourceUnavailable
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errResponseResourceConflict
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE response_resources SET status='interrupted',terminal_at=?,updated_at=?,expires_at=?,revision=revision+1 WHERE id=? AND status='queued'`, stamp, stamp, now.Add(responseResourceTTL).Format(time.RFC3339Nano), responseID)
+	if err != nil {
+		return errResponseResourceUnavailable
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errResponseResourceConflict
+	}
+	if err := c.commitTx(tx); err != nil {
+		return errResponseResourceUnavailable
+	}
+	return nil
+}
+
+func responseTerminalStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled", "interrupted":
+		return true
+	default:
+		return false
+	}
 }
 
 func validResponseResourceCreate(input responseResourceCreateInput) bool {

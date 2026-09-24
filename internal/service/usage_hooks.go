@@ -461,6 +461,11 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 				return err
 			}
 		}
+		if r.terminalTxHook != nil {
+			if err := r.terminalTxHook(writeCtx, tx, snapshot.status, snapshot.finishedAt); err != nil {
+				return err
+			}
+		}
 		if attempt != nil && attempt.budget != nil && r.coordinator.budgetCommit != nil {
 			return r.coordinator.budgetCommit(tx)
 		}

@@ -235,6 +235,202 @@ func TestResponsesRejectsStatefulLifecycleBeforeUpstream(t *testing.T) {
 	}
 }
 
+func TestResponsesManagedToolsStayDisabledAndBackgroundDoesNotDropFields(t *testing.T) {
+	var calls atomic.Int32
+	app, server, key := newResponsesAPIKeyFixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	managed := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","input":"x","tools":[{"type":"web_search_preview"}]}`, key.Key, context.Background())
+	if managed.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(managed), "unsupported_feature") {
+		t.Fatalf("managed tool status=%d", managed.StatusCode)
+	}
+	app.cfg.ResponsesStatefulResources, app.cfg.ResponsesBackgroundTasks = true, true
+	altered := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","background":true,"input":"x","temperature":0.2}`, key.Key, context.Background())
+	if altered.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(altered), "unsupported_feature") {
+		t.Fatalf("background unsupported field status=%d", altered.StatusCode)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("rejected managed/background requests reached upstream: %d", calls.Load())
+	}
+}
+
+func TestResponsesStoredResourceOwnershipContinuationAndDelete(t *testing.T) {
+	var calls atomic.Int32
+	app, server, key := newResponsesAPIKeyFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if string(body["store"]) != "false" {
+			t.Errorf("provider-side storage was enabled: %s", body["store"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			io.WriteString(w, `{"id":"provider-secret-id","object":"response","status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"weather","arguments":"{}"}],"usage":{"input_tokens":8,"output_tokens":3}}`)
+			return
+		}
+		if !strings.Contains(string(body["input"]), `"call_id":"call_1"`) || !strings.Contains(string(body["input"]), `"output":"sunny"`) {
+			t.Errorf("continuation did not reconstruct local context: %s", body["input"])
+		}
+		io.WriteString(w, `{"id":"provider-secret-id-2","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":"clear"}],"usage":{"input_tokens":12,"output_tokens":2}}`)
+	}))
+	app.cfg.ResponsesStatefulResources = true
+	first := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","store":true,"input":"synthetic-user-secret"}`, key.Key, context.Background())
+	var firstBody map[string]json.RawMessage
+	if first.StatusCode != http.StatusOK || json.Unmarshal([]byte(readBody(first)), &firstBody) != nil {
+		t.Fatalf("first stored response status=%d", first.StatusCode)
+	}
+	var responseID string
+	_ = json.Unmarshal(firstBody["id"], &responseID)
+	if !strings.HasPrefix(responseID, "resp_") || responseID == "provider-secret-id" || string(firstBody["store"]) != "true" {
+		t.Fatalf("stored response identity/body=%v", firstBody)
+	}
+	loaded := employeeRequest(t, http.MethodGet, server.URL+"/v1/responses/"+responseID, "", key.Key, context.Background())
+	loadedBody := readBody(loaded)
+	if loaded.StatusCode != http.StatusOK || !strings.Contains(loadedBody, `"call_id":"call_1"`) || strings.Contains(loadedBody, "synthetic-user-secret") {
+		t.Fatalf("loaded status=%d body=%s", loaded.StatusCode, loadedBody)
+	}
+	continued := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","previous_response_id":"`+responseID+`","input":[{"type":"function_call_output","call_id":"call_1","output":"sunny"}]}`, key.Key, context.Background())
+	if continued.StatusCode != http.StatusOK || !strings.Contains(readBody(continued), `"content":"clear"`) {
+		t.Fatalf("continuation status=%d", continued.StatusCode)
+	}
+	deleted := employeeRequest(t, http.MethodDelete, server.URL+"/v1/responses/"+responseID, "", key.Key, context.Background())
+	if deleted.StatusCode != http.StatusOK || !strings.Contains(readBody(deleted), `"deleted":true`) {
+		t.Fatalf("delete status=%d", deleted.StatusCode)
+	}
+	missing := employeeRequest(t, http.MethodGet, server.URL+"/v1/responses/"+responseID, "", key.Key, context.Background())
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("deleted resource status=%d body=%s", missing.StatusCode, readBody(missing))
+	}
+}
+
+func TestBackgroundResponsesCreatePollCompleteAndCancelQueued(t *testing.T) {
+	var calls atomic.Int32
+	app, server, key := newResponsesAPIKeyFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"provider-background","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":"done"}],"usage":{"input_tokens":4,"output_tokens":1}}`)
+	}))
+	app.cfg.ResponsesStatefulResources, app.cfg.ResponsesBackgroundTasks = true, true
+	app.backgroundResponses = newBackgroundResponseWorker(app)
+	app.backgroundResponses.Start()
+	t.Cleanup(app.backgroundResponses.Close)
+	created := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","background":true,"input":"run"}`, key.Key, context.Background())
+	var createdBody struct{ ID, Status string }
+	if created.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(readBody(created)), &createdBody) != nil || createdBody.Status != "queued" {
+		t.Fatalf("background create status=%d body=%+v", created.StatusCode, createdBody)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		polled := employeeRequest(t, http.MethodGet, server.URL+"/v1/responses/"+createdBody.ID, "", key.Key, context.Background())
+		body := readBody(polled)
+		if polled.StatusCode == http.StatusOK && strings.Contains(body, `"status":"completed"`) {
+			if !strings.Contains(body, `"content":"done"`) {
+				t.Fatalf("completed body=%s", body)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			var taskStatus, accountingStatus, modelStatus string
+			_ = app.store.db.QueryRow(`SELECT t.status,a.status,m.outcome FROM background_tasks t JOIN accounting_requests a ON a.id=t.request_id JOIN model_requests m ON m.id=t.request_id WHERE t.response_id=?`, createdBody.ID).Scan(&taskStatus, &accountingStatus, &modelStatus)
+			t.Fatalf("background did not complete: status=%d body=%s task=%s accounting=%s model=%s", polled.StatusCode, body, taskStatus, accountingStatus, modelStatus)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("background upstream calls=%d", calls.Load())
+	}
+
+	app.backgroundResponses.Close()
+	app.backgroundResponses = nil
+	queued := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","background":true,"input":"cancel"}`, key.Key, context.Background())
+	var queuedBody struct{ ID string }
+	if queued.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(readBody(queued)), &queuedBody) != nil {
+		t.Fatalf("queued create status=%d", queued.StatusCode)
+	}
+	cancelled := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses/"+queuedBody.ID+"/cancel", "", key.Key, context.Background())
+	if cancelled.StatusCode != http.StatusOK || !strings.Contains(readBody(cancelled), `"status":"cancelled"`) {
+		t.Fatalf("cancel status=%d", cancelled.StatusCode)
+	}
+	revoked := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","background":true,"input":"revoke"}`, key.Key, context.Background())
+	var revokedBody struct{ ID string }
+	if revoked.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(readBody(revoked)), &revokedBody) != nil {
+		t.Fatalf("revoked setup status=%d", revoked.StatusCode)
+	}
+	if _, err := app.store.db.Exec(`UPDATE access_keys SET revoked_at=? WHERE id=?`, utcNow(), key.ID); err != nil {
+		t.Fatal(err)
+	}
+	app.backgroundResponses = newBackgroundResponseWorker(app)
+	app.backgroundResponses.Start()
+	app.backgroundResponses.Wake()
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		var status, accountingStatus string
+		err := app.store.db.QueryRow(`SELECT t.status,a.status FROM background_tasks t JOIN accounting_requests a ON a.id=t.request_id WHERE t.response_id=?`, revokedBody.ID).Scan(&status, &accountingStatus)
+		if err == nil && status == "interrupted" && accountingStatus == "interrupted" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("revoked queued task status=%s accounting=%s err=%v", status, accountingStatus, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestBackgroundResponseCancelAbortsInProgressUpstream(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	cancelObserved := make(chan struct{})
+	defer close(release)
+	app, server, key := newResponsesAPIKeyFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-r.Context().Done():
+			close(cancelObserved)
+		case <-release:
+		}
+	}))
+	app.cfg.ResponsesStatefulResources, app.cfg.ResponsesBackgroundTasks = true, true
+	app.backgroundResponses = newBackgroundResponseWorker(app)
+	app.backgroundResponses.Start()
+	t.Cleanup(app.backgroundResponses.Close)
+	created := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","background":true,"input":"run"}`, key.Key, context.Background())
+	var body struct{ ID string }
+	if created.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(readBody(created)), &body) != nil {
+		t.Fatalf("create status=%d", created.StatusCode)
+	}
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("background upstream did not start")
+	}
+	cancelled := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses/"+body.ID+"/cancel", "", key.Key, context.Background())
+	if cancelled.StatusCode != http.StatusOK {
+		t.Fatalf("cancel status=%d body=%s", cancelled.StatusCode, readBody(cancelled))
+	}
+	select {
+	case <-cancelObserved:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel did not abort the active upstream request")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		polled := employeeRequest(t, http.MethodGet, server.URL+"/v1/responses/"+body.ID, "", key.Key, context.Background())
+		responseBody := readBody(polled)
+		if strings.Contains(responseBody, `"status":"cancelled"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cancel did not settle: %s", responseBody)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestResponsesSSERejectsOversizedUnterminatedLine(t *testing.T) {
 	err := readResponsesSSE(context.Background(), strings.NewReader("data: "+strings.Repeat("x", responsesMaxEvent+1)), func(responsesSSEEvent) error { return nil })
 	if err == nil {

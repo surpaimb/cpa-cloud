@@ -50,15 +50,16 @@ type usageRequestStart struct {
 }
 
 type usageLedgerRequest struct {
-	coordinator *usageLedgerCoordinator
-	id          string
-	provider    accounting.Provider
-	protocol    accounting.UsageProtocol
-	publicModel string
-	evidence    accounting.UsageEvidence
-	startedAt   time.Time
-	governance  *governance.Coordinator
-	guard       *governedRequest
+	coordinator    *usageLedgerCoordinator
+	id             string
+	provider       accounting.Provider
+	protocol       accounting.UsageProtocol
+	publicModel    string
+	evidence       accounting.UsageEvidence
+	startedAt      time.Time
+	governance     *governance.Coordinator
+	guard          *governedRequest
+	terminalTxHook func(context.Context, *sql.Tx, accounting.Status, time.Time) error
 
 	mu             sync.Mutex
 	attempt        *usageLedgerAttempt

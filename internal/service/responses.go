@@ -65,17 +65,51 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if rejectsResponsesLifecycle(payload) {
-		writeModelError(w, http.StatusBadRequest, "unsupported_feature", "This request uses an unsupported Responses lifecycle feature.", requestID(r.Context()))
+	lifecycle, lifecycleErr := parseResponsesLifecycle(payload, a.cfg, stream)
+	if lifecycleErr != nil {
+		code, message := "unsupported_feature", "This request uses a disabled or unsupported Responses lifecycle feature."
+		if errors.Is(lifecycleErr, errResponseResourceInvalid) && a.cfg.ResponsesStatefulResources {
+			code, message = "invalid_request_error", "Invalid Responses lifecycle request."
+		}
+		writeModelError(w, http.StatusBadRequest, code, message, requestID(r.Context()))
 		return
 	}
-	if _, present := payload["store"]; !present {
+	if _, present := payload["store"]; !present && !lifecycle.store {
 		payload["store"] = json.RawMessage("false")
 	}
 	r = withUsageStreamEvidence(r, stream)
 
 	auth, ok := a.authenticateEmployee(w, r)
 	if !ok {
+		return
+	}
+	var persistence *responsePersistencePlan
+	if lifecycle.store || lifecycle.previousID != "" {
+		persistence, err = prepareResponsePersistence(r.Context(), a.responseResources, auth, model, requestID(r.Context()), payload, lifecycle, time.Now().UTC())
+		if err != nil {
+			writeResponseResourceError(w, r, err)
+			return
+		}
+	}
+	if lifecycle.background {
+		providerKind, providerErr := a.backgroundResponseProvider(r.Context(), model)
+		if providerErr != nil {
+			writeModelError(w, http.StatusBadRequest, "unsupported_feature", "Background execution requires one direct supported route.", requestID(r.Context()))
+			return
+		}
+		view, createErr := a.responseResources.Create(r.Context(), responseResourceCreateInput{
+			OperationID: requestID(r.Context()), EmployeeID: auth.EmployeeID, KeyID: auth.KeyID,
+			PublicModel: model, ParentResponseID: lifecycle.previousID, ProviderKind: providerKind,
+			Background: true, StoreBody: true, Items: persistence.items, CreatedAt: persistence.createdAt,
+		})
+		if createErr != nil {
+			writeResponseResourceError(w, r, createErr)
+			return
+		}
+		if a.backgroundResponses != nil {
+			a.backgroundResponses.Wake()
+		}
+		writeJSON(w, http.StatusAccepted, responseResourcePayload(view))
 		return
 	}
 	if failure := a.validatePoolSession(r, auth, model); failure != nil {
@@ -171,11 +205,19 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	var persist func([]byte) ([]byte, error)
+	if lifecycle.store {
+		persist = func(body []byte) ([]byte, error) {
+			writeCtx, cancel := durableResponseWriteContext(r.Context())
+			defer cancel()
+			return persistence.persistCompleted(writeCtx, selected.ProviderKind, body)
+		}
+	}
 	if codexPrepared != nil {
-		a.handleCodexResponses(w, r, stream, codexPrepared, reqID)
+		a.handleCodexResponses(w, r, stream, codexPrepared, reqID, persist)
 		return
 	}
-	a.handleAPIKeyResponses(w, r, upstreamReq, stream, reqID, client)
+	a.handleAPIKeyResponses(w, r, upstreamReq, stream, reqID, client, persist)
 }
 
 func rejectsResponsesLifecycle(payload map[string]json.RawMessage) bool {
@@ -199,7 +241,7 @@ func rejectsResponsesLifecycle(payload map[string]json.RawMessage) bool {
 	return false
 }
 
-func (a *App) handleAPIKeyResponses(w http.ResponseWriter, r *http.Request, req *http.Request, stream bool, reqID string, client upstreamHTTPDoer) {
+func (a *App) handleAPIKeyResponses(w http.ResponseWriter, r *http.Request, req *http.Request, stream bool, reqID string, client upstreamHTTPDoer, persist func([]byte) ([]byte, error)) {
 	response, err := client.Do(req)
 	if err != nil {
 		outcome := "failed"
@@ -234,10 +276,10 @@ func (a *App) handleAPIKeyResponses(w http.ResponseWriter, r *http.Request, req 
 		a.forwardResponsesStream(w, r, response, reqID)
 		return
 	}
-	a.forwardResponsesJSON(w, response, reqID)
+	a.forwardResponsesJSON(w, r, response, reqID, persist)
 }
 
-func (a *App) forwardResponsesJSON(w http.ResponseWriter, response *http.Response, reqID string) {
+func (a *App) forwardResponsesJSON(w http.ResponseWriter, r *http.Request, response *http.Response, reqID string, persist func([]byte) ([]byte, error)) {
 	if !strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "application/json") {
 		a.responsesProtocolError(w, reqID, response.StatusCode)
 		return
@@ -246,6 +288,14 @@ func (a *App) forwardResponsesJSON(w http.ResponseWriter, response *http.Respons
 	if err != nil || len(body) > responsesMaxResponse || validateCompletedResponse(body) != nil {
 		a.responsesProtocolError(w, reqID, response.StatusCode)
 		return
+	}
+	if persist != nil {
+		body, err = persist(body)
+		if err != nil {
+			a.finishRequest(reqID, "failed", response.StatusCode)
+			writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Response storage is temporarily unavailable.", reqID)
+			return
+		}
 	}
 	a.observeRequestUsage(reqID, body)
 	if err := a.finishRequestChecked(reqID, "succeeded", response.StatusCode); err != nil {
@@ -576,7 +626,7 @@ func (a *App) prepareCodexResponses(ctx context.Context, body []byte, selected r
 	return &codexResponsesPreflight{selected: selected, credential: credential, body: body}, nil
 }
 
-func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, stream bool, prepared *codexResponsesPreflight, reqID string) {
+func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, stream bool, prepared *codexResponsesPreflight, reqID string, persist func([]byte) ([]byte, error)) {
 	if !stream {
 		result, runErr := a.responses.Responses(r.Context(), prepared.credential, prepared.body, nil)
 		if runErr != nil {
@@ -586,6 +636,15 @@ func (a *App) handleCodexResponses(w http.ResponseWriter, r *http.Request, strea
 		if validateCompletedResponse(result) != nil {
 			a.responsesProtocolError(w, reqID, http.StatusOK)
 			return
+		}
+		if persist != nil {
+			stored, persistErr := persist(result)
+			if persistErr != nil {
+				a.finishRequest(reqID, "failed", 200)
+				writeModelError(w, 503, "storage_unavailable", "Response storage is temporarily unavailable.", reqID)
+				return
+			}
+			result = stored
 		}
 		if err := a.markCodexVerified(prepared.selected.AccountID, prepared.selected.Revision); err != nil {
 			a.finishRequest(reqID, "failed", 200)

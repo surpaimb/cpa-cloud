@@ -28,35 +28,37 @@ const (
 )
 
 type App struct {
-	cfg                Config
-	store              *store
-	secrets            *secrets
-	outboundProxies    *outboundProxyStore
-	proxyClients       *egress.ClientCache
-	proxyTests         *outboundProxyTestCoordinator
-	http               *http.Client
-	codex              codexExecutor
-	responses          codexResponsesExecutor
-	oauthHTTP          *http.Client
-	admission          sync.RWMutex
-	refresh            *codexRefreshCoordinator
-	accountPool        *accountPoolRuntime
-	healthTests        *upstreamHealthCoordinator
-	scheduledTests     *scheduledTestCoordinator
-	systemProbes       *accounting.SystemProbeLedger
-	recovery           *accountRecoveryCoordinator
-	backupAutomation   *backupAutomationCoordinator
-	usage              *usageLedgerCoordinator
-	governance         *requestGovernance
-	governancePolicies *governanceManagementStore
-	budget             *governance.Budget
-	budgetCommit       func(string, *sql.Tx) error
-	usageRequests      sync.Map
-	loginMu            sync.Mutex
-	logins             map[string]*loginAttempt
-	catalogMu          sync.Mutex
-	catalogs           map[string]codexCatalogCacheEntry
-	codexCatalog       codexCatalogLister
+	cfg                 Config
+	store               *store
+	secrets             *secrets
+	outboundProxies     *outboundProxyStore
+	proxyClients        *egress.ClientCache
+	proxyTests          *outboundProxyTestCoordinator
+	http                *http.Client
+	codex               codexExecutor
+	responses           codexResponsesExecutor
+	oauthHTTP           *http.Client
+	admission           sync.RWMutex
+	refresh             *codexRefreshCoordinator
+	accountPool         *accountPoolRuntime
+	healthTests         *upstreamHealthCoordinator
+	scheduledTests      *scheduledTestCoordinator
+	systemProbes        *accounting.SystemProbeLedger
+	recovery            *accountRecoveryCoordinator
+	backupAutomation    *backupAutomationCoordinator
+	usage               *usageLedgerCoordinator
+	responseResources   *responseResourceCoordinator
+	backgroundResponses *backgroundResponseWorker
+	governance          *requestGovernance
+	governancePolicies  *governanceManagementStore
+	budget              *governance.Budget
+	budgetCommit        func(string, *sql.Tx) error
+	usageRequests       sync.Map
+	loginMu             sync.Mutex
+	logins              map[string]*loginAttempt
+	catalogMu           sync.Mutex
+	catalogs            map[string]codexCatalogCacheEntry
+	codexCatalog        codexCatalogLister
 	// Lifecycle integration hooks are SQL-only before commit and non-blocking
 	// after commit. Scheduled-test integration wires these without changing the
 	// account lock -> admission lock -> transaction ordering.
@@ -71,6 +73,9 @@ type loginAttempt struct {
 }
 
 func Open(ctx context.Context, cfg Config) (*App, error) {
+	if cfg.ResponsesBackgroundTasks && !cfg.ResponsesStatefulResources {
+		return nil, errors.New("background Responses require stateful Responses resources")
+	}
 	if cfg.Version == "" {
 		cfg.Version = "dev"
 	}
@@ -128,6 +133,16 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err := migrateBackupAutomation(ctx, s.db); err != nil {
 		return nil, fmt.Errorf("migrate backup automation: %w", err)
 	}
+	if err := migrateResponseResources(ctx, s.db); err != nil {
+		return nil, err
+	}
+	app.responseResources, err = newResponseResourceCoordinator(app, app.usage.ledger)
+	if err != nil {
+		return nil, err
+	}
+	if err := app.responseResources.Recover(ctx); err != nil {
+		return nil, err
+	}
 	if err := app.initializeGovernance(ctx); err != nil {
 		return nil, err
 	}
@@ -184,13 +199,17 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 			return nil, err
 		}
 	}
-	if err := app.scheduledTests.Start(); err != nil {
-		return nil, err
+	if cfg.ResponsesBackgroundTasks {
+		app.backgroundResponses = newBackgroundResponseWorker(app)
+		app.backgroundResponses.Start()
 	}
 	if app.backupAutomation != nil {
 		if err := app.backupAutomation.Start(); err != nil {
 			return nil, err
 		}
+	}
+	if err := app.scheduledTests.Start(); err != nil {
+		return nil, err
 	}
 	opened = true
 	return app, nil
@@ -226,6 +245,9 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 func (a *App) Close() error {
 	if a.backupAutomation != nil {
 		a.backupAutomation.Close()
+	}
+	if a.backgroundResponses != nil {
+		a.backgroundResponses.Close()
 	}
 	if a.scheduledTests != nil {
 		a.scheduledTests.Close()
@@ -304,6 +326,9 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", a.listModels)
 	mux.HandleFunc("POST /v1/chat/completions", a.chatCompletions)
 	mux.HandleFunc("POST /v1/responses", a.responsesAPI)
+	mux.HandleFunc("GET /v1/responses/{id}", a.getResponseResource)
+	mux.HandleFunc("DELETE /v1/responses/{id}", a.deleteResponseResource)
+	mux.HandleFunc("POST /v1/responses/{id}/cancel", a.cancelResponseResource)
 	mux.HandleFunc("POST /v1/messages", a.messages)
 	mux.HandleFunc("POST /v1/messages/count_tokens", a.countMessageTokens)
 	mux.HandleFunc("GET /v1beta/models", a.listGeminiModels)
@@ -347,7 +372,8 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSession) {
 	limitations := []string{
 		"development preview; not production hardened",
-		"Responses resources, background execution, failover after upstream dispatch, and reliable billing-grade usage are not implemented; Messages is available only for Anthropic API-key routes",
+		"Responses state and background execution are development-preview features; background stream resume/cursors, managed tools, and failover after upstream dispatch are not implemented",
+		"single-instance billing is disabled by default; its generic signed callback is not a validated production payment-provider integration, and automated renewal, tax, invoices, and notifications are not implemented",
 		"manual account tests check local credentials or catalogs; generation recovery requires both startup allowance and administrator opt-in, uses bounded synthetic prompts, and consumes upstream usage",
 		"scheduled tests, when enabled, check local credentials or model catalogs only and do not prove generation availability",
 		"automated backup key custody currently supports Windows current-user DPAPI only; cross-machine key recovery and object storage are not implemented",
@@ -373,6 +399,9 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"codex_membership_import":         a.cfg.ExperimentalCodexMembership,
 			"responses_api":                   true,
 			"responses_streaming":             true,
+			"responses_stateful_resources":    a.cfg.ResponsesStatefulResources,
+			"responses_background_tasks":      a.cfg.ResponsesStatefulResources && a.cfg.ResponsesBackgroundTasks,
+			"managed_tools":                   false,
 			"codex_membership_oauth":          a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
 			"gemini_native_api":               true,
 			"anthropic_native_api":            true,
@@ -390,6 +419,9 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"account_pool_preflight_failover": a.accountPool != nil,
 			"usage_reporting":                 true,
 			"versioned_cost_prices":           true,
+			"reliable_usage_accounting":       true,
+			"general_budget_enforcement":      true,
+			"single_instance_billing":         true,
 			"system_probe_accounting":         a.systemProbes != nil,
 			"account_recovery":                a.recovery != nil,
 			"codex_membership_auto_refresh":   a.refresh != nil && a.refresh.enabled(),

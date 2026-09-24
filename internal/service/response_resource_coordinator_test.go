@@ -149,6 +149,79 @@ func TestBackgroundResponseCreationIsAtomicWithAccountingRequest(t *testing.T) {
 	}
 }
 
+func TestBackgroundResponseCancelAndRestartRecoveryAreNoReplay(t *testing.T) {
+	coordinator, db := newResponseResourceTestCoordinator(t)
+	now := time.Date(2026, 9, 24, 7, 30, 0, 0, time.UTC)
+	coordinator.now = func() time.Time { return now }
+	create := func(operation string) responseResourceView {
+		view, err := coordinator.Create(context.Background(), responseResourceCreateInput{
+			OperationID: operation, EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one", ProviderKind: "openai-compatible",
+			Background: true, CreatedAt: now, Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"queued"}`)}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return view
+	}
+	cancelled := create("op_cancel_queued")
+	view, err := coordinator.Cancel(context.Background(), employeeAuth{EmployeeID: "emp_one", KeyID: "key_one"}, cancelled.ID)
+	if err != nil || view.Status != "cancelled" {
+		t.Fatalf("cancelled view=%+v err=%v", view, err)
+	}
+	var requestStatus string
+	if err := db.QueryRow(`SELECT status FROM accounting_requests WHERE id=?`, cancelled.RequestID).Scan(&requestStatus); err != nil || requestStatus != "cancelled" {
+		t.Fatalf("cancel request status=%q err=%v", requestStatus, err)
+	}
+	claimed := create("op_restart_claimed")
+	if _, err := db.Exec(`UPDATE background_tasks SET claim_token='claim_crashed',claimed_at=? WHERE id=?`, now.Format(time.RFC3339Nano), claimed.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var claimToken sql.NullString
+	if err := db.QueryRow(`SELECT status,claim_token FROM background_tasks WHERE id=?`, claimed.TaskID).Scan(&requestStatus, &claimToken); err != nil || requestStatus != "queued" || claimToken.Valid {
+		t.Fatalf("pre-dispatch claim recovery status=%q claim=%v err=%v", requestStatus, claimToken, err)
+	}
+
+	dispatched := create("op_restart_dispatched")
+	attemptID := dispatched.RequestID + ":1"
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := accounting.NewLedger(db)
+	if err := ledger.BeginAttemptTx(context.Background(), tx, accounting.AttemptStart{ID: attemptID, RequestID: dispatched.RequestID, AccountID: "ups_one", Provider: accounting.ProviderOpenAICompatible, Dispatch: accounting.DispatchPrimary, StartedAt: now, Protocol: accounting.ProtocolOpenAIResponses, EffectiveModel: "actual", Evidence: accounting.EvidenceBackgroundResult}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.MarkAttemptDispatchedTx(context.Background(), tx, accounting.AttemptDispatch{ID: attemptID, OperationID: attemptID + ":dispatch", DispatchedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE background_tasks SET status='in_progress',attempt_id=?,dispatch_operation_id=?,dispatch_authorized_at=?,started_at=? WHERE id=?`, attemptID, attemptID+":dispatch", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), dispatched.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE response_resources SET status='in_progress',terminal_at=NULL WHERE id=?`, dispatched.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	if err := coordinator.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var taskStatus, responseStatus, attemptStatus string
+	if err := db.QueryRow(`SELECT t.status,r.status,a.status FROM background_tasks t JOIN response_resources r ON r.id=t.response_id JOIN accounting_attempts a ON a.id=t.attempt_id WHERE t.id=?`, dispatched.TaskID).Scan(&taskStatus, &responseStatus, &attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != "interrupted" || responseStatus != "interrupted" || attemptStatus != "interrupted" {
+		t.Fatalf("recovered task=%s response=%s attempt=%s", taskStatus, responseStatus, attemptStatus)
+	}
+	if err := coordinator.Recover(context.Background()); err != nil {
+		t.Fatalf("recovery was not idempotent: %v", err)
+	}
+}
+
 func TestResponseResourceCreateRequiresTerminalSuccessAndAggregateBounds(t *testing.T) {
 	coordinator, _ := newResponseResourceTestCoordinator(t)
 	now := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
@@ -179,6 +252,28 @@ func TestResponseResourceCreateRequiresTerminalSuccessAndAggregateBounds(t *test
 	base.Items = []responseStateItem{{Type: "message", Payload: chunk}, {Type: "message", Payload: chunk}}
 	if _, err := coordinator.Create(context.Background(), base); !errors.Is(err, errResponseResourceInvalid) {
 		t.Fatalf("excessive aggregate plaintext was accepted: %v", err)
+	}
+}
+
+func TestStoredResponseTerminalWriteSurvivesClientCancellation(t *testing.T) {
+	coordinator, db := newResponseResourceTestCoordinator(t)
+	now := time.Date(2026, 9, 24, 8, 30, 0, 0, time.UTC)
+	plan := &responsePersistencePlan{
+		coordinator: coordinator, auth: employeeAuth{EmployeeID: "emp_one", KeyID: "key_one"},
+		model: "model_one", operationID: "op_cancelled_client_terminal", createdAt: now,
+		items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"secret"}`)}},
+	}
+	clientCtx, cancelClient := context.WithCancel(context.Background())
+	cancelClient()
+	writeCtx, cancelWrite := durableResponseWriteContext(clientCtx)
+	defer cancelWrite()
+	stored, err := plan.persistCompleted(writeCtx, "openai-compatible", []byte(`{"id":"provider-id","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":"done"}]}`))
+	if err != nil || !bytes.Contains(stored, []byte(`"store":true`)) {
+		t.Fatalf("durable terminal write err=%v body=%s", err, stored)
+	}
+	var resources int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM response_resources WHERE operation_id=? AND status='completed'`, plan.operationID).Scan(&resources); err != nil || resources != 1 {
+		t.Fatalf("completed resources=%d err=%v", resources, err)
 	}
 }
 
