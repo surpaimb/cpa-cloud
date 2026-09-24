@@ -22,7 +22,7 @@
 ## 跨协议转换、Responses 状态与工具
 
 查阅日期：2026-09-24。支持矩阵见 [跨协议转换能力契约](protocol-conversion-contract.md)，状态/后台/
-工具的实现门禁见 [ADR 0002](adr/0002-responses-state-background-managed-tools.md)。
+工具的实现门禁见 [ADR 0003](adr/0003-responses-state-background-managed-tools.md)。
 
 - Chat/Responses message、item 和工具结果映射：<https://developers.openai.com/api/docs/guides/migrate-to-responses>
 - Function tools、call ID、工具结果及流增量：<https://developers.openai.com/api/docs/guides/function-calling>

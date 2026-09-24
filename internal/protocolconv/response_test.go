@@ -68,7 +68,7 @@ func TestResponseConversionsRejectLossyResults(t *testing.T) {
 	}{
 		{ChatResponseToResponses, `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"x"}}]}`, "choices[0].finish_reason"},
 		{ResponsesResponseToChat, `{"id":"r","object":"response","created_at":1,"model":"m","status":"completed","output":[{"type":"reasoning","id":"x"}]}`, "output[0].type"},
-		{ResponsesResponseToChat, `{"id":"r","object":"response","created_at":1,"model":"m","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_image","image_url":"x"}]}]}`, "output[0].content[0].type"},
+		{ResponsesResponseToChat, `{"id":"r","object":"response","created_at":1,"model":"m","status":"completed","output":[{"id":"msg","type":"message","status":"completed","role":"assistant","content":[{"type":"output_image","image_url":"x"}]}]}`, "output[0].content[0].type"},
 	}
 	for _, test := range tests {
 		_, err := test.call([]byte(test.body))
@@ -82,5 +82,56 @@ func TestUsageTotalsMustAgree(t *testing.T) {
 	_, err := ChatResponseToResponses([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":99}}`))
 	if !errors.Is(err, ErrInvalidUpstream) {
 		t.Fatalf("expected invalid upstream usage, got %v", err)
+	}
+}
+
+func TestOfficialResponseMetadataDoesNotBlockSupportedOutput(t *testing.T) {
+	raw := []byte(`{
+  "id":"resp_standard","object":"response","created_at":1700000000,"completed_at":1700000001,
+  "model":"actual","status":"completed","background":false,"error":null,"incomplete_details":null,
+  "instructions":"system","metadata":{"trace":"synthetic"},"max_output_tokens":128,"max_tool_calls":4,
+  "parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":"cache","prompt_cache_retention":"24h",
+  "reasoning":{"effort":"low"},"safety_identifier":"safe","service_tier":"default","store":false,
+  "temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_logprobs":0,
+  "top_p":1,"truncation":"disabled","user":"synthetic","context_management":[],
+  "output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}]
+}`)
+	converted, err := ResponsesResponseToChat(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	_ = json.Unmarshal(converted, &root)
+	if root["object"] != "chat.completion" || root["id"].(string)[:9] != "chatcmpl_" {
+		t.Fatalf("unexpected converted envelope: %#v", root)
+	}
+}
+
+func TestOfficialChatMetadataDoesNotBlockSupportedOutput(t *testing.T) {
+	converted, err := ChatResponseToResponses([]byte(`{
+  "id":"chat_standard","object":"chat.completion","created":1,"model":"m","system_fingerprint":null,"service_tier":"default",
+  "choices":[{"index":0,"finish_reason":"stop","logprobs":null,"message":{"role":"assistant","content":"ok","refusal":null,"audio":null}}],
+  "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0,"audio_tokens":0}}
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	_ = json.Unmarshal(converted, &root)
+	if root["object"] != "response" || root["id"].(string)[:5] != "resp_" {
+		t.Fatalf("unexpected converted envelope: %#v", root)
+	}
+}
+
+func TestResponsesResponseRequiresCompletedOutputItems(t *testing.T) {
+	for _, item := range []string{
+		`{"id":"msg","type":"message","status":"in_progress","role":"assistant","content":[{"type":"output_text","text":"x","annotations":[]}]}`,
+		`{"id":"fc","type":"function_call","status":"in_progress","call_id":"call","name":"f","arguments":"{}"}`,
+		`{"id":"","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"x","annotations":[]}]}`,
+	} {
+		_, err := ResponsesResponseToChat([]byte(`{"id":"r","object":"response","created_at":1,"model":"m","status":"completed","output":[` + item + `]}`))
+		if !errors.Is(err, ErrInvalidUpstream) {
+			t.Fatalf("expected unfinished/invalid item rejection for %s, got %v", item, err)
+		}
 	}
 }

@@ -31,6 +31,7 @@ type ChatToResponsesStream struct {
 	sequence       int64
 	started        bool
 	terminal       bool
+	sourceID       string
 	responseID     string
 	model          string
 	created        int64
@@ -75,7 +76,7 @@ func (s *ChatToResponsesStream) Feed(raw []byte) ([]SSEEvent, error) {
 	}
 	if err := rejectUnknown(root, map[string]bool{
 		"id": true, "object": true, "created": true, "model": true,
-		"choices": true, "usage": true,
+		"choices": true, "usage": true, "system_fingerprint": true, "service_tier": true,
 	}, ""); err != nil {
 		return nil, err
 	}
@@ -97,14 +98,14 @@ func (s *ChatToResponsesStream) Feed(raw []byte) ([]SSEEvent, error) {
 	}
 	result := make([]SSEEvent, 0, 4)
 	if !s.started {
-		s.started, s.responseID, s.model, s.created = true, id, model, created
+		s.started, s.sourceID, s.responseID, s.model, s.created = true, id, convertedEnvelopeID("resp", id), model, created
 		s.textIndex = -1
 		s.tools = make(map[int]*chatToolStream)
 		response := s.responseSnapshot("in_progress", nil)
 		createdEvent, _ := s.event("response.created", map[string]any{"response": response}, false)
 		progressEvent, _ := s.event("response.in_progress", map[string]any{"response": response}, false)
 		result = append(result, createdEvent, progressEvent)
-	} else if id != s.responseID || model != s.model || created != s.created {
+	} else if id != s.sourceID || model != s.model || created != s.created {
 		return nil, invalidUpstream("", "stream metadata changed")
 	}
 	if rawUsage, ok := root["usage"]; ok && !bytes.Equal(bytes.TrimSpace(rawUsage), []byte("null")) {
@@ -128,8 +129,11 @@ func (s *ChatToResponsesStream) Feed(raw []byte) ([]SSEEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknown(choice, map[string]bool{"index": true, "delta": true, "finish_reason": true}, "choices[0]"); err != nil {
+	if err := rejectUnknown(choice, map[string]bool{"index": true, "delta": true, "finish_reason": true, "logprobs": true}, "choices[0]"); err != nil {
 		return nil, err
+	}
+	if raw, ok := choice["logprobs"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, unsupported("choices[0].logprobs")
 	}
 	index, err := requireInteger(choice["index"], "choices[0].index", true)
 	if err != nil || index != 0 {
@@ -139,8 +143,11 @@ func (s *ChatToResponsesStream) Feed(raw []byte) ([]SSEEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknown(delta, map[string]bool{"role": true, "content": true, "tool_calls": true}, "choices[0].delta"); err != nil {
+	if err := rejectUnknown(delta, map[string]bool{"role": true, "content": true, "tool_calls": true, "refusal": true}, "choices[0].delta"); err != nil {
 		return nil, err
+	}
+	if raw, ok := delta["refusal"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, unsupported("choices[0].delta.refusal")
 	}
 	if rawRole, ok := delta["role"]; ok {
 		role, err := requireString(rawRole, "choices[0].delta.role", true)
@@ -375,6 +382,10 @@ type responseStreamItem struct {
 	name        string
 	text        bytes.Buffer
 	arguments   bytes.Buffer
+	partAdded   bool
+	textDone    bool
+	partDone    bool
+	argsDone    bool
 	done        bool
 }
 
@@ -383,6 +394,7 @@ type responseStreamItem struct {
 type ResponsesToChatStream struct {
 	started    bool
 	terminal   bool
+	sourceID   string
 	responseID string
 	model      string
 	created    int64
@@ -459,6 +471,9 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		item, err := s.eventItem(event, "message", true)
 		if err != nil {
 			return nil, err
+		}
+		if !item.partAdded || item.textDone {
+			return nil, invalidUpstream("type", "text delta is out of order")
 		}
 		item.text.WriteString(delta)
 		return s.chatDelta(map[string]any{"content": delta})
@@ -539,6 +554,9 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		if err != nil {
 			return nil, err
 		}
+		if tool.argsDone {
+			return nil, invalidUpstream("type", "function arguments delta arrived after done")
+		}
 		delta, err := requireString(event["delta"], "delta", true)
 		if err != nil {
 			return nil, err
@@ -554,6 +572,10 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		if err != nil || text != item.text.String() {
 			return nil, invalidUpstream("text", "done text does not match streamed deltas")
 		}
+		if !item.partAdded || item.textDone {
+			return nil, invalidUpstream("type", "text done is missing its part or is duplicated")
+		}
+		item.textDone = true
 		return nil, nil
 	case "response.function_call_arguments.done":
 		item, err := s.eventItem(event, "function_call", false)
@@ -564,6 +586,10 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		if err != nil || arguments != item.arguments.String() {
 			return nil, invalidUpstream("arguments", "done arguments do not match streamed deltas")
 		}
+		if item.argsDone {
+			return nil, invalidUpstream("type", "function arguments done is duplicated")
+		}
+		item.argsDone = true
 		return nil, nil
 	case "response.content_part.added":
 		item, err := s.eventItem(event, "message", true)
@@ -578,6 +604,10 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		if err != nil || text != "" || item.text.Len() != 0 {
 			return nil, invalidUpstream("part", "added text part must be empty")
 		}
+		if item.partAdded || item.textDone || item.partDone {
+			return nil, invalidUpstream("type", "content part added is duplicated or out of order")
+		}
+		item.partAdded = true
 		return nil, nil
 	case "response.content_part.done":
 		item, err := s.eventItem(event, "message", true)
@@ -592,6 +622,10 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		if err != nil || text != item.text.String() {
 			return nil, invalidUpstream("part", "done text part does not match streamed deltas")
 		}
+		if !item.textDone || item.partDone {
+			return nil, invalidUpstream("type", "content part done is missing text done or is duplicated")
+		}
+		item.partDone = true
 		return nil, nil
 	case "response.output_item.done":
 		if err := s.validateEventResponseID(event); err != nil {
@@ -615,6 +649,12 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		}
 		if item.done {
 			return nil, invalidUpstream("item", "duplicate output item completion")
+		}
+		if item.kind == "message" && !item.partDone {
+			return nil, invalidUpstream("item", "message item completed before its content event chain")
+		}
+		if item.kind == "function_call" && !item.argsDone {
+			return nil, invalidUpstream("item", "function item completed before arguments done")
 		}
 		if err := validateStreamItemObject(item, terminalItem); err != nil {
 			return nil, err
@@ -742,7 +782,7 @@ func (s *ResponsesToChatStream) validateEventResponseID(event map[string]json.Ra
 		return nil
 	}
 	id, err := requireString(raw, "response_id", true)
-	if err != nil || id != s.responseID {
+	if err != nil || id != s.sourceID {
 		return invalidUpstream("response_id", "event response id changed")
 	}
 	return nil
@@ -845,10 +885,10 @@ func (s *ResponsesToChatStream) captureResponseMetadata(response map[string]json
 		return err
 	}
 	if !s.started {
-		s.started, s.responseID, s.model, s.created = true, id, model, created
+		s.started, s.sourceID, s.responseID, s.model, s.created = true, id, convertedEnvelopeID("chatcmpl", id), model, created
 		return nil
 	}
-	if id != s.responseID || model != s.model || created != s.created {
+	if id != s.sourceID || model != s.model || created != s.created {
 		return invalidUpstream("response", "stream metadata changed")
 	}
 	return nil

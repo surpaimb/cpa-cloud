@@ -17,7 +17,7 @@ func ChatResponseToResponses(raw []byte) ([]byte, error) {
 	}
 	if err := rejectUnknown(root, map[string]bool{
 		"id": true, "object": true, "created": true, "model": true,
-		"choices": true, "usage": true,
+		"choices": true, "usage": true, "system_fingerprint": true, "service_tier": true,
 	}, ""); err != nil {
 		return nil, err
 	}
@@ -37,6 +37,7 @@ func ChatResponseToResponses(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	targetID := convertedEnvelopeID("resp", id)
 	var choices []json.RawMessage
 	if json.Unmarshal(root["choices"], &choices) != nil || len(choices) != 1 {
 		return nil, invalidUpstream("choices", "exactly one choice is required")
@@ -45,8 +46,11 @@ func ChatResponseToResponses(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknown(choice, map[string]bool{"index": true, "message": true, "finish_reason": true}, "choices[0]"); err != nil {
+	if err := rejectUnknown(choice, map[string]bool{"index": true, "message": true, "finish_reason": true, "logprobs": true}, "choices[0]"); err != nil {
 		return nil, err
+	}
+	if raw, ok := choice["logprobs"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, unsupported("choices[0].logprobs")
 	}
 	index, err := requireInteger(choice["index"], "choices[0].index", true)
 	if err != nil || index != 0 {
@@ -60,8 +64,13 @@ func ChatResponseToResponses(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknown(message, map[string]bool{"role": true, "content": true, "tool_calls": true}, "choices[0].message"); err != nil {
+	if err := rejectUnknown(message, map[string]bool{"role": true, "content": true, "tool_calls": true, "refusal": true, "audio": true}, "choices[0].message"); err != nil {
 		return nil, err
+	}
+	for _, field := range []string{"refusal", "audio"} {
+		if raw, ok := message[field]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return nil, unsupported("choices[0].message." + field)
+		}
 	}
 	role, err := requireString(message["role"], "choices[0].message.role", true)
 	if err != nil || role != "assistant" {
@@ -74,7 +83,7 @@ func ChatResponseToResponses(raw []byte) ([]byte, error) {
 			return nil, err
 		}
 		output = append(output, map[string]any{
-			"id": convertedItemID("msg", id, 0), "type": "message", "status": "completed", "role": "assistant",
+			"id": convertedItemID("msg", targetID, 0), "type": "message", "status": "completed", "role": "assistant",
 			"content": []any{map[string]any{"type": "output_text", "text": content, "annotations": []any{}}},
 		})
 	}
@@ -85,7 +94,7 @@ func ChatResponseToResponses(raw []byte) ([]byte, error) {
 		}
 		for itemIndex, call := range calls {
 			converted := call.(map[string]any)
-			converted["id"] = convertedItemID("fc", id, itemIndex)
+			converted["id"] = convertedItemID("fc", targetID, itemIndex)
 			converted["status"] = "completed"
 			output = append(output, converted)
 		}
@@ -104,7 +113,7 @@ func ChatResponseToResponses(raw []byte) ([]byte, error) {
 		}
 	}
 	result := map[string]any{
-		"id": id, "object": "response", "created_at": created, "model": model,
+		"id": targetID, "object": "response", "created_at": created, "model": model,
 		"status": "completed", "output": output,
 	}
 	if rawUsage, ok := root["usage"]; ok && !bytes.Equal(bytes.TrimSpace(rawUsage), []byte("null")) {
@@ -124,10 +133,7 @@ func ResponsesResponseToChat(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknown(root, map[string]bool{
-		"id": true, "object": true, "created_at": true, "model": true,
-		"status": true, "output": true, "usage": true,
-	}, ""); err != nil {
+	if err := validateStandardResponseEnvelope(root); err != nil {
 		return nil, err
 	}
 	id, err := requireString(root["id"], "id", true)
@@ -176,6 +182,9 @@ func ResponsesResponseToChat(raw []byte) ([]byte, error) {
 			if err := rejectUnknown(item, map[string]bool{"id": true, "type": true, "status": true, "role": true, "content": true}, field); err != nil {
 				return nil, err
 			}
+			if err := validateCompletedOutputIdentity(item, field); err != nil {
+				return nil, err
+			}
 			role, err := requireString(item["role"], joinField(field, "role"), true)
 			if err != nil || role != "assistant" {
 				return nil, invalidUpstream(joinField(field, "role"), "expected assistant")
@@ -187,6 +196,9 @@ func ResponsesResponseToChat(raw []byte) ([]byte, error) {
 			content.WriteString(text)
 		case "function_call":
 			if err := rejectUnknown(item, map[string]bool{"id": true, "type": true, "status": true, "call_id": true, "name": true, "arguments": true}, field); err != nil {
+				return nil, err
+			}
+			if err := validateCompletedOutputIdentity(item, field); err != nil {
 				return nil, err
 			}
 			callID, err := requireString(item["call_id"], joinField(field, "call_id"), true)
@@ -216,7 +228,7 @@ func ResponsesResponseToChat(raw []byte) ([]byte, error) {
 		}
 	}
 	result := map[string]any{
-		"id": id, "object": "chat.completion", "created": created, "model": model,
+		"id": convertedEnvelopeID("chatcmpl", id), "object": "chat.completion", "created": created, "model": model,
 		"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finishReason}},
 	}
 	if rawUsage, ok := root["usage"]; ok && !bytes.Equal(bytes.TrimSpace(rawUsage), []byte("null")) {
@@ -227,6 +239,41 @@ func ResponsesResponseToChat(raw []byte) ([]byte, error) {
 		result["usage"] = usage
 	}
 	return marshal(result)
+}
+
+func validateStandardResponseEnvelope(root map[string]json.RawMessage) error {
+	allowed := map[string]bool{
+		"id": true, "object": true, "created_at": true, "completed_at": true, "model": true,
+		"status": true, "output": true, "usage": true, "background": true,
+		"error": true, "incomplete_details": true, "instructions": true, "metadata": true,
+		"max_output_tokens": true, "max_tool_calls": true, "parallel_tool_calls": true,
+		"previous_response_id": true, "prompt_cache_key": true, "prompt_cache_retention": true,
+		"reasoning": true, "safety_identifier": true, "service_tier": true, "store": true,
+		"temperature": true, "text": true, "tool_choice": true, "tools": true,
+		"top_logprobs": true, "top_p": true, "truncation": true, "user": true,
+		"context_management": true,
+	}
+	if err := rejectUnknown(root, allowed, ""); err != nil {
+		return err
+	}
+	for _, field := range []string{"error", "incomplete_details"} {
+		if raw, ok := root[field]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return invalidUpstream(field, "completed response must not contain terminal error details")
+		}
+	}
+	return nil
+}
+
+func validateCompletedOutputIdentity(item map[string]json.RawMessage, field string) error {
+	id, err := requireString(item["id"], joinField(field, "id"), true)
+	if err != nil || id == "" {
+		return invalidUpstream(joinField(field, "id"), "a non-empty string is required")
+	}
+	status, err := requireString(item["status"], joinField(field, "status"), true)
+	if err != nil || status != "completed" {
+		return invalidUpstream(joinField(field, "status"), "completed response contains an unfinished output item")
+	}
+	return nil
 }
 
 func requireInteger(raw json.RawMessage, field string, upstream bool) (int64, error) {
@@ -242,6 +289,11 @@ func requireInteger(raw json.RawMessage, field string, upstream bool) (int64, er
 
 func convertedItemID(prefix, responseID string, index int) string {
 	sum := sha256.Sum256([]byte(responseID + "\x00" + prefix + "\x00" + strconv.Itoa(index)))
+	return prefix + "_cpa_" + hex.EncodeToString(sum[:12])
+}
+
+func convertedEnvelopeID(prefix, sourceID string) string {
+	sum := sha256.Sum256([]byte("cpa-protocol-conversion\x00" + prefix + "\x00" + sourceID))
 	return prefix + "_cpa_" + hex.EncodeToString(sum[:12])
 }
 
@@ -270,14 +322,14 @@ func chatUsageToResponses(raw json.RawMessage, field string, upstream bool) (map
 	}
 	result := map[string]any{"input_tokens": input, "output_tokens": output, "total_tokens": total}
 	if details, ok := usage["prompt_tokens_details"]; ok {
-		converted, err := convertUsageDetails(details, joinField(field, "prompt_tokens_details"), upstream, map[string]string{"cached_tokens": "cached_tokens", "cache_write_tokens": "cache_write_tokens"})
+		converted, err := convertUsageDetails(details, joinField(field, "prompt_tokens_details"), upstream, map[string]string{"cached_tokens": "cached_tokens", "cache_write_tokens": "cache_write_tokens", "audio_tokens": ""})
 		if err != nil {
 			return nil, err
 		}
 		result["input_tokens_details"] = converted
 	}
 	if details, ok := usage["completion_tokens_details"]; ok {
-		converted, err := convertUsageDetails(details, joinField(field, "completion_tokens_details"), upstream, map[string]string{"reasoning_tokens": "reasoning_tokens"})
+		converted, err := convertUsageDetails(details, joinField(field, "completion_tokens_details"), upstream, map[string]string{"reasoning_tokens": "reasoning_tokens", "accepted_prediction_tokens": "", "audio_tokens": "", "rejected_prediction_tokens": ""})
 		if err != nil {
 			return nil, err
 		}
@@ -345,6 +397,12 @@ func convertUsageDetails(raw json.RawMessage, field string, upstream bool, field
 			count, err := requireInteger(value, joinField(field, source), upstream)
 			if err != nil {
 				return nil, err
+			}
+			if target == "" {
+				if count != 0 {
+					return nil, unsupported(joinField(field, source))
+				}
+				continue
 			}
 			result[target] = count
 		}

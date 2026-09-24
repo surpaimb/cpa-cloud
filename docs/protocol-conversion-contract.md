@@ -72,7 +72,7 @@ Gemini 原生通路仍是同协议透传，不属于跨协议转换。本批根�
 
 1. D1 集成：由独立集成任务将纯转换器接入共享路由，复用现有员工 Key、模型权限、池、出站代理、
    归档、预算和 usage 生命周期，并做随机端口进程验收。
-2. D2：按 ADR 0002 完成默认关闭的 Responses 资源、`previous_response_id`、读取/删除/取消和后台任务；
+2. D2：按 ADR 0003 完成默认关闭的 Responses 资源、`previous_response_id`、读取/删除/取消和后台任务；
    先合迁移、所有权和恢复，再启 worker。
 3. D3：仅对管理员白名单且上游官方支持的托管工具透传；不在 CPA Cloud 任意执行用户代码。
 4. Messages/Gemini 跨协议：逐字段证明可表达语义后扩表；当前只有各自原生路径，不能用文本转换冒充完成。
@@ -94,3 +94,8 @@ Gemini 原生通路仍是同协议透传，不属于跨协议转换。本批根�
   <https://ai.google.dev/api/generate-content>
 
 实现与测试没有使用 CLIProxyAPI、Sub2API、归档 CPA、真实凭据或捕获的用户正文。
+
+响应侧的字段策略与请求侧不同：请求字段代表调用方要求的语义，未列字段继续拒绝；响应对象中官方定义、
+但不改变本批文本/function output 的 envelope 元数据（例如 service tier、store、temperature、tools 和
+metadata）允许经过结构校验后省略。`error`/`incomplete_details` 在 completed 响应中必须为 null。
+output item、content、phase、非空 logprobs/refusal/audio 及未知 SSE 事件仍不能省略或降级，必须明确失败。
