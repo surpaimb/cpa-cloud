@@ -752,11 +752,14 @@ func validateGeminiContents(raw json.RawMessage, system bool) error {
 			return errors.New("invalid content parts")
 		}
 		for _, partRaw := range parts {
-			part, err := decodeGeminiObject(partRaw, map[string]bool{"text": true, "functionCall": true, "functionResponse": true})
-			if err != nil || len(part) != 1 {
+			part, err := decodeGeminiObject(partRaw, map[string]bool{"text": true, "functionCall": true, "functionResponse": true, "thoughtSignature": true})
+			if err != nil || len(part) == 0 || len(part) > 2 {
 				return errGeminiUnsupported
 			}
 			if textRaw, ok := part["text"]; ok {
+				if len(part) != 1 {
+					return errGeminiUnsupported
+				}
 				var text string
 				if json.Unmarshal(textRaw, &text) != nil {
 					return errors.New("invalid text part")
@@ -767,15 +770,29 @@ func validateGeminiContents(raw json.RawMessage, system bool) error {
 				return errGeminiUnsupported
 			}
 			if call, ok := part["functionCall"]; ok {
+				if signatureRaw, present := part["thoughtSignature"]; present {
+					var signature string
+					if json.Unmarshal(signatureRaw, &signature) != nil || !validText(signature, 1, 64<<10) {
+						return errors.New("invalid thought signature")
+					}
+				} else if len(part) != 1 {
+					return errGeminiUnsupported
+				}
 				if err := validateGeminiFunctionCall(call, false); err != nil {
 					return err
 				}
+				continue
 			}
 			if response, ok := part["functionResponse"]; ok {
+				if len(part) != 1 {
+					return errGeminiUnsupported
+				}
 				if err := validateGeminiFunctionCall(response, true); err != nil {
 					return err
 				}
+				continue
 			}
+			return errGeminiUnsupported
 		}
 	}
 	return nil

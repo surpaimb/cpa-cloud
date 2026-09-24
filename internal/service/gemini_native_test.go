@@ -170,7 +170,7 @@ func TestGeminiNativeAPIKeyWorkflowStreamingDiscoveryAndRestart(t *testing.T) {
 	}
 	xGoogModels.Body.Close()
 
-	requestBody := `{"contents":[{"role":"user","parts":[{"text":"weather"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"weather","args":{"city":"Paris"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"weather","response":{"temperature":21}}}]}],"systemInstruction":{"parts":[{"text":"Be concise."}]},"tools":[{"functionDeclarations":[{"name":"weather","description":"Get weather","parametersJsonSchema":{"type":"object","properties":{"city":{"type":"string"}}}}]}],"toolConfig":{"functionCallingConfig":{"mode":"AUTO","allowedFunctionNames":["weather"]}},"generationConfig":{"candidateCount":1,"maxOutputTokens":128,"temperature":0.2,"topP":0.9,"topK":20,"stopSequences":["done"],"seed":7,"presencePenalty":0,"frequencyPenalty":0,"responseMimeType":"application/json","responseSchema":{"type":"object"},"thinkingConfig":{"includeThoughts":true}},"safetySettings":[]}`
+	requestBody := `{"contents":[{"role":"user","parts":[{"text":"weather"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"weather","args":{"city":"Paris"}},"thoughtSignature":"cli-0.61-synthetic-signature"}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"weather","response":{"temperature":21}}}]}],"systemInstruction":{"parts":[{"text":"Be concise."}]},"tools":[{"functionDeclarations":[{"name":"weather","description":"Get weather","parametersJsonSchema":{"type":"object","properties":{"city":{"type":"string"}}}}]}],"toolConfig":{"functionCallingConfig":{"mode":"AUTO","allowedFunctionNames":["weather"]}},"generationConfig":{"candidateCount":1,"maxOutputTokens":128,"temperature":0.2,"topP":0.9,"topK":20,"stopSequences":["done"],"seed":7,"presencePenalty":0,"frequencyPenalty":0,"responseMimeType":"application/json","responseSchema":{"type":"object"},"thinkingConfig":{"includeThoughts":true}},"safetySettings":[]}`
 	generated := geminiEmployeeKeyRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent", requestBody, key.Key, context.Background())
 	if generated.StatusCode != http.StatusOK {
 		t.Fatalf("generate status=%d body=%s", generated.StatusCode, readBody(generated))
@@ -184,7 +184,7 @@ func TestGeminiNativeAPIKeyWorkflowStreamingDiscoveryAndRestart(t *testing.T) {
 	receivedMu.Lock()
 	forwarded := mustMarshal(received)
 	receivedMu.Unlock()
-	for _, expected := range []string{`"systemInstruction"`, `"functionDeclarations"`, `"parametersJsonSchema"`, `"functionCall"`, `"functionResponse"`, `"generationConfig"`, `"thinkingConfig"`, `"includeThoughts":true`} {
+	for _, expected := range []string{`"systemInstruction"`, `"functionDeclarations"`, `"parametersJsonSchema"`, `"functionCall"`, `"thoughtSignature":"cli-0.61-synthetic-signature"`, `"functionResponse"`, `"generationConfig"`, `"thinkingConfig"`, `"includeThoughts":true`} {
 		if !bytes.Contains(forwarded, []byte(expected)) {
 			t.Fatalf("forwarded request omitted %s: %s", expected, forwarded)
 		}
@@ -244,6 +244,25 @@ func TestGeminiNativeAPIKeyWorkflowStreamingDiscoveryAndRestart(t *testing.T) {
 	}
 	if requestCount.Load() < 4 {
 		t.Fatalf("Gemini request count=%d", requestCount.Load())
+	}
+}
+
+func TestGeminiFunctionCallThoughtSignatureIsStrict(t *testing.T) {
+	valid := `[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read_file","args":{"path":"synthetic.txt"}},"thoughtSignature":"opaque-synthetic-signature"}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"read_file","response":{"output":"synthetic"}}}]}]`
+	if err := validateGeminiContents(json.RawMessage(valid), false); err != nil {
+		t.Fatalf("Gemini CLI 0.61 tool round rejected: %v", err)
+	}
+	invalid := []string{
+		`[{"role":"model","parts":[{"text":"x","thoughtSignature":"opaque"}]}]`,
+		`[{"role":"model","parts":[{"functionResponse":{"id":"call-1","name":"read_file","response":{}},"thoughtSignature":"opaque"}]}]`,
+		`[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read_file","args":{}},"thoughtSignature":7}]}]`,
+		`[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read_file","args":{}},"thoughtSignature":""}]}]`,
+		`[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read_file","args":{}},"thoughtSignature":"opaque","futureField":true}]}]`,
+	}
+	for _, body := range invalid {
+		if err := validateGeminiContents(json.RawMessage(body), false); err == nil {
+			t.Fatalf("invalid thought signature shape accepted: %s", body)
+		}
 	}
 }
 
