@@ -58,11 +58,20 @@ var (
 // is structurally and cryptographically valid for this format version; it does
 // not promise compatibility with every future CPA Cloud version.
 type Info struct {
-	FormatVersion int        `json:"format_version"`
-	SourceProgram string     `json:"source_program"`
-	SourceVersion string     `json:"source_version"`
-	CreatedAt     string     `json:"created_at"`
-	Files         []FileInfo `json:"files"`
+	FormatVersion int           `json:"format_version"`
+	SourceProgram string        `json:"source_program"`
+	SourceVersion string        `json:"source_version"`
+	CreatedAt     string        `json:"created_at"`
+	Files         []FileInfo    `json:"files"`
+	KeyProvider   *KeyReference `json:"key_provider,omitempty"`
+}
+
+// KeyReference identifies the exact non-secret provider version required to
+// open a key-material backup. It never contains the wrapping key.
+type KeyReference struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Version uint64 `json:"version"`
 }
 
 type FileInfo struct {
@@ -237,13 +246,17 @@ func Restore(ctx context.Context, input, dataDir string, password []byte) (Info,
 }
 
 func newInfo(sourceVersion string, records []record) Info {
+	return newInfoForFormat(int(formatVersion), sourceVersion, records, nil)
+}
+
+func newInfoForFormat(version int, sourceVersion string, records []record, keyProvider *KeyReference) Info {
 	files := make([]FileInfo, 0, len(records))
 	for _, item := range records {
 		files = append(files, FileInfo{Name: item.name, Size: int64(len(item.data)), Integrity: "authenticated-sha256"})
 	}
 	return Info{
-		FormatVersion: int(formatVersion), SourceProgram: "cpa-cloud", SourceVersion: sourceVersion,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Files: files,
+		FormatVersion: version, SourceProgram: "cpa-cloud", SourceVersion: sourceVersion,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Files: files, KeyProvider: keyProvider,
 	}
 }
 
@@ -395,6 +408,10 @@ func openPackage(password, packageBytes []byte) ([]byte, error) {
 }
 
 func decodePayload(plaintext []byte) (*decodedPackage, error) {
+	return decodePayloadForFormat(plaintext, int(formatVersion), nil)
+}
+
+func decodePayloadForFormat(plaintext []byte, expectedVersion int, expectedKeyProvider *KeyReference) (*decodedPackage, error) {
 	reader := bytes.NewReader(plaintext)
 	magic := make([]byte, len(payloadMagic))
 	if _, err := io.ReadFull(reader, magic); err != nil || !bytes.Equal(magic, payloadMagic[:]) {
@@ -415,13 +432,13 @@ func decodePayload(plaintext []byte) (*decodedPackage, error) {
 	var info Info
 	decoder := json.NewDecoder(bytes.NewReader(metadata))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&info); err != nil || info.FormatVersion != int(formatVersion) || info.SourceProgram != "cpa-cloud" {
+	if err := decoder.Decode(&info); err != nil || info.FormatVersion != expectedVersion || info.SourceProgram != "cpa-cloud" {
 		return nil, errors.New("backup metadata is invalid")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("backup metadata contains trailing data")
 	}
-	if _, err := time.Parse(time.RFC3339Nano, info.CreatedAt); err != nil || len(info.Files) != 2 {
+	if _, err := time.Parse(time.RFC3339Nano, info.CreatedAt); err != nil || len(info.Files) != 2 || !equalKeyReference(info.KeyProvider, expectedKeyProvider) {
 		return nil, errors.New("backup metadata is invalid")
 	}
 	expected := []string{databaseFilename, rootKeyFilename}
@@ -456,6 +473,13 @@ func decodePayload(plaintext []byte) (*decodedPackage, error) {
 	}
 	transferred = true
 	return &decodedPackage{info: info, db: records[0].data, rootKey: records[1].data}, nil
+}
+
+func equalKeyReference(left, right *KeyReference) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.ID == right.ID && left.Kind == right.Kind && left.Version == right.Version
 }
 
 func decodeRecord(reader *bytes.Reader) (record, error) {
