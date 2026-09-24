@@ -119,6 +119,65 @@ func assertDispatchAttemptCount(t *testing.T, a *App, id string, want int) {
 	}
 }
 
+func TestNonBudgetDispatchBarrierSerializesRevisionThroughDurableMarker(t *testing.T) {
+	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, time.Minute, 4)
+	a := f.base.app
+	a.accountPool.Close()
+	a.accountPool = f.rt
+	f.insertAccount(t, "ups_atomic_dispatch", true)
+	f.insertModelPool(t, "atomic-dispatch-model", "ups_atomic_dispatch", 1, modelAccountView{UpstreamID: "ups_atomic_dispatch", UpstreamModel: "actual-model", Priority: 1, Weight: 1, MaxConcurrency: 1})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ctx = context.WithValue(ctx, requestIDKey{}, "request-atomic-dispatch")
+	r := httptest.NewRequest("POST", "/v1/responses", strings.NewReader("{}")).WithContext(ctx)
+	selected, lease, failed := a.prepareModelRoute(r, f.auth1, "atomic-dispatch-model", []string{"openai-compatible"}, accounting.ProtocolOpenAIResponses, true, func(_ *http.Request, selected route) (route, *modelPreflightError) { return selected, nil })
+	if failed != nil || lease == nil {
+		t.Fatalf("prepare failed: %+v", failed)
+	}
+	defer a.releaseModelLease(lease, requestID(ctx), true)
+	reached, release := make(chan struct{}), make(chan struct{})
+	a.usage.priceLookup = func(context.Context, string, string) (*accounting.PriceSnapshot, error) {
+		close(reached)
+		<-release
+		return nil, nil
+	}
+	dispatched := make(chan *modelAdmissionError, 1)
+	go func() {
+		_, failure := a.dispatchModelRoute(r, f.auth1, "atomic-dispatch-model", selected, lease, true)
+		dispatched <- failure
+	}()
+	select {
+	case <-reached:
+	case <-ctx.Done():
+		t.Fatal("dispatch did not reach transactional price freeze")
+	}
+	mutated := make(chan error, 1)
+	go func() {
+		a.admission.Lock()
+		defer a.admission.Unlock()
+		_, err := a.store.db.ExecContext(ctx, `UPDATE upstreams SET revision=revision+1 WHERE id='ups_atomic_dispatch'`)
+		mutated <- err
+	}()
+	select {
+	case err := <-mutated:
+		close(release)
+		t.Fatalf("revision mutation crossed the open dispatch barrier: %v", err)
+	case <-time.After(60 * time.Millisecond):
+	}
+	close(release)
+	if failure := <-dispatched; failure != nil {
+		t.Fatalf("dispatch failure: %+v", failure)
+	}
+	if err := <-mutated; err != nil {
+		t.Fatal(err)
+	}
+	var dispatches int
+	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempt_dispatches d JOIN accounting_attempts a ON a.id=d.attempt_id WHERE a.request_id=?`, requestID(ctx)).Scan(&dispatches); err != nil || dispatches != 1 {
+		t.Fatalf("durable dispatch markers=%d err=%v", dispatches, err)
+	}
+	a.finishRequest(requestID(ctx), "cancelled", 0)
+}
+
 func TestFinalDispatchCancellationAcrossHTTPProtocols(t *testing.T) {
 	for _, test := range []struct{ name, provider, path, body string }{
 		{"chat", "openai-compatible", "/v1/chat/completions", `{"model":"cancel-model","messages":[{"role":"user","content":"synthetic"}]}`},

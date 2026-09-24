@@ -32,6 +32,8 @@ type usageLedgerCoordinator struct {
 	budget        *governance.Budget
 	// Package-private commit fault injection for the joint budget settlement.
 	budgetCommit func(*sql.Tx) error
+	// Package-private fault injection for the non-budget dispatch barrier.
+	dispatchCommit func(*sql.Tx) error
 }
 
 type usageRequestStart struct {
@@ -64,13 +66,14 @@ type usageLedgerRequest struct {
 }
 
 type usageLedgerAttempt struct {
-	request   *usageLedgerRequest
-	id        string
-	accountID string
-	dispatch  accounting.Dispatch
-	startedAt time.Time
-	usage     *accounting.UsageAccumulator
-	budget    *budgetAttemptState
+	request           *usageLedgerRequest
+	id                string
+	accountID         string
+	dispatch          accounting.Dispatch
+	startedAt         time.Time
+	usage             *accounting.UsageAccumulator
+	budget            *budgetAttemptState
+	dispatchUncertain bool
 
 	mu             sync.Mutex
 	finishSnapshot *usageAttemptFinishSnapshot

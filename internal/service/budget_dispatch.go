@@ -123,6 +123,11 @@ func (a *App) commitBudgetDispatch(ctx context.Context, tx *sql.Tx, selected rou
 	if err := req.coordinator.ledger.MarkAttemptDispatchedTx(ctx, tx, accounting.AttemptDispatch{ID: start.ID, OperationID: start.ID + ":dispatch", DispatchedAt: at}); err != nil {
 		return budgetStorageFailure()
 	}
+	if hook := dispatchBarrierHookFromContext(ctx); hook != nil {
+		if err := hook(ctx, tx, start.ID, at); err != nil {
+			return budgetStorageFailure()
+		}
+	}
 	attempt := &usageLedgerAttempt{request: req, id: start.ID, accountID: start.AccountID, dispatch: dispatch, startedAt: at, usage: accounting.NewGPT41SnapshotUsageAccumulator(), budget: &budgetAttemptState{start: start, reserve: reserve, mode: governance.BudgetSettleReleaseNotStarted}}
 	// Publish the exact original identity before Commit, because a returned
 	// error alone cannot tell whether the reservation was durably written.

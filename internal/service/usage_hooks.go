@@ -141,6 +141,96 @@ func (a *App) beginRouteUpstreamUsage(ctx context.Context, id string, selected r
 	return err
 }
 
+type usageDispatchState struct {
+	active  *activeUsageRequest
+	request *usageLedgerRequest
+}
+
+func (s *usageDispatchState) unlock() { s.request.mu.Unlock(); s.active.mu.Unlock() }
+
+func (a *App) prepareUsageDispatch(id string, record bool) (*usageDispatchState, *modelAdmissionError) {
+	if !record {
+		return nil, nil
+	}
+	value, ok := a.usageRequests.Load(id)
+	if !ok {
+		return nil, nil // Isolated forwarding fixtures do not own usage state.
+	}
+	active := value.(*activeUsageRequest)
+	active.mu.Lock()
+	request := active.request
+	request.mu.Lock()
+	state := &usageDispatchState{active: active, request: request}
+	if active.attempt != nil || active.outcome != "" || active.finished || request.attempt != nil || request.finishSnapshot != nil {
+		state.unlock()
+		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)
+	}
+	return state, nil
+}
+
+func (a *App) commitUsageDispatch(ctx context.Context, tx *sql.Tx, selected route, state *usageDispatchState) *modelAdmissionError {
+	request := state.request
+	var price *accounting.PriceSnapshot
+	var err error
+	if lookup := request.coordinator.priceLookup; lookup != nil {
+		price, err = lookup(ctx, selected.AccountID, selected.UpstreamModel)
+	} else if lookupTx := request.coordinator.priceLookupTx; lookupTx != nil {
+		price, err = lookupTx(ctx, tx, selected.AccountID, selected.UpstreamModel)
+	} else {
+		err = errUsageLedgerUnavailable
+	}
+	if err != nil {
+		return poolAdmissionFailure(accountPoolStorageUnavailable)
+	}
+	dispatch := accounting.DispatchPrimary
+	if state.active.failover {
+		dispatch = accounting.DispatchFailover
+	}
+	at := time.Now().UTC()
+	accumulator, err := accounting.NewUsageAccumulator(request.protocol)
+	if err != nil {
+		return poolAdmissionFailure(accountPoolStorageUnavailable)
+	}
+	attempt := &usageLedgerAttempt{request: request, id: request.id + ":1", accountID: selected.AccountID, dispatch: dispatch, startedAt: at, usage: accumulator}
+	start := accounting.AttemptStart{ID: attempt.id, RequestID: request.id, AccountID: selected.AccountID, Provider: request.provider, Dispatch: dispatch, StartedAt: at, Price: price, Protocol: request.protocol, EffectiveModel: selected.UpstreamModel, Evidence: request.evidence}
+	if err := request.coordinator.ledger.BeginAttemptTx(ctx, tx, start); err != nil {
+		return poolAdmissionFailure(accountPoolStorageUnavailable)
+	}
+	if err := request.coordinator.ledger.MarkAttemptDispatchedTx(ctx, tx, accounting.AttemptDispatch{ID: attempt.id, OperationID: attempt.id + ":dispatch", DispatchedAt: at}); err != nil {
+		return poolAdmissionFailure(accountPoolStorageUnavailable)
+	}
+	if hook := dispatchBarrierHookFromContext(ctx); hook != nil {
+		if err := hook(ctx, tx, attempt.id, at); err != nil {
+			return poolAdmissionFailure(accountPoolStorageUnavailable)
+		}
+	}
+	// Publish the immutable identity before Commit because an error response
+	// cannot prove whether SQLite durably accepted the transaction.
+	request.attempt, state.active.attempt = attempt, attempt
+	commit := request.coordinator.dispatchCommit
+	if commit == nil {
+		commit = func(tx *sql.Tx) error { return tx.Commit() }
+	}
+	if err := commit(tx); err != nil {
+		_ = tx.Rollback()
+		attempt.dispatchUncertain = true
+		return poolAdmissionFailure(accountPoolStorageUnavailable)
+	}
+	return nil
+}
+
+type dispatchBarrierContextKey struct{}
+type dispatchBarrierHook func(context.Context, *sql.Tx, string, time.Time) error
+
+func withDispatchBarrierHook(r *http.Request, hook dispatchBarrierHook) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), dispatchBarrierContextKey{}, hook))
+}
+
+func dispatchBarrierHookFromContext(ctx context.Context) dispatchBarrierHook {
+	hook, _ := ctx.Value(dispatchBarrierContextKey{}).(dispatchBarrierHook)
+	return hook
+}
+
 // Invalid usage poisons only the accumulator, preserving unknown counters.
 // This hook never retains the passed response/event or prints parser errors.
 func (a *App) observeRequestUsage(id string, data []byte) {
@@ -277,6 +367,19 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 			attempt = nil
 		}
 	}
+	if attempt != nil && attempt.budget == nil && attempt.dispatchUncertain {
+		persisted, err := r.reconcileDispatchStart(attempt)
+		if err != nil {
+			return err
+		}
+		if !persisted {
+			if status == accounting.StatusSucceeded {
+				return errUsageLedgerInvalid
+			}
+			r.attempt = nil
+			attempt = nil
+		}
+	}
 	if r.finishSnapshot == nil {
 		r.finishSnapshot = &usageFinishSnapshot{status: status, finishedAt: finishedAt}
 	} else if r.finishSnapshot.status != status {
@@ -370,4 +473,19 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 		return r.guard.terminalCommitted(snapshot.status)
 	}
 	return nil
+}
+
+func (r *usageLedgerRequest) reconcileDispatchStart(attempt *usageLedgerAttempt) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), usageLedgerShutdownTimeout)
+	defer cancel()
+	var attempts, dispatches int
+	err := r.coordinator.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM accounting_attempts WHERE id=?),(SELECT COUNT(*) FROM accounting_attempt_dispatches WHERE attempt_id=?)`, attempt.id, attempt.id).Scan(&attempts, &dispatches)
+	if err != nil || attempts != dispatches || attempts < 0 || attempts > 1 {
+		return false, errUsageLedgerUnavailable
+	}
+	if attempts == 1 {
+		attempt.dispatchUncertain = false
+		return true, nil
+	}
+	return false, nil
 }

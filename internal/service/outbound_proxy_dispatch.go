@@ -122,6 +122,16 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 	if budgetState != nil {
 		defer budgetState.unlock()
 	}
+	var usageState *usageDispatchState
+	if budgetState == nil {
+		usageState, budgetFailure = a.prepareUsageDispatch(requestID(r.Context()), record)
+		if budgetFailure != nil {
+			return nil, budgetFailure
+		}
+		if usageState != nil {
+			defer usageState.unlock()
+		}
+	}
 	tx, err := a.store.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)
@@ -178,13 +188,17 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 		}
 		return selected.egress.client, nil
 	}
+	if usageState != nil {
+		if failure := a.commitUsageDispatch(r.Context(), tx, selected, usageState); failure != nil {
+			return nil, failure
+		}
+		if lease != nil {
+			lease.phase = scheduling.MayHaveSent
+		}
+		return selected.egress.client, nil
+	}
 	if err := tx.Rollback(); err != nil {
 		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)
-	}
-	if record {
-		if err := a.beginRouteUpstreamUsage(r.Context(), requestID(r.Context()), selected); err != nil {
-			return nil, poolAdmissionFailure(accountPoolStorageUnavailable)
-		}
 	}
 	if lease != nil {
 		lease.phase = scheduling.MayHaveSent
