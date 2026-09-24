@@ -35,13 +35,15 @@ Connector secrets are encrypted with the existing local root-key material. The a
 All configuration and manual money operations require the existing administrator session, Origin/CSRF checks, bounded unique-key JSON, and canonical decimal strings for micro amounts.
 
 - settings: `GET/PUT /admin/api/v1/billing/settings`
-- balance and adjustments: `GET /admin/api/v1/billing/balances`, `POST /admin/api/v1/billing/adjustments`
+- balance, immutable entries and adjustments: `GET /admin/api/v1/billing/balances`, `GET /admin/api/v1/billing/entries`, `POST /admin/api/v1/billing/adjustments`
 - plans: `GET/POST /admin/api/v1/billing/plans`, `PUT /admin/api/v1/billing/plans/{id}`
 - connectors: `GET/POST /admin/api/v1/billing/payment-connectors`, `PUT /admin/api/v1/billing/payment-connectors/{id}`
 - top-ups: `GET/POST /admin/api/v1/billing/topups`
 - subscriptions: `GET/POST /admin/api/v1/billing/subscriptions`, `POST /admin/api/v1/billing/subscriptions/{id}/cancel`
 - redemption: `GET/POST /admin/api/v1/billing/redemption-codes`, `POST /admin/api/v1/billing/redemptions`
 - refunds: `GET/POST /admin/api/v1/billing/refunds`
+
+`GET /admin/api/v1/billing/entries` is a read-only view of the existing immutable ledger. It accepts optional exact `owner_kind`, `employee_id`, `key_id`, `resource_kind`, `resource_id`, `account_id`, and `currency` filters; the resource filters address the entry's business resource. `limit` defaults to 50 and is bounded to 1..100. `after_id` must be an entry in the same filtered result set and is treated as an opaque cursor. Results are ordered by `(created_at,id)` and return `{items,next_cursor}`. Entry amounts use canonical decimal strings, nullable original IDs use JSON `null`, and the endpoint never returns operation payload digests, administrator IDs, credentials, or connector secrets.
 
 ## Delivery state
 

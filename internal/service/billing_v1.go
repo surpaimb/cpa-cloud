@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -13,6 +14,7 @@ const billingV1MaxBody = 64 << 10
 
 func (a *App) registerBillingV1Handlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/api/v1/billing/balances", a.requireAdmin(a.billingV1Balance, false))
+	mux.HandleFunc("GET /admin/api/v1/billing/entries", a.requireAdmin(a.billingV1Entries, false))
 	mux.HandleFunc("POST /admin/api/v1/billing/adjustments", a.requireAdmin(a.billingV1Adjustment, true))
 	a.registerBillingCommercialHandlers(mux)
 }
@@ -29,6 +31,28 @@ func (a *App) billingV1Balance(w http.ResponseWriter, r *http.Request, _ adminSe
 		return
 	}
 	writeJSON(w, http.StatusOK, billingBalanceView(balance))
+}
+
+func (a *App) billingV1Entries(w http.ResponseWriter, r *http.Request, _ adminSession) {
+	filter, ok := parseBillingEntriesQuery(r)
+	if !ok {
+		writeBillingV1Error(w, financial.ErrInvalid)
+		return
+	}
+	page, err := financial.NewLedger(a.store.db).ListEntries(r.Context(), filter)
+	if err != nil {
+		writeBillingV1Error(w, err)
+		return
+	}
+	items := make([]map[string]any, 0, len(page.Items))
+	for _, item := range page.Items {
+		items = append(items, billingEntryView(item))
+	}
+	var next any
+	if page.NextCursor != "" {
+		next = page.NextCursor
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
 }
 
 func (a *App) billingV1Adjustment(w http.ResponseWriter, r *http.Request, session adminSession) {
@@ -92,6 +116,37 @@ func parseBillingOwnerQuery(r *http.Request) (financial.Owner, string, bool) {
 	return owner, currency, owner.Kind != "" && owner.EmployeeID != "" && currency != ""
 }
 
+func parseBillingEntriesQuery(r *http.Request) (financial.EntryFilter, bool) {
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return financial.EntryFilter{}, false
+	}
+	allowed := map[string]bool{
+		"owner_kind": true, "employee_id": true, "key_id": true,
+		"resource_kind": true, "resource_id": true, "account_id": true,
+		"currency": true, "after_id": true, "limit": true,
+	}
+	for key, values := range query {
+		if !allowed[key] || len(values) != 1 || values[0] == "" {
+			return financial.EntryFilter{}, false
+		}
+	}
+	limit := 50
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 || strconv.Itoa(parsed) != raw {
+			return financial.EntryFilter{}, false
+		}
+		limit = parsed
+	}
+	filter := financial.EntryFilter{
+		OwnerKind: financial.OwnerKind(query.Get("owner_kind")), EmployeeID: query.Get("employee_id"),
+		KeyID: query.Get("key_id"), ResourceKind: query.Get("resource_kind"), ResourceID: query.Get("resource_id"),
+		AccountID: query.Get("account_id"), Currency: query.Get("currency"), AfterID: query.Get("after_id"), Limit: limit,
+	}
+	return filter, true
+}
+
 func parseBillingOwnerObject(object map[string]any) (financial.Owner, bool) {
 	if object == nil {
 		return financial.Owner{}, false
@@ -140,6 +195,20 @@ func billingOwnerView(owner financial.Owner) map[string]any {
 		resourceID = owner.ResourceID
 	}
 	return map[string]any{"kind": owner.Kind, "employee_id": owner.EmployeeID, "key_id": keyID, "resource_kind": resourceKind, "resource_id": resourceID}
+}
+
+func billingEntryView(item financial.Entry) map[string]any {
+	original := any(nil)
+	if item.OriginalEntryID != "" {
+		original = item.OriginalEntryID
+	}
+	return map[string]any{
+		"id": item.ID, "operation_id": item.OperationID, "account_id": item.AccountID,
+		"owner": billingOwnerView(item.Owner), "currency": item.Currency, "kind": item.Kind,
+		"amount_micro": strconv.FormatInt(item.AmountMicro, 10), "original_entry_id": original,
+		"resource_kind": item.ResourceKind, "resource_id": item.ResourceID,
+		"created_at": item.CreatedAt.Format(time.RFC3339Nano),
+	}
 }
 
 func writeBillingV1Error(w http.ResponseWriter, err error) {

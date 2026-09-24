@@ -93,6 +93,23 @@ type Balance struct {
 	AmountMicro int64
 }
 
+type EntryFilter struct {
+	OwnerKind    OwnerKind
+	EmployeeID   string
+	KeyID        string
+	ResourceKind string
+	ResourceID   string
+	AccountID    string
+	Currency     string
+	AfterID      string
+	Limit        int
+}
+
+type EntryPage struct {
+	Items      []Entry
+	NextCursor string
+}
+
 // EnsureAccountTx validates the single-instance owner boundary and returns a
 // stable currency account in the caller-owned transaction. It never posts a
 // money entry.
@@ -346,6 +363,108 @@ func (l *Ledger) Balance(ctx context.Context, owner Owner, currency string) (Bal
 		return Balance{}, err
 	}
 	return Balance{AccountID: accountID, Owner: resolved, Currency: currency, AmountMicro: amount}, nil
+}
+
+// ListEntries reads the immutable money ledger in deterministic creation
+// order. Resource filters refer to the entry's business resource, not the
+// optional resource-shaped account owner. AfterID must identify an entry in
+// the same filtered result set.
+func (l *Ledger) ListEntries(ctx context.Context, filter EntryFilter) (EntryPage, error) {
+	if l == nil || l.db == nil || ctx == nil || !validEntryFilter(filter) {
+		return EntryPage{}, ErrInvalid
+	}
+	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return EntryPage{}, ErrUnavailable
+	}
+	defer tx.Rollback()
+
+	clauses, args := entryFilterClauses(filter)
+	if filter.AfterID != "" {
+		cursorQuery := `SELECT e.created_at FROM financial_entries e JOIN financial_accounts a ON a.id=e.account_id WHERE ` + strings.Join(append(append([]string(nil), clauses...), "e.id=?"), " AND ")
+		cursorArgs := append(append([]any(nil), args...), filter.AfterID)
+		var createdAt string
+		if err := tx.QueryRowContext(ctx, cursorQuery, cursorArgs...).Scan(&createdAt); errors.Is(err, sql.ErrNoRows) {
+			return EntryPage{}, ErrInvalid
+		} else if err != nil {
+			return EntryPage{}, ErrUnavailable
+		}
+		clauses = append(clauses, "(e.created_at>? OR (e.created_at=? AND e.id>?))")
+		args = append(args, createdAt, createdAt, filter.AfterID)
+	}
+	query := `SELECT e.id,e.operation_id,e.account_id,a.owner_kind,a.employee_id,COALESCE(a.key_id,''),a.resource_kind,a.resource_id,a.currency,e.kind,e.amount_micro,COALESCE(e.original_entry_id,''),e.resource_kind,e.resource_id,e.created_at FROM financial_entries e JOIN financial_accounts a ON a.id=e.account_id WHERE ` + strings.Join(clauses, " AND ") + ` ORDER BY e.created_at,e.id LIMIT ?`
+	args = append(args, filter.Limit+1)
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return EntryPage{}, ErrUnavailable
+	}
+	defer rows.Close()
+	items := make([]Entry, 0, filter.Limit+1)
+	for rows.Next() {
+		var item Entry
+		var created string
+		if err := rows.Scan(&item.ID, &item.OperationID, &item.AccountID, &item.Owner.Kind, &item.Owner.EmployeeID, &item.Owner.KeyID, &item.Owner.ResourceKind, &item.Owner.ResourceID, &item.Currency, &item.Kind, &item.AmountMicro, &item.OriginalEntryID, &item.ResourceKind, &item.ResourceID, &created); err != nil {
+			return EntryPage{}, ErrUnavailable
+		}
+		item.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
+		if err != nil {
+			return EntryPage{}, ErrSchema
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return EntryPage{}, ErrUnavailable
+	}
+	page := EntryPage{Items: items}
+	if len(page.Items) > filter.Limit {
+		page.Items = page.Items[:filter.Limit]
+		page.NextCursor = page.Items[len(page.Items)-1].ID
+	}
+	return page, nil
+}
+
+func validEntryFilter(filter EntryFilter) bool {
+	if filter.Limit < 1 || filter.Limit > 100 {
+		return false
+	}
+	if filter.OwnerKind != "" && filter.OwnerKind != OwnerEmployee && filter.OwnerKind != OwnerKey && filter.OwnerKind != OwnerResource {
+		return false
+	}
+	for _, item := range []struct {
+		value string
+		limit int
+	}{
+		{filter.EmployeeID, 256}, {filter.KeyID, 256}, {filter.ResourceKind, 64},
+		{filter.ResourceID, 256}, {filter.AccountID, 256}, {filter.AfterID, 256},
+	} {
+		if item.value != "" && !validText(item.value, item.limit) {
+			return false
+		}
+	}
+	return filter.Currency == "" || validCurrency(filter.Currency)
+}
+
+func entryFilterClauses(filter EntryFilter) ([]string, []any) {
+	clauses := []string{"1=1"}
+	args := make([]any, 0, 7)
+	for _, item := range []struct {
+		value  string
+		clause string
+	}{
+		{string(filter.OwnerKind), "a.owner_kind=?"},
+		{filter.EmployeeID, "a.employee_id=?"},
+		{filter.KeyID, "a.key_id=?"},
+		{filter.ResourceKind, "e.resource_kind=?"},
+		{filter.ResourceID, "e.resource_id=?"},
+		{filter.AccountID, "e.account_id=?"},
+		{filter.Currency, "a.currency=?"},
+	} {
+		if item.value != "" {
+			clauses = append(clauses, item.clause)
+			args = append(args, item.value)
+		}
+	}
+	return clauses, args
 }
 
 func resolveOwner(ctx context.Context, query interface {

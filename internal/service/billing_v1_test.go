@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -68,6 +69,59 @@ func TestBillingV1AdjustmentBalanceIdempotencyAndIsolation(t *testing.T) {
 	status, _, _ = accountingV2Request(t, server.URL+"/admin/api/v1/billing/adjustments", f.cookie, []byte(body), "", server.URL)
 	if status != http.StatusForbidden {
 		t.Fatalf("missing csrf status=%d", status)
+	}
+	debit := `{"operation_id":"10000000-0000-4000-8000-000000000005","owner":{"kind":"key","employee_id":"billing-employee","key_id":"billing-key"},"currency":"USD","amount_micro":"-70"}`
+	status, response, _ = accountingV2Request(t, server.URL+"/admin/api/v1/billing/adjustments", f.cookie, []byte(debit), f.csrf, server.URL)
+	if status != http.StatusOK {
+		t.Fatalf("debit status=%d body=%s", status, response)
+	}
+
+	entriesURL := server.URL + "/admin/api/v1/billing/entries?owner_kind=key&employee_id=billing-employee&key_id=billing-key&currency=USD&limit=1"
+	status, response, _ = accountingV2Request(t, entriesURL, f.cookie, nil, "", "")
+	var firstPage struct {
+		Items []struct {
+			ID              string         `json:"id"`
+			OperationID     string         `json:"operation_id"`
+			AccountID       string         `json:"account_id"`
+			Owner           map[string]any `json:"owner"`
+			AmountMicro     string         `json:"amount_micro"`
+			OriginalEntryID *string        `json:"original_entry_id"`
+			CreatedAt       string         `json:"created_at"`
+		} `json:"items"`
+		NextCursor *string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(response, &firstPage); err != nil || status != http.StatusOK || len(firstPage.Items) != 1 || firstPage.Items[0].AmountMicro != "100" || firstPage.Items[0].OriginalEntryID != nil || firstPage.NextCursor == nil {
+		t.Fatalf("first entries status=%d page=%+v body=%s err=%v", status, firstPage, response, err)
+	}
+	status, response, _ = accountingV2Request(t, entriesURL+"&after_id="+*firstPage.NextCursor, f.cookie, nil, "", "")
+	var secondPage struct {
+		Items []struct {
+			AmountMicro string `json:"amount_micro"`
+			ResourceID  string `json:"resource_id"`
+		} `json:"items"`
+		NextCursor *string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(response, &secondPage); err != nil || status != http.StatusOK || len(secondPage.Items) != 1 || secondPage.Items[0].AmountMicro != "-70" || secondPage.Items[0].ResourceID != "10000000-0000-4000-8000-000000000005" || secondPage.NextCursor != nil {
+		t.Fatalf("second entries status=%d page=%+v body=%s err=%v", status, secondPage, response, err)
+	}
+	for _, rawQuery := range []string{"?limit=0", "?limit=01", "?limit=101", "?unknown=1", "?currency=usd", "?after_id=missing"} {
+		status, _, _ = accountingV2Request(t, server.URL+"/admin/api/v1/billing/entries"+rawQuery, f.cookie, nil, "", "")
+		if status != http.StatusBadRequest {
+			t.Fatalf("entries query %q status=%d", rawQuery, status)
+		}
+	}
+	status, _, _ = accountingV2Request(t, server.URL+"/admin/api/v1/billing/entries", nil, nil, "", "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("entries without admin status=%d", status)
+	}
+}
+
+func TestParseBillingEntriesQueryRejectsMalformedRawQuery(t *testing.T) {
+	for _, rawQuery := range []string{"employee_id=%ZZ", "employee_id=%", "employee_id=one;currency=USD"} {
+		request := &http.Request{URL: &url.URL{RawQuery: rawQuery}}
+		if _, ok := parseBillingEntriesQuery(request); ok {
+			t.Fatalf("malformed raw query %q was accepted", rawQuery)
+		}
 	}
 }
 

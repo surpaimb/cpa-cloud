@@ -298,8 +298,30 @@ export type SystemStatus = {
     account_pool_configuration?: boolean
     account_pool_routing?: boolean
     account_lifecycle_management?: boolean
+    single_instance_billing?: boolean
   }
 }
+
+export type BillingOwner = {
+  kind: 'employee' | 'key' | 'resource'
+  employee_id: string
+  key_id?: string | null
+  resource_kind?: string | null
+  resource_id?: string | null
+}
+export type BillingBalance = { account_id: string | null; owner: BillingOwner; currency: string; balance_micro: string }
+export type BillingAdjustment = BillingBalance & { operation_id: string; entry_id: string; amount_micro: string }
+export type BillingReceipt = { operation_id: string; resource_kind: string; resource_id: string; revision: number; created_at: string; replay: boolean }
+export type BillingSettings = { enabled: boolean; revision: number }
+export type BillingPlan = { id: string; name: string; currency: string; price_micro: string; credit_micro: string; interval: 'one_time' | 'monthly'; enabled: boolean; revision: number; created_at: string; updated_at: string }
+export type BillingConnector = { id: string; name: string; enabled: boolean; revision: number; created_at: string; updated_at: string }
+export type BillingTopUp = { id: string; payment_id: string; connector_id: string; external_reference: string; amount_micro: string; currency: string; status: 'pending' | 'paid' | 'partially_refunded' | 'refunded'; refunded_micro: string; revision: number; created_at: string; paid_at: string | null }
+export type BillingSubscription = { id: string; plan_id: string; plan_revision: number; price_micro: string; credit_micro: string; currency: string; interval: 'one_time' | 'monthly'; status: 'active' | 'cancelled'; revision: number; started_at: string }
+export type BillingRedemptionCode = { id: string; amount_micro: string; currency: string; max_uses: number; uses: number; expires_at: string | null; enabled: boolean; created_at: string }
+export type BillingRefund = { id: string; payment_id: string; entry_id: string; amount_micro: string; created_at: string }
+export type BillingEntry = { id: string; operation_id: string; account_id: string; owner: BillingOwner; currency: string; kind: string; amount_micro: string; original_entry_id: string | null; resource_kind: string; resource_id: string; created_at: string }
+export type BillingPage<T> = { items: T[]; next_cursor: string | null }
+export type BillingPlanWrite = { operation_id: string; name: string; currency: string; price_micro: string; credit_micro: string; interval: BillingPlan['interval']; enabled: boolean }
 
 export type ScheduledTestScope = 'local_credential' | 'catalog'
 export type ScheduledTestRun = {
@@ -647,6 +669,12 @@ function governanceObservationSearch(filters: GovernanceObservationFilters, curs
   return query.toString()
 }
 
+function billingList<T>(path: string, afterId?: string, limit = 50, signal?: AbortSignal) {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (afterId) query.set('after_id', afterId)
+  return request<BillingPage<T>>(`${path}?${query}`, { signal })
+}
+
 export const api = {
   session: () => request<Session>('/session'),
   login: (username: string, password: string) =>
@@ -788,6 +816,42 @@ export const api = {
     request<GovernanceObservationsPage>(`/governance/observations?${governanceObservationSearch(filters, cursor)}`, { signal }),
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
     request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),
+  billingSettings: (signal?: AbortSignal) => request<BillingSettings>('/billing/settings', { signal }),
+  putBillingSettings: (body: { operation_id: string; expected_revision: number; enabled: boolean }, csrf: string) =>
+    request<BillingReceipt>('/billing/settings', { method: 'PUT', body: JSON.stringify(body) }, csrf),
+  billingBalance: (owner: BillingOwner, currency: string, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ owner_kind: owner.kind, employee_id: owner.employee_id, currency })
+    if (owner.key_id) query.set('key_id', owner.key_id)
+    if (owner.resource_kind) query.set('resource_kind', owner.resource_kind)
+    if (owner.resource_id) query.set('resource_id', owner.resource_id)
+    return request<BillingBalance>(`/billing/balances?${query}`, { signal })
+  },
+  billingEntries: (owner: BillingOwner, currency: string, afterId?: string, limit = 50, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ owner_kind: owner.kind, employee_id: owner.employee_id, currency, limit: String(limit) })
+    if (owner.key_id) query.set('key_id', owner.key_id)
+    if (owner.resource_kind) query.set('resource_kind', owner.resource_kind)
+    if (owner.resource_id) query.set('resource_id', owner.resource_id)
+    if (afterId) query.set('after_id', afterId)
+    return request<BillingPage<BillingEntry>>(`/billing/entries?${query}`, { signal })
+  },
+  createBillingAdjustment: (body: { operation_id: string; owner: BillingOwner; currency: string; amount_micro: string }, csrf: string) =>
+    request<BillingAdjustment>('/billing/adjustments', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  billingPlans: (afterId?: string, limit = 50, signal?: AbortSignal) => billingList<BillingPlan>('/billing/plans', afterId, limit, signal),
+  createBillingPlan: (body: BillingPlanWrite, csrf: string) => request<{ receipt: BillingReceipt; plan: BillingPlan }>('/billing/plans', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  updateBillingPlan: (id: string, body: BillingPlanWrite & { expected_revision: number }, csrf: string) => request<{ receipt: BillingReceipt; plan: BillingPlan }>(`/billing/plans/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
+  billingConnectors: (afterId?: string, limit = 50, signal?: AbortSignal) => billingList<BillingConnector>('/billing/payment-connectors', afterId, limit, signal),
+  createBillingConnector: (body: { operation_id: string; name: string; webhook_secret: string; enabled: boolean }, csrf: string) => request<{ receipt: BillingReceipt; connector: BillingConnector }>('/billing/payment-connectors', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  updateBillingConnector: (id: string, body: { operation_id: string; expected_revision: number; name: string; webhook_secret: string | null; enabled: boolean }, csrf: string) => request<{ receipt: BillingReceipt; connector: BillingConnector }>(`/billing/payment-connectors/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
+  billingTopUps: (afterId?: string, limit = 50, signal?: AbortSignal) => billingList<BillingTopUp>('/billing/topups', afterId, limit, signal),
+  createBillingTopUp: (body: { operation_id: string; owner: BillingOwner; connector_id: string; currency: string; amount_micro: string }, csrf: string) => request<{ receipt: BillingReceipt; topup: BillingTopUp }>('/billing/topups', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  billingSubscriptions: (afterId?: string, limit = 50, signal?: AbortSignal) => billingList<BillingSubscription>('/billing/subscriptions', afterId, limit, signal),
+  createBillingSubscription: (body: { operation_id: string; owner: BillingOwner; plan_id: string }, csrf: string) => request<{ receipt: BillingReceipt; subscription: BillingSubscription }>('/billing/subscriptions', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  cancelBillingSubscription: (id: string, body: { operation_id: string; expected_revision: number }, csrf: string) => request<{ receipt: BillingReceipt; subscription: BillingSubscription }>(`/billing/subscriptions/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: JSON.stringify(body) }, csrf),
+  billingRedemptionCodes: (afterId?: string, limit = 50, signal?: AbortSignal) => billingList<BillingRedemptionCode>('/billing/redemption-codes', afterId, limit, signal),
+  createBillingRedemptionCode: (body: { operation_id: string; currency: string; amount_micro: string; max_uses: number; expires_at: string | null }, csrf: string) => request<{ receipt: BillingReceipt; redemption_code: BillingRedemptionCode; code: string | null }>('/billing/redemption-codes', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  redeemBillingCode: (body: { operation_id: string; owner: BillingOwner; code: string }, csrf: string) => request<{ receipt: BillingReceipt; entry_id: string; amount_micro: string; currency: string }>('/billing/redemptions', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  billingRefunds: (afterId?: string, limit = 50, signal?: AbortSignal) => billingList<BillingRefund>('/billing/refunds', afterId, limit, signal),
+  createBillingRefund: (body: { operation_id: string; payment_id: string; amount_micro: string }, csrf: string) => request<{ receipt: BillingReceipt; refund: BillingRefund }>('/billing/refunds', { method: 'POST', body: JSON.stringify(body) }, csrf),
   status: () => request<SystemStatus>('/system/status'),
 	backupKeyProviders: (signal?: AbortSignal) => request<{ items: BackupKeyProvider[]; ready: boolean; store_ready: boolean; reason_code: string | null }>('/backups/key-providers', { signal }),
 	createBackupKeyProvider: (csrf: string) => request<BackupKeyProvider>('/backups/key-providers', { method: 'POST', body: JSON.stringify({ kind: 'windows-dpapi-user' }) }, csrf),
