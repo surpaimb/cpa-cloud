@@ -138,6 +138,7 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusBadRequest, status, "Unsupported or invalid Gemini request.")
 		return
 	}
+	r = withUsageStreamEvidence(r, stream)
 
 	auth, err := a.authenticateGeminiEmployeeRequest(r)
 	if err != nil {

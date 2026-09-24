@@ -118,7 +118,7 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 	app.usage = newUsageLedgerCoordinator(s.db)
-	app.usage.priceLookup = prices.Current
+	app.usage.priceLookupTx = prices.CurrentTx
 	if err := app.usage.ledger.Migrate(ctx); err != nil {
 		return nil, err
 	}

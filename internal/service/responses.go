@@ -72,6 +72,7 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 	if _, present := payload["store"]; !present {
 		payload["store"] = json.RawMessage("false")
 	}
+	r = withUsageStreamEvidence(r, stream)
 
 	auth, ok := a.authenticateEmployee(w, r)
 	if !ok {

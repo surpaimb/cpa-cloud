@@ -99,11 +99,12 @@ func TestUsagePricingHTTPDispatchSnapshotAndFailure(t *testing.T) {
 	}
 	catalog := accounting.NewPriceCatalog(app.store.db)
 	var failLookup atomic.Bool
-	app.usage.priceLookup = func(ctx context.Context, account, model string) (*accounting.PriceSnapshot, error) {
+	app.usage.priceLookup = nil
+	app.usage.priceLookupTx = func(ctx context.Context, tx *sql.Tx, account, model string) (*accounting.PriceSnapshot, error) {
 		if failLookup.Load() {
 			return nil, errors.New("synthetic private catalog failure")
 		}
-		return catalog.Current(ctx, account, model)
+		return catalog.CurrentTx(ctx, tx, account, model)
 	}
 	save := func(revision int64, model string, price *accounting.PriceSnapshot) accounting.PriceVersion {
 		t.Helper()

@@ -26,6 +26,23 @@ type activeUsageRequest struct {
 	finished bool
 }
 
+type usageEvidenceContextKey struct{}
+
+func withUsageStreamEvidence(r *http.Request, stream bool) *http.Request {
+	evidence := accounting.EvidenceProviderResponse
+	if stream {
+		evidence = accounting.EvidenceProviderStream
+	}
+	return r.WithContext(context.WithValue(r.Context(), usageEvidenceContextKey{}, evidence))
+}
+
+func usageEvidenceForRequest(r *http.Request) accounting.UsageEvidence {
+	if evidence, ok := r.Context().Value(usageEvidenceContextKey{}).(accounting.UsageEvidence); ok {
+		return evidence
+	}
+	return accounting.EvidenceProviderResponse
+}
+
 func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string, selected route) error {
 	var protocol accounting.UsageProtocol
 	switch {
@@ -55,7 +72,7 @@ func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string
 	guard, governed := r.Context().Value(governedRequestKey{}).(*governedRequest)
 	request, err := a.usage.beginRequestTx(r.Context(), tx, usageRequestStart{
 		RequestID: requestID(r.Context()), EmployeeID: auth.EmployeeID, KeyID: auth.KeyID,
-		PublicModel: model, ProviderKind: selected.ProviderKind, Protocol: protocol, StartedAt: startedAt,
+		PublicModel: model, ProviderKind: selected.ProviderKind, Protocol: protocol, Evidence: usageEvidenceForRequest(r), StartedAt: startedAt,
 		Governed: governed, guard: guard,
 	})
 	if err != nil {
@@ -94,19 +111,30 @@ func (a *App) beginRouteUpstreamUsage(ctx context.Context, id string, selected r
 	if active.attempt != nil || active.outcome != "" {
 		return errUsageLedgerConflict
 	}
+	tx, err := active.request.coordinator.db.BeginTx(ctx, nil)
+	if err != nil {
+		return errUsageLedgerUnavailable
+	}
+	defer tx.Rollback()
 	var price *accounting.PriceSnapshot
 	if lookup := active.request.coordinator.priceLookup; lookup != nil {
-		var err error
-		price, err = lookup(ctx, selected.AccountID, selected.UpstreamModel)
-		if err != nil {
-			return errUsageLedgerUnavailable
-		}
+		price, err = lookup(ctx, selected.AccountID, selected.UpstreamModel) // package-private fault injection only
+	} else if lookupTx := active.request.coordinator.priceLookupTx; lookupTx != nil {
+		price, err = lookupTx(ctx, tx, selected.AccountID, selected.UpstreamModel)
+	} else {
+		err = errUsageLedgerUnavailable
+	}
+	if err != nil {
+		return errUsageLedgerUnavailable
 	}
 	dispatch := accounting.DispatchPrimary
 	if active.failover {
 		dispatch = accounting.DispatchFailover
 	}
-	attempt, err := active.request.beginDispatchedAttempt(ctx, selected.AccountID, time.Now().UTC(), price, dispatch)
+	attempt, err := active.request.beginDispatchedAttemptTx(ctx, tx, selected.AccountID, selected.UpstreamModel, time.Now().UTC(), price, dispatch)
+	if err == nil {
+		err = tx.Commit()
+	}
 	if err == nil {
 		active.attempt = attempt
 	}
@@ -146,8 +174,12 @@ func (a *App) observeSSEUsage(id string, frame []byte) {
 	}
 }
 
-func (a *App) observeCodexChatUsage(id string, usage any) {
-	data, err := json.Marshal(map[string]any{"usage": usage})
+func (a *App) observeCodexChatUsage(id, responseID string, usage any) {
+	payload := map[string]any{"usage": usage}
+	if responseID != "" {
+		payload["id"] = responseID
+	}
+	data, err := json.Marshal(payload)
 	if err == nil {
 		a.observeRequestUsage(id, data)
 	}
@@ -273,8 +305,10 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 		}
 		defer tx.Rollback()
 		if attempt != nil {
+			reasoning, responseID := attempt.usage.ReliableMetadata()
 			if err := r.coordinator.ledger.FinishAttemptTx(writeCtx, tx, accounting.AttemptFinish{
 				ID: attempt.id, Status: snapshot.status, FinishedAt: snapshot.finishedAt, Usage: attempt.finishSnapshot.usage,
+				ReasoningTokens: reasoning, ResponseID: responseID, ReliableUsage: true,
 			}); err != nil {
 				return err
 			}

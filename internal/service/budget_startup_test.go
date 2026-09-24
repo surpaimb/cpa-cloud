@@ -90,13 +90,13 @@ func TestBudgetStartupJointLegacyMigrationRollbackRetry(t *testing.T) {
 
 func TestBudgetStartupRecoveryRollbackIncludesReservation(t *testing.T) {
 	a, server, key := newBudgetHTTPFixture(t, 3000000)
-	// Keep a mark commit uncertain and reject its cleanup to simulate a crash
+	// Keep the single dispatch-barrier commit uncertain and reject its cleanup to simulate a crash
 	// before the known original attempt can converge to its terminal receipt.
 	a.budgetCommit = func(stage string, tx *sql.Tx) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		if stage == "mark" {
+		if stage == "reserve" {
 			_, err := a.store.db.Exec(`CREATE TRIGGER stop_budget_finish BEFORE UPDATE OF lifecycle ON governance_budget_reservations WHEN NEW.lifecycle='interrupted' BEGIN SELECT RAISE(ABORT,'synthetic'); END`)
 			if err != nil {
 				return err

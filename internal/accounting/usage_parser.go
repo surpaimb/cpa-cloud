@@ -26,10 +26,12 @@ const (
 // data JSON objects. It retains only normalized counters, never response JSON.
 // It is intended to be owned by one request-forwarding goroutine.
 type UsageAccumulator struct {
-	protocol   UsageProtocol
-	usage      Usage
-	invalid    bool
-	fixedGPT41 bool
+	protocol        UsageProtocol
+	usage           Usage
+	reasoningTokens *int64
+	responseID      *string
+	invalid         bool
+	fixedGPT41      bool
 }
 
 // NewGPT41SnapshotUsageAccumulator is only for a request whose final upstream
@@ -96,6 +98,9 @@ func (a *UsageAccumulator) Observe(dataJSON []byte) error {
 	if observed != nil {
 		a.usage = cloneUsage(*observed)
 	}
+	if err := a.captureReliableMetadata(root); err != nil {
+		return a.poison()
+	}
 	return nil
 }
 
@@ -108,10 +113,121 @@ func (a *UsageAccumulator) Usage() Usage {
 	return cloneUsage(a.usage)
 }
 
+// ReliableMetadata returns bounded identifiers and token details extracted
+// from the same validated provider snapshots consumed by Observe. It never
+// retains response text or tool payloads.
+func (a *UsageAccumulator) ReliableMetadata() (*int64, *string) {
+	if a == nil || a.invalid {
+		return nil, nil
+	}
+	return cloneInt64(a.reasoningTokens), cloneString(a.responseID)
+}
+
 func (a *UsageAccumulator) poison() error {
 	a.invalid = true
 	a.usage = Usage{}
+	a.reasoningTokens = nil
+	a.responseID = nil
 	return ErrInvalidUsage
+}
+
+func (a *UsageAccumulator) captureReliableMetadata(root jsonObject) error {
+	container := root
+	switch a.protocol {
+	case ProtocolOpenAIResponses:
+		typ, _, err := stringField(root, "type")
+		if err != nil {
+			return err
+		}
+		if typ != "" {
+			if typ != "response.completed" && typ != "response.incomplete" {
+				return nil
+			}
+			var present bool
+			container, present, err = objectField(root, "response")
+			if err != nil || !present {
+				return err
+			}
+		}
+	case ProtocolAnthropicMessages:
+		typ, _, err := stringField(root, "type")
+		if err != nil {
+			return err
+		}
+		if typ == "message_start" {
+			var present bool
+			container, present, err = objectField(root, "message")
+			if err != nil || !present {
+				return err
+			}
+		} else if typ != "message" {
+			return nil
+		}
+	}
+	if a.protocol != ProtocolGeminiGenerateContent {
+		if id, present, err := stringField(container, "id"); err != nil {
+			return err
+		} else if present {
+			if !validUsageIdentifier(id) {
+				return ErrInvalidUsage
+			}
+			a.responseID = &id
+		}
+	}
+	var reasoning *int64
+	var err error
+	switch a.protocol {
+	case ProtocolOpenAIChatCompletions:
+		reasoning, err = openAIReasoningTokens(container, "completion_tokens_details")
+	case ProtocolOpenAIResponses:
+		reasoning, err = openAIReasoningTokens(container, "output_tokens_details")
+	case ProtocolGeminiGenerateContent:
+		metadata, present, metadataErr := objectField(container, "usageMetadata")
+		if metadataErr != nil || !present {
+			return metadataErr
+		}
+		reasoning, _, err = integerField(metadata, "thoughtsTokenCount")
+	}
+	if err != nil {
+		return err
+	}
+	if reasoning != nil {
+		a.reasoningTokens = cloneInt64(reasoning)
+	}
+	return nil
+}
+
+func openAIReasoningTokens(root jsonObject, detailsName string) (*int64, error) {
+	usage, present, err := objectField(root, "usage")
+	if err != nil || !present {
+		return nil, err
+	}
+	details, present, err := objectField(usage, detailsName)
+	if err != nil || !present {
+		return nil, err
+	}
+	value, _, err := integerField(details, "reasoning_tokens")
+	return value, err
+}
+
+func validUsageIdentifier(value string) bool {
+	if len(value) < 1 || len(value) > 256 {
+		return false
+	}
+	for _, r := range value {
+		if r < 0x21 || r > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	return &result
 }
 
 func parseOpenAIChat(root jsonObject) (*Usage, error) {

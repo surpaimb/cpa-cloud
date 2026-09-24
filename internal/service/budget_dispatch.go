@@ -102,7 +102,7 @@ func (a *App) commitBudgetDispatch(ctx context.Context, tx *sql.Tx, selected rou
 		dispatch = accounting.DispatchFailover
 	}
 	at := time.Now().UTC()
-	start := accounting.AttemptStart{ID: req.id + ":1", RequestID: req.id, AccountID: selected.AccountID, Provider: req.provider, Dispatch: dispatch, StartedAt: at, Price: price}
+	start := accounting.AttemptStart{ID: req.id + ":1", RequestID: req.id, AccountID: selected.AccountID, Provider: req.provider, Dispatch: dispatch, StartedAt: at, Price: price, Protocol: req.protocol, EffectiveModel: selected.UpstreamModel, Evidence: req.evidence}
 	reserve := governance.BudgetReserve{RequestID: req.id, AttemptID: start.ID, Proof: state.proof, ObservedAt: at}
 	if err := req.coordinator.ledger.BeginAttemptTx(ctx, tx, start); err != nil {
 		return budgetStorageFailure()
@@ -117,6 +117,12 @@ func (a *App) commitBudgetDispatch(ctx context.Context, tx *sql.Tx, selected rou
 	if !result.Enforced || !state.proved {
 		return budgetStorageFailure()
 	}
+	if _, err := a.budget.MarkMayHaveSentTx(ctx, tx, governance.BudgetMutation{AttemptID: start.ID, ObservedAt: at}); err != nil {
+		return budgetStorageFailure()
+	}
+	if err := req.coordinator.ledger.MarkAttemptDispatchedTx(ctx, tx, accounting.AttemptDispatch{ID: start.ID, OperationID: start.ID + ":dispatch", DispatchedAt: at}); err != nil {
+		return budgetStorageFailure()
+	}
 	attempt := &usageLedgerAttempt{request: req, id: start.ID, accountID: start.AccountID, dispatch: dispatch, startedAt: at, usage: accounting.NewGPT41SnapshotUsageAccumulator(), budget: &budgetAttemptState{start: start, reserve: reserve, mode: governance.BudgetSettleReleaseNotStarted}}
 	// Publish the exact original identity before Commit, because a returned
 	// error alone cannot tell whether the reservation was durably written.
@@ -125,21 +131,6 @@ func (a *App) commitBudgetDispatch(ctx context.Context, tx *sql.Tx, selected rou
 	if err := a.commitBudgetTx("reserve", tx); err != nil {
 		_ = tx.Rollback()
 		attempt.budget.reserveUncertain = true
-		return budgetStorageFailure()
-	}
-	if ctx.Err() != nil {
-		return poolAdmissionFailure(accountPoolCancelled)
-	}
-	markTx, err := a.store.db.BeginTx(ctx, nil)
-	if err != nil {
-		return budgetStorageFailure()
-	}
-	defer markTx.Rollback()
-	if _, err := a.budget.MarkMayHaveSentTx(ctx, markTx, governance.BudgetMutation{AttemptID: attempt.id, ObservedAt: time.Now().UTC()}); err != nil {
-		return budgetStorageFailure()
-	}
-	if err := a.commitBudgetTx("mark", markTx); err != nil {
-		// Never attempt mark/network again, even when a later read says reserved.
 		attempt.budget.markUncertain = true
 		return budgetStorageFailure()
 	}
@@ -170,6 +161,11 @@ func (r *usageLedgerRequest) reconcileBudgetStart(attempt *usageLedgerAttempt) (
 	}
 	if err := r.coordinator.ledger.BeginAttemptTx(ctx, tx, attempt.budget.start); err != nil {
 		return false, errUsageLedgerUnavailable
+	}
+	if existing, err := r.coordinator.budget.GetTx(ctx, tx, attempt.id); err == nil && existing.Lifecycle == governance.BudgetMayHaveSent {
+		attempt.budget.reserveUncertain = false
+		attempt.budget.markUncertain = true
+		return true, nil
 	}
 	result, err := r.coordinator.budget.ReserveTx(ctx, tx, attempt.budget.reserve)
 	if err != nil || !result.Allowed || !result.Enforced {

@@ -151,6 +151,7 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeModelError(w, 400, "invalid_request_error", "The stream field must be boolean.", requestID(r.Context()))
 		return
 	}
+	r = withUsageStreamEvidence(r, stream)
 	auth, ok := a.authenticateEmployee(w, r)
 	if !ok {
 		return

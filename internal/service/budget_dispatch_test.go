@@ -323,54 +323,48 @@ func TestBudgetDispatchRejectsLimitOrUnprovenPayloadWithoutAttempt(t *testing.T)
 }
 
 func TestBudgetDispatchUncertainCommitNeverSends(t *testing.T) {
-	for _, stage := range []string{"reserve", "mark"} {
-		for _, committed := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s-committed-%t", stage, committed), func(t *testing.T) {
-				a, server, key := newBudgetHTTPFixture(t, 3000000)
-				var calls atomic.Int32
-				a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { calls.Add(1); return budgetResponse(7), nil })}
-				a.budgetCommit = func(current string, tx *sql.Tx) error {
-					if current != stage {
-						return tx.Commit()
+	for _, committed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("barrier-committed-%t", committed), func(t *testing.T) {
+			a, server, key := newBudgetHTTPFixture(t, 3000000)
+			var calls atomic.Int32
+			a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { calls.Add(1); return budgetResponse(7), nil })}
+			a.budgetCommit = func(current string, tx *sql.Tx) error {
+				if current != "reserve" {
+					return tx.Commit()
+				}
+				if committed {
+					if err := tx.Commit(); err != nil {
+						return err
 					}
-					if committed {
-						if err := tx.Commit(); err != nil {
-							return err
-						}
-					} else {
-						_ = tx.Rollback()
-					}
-					return errors.New("synthetic uncertain commit")
+				} else {
+					_ = tx.Rollback()
 				}
-				if code, body := budgetTestRequest(t, server, key, budgetTestPayload); code != 503 || !strings.Contains(body, "budget_unavailable") {
-					t.Fatalf("status=%d %s", code, body)
+				return errors.New("synthetic uncertain commit")
+			}
+			if code, body := budgetTestRequest(t, server, key, budgetTestPayload); code != 503 || !strings.Contains(body, "budget_unavailable") {
+				t.Fatalf("status=%d %s", code, body)
+			}
+			if calls.Load() != 0 {
+				t.Fatal("uncertain write regained send permission")
+			}
+			var count int
+			if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM governance_budget_reservations`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if !committed {
+				if count != 0 {
+					t.Fatal("rolled back reserve retained")
 				}
-				if calls.Load() != 0 {
-					t.Fatal("uncertain write regained send permission")
-				}
-				var count int
-				if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM governance_budget_reservations`).Scan(&count); err != nil {
-					t.Fatal(err)
-				}
-				if stage == "reserve" && !committed {
-					if count != 0 {
-						t.Fatal("rolled back reserve retained")
-					}
-					return
-				}
-				var state string
-				var known int
-				if err := a.store.db.QueryRow(`SELECT lifecycle,token_known FROM governance_budget_reservations`).Scan(&state, &known); err != nil {
-					t.Fatal(err)
-				}
-				want := "interrupted"
-				if stage == "reserve" {
-					want = "released_not_started"
-				}
-				if state != want || known != 0 {
-					t.Fatalf("state=%s known=%d want=%s", state, known, want)
-				}
-			})
-		}
+				return
+			}
+			var state string
+			var known int
+			if err := a.store.db.QueryRow(`SELECT lifecycle,token_known FROM governance_budget_reservations`).Scan(&state, &known); err != nil {
+				t.Fatal(err)
+			}
+			if state != "interrupted" || known != 0 {
+				t.Fatalf("state=%s known=%d want=interrupted", state, known)
+			}
+		})
 	}
 }

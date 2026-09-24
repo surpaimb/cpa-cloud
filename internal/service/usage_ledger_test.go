@@ -83,6 +83,61 @@ func TestUsageLedgerProviderAndProtocolIsolation(t *testing.T) {
 	}
 }
 
+func TestUsageLedgerV2FactsAcrossFourProtocols(t *testing.T) {
+	db := openUsageLedgerTestDB(t, filepath.Join(t.TempDir(), "v2-facts.db"))
+	coordinator := startUsageLedgerTestCoordinator(t, db, usageLedgerTestBase)
+	tests := []struct {
+		name, provider, model, actual, body, responseID string
+		protocol                                        accounting.UsageProtocol
+		evidence                                        accounting.UsageEvidence
+		reasoning                                       int64
+	}{
+		{"chat", "openai-compatible", "chat-public", "chat-actual", `{"id":"chat-provider-1","usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8,"completion_tokens_details":{"reasoning_tokens":1}}}`, "chat-provider-1", accounting.ProtocolOpenAIChatCompletions, accounting.EvidenceProviderResponse, 1},
+		{"responses stream", "openai-compatible", "responses-public", "responses-actual", `{"type":"response.completed","response":{"id":"resp-provider-1","usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8,"output_tokens_details":{"reasoning_tokens":2}}}}`, "resp-provider-1", accounting.ProtocolOpenAIResponses, accounting.EvidenceProviderStream, 2},
+		{"anthropic", anthropicAPIKeyProvider, "claude-public", "claude-actual", `{"id":"msg-provider-1","type":"message","usage":{"input_tokens":5,"output_tokens":3}}`, "msg-provider-1", accounting.ProtocolAnthropicMessages, accounting.EvidenceProviderResponse, 0},
+		{"gemini stream", geminiAPIKeyProvider, "gemini-public", "gemini-actual", `{"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"thoughtsTokenCount":1,"totalTokenCount":8}}`, "", accounting.ProtocolGeminiGenerateContent, accounting.EvidenceProviderStream, 1},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			started := usageLedgerTestBase.Add(time.Duration(index+1) * time.Hour)
+			id := "request-v2-" + string(rune('a'+index))
+			request, err := coordinator.beginRequest(context.Background(), usageRequestStart{RequestID: id, EmployeeID: "employee-v2", KeyID: "key-v2", PublicModel: test.model, ProviderKind: test.provider, Protocol: test.protocol, Evidence: test.evidence, StartedAt: started})
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := request.beginDispatchedAttempt(context.Background(), "account-v2-"+string(rune('a'+index)), test.actual, started.Add(time.Second), nil, accounting.DispatchPrimary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := attempt.observe([]byte(test.body)); err != nil {
+				t.Fatal(err)
+			}
+			if err := attempt.finish(context.Background(), accounting.StatusSucceeded, started.Add(2*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := request.finishAfterAttempt(context.Background(), accounting.StatusSucceeded, started.Add(2*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			var protocol, actual, evidence string
+			var dispatched int
+			if err := db.QueryRow(`SELECT c.protocol,c.effective_model,c.evidence,(SELECT COUNT(*) FROM accounting_attempt_dispatches d WHERE d.attempt_id=c.attempt_id) FROM accounting_attempt_contexts c WHERE c.attempt_id=?`, id+":1").Scan(&protocol, &actual, &evidence, &dispatched); err != nil {
+				t.Fatal(err)
+			}
+			if protocol != string(test.protocol) || actual != test.actual || evidence != string(test.evidence) || dispatched != 1 {
+				t.Fatalf("context protocol=%q model=%q evidence=%q dispatched=%d", protocol, actual, evidence, dispatched)
+			}
+			var responseID sql.NullString
+			var reasoning sql.NullInt64
+			if err := db.QueryRow(`SELECT response_id,reasoning_tokens FROM accounting_usage_events WHERE attempt_id=?`, id+":1").Scan(&responseID, &reasoning); err != nil {
+				t.Fatal(err)
+			}
+			if responseID.String != test.responseID || responseID.Valid != (test.responseID != "") || reasoning.Int64 != test.reasoning || reasoning.Valid != (test.reasoning != 0) {
+				t.Fatalf("response=%v reasoning=%v", responseID, reasoning)
+			}
+		})
+	}
+}
+
 func TestUsageLedgerJSONAndSSECumulativeUsage(t *testing.T) {
 	db := openUsageLedgerTestDB(t, filepath.Join(t.TempDir(), "usage.db"))
 	coordinator := startUsageLedgerTestCoordinator(t, db, usageLedgerTestBase)
