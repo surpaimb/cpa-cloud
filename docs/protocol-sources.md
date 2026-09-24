@@ -36,6 +36,8 @@
 - Conversation state 与 previous response：<https://developers.openai.com/api/docs/guides/conversation-state>
 - Background 轮询、取消和恢复流：<https://developers.openai.com/api/docs/guides/background>
 - 托管工具总览：<https://developers.openai.com/api/docs/guides/tools>
+- Anthropic Messages 的 `tool_use`、`tool_result` 与客户端执行回合：<https://platform.claude.com/docs/en/agents-and-tools/tool-use/how-tool-use-works>
+- Gemini `functionDeclarations`、`functionCall`、`functionResponse` 与多回合函数调用：<https://ai.google.dev/gemini-api/docs/function-calling>
 
 ## Gemini Developer API 原生通路
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/protocolconv"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -170,6 +171,10 @@ func (w *backgroundResponseWorker) execute(claim *backgroundResponseClaim) {
 	var upstreamReq *http.Request
 	var codexPrepared *codexResponsesPreflight
 	selected, lease, failure := a.prepareModelRoute(r, claim.auth, claim.view.PublicModel, []string{"openai-compatible", codexMembershipProvider}, accounting.ProtocolOpenAIResponses, false, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {
+		capability, capabilityErr := routeCapability(candidate, accounting.ProtocolOpenAIResponses, false)
+		if capabilityErr != nil || capability.UpstreamProtocol != protocolconv.ProtocolOpenAIResponses {
+			return route{}, requestPreflightFailure(http.StatusBadRequest, "unsupported_feature", "Background execution requires a native Responses route.")
+		}
 		copyPayload := make(map[string]json.RawMessage, len(payload))
 		for key, value := range payload {
 			copyPayload[key] = value

@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"cpacloud.local/server/internal/accounting"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -59,7 +60,7 @@ func geminiAdmissionStatus(status int) string {
 	}
 }
 
-func (a *App) selectModelRoute(r *http.Request, auth employeeAuth, model string, providers []string, record bool) (route, *accountPoolLease, *modelAdmissionError) {
+func (a *App) selectModelRoute(r *http.Request, auth employeeAuth, model string, providers []string, clientProtocol accounting.UsageProtocol, record bool) (route, *accountPoolLease, *modelAdmissionError) {
 	var selected route
 	var lease *accountPoolLease
 	legacy := true
@@ -87,7 +88,17 @@ func (a *App) selectModelRoute(r *http.Request, auth employeeAuth, model string,
 		}
 	}
 	if record {
-		if err := a.beginRequestUsage(r, auth, model, selected); err != nil {
+		upstream, err := routeUpstreamProtocol(selected, clientProtocol)
+		if err != nil {
+			if lease != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				lease.Release(ctx, scheduling.ReleaseResult{Failure: scheduling.FailureNone, Phase: scheduling.DispatchNotStarted})
+			}
+			return route{}, nil, poolAdmissionFailure(accountPoolNoCompatible)
+		}
+		usageProtocol, err := accountingProtocol(upstream)
+		if err != nil || a.beginRequestUsage(r, auth, model, selected, usageProtocol) != nil {
 			if lease != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
@@ -126,8 +137,8 @@ func (a *App) legacyEmployeeRoute(ctx context.Context, auth employeeAuth, model 
 		}
 	}
 	var selected route
-	err = a.store.db.QueryRowContext(ctx, `SELECT u.id,u.endpoint,m.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND u.enabled=1 AND u.archived=0
-		AND NOT EXISTS(SELECT 1 FROM account_recovery_states recovery WHERE recovery.account_id=u.id)`, model).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion)
+	err = a.store.db.QueryRowContext(ctx, `SELECT u.id,u.endpoint,m.upstream_model,m.wire_protocol,m.revision,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND u.enabled=1 AND u.archived=0
+		AND NOT EXISTS(SELECT 1 FROM account_recovery_states recovery WHERE recovery.account_id=u.id)`, model).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.WireProtocol, &selected.ModelRevision, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return route{}, poolAdmissionFailure(accountPoolNoCompatible)
 	}
@@ -136,6 +147,9 @@ func (a *App) legacyEmployeeRoute(ctx context.Context, auth employeeAuth, model 
 	}
 	if !providerAllowed(selected.ProviderKind, providers) {
 		return route{}, poolAdmissionFailure(accountPoolNoCompatible)
+	}
+	if !providerSupportsWire(selected.ProviderKind, string(selected.WireProtocol)) {
+		return route{}, poolAdmissionFailure(accountPoolConfigurationChanged)
 	}
 	return selected, nil
 }

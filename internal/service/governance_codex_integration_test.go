@@ -182,6 +182,10 @@ func assertGovernedCodexRows(t *testing.T, fixture *codexServiceFixture, firstRe
 			t.Fatalf("protocol %s count=%d want=%d err=%v", protocol, got, expected, err)
 		}
 	}
+	var responseAttempts int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM accounting_attempt_contexts c JOIN accounting_attempts a ON a.id=c.attempt_id JOIN accounting_requests r ON r.id=a.request_id WHERE r.employee_id=? AND r.key_id=? AND c.protocol='openai-responses'`, fixture.employee.ID, fixture.employeeKey.ID).Scan(&responseAttempts); err != nil || responseAttempts != want {
+		t.Fatalf("Codex upstream Responses attempts=%d want=%d err=%v", responseAttempts, want, err)
+	}
 	var firstRows, firstScopes, firstAttempts int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM governance_requests WHERE id=?`, firstRequestID).Scan(&firstRows); err != nil {
 		t.Fatal(err)

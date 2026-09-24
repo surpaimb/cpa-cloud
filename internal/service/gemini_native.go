@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/protocolconv"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -160,30 +161,65 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 	r = governed
 	defer guard.Close()
 	var upstreamReq *http.Request
-	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{geminiAPIKeyProvider}, accounting.ProtocolGeminiGenerateContent, true, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {
-		if candidate.KeyVersion != 2 {
+	var conversion *protocolRuntime
+	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{geminiAPIKeyProvider, "openai-compatible"}, accounting.ProtocolGeminiGenerateContent, true, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {
+		if candidate.ProviderKind == geminiAPIKeyProvider && candidate.KeyVersion != 2 || candidate.ProviderKind == "openai-compatible" && candidate.KeyVersion != 1 {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.", scheduling.FailurePermanent)
 		}
-		credential, err := a.secrets.decryptGeminiAPIKey(candidate.AccountID, candidate.Ciphertext)
+		var credential string
+		var err error
+		if candidate.ProviderKind == geminiAPIKeyProvider {
+			credential, err = a.secrets.decryptGeminiAPIKey(candidate.AccountID, candidate.Ciphertext)
+		} else {
+			credential, err = a.secrets.decryptCredential(candidate.AccountID, candidate.Ciphertext)
+		}
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.", scheduling.FailureAuth)
 		}
-		endpoint, err := validateGeminiEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
+		var endpoint string
+		if candidate.ProviderKind == geminiAPIKeyProvider {
+			endpoint, err = validateGeminiEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
+		} else {
+			endpoint, err = validateEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
+		}
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.", scheduling.FailurePermanent)
 		}
-		if !validGeminiUpstreamModel(candidate.UpstreamModel) {
+		if candidate.ProviderKind == geminiAPIKeyProvider && !validGeminiUpstreamModel(candidate.UpstreamModel) {
 			return route{}, requestPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.")
 		}
-		target, err := geminiGenerateURL(endpoint, candidate.UpstreamModel, stream)
+		capability, err := routeCapability(candidate, accounting.ProtocolGeminiGenerateContent, stream)
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.", scheduling.FailurePermanent)
 		}
-		prepared, err := http.NewRequestWithContext(candidateRequest.Context(), http.MethodPost, target, bytes.NewReader(body))
+		preparedRuntime, err := prepareProtocolRuntime(capability, candidate.UpstreamModel, body)
+		if err != nil {
+			if protocolconv.IsUnsupportedRoute(err) {
+				return route{}, requestPreflightFailure(http.StatusBadRequest, "UNIMPLEMENTED", "This request cannot be represented by the selected route.")
+			}
+			return route{}, requestPreflightFailure(http.StatusBadRequest, "INVALID_ARGUMENT", "Invalid request.")
+		}
+		var target string
+		switch preparedRuntime.plan().UpstreamProtocol {
+		case protocolconv.ProtocolGeminiGenerate:
+			target, err = geminiGenerateURL(endpoint, candidate.UpstreamModel, stream)
+		case protocolconv.ProtocolOpenAIResponses:
+			target, err = upstreamResponsesURL(endpoint)
+		default:
+			err = errors.New("unsupported Gemini route wire protocol")
+		}
+		if err != nil {
+			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "UNAVAILABLE", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		prepared, err := preparedRuntime.newRequest(candidateRequest.Context(), http.MethodPost, target, http.Header{})
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusBadGateway, "UNAVAILABLE", "Upstream is unavailable.", scheduling.FailurePermanent)
 		}
-		prepared.Header.Set("x-goog-api-key", credential)
+		if candidate.ProviderKind == geminiAPIKeyProvider {
+			prepared.Header.Set("x-goog-api-key", credential)
+		} else {
+			prepared.Header.Set("Authorization", "Bearer "+credential)
+		}
 		prepared.Header.Set("Content-Type", "application/json")
 		if stream {
 			prepared.Header.Set("Accept", "text/event-stream")
@@ -191,6 +227,9 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 			prepared.Header.Set("Accept", "application/json")
 		}
 		upstreamReq = prepared
+		if preparedRuntime.plan().Kind != protocolconv.PlanNative {
+			conversion = preparedRuntime
+		}
 		return candidate, nil
 	})
 	if failure != nil {
@@ -209,6 +248,10 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		if a.finishDispatchFailure(r, modelRequestID, true) {
 			writeGeminiError(w, dispatchFailure.status, geminiAdmissionStatus(dispatchFailure.status), dispatchFailure.message)
 		}
+		return
+	}
+	if conversion != nil {
+		a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, modelRequestID, geminiMaxResponseBody, nil)
 		return
 	}
 	response, err := client.Do(upstreamReq)

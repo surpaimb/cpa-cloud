@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/protocolconv"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -86,11 +87,14 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		defer guard.Close()
 	}
 	var upstreamReq *http.Request
+	var conversion *protocolRuntime
 	protocol := accounting.ProtocolAnthropicMessages
+	providers := []string{anthropicAPIKeyProvider, "openai-compatible"}
 	if countTokens {
 		protocol = ""
+		providers = []string{anthropicAPIKeyProvider}
 	}
-	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{anthropicAPIKeyProvider}, protocol, !countTokens, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {
+	selected, lease, failure := a.prepareModelRoute(r, auth, model, providers, protocol, !countTokens, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {
 		if candidate.KeyVersion != 1 {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available route for this model.", scheduling.FailurePermanent)
 		}
@@ -111,18 +115,54 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailurePermanent)
 		}
-		target, err := upstreamAnthropicURL(endpoint, countTokens)
+		if countTokens && candidate.ProviderKind != anthropicAPIKeyProvider {
+			return route{}, requestPreflightFailure(http.StatusBadRequest, "unsupported_feature", "Token counting requires a native Anthropic route.")
+		}
+		var preparedRuntime *protocolRuntime
+		var target string
+		if countTokens {
+			target, err = upstreamAnthropicURL(endpoint, true)
+		} else {
+			capability, capabilityErr := routeCapability(candidate, accounting.ProtocolAnthropicMessages, stream)
+			if capabilityErr != nil {
+				return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available route for this model.", scheduling.FailurePermanent)
+			}
+			preparedRuntime, err = prepareProtocolRuntime(capability, candidate.UpstreamModel, outgoing)
+			if err != nil {
+				if protocolconv.IsUnsupportedRoute(err) {
+					return route{}, requestPreflightFailure(http.StatusBadRequest, "unsupported_feature", "This request cannot be represented by the selected route.")
+				}
+				return route{}, requestPreflightFailure(http.StatusBadRequest, "invalid_request_error", "Invalid request.")
+			}
+			switch preparedRuntime.plan().UpstreamProtocol {
+			case protocolconv.ProtocolAnthropicMessages:
+				target, err = upstreamAnthropicURL(endpoint, false)
+			case protocolconv.ProtocolOpenAIResponses:
+				target, err = upstreamResponsesURL(endpoint)
+			default:
+				err = errors.New("unsupported Messages route wire protocol")
+			}
+		}
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "api_error", "No available Anthropic route exists for this model.", scheduling.FailurePermanent)
 		}
-		prepared, err := http.NewRequestWithContext(candidateRequest.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
+		var prepared *http.Request
+		if preparedRuntime == nil {
+			prepared, err = http.NewRequestWithContext(candidateRequest.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
+		} else {
+			prepared, err = preparedRuntime.newRequest(candidateRequest.Context(), http.MethodPost, target, http.Header{})
+		}
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusBadGateway, "api_error", "Upstream is unavailable.", scheduling.FailurePermanent)
 		}
-		prepared.Header.Set("Authorization", "Bearer "+credential)
-		prepared.Header.Set("Anthropic-Version", version)
-		if beta != "" {
-			prepared.Header.Set("Anthropic-Beta", beta)
+		if candidate.ProviderKind == anthropicAPIKeyProvider {
+			prepared.Header.Set("Authorization", "Bearer "+credential)
+			prepared.Header.Set("Anthropic-Version", version)
+			if beta != "" {
+				prepared.Header.Set("Anthropic-Beta", beta)
+			}
+		} else {
+			prepared.Header.Set("Authorization", "Bearer "+credential)
 		}
 		prepared.Header.Set("Content-Type", "application/json")
 		if stream {
@@ -131,6 +171,9 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 			prepared.Header.Set("Accept", "application/json")
 		}
 		upstreamReq = prepared
+		if preparedRuntime != nil && preparedRuntime.plan().Kind != protocolconv.PlanNative {
+			conversion = preparedRuntime
+		}
 		return candidate, nil
 	})
 	if failure != nil {
@@ -149,6 +192,10 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		if a.finishDispatchFailure(r, modelRequestID, !countTokens) {
 			writeAnthropicError(w, dispatchFailure.status, anthropicAdmissionType(dispatchFailure.status), dispatchFailure.message, modelRequestID)
 		}
+		return
+	}
+	if conversion != nil {
+		a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, modelRequestID, anthropicMaxResponse, nil)
 		return
 	}
 	response, err := client.Do(upstreamReq)

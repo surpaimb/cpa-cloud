@@ -125,6 +125,7 @@ func (s *store) initialize(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			upstream_id TEXT NOT NULL REFERENCES upstreams(id),
 			upstream_model TEXT NOT NULL,
+			wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content')),
 			enabled INTEGER NOT NULL,
 			revision INTEGER NOT NULL DEFAULT 1 CHECK(revision BETWEEN 1 AND 9007199254740991),
 			archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
@@ -197,6 +198,7 @@ func (s *store) migrateAccountLifecycle(ctx context.Context) error {
 		{!modelColumns["revision"], `ALTER TABLE models ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK(revision BETWEEN 1 AND 9007199254740991)`},
 		{!modelColumns["archived"], `ALTER TABLE models ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))`},
 		{!modelColumns["archived_at"], `ALTER TABLE models ADD COLUMN archived_at TEXT`},
+		{!modelColumns["wire_protocol"], `ALTER TABLE models ADD COLUMN wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))`},
 	} {
 		if migration.missing {
 			if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
@@ -287,6 +289,10 @@ func validateAccountLifecycleSchema(ctx context.Context, query schemaQueryer) er
 	if !ok || revision.kind != "INTEGER" || !revision.notNull || !revision.defaultSQL.Valid || strings.Trim(revision.defaultSQL.String, "() '") != "1" {
 		return errors.New("model revision column has an incompatible schema")
 	}
+	wire, ok := models["wire_protocol"]
+	if !ok || wire.kind != "TEXT" || !wire.notNull || !wire.defaultSQL.Valid || strings.Trim(wire.defaultSQL.String, "() '") != string(wireProtocolLegacyNative) {
+		return errors.New("model wire protocol column has an incompatible schema")
+	}
 	for name, expected := range map[string]schemaColumn{
 		"id":          {kind: "TEXT", primaryKey: 1},
 		"actor_id":    {kind: "TEXT", notNull: true},
@@ -316,7 +322,7 @@ func validateAccountLifecycleSchema(ctx context.Context, query schemaQueryer) er
 	}
 	normalize := func(value string) string { return strings.ToLower(strings.Join(strings.Fields(value), "")) }
 	if !strings.Contains(normalize(upstreamSQL), "check(archivedin(0,1))") || !strings.Contains(normalize(modelSQL), "check(archivedin(0,1))") ||
-		!strings.Contains(normalize(modelSQL), "check(revisionbetween1and9007199254740991)") || !strings.Contains(normalize(indexSQL), "onaccount_lifecycle_audit(occurred_at,id)") {
+		!strings.Contains(normalize(modelSQL), "check(revisionbetween1and9007199254740991)") || !strings.Contains(normalize(modelSQL), "check(wire_protocolin('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))") || !strings.Contains(normalize(indexSQL), "onaccount_lifecycle_audit(occurred_at,id)") {
 		return errors.New("account lifecycle constraints have an incompatible schema")
 	}
 	var invalid int

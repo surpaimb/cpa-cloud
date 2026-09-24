@@ -245,6 +245,7 @@ export type ModelRoute = {
   id: string
   upstream_id: string
   upstream_model: string
+  wire_protocol?: WireProtocol
   enabled: boolean
   revision?: number
   archived?: boolean
@@ -253,9 +254,11 @@ export type ModelRoute = {
 }
 export type AccountGroup = { id: string; name: string; revision: number }
 export type AccountChannel = { id: string; name: string; group_id?: string | null; revision: number }
+export type WireProtocol = 'legacy-native' | 'openai-chat' | 'openai-responses' | 'anthropic-messages' | 'gemini-generate-content'
 export type ModelAccount = {
   upstream_id: string
   upstream_model: string
+  wire_protocol?: WireProtocol
   priority: number
   weight: number
   max_concurrency: number

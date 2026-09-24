@@ -383,6 +383,7 @@ type modelView struct {
 	ID            string  `json:"id"`
 	UpstreamID    string  `json:"upstream_id"`
 	UpstreamModel string  `json:"upstream_model"`
+	WireProtocol  string  `json:"wire_protocol"`
 	Enabled       bool    `json:"enabled"`
 	Revision      int64   `json:"revision"`
 	Archived      bool    `json:"archived"`
@@ -395,7 +396,7 @@ func (a *App) listAdminModels(w http.ResponseWriter, r *http.Request, _ adminSes
 	if !ok {
 		return
 	}
-	rows, err := a.store.db.QueryContext(r.Context(), `SELECT id,upstream_id,upstream_model,enabled,revision,archived,archived_at FROM models WHERE (?=1 OR archived=0) ORDER BY id`, boolInt(includeArchived))
+	rows, err := a.store.db.QueryContext(r.Context(), `SELECT id,upstream_id,upstream_model,wire_protocol,enabled,revision,archived,archived_at FROM models WHERE (?=1 OR archived=0) ORDER BY id`, boolInt(includeArchived))
 	if err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -406,7 +407,7 @@ func (a *App) listAdminModels(w http.ResponseWriter, r *http.Request, _ adminSes
 		var item modelView
 		var enabled, archived int
 		var archivedAt sql.NullString
-		if err := rows.Scan(&item.ID, &item.UpstreamID, &item.UpstreamModel, &enabled, &item.Revision, &archived, &archivedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.UpstreamID, &item.UpstreamModel, &item.WireProtocol, &enabled, &item.Revision, &archived, &archivedAt); err != nil {
 			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 			return
 		}
@@ -419,9 +420,10 @@ func (a *App) listAdminModels(w http.ResponseWriter, r *http.Request, _ adminSes
 }
 
 type createModelRequest struct {
-	ID            string `json:"id"`
-	UpstreamID    string `json:"upstream_id"`
-	UpstreamModel string `json:"upstream_model"`
+	ID            string  `json:"id"`
+	UpstreamID    string  `json:"upstream_id"`
+	UpstreamModel string  `json:"upstream_model"`
+	WireProtocol  *string `json:"wire_protocol"`
 }
 
 func (a *App) createModel(w http.ResponseWriter, r *http.Request, session adminSession) {
@@ -450,7 +452,15 @@ func (a *App) createModel(w http.ResponseWriter, r *http.Request, session adminS
 		writeAdminError(w, 400, "invalid_request", "Invalid model fields.")
 		return
 	}
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO models(id,upstream_id,upstream_model,enabled,revision,archived,created_at) VALUES(?,?,?,?,1,0,?)`, input.ID, input.UpstreamID, input.UpstreamModel, 1, utcNow())
+	wireProtocol := string(wireProtocolLegacyNative)
+	if input.WireProtocol != nil {
+		wireProtocol = strings.TrimSpace(*input.WireProtocol)
+	}
+	if !validRouteWireProtocol(wireProtocol) || !providerSupportsWire(providerKind, wireProtocol) {
+		writeAdminError(w, 400, "invalid_request", "The wire protocol is not supported by that provider.")
+		return
+	}
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO models(id,upstream_id,upstream_model,wire_protocol,enabled,revision,archived,created_at) VALUES(?,?,?,?,?,1,0,?)`, input.ID, input.UpstreamID, input.UpstreamModel, wireProtocol, 1, utcNow())
 	if err != nil {
 		if isConflict(err) {
 			writeAdminError(w, 409, "already_exists", "Model already exists.")
@@ -463,7 +473,7 @@ func (a *App) createModel(w http.ResponseWriter, r *http.Request, session adminS
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	writeJSON(w, 201, modelView{ID: input.ID, UpstreamID: input.UpstreamID, UpstreamModel: input.UpstreamModel, Enabled: true, Revision: 1})
+	writeJSON(w, 201, modelView{ID: input.ID, UpstreamID: input.UpstreamID, UpstreamModel: input.UpstreamModel, WireProtocol: wireProtocol, Enabled: true, Revision: 1})
 }
 
 func validateEndpoint(ctx context.Context, raw string, allowLoopback bool) (string, error) {

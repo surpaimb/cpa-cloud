@@ -4,7 +4,7 @@ import {
   api,
   type AccountChannel,
   type AccountGroup,
-  type ModelAccount,
+  type ModelAccount, type WireProtocol,
   type ModelAccounts,
   type ModelRoute,
   type Upstream,
@@ -171,6 +171,7 @@ function validateAccounts(items: ModelAccount[], upstreams: Upstream[]) {
   if (items.length < 1 || items.length > 64) return '账号池必须包含 1–64 个账号。'
   const ids = new Set<string>()
   let provider: Upstream['provider_kind'] | undefined
+  let wire: WireProtocol | undefined
   for (const item of items) {
     if (ids.has(item.upstream_id)) return '同一个上游账号不能重复添加。'
     ids.add(item.upstream_id)
@@ -178,6 +179,9 @@ function validateAccounts(items: ModelAccount[], upstreams: Upstream[]) {
     if (!upstream) return '存在已删除的上游账号，请移除后再保存。'
     provider ??= upstream.provider_kind
     if (upstream.provider_kind !== provider) return '账号池中的账号必须属于同一服务商。'
+    const itemWire = item.wire_protocol ?? 'legacy-native'
+    wire ??= itemWire
+    if (itemWire !== wire) return '账号池中的账号必须使用同一个 Wire 协议。'
     if (!validText(item.upstream_model, 256)) return '上游模型名称需为 1–256 字节，不能有首尾空格或控制字符。'
     if (!Number.isInteger(item.priority) || item.priority < -1_000_000 || item.priority > 1_000_000) return '优先级必须是 -1000000 到 1000000 的整数。'
     if (!Number.isInteger(item.weight) || item.weight < 1 || item.weight > 10_000) return '权重必须是 1 到 10000 的整数。'
@@ -252,7 +256,7 @@ export function ModelAccountPoolEditor({ model, csrf, routingEnabled, onClose }:
 
   function addAccount() {
     if (!candidateID || items.length >= 64) return
-    setItems((current) => [...current, { upstream_id: candidateID, upstream_model: model.upstream_model, priority: 0, weight: 1, max_concurrency: 1 }])
+    setItems((current) => [...current, { upstream_id: candidateID, upstream_model: model.upstream_model, wire_protocol: current[0]?.wire_protocol ?? model.wire_protocol ?? 'legacy-native', priority: 0, weight: 1, max_concurrency: 1 }])
     setSaved(false)
   }
 
@@ -290,6 +294,7 @@ export function ModelAccountPoolEditor({ model, csrf, routingEnabled, onClose }:
           <div className="pool-account-heading"><div><strong>{upstream?.name ?? item.upstream_id}</strong>{disabled ? <span className="pool-disabled-badge">已停用，可移除</span> : null}{!upstream ? <span className="pool-disabled-badge">已删除，可移除</span> : null}<small><code>{item.upstream_id}</code>{groupName ? ` · ${groupName}` : ''}</small></div><Button type="button" variant="danger" disabled={items.length === 1 || busy} onClick={() => { setItems((current) => current.filter((_, itemIndex) => itemIndex !== index)); setSaved(false) }}>移除</Button></div>
           <div className="pool-account-grid">
             <Field label={`账号 ${index + 1} 上游模型`}><input value={item.upstream_model} onChange={(event) => updateItem(index, { upstream_model: event.target.value })} /></Field>
+            <Field label={`账号 ${index + 1} Wire 协议`}><select value={item.wire_protocol ?? 'legacy-native'} onChange={(event) => updateItem(index, { wire_protocol: event.target.value as WireProtocol })}><option value="legacy-native">兼容原生入口</option>{upstream?.provider_kind === 'openai-compatible' ? <><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option></> : null}{upstream?.provider_kind === 'codex-membership' ? <option value="openai-responses">OpenAI Responses</option> : null}{upstream?.provider_kind === 'anthropic-api-key' ? <option value="anthropic-messages">Anthropic Messages</option> : null}{upstream?.provider_kind === 'gemini-api-key' ? <option value="gemini-generate-content">Gemini generateContent</option> : null}</select></Field>
             <Field label={`账号 ${index + 1} 渠道`}><select value={item.channel_id ?? ''} onChange={(event) => updateItem(index, { channel_id: event.target.value || undefined })}><option value="">无渠道</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{groups.find((group) => group.id === channel.group_id)?.name ? `${groups.find((group) => group.id === channel.group_id)?.name} / ` : ''}{channel.name}</option>)}</select></Field>
             <Field label={`账号 ${index + 1} 优先级`}><input type="number" min={-1000000} max={1000000} step={1} value={item.priority} onChange={(event) => updateItem(index, { priority: Number(event.target.value) })} /></Field>
             <Field label={`账号 ${index + 1} 权重`}><input type="number" min={1} max={10000} step={1} value={item.weight} onChange={(event) => updateItem(index, { weight: Number(event.target.value) })} /></Field>

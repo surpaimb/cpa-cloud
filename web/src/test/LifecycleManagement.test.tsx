@@ -50,6 +50,23 @@ describe('account lifecycle management UI', () => {
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('不能恢复'))
   })
 
+  it('resets an incompatible explicit wire when the model provider changes', async () => {
+    const anthropic = { ...upstream, id: 'ups-claude', name: 'Claude', provider_kind: 'anthropic-api-key' }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response(status(true))
+      if (url.endsWith('/models') && !init?.method) return response({ items: [{ ...model, wire_protocol: 'openai-responses' }] })
+      if (url.endsWith('/upstreams') && !init?.method) return response({ items: [upstream, anthropic] })
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    }))
+    render(<ModelsPage csrf="csrf" />)
+    await userEvent.click(await screen.findByRole('button', { name: '修改 / 归档' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByLabelText('上游 Wire 协议')).toHaveValue('openai-responses')
+    await userEvent.selectOptions(within(dialog).getByLabelText('上游连接'), 'ups-claude')
+    expect(within(dialog).getByLabelText('上游 Wire 协议')).toHaveValue('legacy-native')
+  })
+
   it('edits and archives upstreams without exposing a saved credential', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {

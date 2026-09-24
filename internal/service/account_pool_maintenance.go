@@ -303,17 +303,17 @@ func (rt *accountPoolRuntime) revalidateMaintenanceTx(ctx context.Context, tx *s
 	var enabled int
 	var capacity int
 	var poolRevision int64
-	err = tx.QueryRowContext(ctx, `SELECT u.id,u.endpoint,r.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version,u.enabled,c.revision,
+	err = tx.QueryRowContext(ctx, `SELECT u.id,u.endpoint,r.upstream_model,r.wire_protocol,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version,u.enabled,c.revision,
 		(SELECT MIN(gr.max_concurrency) FROM model_account_pool_routes gr JOIN models gm ON gm.id=gr.model_id WHERE gr.upstream_id=r.upstream_id AND gm.enabled=1)
 		FROM model_account_pool_routes r JOIN model_account_pool_configs c ON c.model_id=r.model_id JOIN models m ON m.id=r.model_id JOIN upstreams u ON u.id=r.upstream_id
-		WHERE r.model_id=? AND r.upstream_id=? AND m.enabled=1`, state.PublicModel, state.AccountID).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion, &enabled, &poolRevision, &capacity)
+		WHERE r.model_id=? AND r.upstream_id=? AND m.enabled=1`, state.PublicModel, state.AccountID).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.WireProtocol, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion, &enabled, &poolRevision, &capacity)
 	if errors.Is(err, sql.ErrNoRows) {
 		return state, route{}, 0, accountPoolConfigurationChanged
 	}
 	if err != nil {
 		return state, route{}, 0, accountPoolStorageUnavailable
 	}
-	if enabled == 0 || capacity < 1 || selected.Revision != state.AccountRevision || poolRevision != state.PoolRevision || selected.ProviderKind != state.ProviderKind || selected.UpstreamModel != state.UpstreamModel || selected.ProviderKind == codexMembershipProvider && (!rt.app.cfg.ExperimentalCodexMembership || selected.CredentialState.String == codexStateReauth) {
+	if enabled == 0 || capacity < 1 || selected.Revision != state.AccountRevision || poolRevision != state.PoolRevision || selected.ProviderKind != state.ProviderKind || selected.UpstreamModel != state.UpstreamModel || !providerSupportsWire(selected.ProviderKind, string(selected.WireProtocol)) || selected.ProviderKind == codexMembershipProvider && (!rt.app.cfg.ExperimentalCodexMembership || selected.CredentialState.String == codexStateReauth) {
 		return state, route{}, 0, accountPoolConfigurationChanged
 	}
 	if code := validateRecoverySourceTx(ctx, tx, state); code != "" {

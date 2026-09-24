@@ -91,7 +91,7 @@ func beginGovernedTestAttempt(t *testing.T, f *requestGovernanceFixture, id stri
 	if failed != nil || guard == nil {
 		t.Fatalf("admit=%+v", failed)
 	}
-	selected, lease, failed := f.g.app.selectModelRoute(r, f.pool.auth1, "governance-model", []string{"openai-compatible"}, true)
+	selected, lease, failed := f.g.app.selectModelRoute(r, f.pool.auth1, "governance-model", []string{"openai-compatible"}, accounting.ProtocolOpenAIChatCompletions, true)
 	if failed != nil || lease == nil {
 		guard.Close()
 		t.Fatalf("route=%+v", failed)
@@ -196,7 +196,7 @@ func TestRequestGovernanceAtomicTerminalRollbackAndRetry(t *testing.T) {
 		t.Fatalf("admit=%+v", failed)
 	}
 	defer guard.Close()
-	selected, lease, failed := a.selectModelRoute(r, f.pool.auth1, "governance-model", []string{"openai-compatible"}, true)
+	selected, lease, failed := a.selectModelRoute(r, f.pool.auth1, "governance-model", []string{"openai-compatible"}, accounting.ProtocolOpenAIChatCompletions, true)
 	if failed != nil || lease == nil {
 		t.Fatalf("route=%+v", failed)
 	}
@@ -264,7 +264,7 @@ func TestRequestGovernanceRenewFailureAndTerminalRace(t *testing.T) {
 			}
 			switch mode {
 			case "failure":
-				selected, lease, routeFailure := f.g.app.selectModelRoute(r, f.pool.auth1, "governance-model", []string{"openai-compatible"}, true)
+				selected, lease, routeFailure := f.g.app.selectModelRoute(r, f.pool.auth1, "governance-model", []string{"openai-compatible"}, accounting.ProtocolOpenAIChatCompletions, true)
 				if routeFailure != nil || lease == nil {
 					t.Fatalf("route before renewal failure=%+v", routeFailure)
 				}
@@ -379,7 +379,7 @@ func TestRequestGovernanceTerminalAndCancellationWinners(t *testing.T) {
 		if failed != nil || guard == nil {
 			t.Fatalf("admit=%+v", failed)
 		}
-		selected, lease, routeFailure := f.g.app.selectModelRoute(r, f.pool.auth1, "governance-model", []string{"openai-compatible"}, true)
+		selected, lease, routeFailure := f.g.app.selectModelRoute(r, f.pool.auth1, "governance-model", []string{"openai-compatible"}, accounting.ProtocolOpenAIChatCompletions, true)
 		if routeFailure != nil || lease == nil {
 			t.Fatalf("route=%+v", routeFailure)
 		}
