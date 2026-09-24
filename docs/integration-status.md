@@ -2,7 +2,7 @@
 
 ## 2026-09-24：显式 Wire 协议路由与跨协议非流式接线
 
-- 集成提交 `8f948a4` 把纯转换模块接入共享 HTTP 执行路径。模型与账号池路由持久化显式
+- 集成提交 `13985a0` 把纯转换模块接入共享 HTTP 执行路径。模型与账号池路由持久化显式
   `wire_protocol`，旧库迁移及旧管理客户端省略字段都保持 `legacy-native`；provider/wire 不匹配、账号池内
   wire 不一致、派发前 revision/wire 改变均失败关闭，不按 provider 猜测或试探端点。
 - 合成上游验收覆盖 Chat↔Responses、Messages↔Responses、Gemini↔Responses 六个非流式方向。每个员工请求
