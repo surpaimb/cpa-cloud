@@ -19,6 +19,19 @@
 核心设计中的 API 路径和支持批次是产品目标，不代表所有官方接口字段已经验证。
 后续新增来源应记录具体章节、版本/日期、支持子集与独立测试证据；不抄录大段原文。
 
+## 跨协议转换、Responses 状态与工具
+
+查阅日期：2026-09-24。支持矩阵见 [跨协议转换能力契约](protocol-conversion-contract.md)，状态/后台/
+工具的实现门禁见 [ADR 0002](adr/0002-responses-state-background-managed-tools.md)。
+
+- Chat/Responses message、item 和工具结果映射：<https://developers.openai.com/api/docs/guides/migrate-to-responses>
+- Function tools、call ID、工具结果及流增量：<https://developers.openai.com/api/docs/guides/function-calling>
+- Responses create/output/usage：<https://developers.openai.com/api/reference/resources/responses/methods/create>
+- Responses SSE：<https://developers.openai.com/api/docs/guides/streaming-responses>
+- Conversation state 与 previous response：<https://developers.openai.com/api/docs/guides/conversation-state>
+- Background 轮询、取消和恢复流：<https://developers.openai.com/api/docs/guides/background>
+- 托管工具总览：<https://developers.openai.com/api/docs/guides/tools>
+
 ## Gemini Developer API 原生通路
 
 查阅日期：2026-09-23。
