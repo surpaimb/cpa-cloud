@@ -16,11 +16,13 @@ for (let index = 2; index < process.argv.length; index += 2) {
   const name = process.argv[index];
   const value = process.argv[index + 1];
   assert.ok(name?.startsWith('--') && value, `Invalid argument near ${name ?? '<end>'}`);
-  args.set(name.slice(2), path.resolve(value));
+  args.set(name.slice(2), name === '--scope' ? value : path.resolve(value));
 }
 for (const required of ['server', 'codex', 'claude', 'gemini-entry']) {
   assert.ok(args.has(required), `--${required} absolute path is required`);
 }
+assert.ok(!args.has('scope') || args.get('scope') === 'core', '--scope must be core when provided');
+const coreOnly = args.get('scope') === 'core';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'cpac-real-clients-'));
 const dataDir = path.join(root, 'server-data');
@@ -476,7 +478,14 @@ function cancellationResult(client, version, evidence) {
 }
 
 function assertClientSuccess(name, result, requiredMarker = marker) {
-  assert.equal(result.code, 0, `${name} exited unsuccessfully (code=${result.code}, signal=${result.signal ?? 'none'})`);
+  const output = `${result.stdout}\n${result.stderr}`;
+  const errorCodes = [...output.matchAll(/\"code\"\s*:\s*\"([A-Za-z0-9_-]+)\"/g)].map(match => match[1]);
+  const diagnostic = { upstream_requests: requests.length, output_bytes: Buffer.byteLength(output),
+    error_codes: [...new Set(errorCodes)].sort(),
+    mentions_http_400: /\b400\b/.test(output), mentions_http_401: /\b401\b/.test(output),
+    mentions_http_404: /\b404\b/.test(output), mentions_connection: /connect|connection/i.test(output),
+    mentions_unsupported: /unsupported/i.test(output) };
+  assert.equal(result.code, 0, `${name} exited unsuccessfully (code=${result.code}, signal=${result.signal ?? 'none'}, diagnostic=${JSON.stringify(diagnostic)})`);
   if (requiredMarker) assert.ok(result.stdout.includes(requiredMarker), `${name} did not render the synthetic marker`);
 }
 
@@ -683,6 +692,7 @@ lines.on('line', line => {
       upstream_requests: 0 });
   }
 
+  if (!coreOnly) {
   const codexCancelled = await runAndCancel(args.get('codex'), ['--no-daemon', '--strict-config', '-s', 'read-only', '-a', 'never',
     '-m', 'public-codex', 'exec', '--ephemeral', '--ignore-rules', '--skip-git-repo-check', '--json', cancelPrompt],
   isolatedEnvironment(codexHome, { CODEX_HOME: path.join(codexHome, '.codex'), CPA_SYNTHETIC_KEY: employeeKey.key }),
@@ -780,14 +790,15 @@ lines.on('line', line => {
   assert.equal(requests.length, beforeRevoked, 'Revoked employee Key reached the upstream');
   results.push({ client: 'Codex CLI', version: identities.codex.version, scenario: 'revoked_key_zero_dispatch', status: 'PASS' });
   results.push({ client: 'Claude Code', version: identities.claude.version, scenario: 'revoked_key_zero_dispatch', status: 'PASS' });
+  }
 
   if (!geminiPassed) {
-    results.push(
-      { client: 'Gemini CLI', version: identities.gemini.version, scenario: 'tool_call_result_round', status: 'SKIP', reason_code: `blocked_by_${geminiFailureReason}` },
+    results.push({ client: 'Gemini CLI', version: identities.gemini.version, scenario: 'tool_call_result_round',
+      status: 'SKIP', reason_code: `blocked_by_${geminiFailureReason}` });
+    if (!coreOnly) results.push(
       { client: 'Gemini CLI', version: identities.gemini.version, scenario: 'client_cancel_upstream_abort', status: 'SKIP', reason_code: `blocked_by_${geminiFailureReason}` },
       { client: 'Gemini CLI', version: identities.gemini.version, scenario: 'server_restart_existing_key', status: 'SKIP', reason_code: `blocked_by_${geminiFailureReason}` },
-      { client: 'Gemini CLI', version: identities.gemini.version, scenario: 'revoked_key_zero_dispatch', status: 'SKIP', reason_code: `blocked_by_${geminiFailureReason}` },
-    );
+      { client: 'Gemini CLI', version: identities.gemini.version, scenario: 'revoked_key_zero_dispatch', status: 'SKIP', reason_code: `blocked_by_${geminiFailureReason}` });
   }
 
   assert.deepEqual(upstreamErrors, []);
@@ -802,7 +813,7 @@ lines.on('line', line => {
     assert.ok(!sensitive.some(value => bytes.includes(Buffer.from(value))), `Plaintext secret/content persisted in ${entry.name}`);
   }
   const status = results.some(result => result.status === 'FAIL') ? 'FAIL' : 'PASS';
-  console.log(JSON.stringify({ status, boundary: 'real_clients_synthetic_upstream', platform,
+  console.log(JSON.stringify({ status, boundary: coreOnly ? 'real_clients_native_core_synthetic_upstream' : 'real_clients_synthetic_upstream', platform,
     server: serverIdentity, clients: identities, results }, null, 2));
   if (status === 'FAIL') process.exitCode = 1;
 } finally {
