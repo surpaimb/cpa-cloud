@@ -54,9 +54,14 @@ func GeminiResponseToResponses(raw []byte) ([]byte, error) {
 	if json.Unmarshal(content["parts"], &parts) != nil || parts == nil {
 		return nil, invalidUpstream("candidates[0].content.parts", "an array is required")
 	}
+	reservedCallIDs, err := geminiResponseExplicitCallIDs(parts)
+	if err != nil {
+		return nil, err
+	}
 	output := make([]any, 0, len(parts))
 	messageIndex := 0
 	callIndex := 0
+	generatedCallIndex := 0
 	for index, rawPart := range parts {
 		field := indexField("candidates[0].content.parts", index)
 		part, err := decodeObject(rawPart, CodeInvalidUpstream, field)
@@ -97,7 +102,7 @@ func GeminiResponseToResponses(raw []byte) ([]byte, error) {
 				return nil, err
 			}
 			if !present {
-				id = convertedItemID("call", responseID, callIndex)
+				id = nextUniqueGeminiCallID(responseID, &generatedCallIndex, reservedCallIDs)
 			}
 			arguments := "{}"
 			if len(call["args"]) != 0 {
@@ -134,6 +139,36 @@ func GeminiResponseToResponses(raw []byte) ([]byte, error) {
 		result["usage"] = usage
 	}
 	return marshal(result)
+}
+
+func geminiResponseExplicitCallIDs(parts []json.RawMessage) (map[string]struct{}, error) {
+	reserved := map[string]struct{}{}
+	for index, rawPart := range parts {
+		partField := indexField("candidates[0].content.parts", index)
+		part, err := decodeObject(rawPart, CodeInvalidUpstream, partField)
+		if err != nil {
+			return nil, err
+		}
+		rawCall, ok := part["functionCall"]
+		if !ok {
+			continue
+		}
+		callField := joinField(partField, "functionCall")
+		call, err := decodeObject(rawCall, CodeInvalidUpstream, callField)
+		if err != nil {
+			return nil, err
+		}
+		id, present, err := optionalNonEmptyString(call["id"], joinField(callField, "id"), true)
+		if err != nil {
+			return nil, err
+		}
+		if present {
+			if err := reserveUniqueGeminiCallID(reserved, id, joinField(callField, "id"), true); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return reserved, nil
 }
 
 func geminiUsageToResponses(raw json.RawMessage) (map[string]any, error) {

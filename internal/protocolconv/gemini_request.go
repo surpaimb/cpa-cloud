@@ -87,11 +87,15 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 	if len(raw) == 0 || json.Unmarshal(raw, &contents) != nil || contents == nil {
 		return nil, 0, invalid("contents", "an array is required")
 	}
+	reservedCallIDs, err := geminiRequestExplicitCallIDs(contents)
+	if err != nil {
+		return nil, 0, err
+	}
 	items := make([]any, 0, len(contents))
 	features := FeatureSet(0)
 	pendingCalls := map[string]string{}
 	pendingOrder := make([]canonicalCall, 0)
-	callIndex := 0
+	generatedCallIndex := 0
 	for contentIndex, rawContent := range contents {
 		field := indexField("contents", contentIndex)
 		content, err := decodeObject(rawContent, CodeInvalidRequest, field)
@@ -150,7 +154,7 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 					return nil, 0, err
 				}
 				if !present {
-					id = convertedItemID("call", "gemini-request", callIndex)
+					id = nextUniqueGeminiCallID("gemini-request", &generatedCallIndex, reservedCallIDs)
 				}
 				args := "{}"
 				if len(call["args"]) != 0 {
@@ -162,7 +166,6 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 				items = append(items, map[string]any{"type": "function_call", "call_id": id, "name": name, "arguments": args})
 				pendingCalls[id] = name
 				pendingOrder = append(pendingOrder, canonicalCall{ID: id, Name: name})
-				callIndex++
 				features |= Features(FeatureFunctionCalls)
 			case part["functionResponse"] != nil:
 				if role != "user" {
@@ -187,11 +190,15 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 					return nil, 0, err
 				}
 				if !present {
+					matches := 0
 					for _, pending := range pendingOrder {
 						if pendingCalls[pending.ID] == name {
 							id = pending.ID
-							break
+							matches++
 						}
+					}
+					if matches > 1 {
+						return nil, 0, invalid(joinField(partField, "functionResponse.id"), "is required to disambiguate multiple pending calls with the same name")
 					}
 				}
 				if id == "" || pendingCalls[id] != name {
@@ -210,6 +217,70 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 		}
 	}
 	return items, features, nil
+}
+
+func geminiRequestExplicitCallIDs(contents []json.RawMessage) (map[string]struct{}, error) {
+	reserved := map[string]struct{}{}
+	for contentIndex, rawContent := range contents {
+		contentField := indexField("contents", contentIndex)
+		content, err := decodeObject(rawContent, CodeInvalidRequest, contentField)
+		if err != nil {
+			return nil, err
+		}
+		var parts []json.RawMessage
+		if json.Unmarshal(content["parts"], &parts) != nil || parts == nil {
+			return nil, invalid(joinField(contentField, "parts"), "an array is required")
+		}
+		for partIndex, rawPart := range parts {
+			partField := indexField(joinField(contentField, "parts"), partIndex)
+			part, err := decodeObject(rawPart, CodeInvalidRequest, partField)
+			if err != nil {
+				return nil, err
+			}
+			rawCall, ok := part["functionCall"]
+			if !ok {
+				continue
+			}
+			callField := joinField(partField, "functionCall")
+			call, err := decodeObject(rawCall, CodeInvalidRequest, callField)
+			if err != nil {
+				return nil, err
+			}
+			id, present, err := optionalNonEmptyString(call["id"], joinField(callField, "id"), false)
+			if err != nil {
+				return nil, err
+			}
+			if present {
+				if err := reserveUniqueGeminiCallID(reserved, id, joinField(callField, "id"), false); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return reserved, nil
+}
+
+func reserveUniqueGeminiCallID(reserved map[string]struct{}, id, field string, upstream bool) error {
+	if _, exists := reserved[id]; exists {
+		if upstream {
+			return invalidUpstream(field, "duplicate function call id")
+		}
+		return invalid(field, "duplicate function call id")
+	}
+	reserved[id] = struct{}{}
+	return nil
+}
+
+func nextUniqueGeminiCallID(source string, next *int, reserved map[string]struct{}) string {
+	for {
+		id := convertedItemID("call", source, *next)
+		(*next)++
+		if _, exists := reserved[id]; exists {
+			continue
+		}
+		reserved[id] = struct{}{}
+		return id
+	}
 }
 
 func optionalNonEmptyString(raw json.RawMessage, field string, upstream bool) (string, bool, error) {

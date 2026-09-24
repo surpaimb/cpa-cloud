@@ -3,6 +3,7 @@ package protocolconv
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -153,6 +154,140 @@ func TestGeminiOptionalCallIDsAreStableWithinToolRound(t *testing.T) {
 	output := root["output"].([]any)[0].(map[string]any)
 	if output["call_id"] == "" || output["arguments"] != "{}" {
 		t.Fatalf("optional upstream Gemini fields were not represented: %#v", output)
+	}
+}
+
+func TestGeminiGeneratedCallIDsAvoidExplicitCollisions(t *testing.T) {
+	requestCollision := convertedItemID("call", "gemini-request", 0)
+	converted, err := GeminiRequestToResponses("m", []byte(fmt.Sprintf(`{
+  "contents":[{"role":"model","parts":[
+    {"functionCall":{"name":"generated"}},
+    {"functionCall":{"id":%q,"name":"explicit"}}
+  ]}]
+}`, requestCollision)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	_ = json.Unmarshal(converted, &root)
+	items := root["input"].([]any)
+	generated := items[0].(map[string]any)["call_id"]
+	explicit := items[1].(map[string]any)["call_id"]
+	if generated == explicit || explicit != requestCollision {
+		t.Fatalf("request call IDs collided: %#v", items)
+	}
+
+	responseID := "g_collision"
+	responseCollision := convertedItemID("call", responseID, 0)
+	converted, err = GeminiResponseToResponses([]byte(fmt.Sprintf(`{
+  "responseId":%q,"modelVersion":"m",
+  "candidates":[{"content":{"role":"model","parts":[
+    {"functionCall":{"name":"generated"}},
+    {"functionCall":{"id":%q,"name":"explicit"}}
+  ]},"finishReason":"STOP"}]
+}`, responseID, responseCollision)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = json.Unmarshal(converted, &root)
+	output := root["output"].([]any)
+	generated = output[0].(map[string]any)["call_id"]
+	explicit = output[1].(map[string]any)["call_id"]
+	if generated == explicit || explicit != responseCollision {
+		t.Fatalf("response call IDs collided: %#v", output)
+	}
+}
+
+func TestGeminiOptionalCallIDAssociationIsUniqueAcrossOrderAndRounds(t *testing.T) {
+	converted, err := GeminiRequestToResponses("m", []byte(`{
+  "contents":[
+    {"role":"model","parts":[
+      {"functionCall":{"name":"echo"}},
+      {"functionCall":{"id":"call_explicit","name":"echo"}}
+    ]},
+    {"role":"user","parts":[
+      {"functionResponse":{"id":"call_explicit","name":"echo","response":{"sequence":2}}},
+      {"functionResponse":{"name":"echo","response":{"sequence":1}}}
+    ]},
+    {"role":"model","parts":[{"functionCall":{"name":"echo"}}]},
+    {"role":"user","parts":[{"functionResponse":{"name":"echo","response":{"sequence":3}}}]}
+  ]
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	_ = json.Unmarshal(converted, &root)
+	items := root["input"].([]any)
+	firstGenerated := items[0].(map[string]any)["call_id"]
+	secondGenerated := items[4].(map[string]any)["call_id"]
+	if items[2].(map[string]any)["call_id"] != "call_explicit" || items[3].(map[string]any)["call_id"] != firstGenerated {
+		t.Fatalf("reordered partial-ID results lost association: %#v", items)
+	}
+	if firstGenerated == secondGenerated || items[5].(map[string]any)["call_id"] != secondGenerated {
+		t.Fatalf("cross-round generated IDs lost association: %#v", items)
+	}
+}
+
+func TestGeminiCallIDsRejectAmbiguousOrInvalidIdentityBeforeDispatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		call      func() error
+		want      error
+		wantField string
+	}{
+		{"duplicate request id", func() error {
+			_, err := GeminiRequestToResponses("m", []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"same","name":"a"}},{"functionCall":{"id":"same","name":"b"}}]}]}`))
+			return err
+		}, ErrInvalidRequest, "contents[0].parts[1].functionCall.id"},
+		{"ambiguous same-name result", func() error {
+			_, err := GeminiRequestToResponses("m", []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"echo"}},{"functionCall":{"name":"echo"}}]},{"role":"user","parts":[{"functionResponse":{"name":"echo","response":{}}}]}]}`))
+			return err
+		}, ErrInvalidRequest, "contents[1].parts[0].functionResponse.id"},
+		{"null request id", func() error {
+			_, err := GeminiRequestToResponses("m", []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":null,"name":"echo"}}]}]}`))
+			return err
+		}, ErrInvalidRequest, "contents[0].parts[0].functionCall.id"},
+		{"empty request id", func() error {
+			_, err := GeminiRequestToResponses("m", []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"","name":"echo"}}]}]}`))
+			return err
+		}, ErrInvalidRequest, "contents[0].parts[0].functionCall.id"},
+		{"null result id", func() error {
+			_, err := GeminiRequestToResponses("m", []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"echo"}}]},{"role":"user","parts":[{"functionResponse":{"id":null,"name":"echo","response":{}}}]}]}`))
+			return err
+		}, ErrInvalidRequest, "contents[1].parts[0].functionResponse.id"},
+		{"empty result id", func() error {
+			_, err := GeminiRequestToResponses("m", []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"echo"}}]},{"role":"user","parts":[{"functionResponse":{"id":"","name":"echo","response":{}}}]}]}`))
+			return err
+		}, ErrInvalidRequest, "contents[1].parts[0].functionResponse.id"},
+		{"non-object request args", func() error {
+			_, err := GeminiRequestToResponses("m", []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"echo","args":[]}}]}]}`))
+			return err
+		}, ErrInvalidRequest, "contents[0].parts[0].functionCall.args"},
+		{"duplicate upstream id", func() error {
+			_, err := GeminiResponseToResponses([]byte(`{"responseId":"r","modelVersion":"m","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"same","name":"a"}},{"functionCall":{"id":"same","name":"b"}}]},"finishReason":"STOP"}]}`))
+			return err
+		}, ErrInvalidUpstream, "candidates[0].content.parts[1].functionCall.id"},
+		{"null upstream id", func() error {
+			_, err := GeminiResponseToResponses([]byte(`{"responseId":"r","modelVersion":"m","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":null,"name":"a"}}]},"finishReason":"STOP"}]}`))
+			return err
+		}, ErrInvalidUpstream, "candidates[0].content.parts[0].functionCall.id"},
+		{"empty upstream id", func() error {
+			_, err := GeminiResponseToResponses([]byte(`{"responseId":"r","modelVersion":"m","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"","name":"a"}}]},"finishReason":"STOP"}]}`))
+			return err
+		}, ErrInvalidUpstream, "candidates[0].content.parts[0].functionCall.id"},
+		{"non-object upstream args", func() error {
+			_, err := GeminiResponseToResponses([]byte(`{"responseId":"r","modelVersion":"m","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"a","args":[]}}]},"finishReason":"STOP"}]}`))
+			return err
+		}, ErrInvalidUpstream, "candidates[0].content.parts[0].functionCall.args"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.call()
+			if !errors.Is(err, test.want) || Field(err) != test.wantField {
+				t.Fatalf("err=%v field=%q", err, Field(err))
+			}
+		})
 	}
 }
 
