@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -351,6 +352,14 @@ func (c *backupAutomationCoordinator) Ready() bool {
 	return false
 }
 
+func (c *backupAutomationCoordinator) keyProviderReady() bool {
+	if c == nil || c.keys == nil {
+		return false
+	}
+	ready, _ := c.keys.Ready()
+	return ready
+}
+
 func (c *backupAutomationCoordinator) Running() bool {
 	if c == nil || !c.cfg.Enabled || !c.Ready() {
 		return false
@@ -669,6 +678,7 @@ func validateBackupRehearsal(ctx context.Context, base Config, dataDir string, p
 	base.InstanceID = ""
 	base.AccountRecoveryEnabled = false
 	base.ScheduledTestsEnabled = false
+	base.AutomatedBackupsEnabled = false
 	base.ExperimentalCodexMembership = false
 	if prepare != nil {
 		prepare(&base)
@@ -678,6 +688,36 @@ func validateBackupRehearsal(ctx context.Context, base Config, dataDir string, p
 		return err
 	}
 	return rehearsal.Close()
+}
+
+func resolveBackupAutomationPaths(cfg Config) (string, string) {
+	dataDir := filepath.Clean(cfg.DataDir)
+	outputDir := strings.TrimSpace(cfg.AutomatedBackupsOutputDir)
+	if outputDir == "" {
+		outputDir = dataDir + "-automated-backups"
+	}
+	keyStoreDir := strings.TrimSpace(cfg.BackupKeyProviderStoreDir)
+	if keyStoreDir == "" {
+		keyStoreDir = dataDir + "-backup-key-provider"
+	}
+	return outputDir, keyStoreDir
+}
+
+func prepareBackupRehearsalConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.Listen = "127.0.0.1:0"
+	cfg.TLSCert = ""
+	cfg.TLSKey = ""
+	cfg.AllowLoopbackUpstream = false
+	cfg.AccountRecoveryEnabled = false
+	cfg.ScheduledTestsEnabled = false
+	cfg.AutomatedBackupsEnabled = false
+	cfg.ExperimentalCodexMembership = false
+	cfg.CodexOAuthClientID = ""
+	cfg.CodexOAuthRedirectURI = ""
+	cfg.backupAutomationRehearsal = true
 }
 
 func removeBackupRehearsal(parent, target string) error {

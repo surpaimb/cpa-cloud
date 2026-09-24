@@ -45,6 +45,7 @@ type App struct {
 	scheduledTests     *scheduledTestCoordinator
 	systemProbes       *accounting.SystemProbeLedger
 	recovery           *accountRecoveryCoordinator
+	backupAutomation   *backupAutomationCoordinator
 	usage              *usageLedgerCoordinator
 	governance         *requestGovernance
 	governancePolicies *governanceManagementStore
@@ -124,6 +125,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err := migrateAccountingV2(ctx, s.db); err != nil {
 		return nil, errUsageLedgerUnavailable
 	}
+	if err := migrateBackupAutomation(ctx, s.db); err != nil {
+		return nil, fmt.Errorf("migrate backup automation: %w", err)
+	}
 	if err := app.initializeGovernance(ctx); err != nil {
 		return nil, err
 	}
@@ -163,8 +167,27 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !cfg.backupAutomationRehearsal {
+		backupOutputDir, backupKeyStoreDir := resolveBackupAutomationPaths(cfg)
+		app.backupAutomation, err = newBackupAutomationCoordinator(ctx, app, BackupAutomationConfig{
+			Enabled:                cfg.AutomatedBackupsEnabled,
+			DataDir:                cfg.DataDir,
+			OutputRoot:             backupOutputDir,
+			ProviderStoreRoot:      backupKeyStoreDir,
+			SourceVersion:          cfg.Version,
+			PrepareRehearsalConfig: prepareBackupRehearsalConfig,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 	if err := app.scheduledTests.Start(); err != nil {
 		return nil, err
+	}
+	if app.backupAutomation != nil {
+		if err := app.backupAutomation.Start(); err != nil {
+			return nil, err
+		}
 	}
 	opened = true
 	return app, nil
@@ -198,6 +221,9 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 }
 
 func (a *App) Close() error {
+	if a.backupAutomation != nil {
+		a.backupAutomation.Close()
+	}
 	if a.scheduledTests != nil {
 		a.scheduledTests.Close()
 	}
@@ -240,6 +266,7 @@ func (a *App) Handler() http.Handler {
 	a.registerSystemProbeHandlers(mux)
 	a.registerAccountRecoveryHandlers(mux)
 	a.registerScheduledTestHandlers(mux)
+	registerBackupAutomationHandlers(a, a.backupAutomation, mux)
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("POST /admin/api/v1/sessions", a.login)
 	mux.HandleFunc("DELETE /admin/api/v1/sessions", a.requireAdmin(a.logout, true))
@@ -320,7 +347,9 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"Responses resources, background execution, failover after upstream dispatch, and reliable billing-grade usage are not implemented; Messages is available only for Anthropic API-key routes",
 		"manual account tests check local credentials or catalogs; generation recovery requires both startup allowance and administrator opt-in, uses bounded synthetic prompts, and consumes upstream usage",
 		"scheduled tests, when enabled, check local credentials or model catalogs only and do not prove generation availability",
-		"backup/restore automation, production key custody, and multi-process storage are not implemented",
+		"automated backup key custody currently supports Windows current-user DPAPI only; cross-machine key recovery and object storage are not implemented",
+		"automated backups are disabled by default and require an explicit startup flag plus an administrator-configured plan",
+		"multi-process storage is not implemented",
 		"the host administrator can access runtime secrets and must protect the data directory and master key",
 		"single process and single SQLite database only",
 	}
@@ -349,6 +378,9 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"upstream_account_tests":          a.healthTests != nil,
 			"scheduled_tests_configuration":   a.scheduledTests != nil,
 			"scheduled_tests_running":         a.scheduledTests != nil && a.cfg.ScheduledTestsEnabled,
+			"automated_backups_configuration": a.backupAutomation != nil,
+			"backup_key_provider_ready":       a.backupAutomation != nil && a.backupAutomation.keyProviderReady(),
+			"automated_backups_running":       a.backupAutomation != nil && a.backupAutomation.Running(),
 			"upstream_cooldown_management":    a.accountPool != nil,
 			"account_pool_configuration":      true,
 			"account_pool_routing":            a.accountPool != nil,
