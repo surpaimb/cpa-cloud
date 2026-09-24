@@ -19,6 +19,11 @@ func (a *App) getResponseResource(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	if sourceFailure != nil {
+		writeModelError(w, sourceFailure.status, sourceFailure.code, sourceFailure.message, requestID(r.Context()))
+		return
+	}
 	view, err := a.responseResources.Get(r.Context(), auth, r.PathValue("id"), true)
 	if err != nil {
 		writeResponseResourceError(w, r, err)

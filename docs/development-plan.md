@@ -14,7 +14,7 @@ Responses 首批、Claude/Gemini API Key 原生协议、Codex 网页 OAuth 与�
 
 普通自助注册、Key 策略、套餐、订阅、充值、兑换、支付、员工门户、代理池、治理和运维扩展继续按 [功能矩阵](feature-parity-plan.md) 推进。默认内部企业模式仍关闭对外注册和商业化入口；启用商业流程前必须完成身份、金额账本、回调安全及恢复验收。严格多租户、租户域名、SSO、管理员密码重置命令和提示词/响应正文审计不在实现范围内。
 
-2026-09-25 的源码增量已把 Chat↔Responses 与 Messages↔Responses 严格文本/function SSE 转换接入显式 wire 真实执行链，并实现每 Key 客户端协议与公开模型策略、CAS 管理接口和网页。六个非流式显式 wire 方向已在 `main`；Gemini 跨协议 SSE、媒体、托管工具、有状态/后台转换、IP/CIDR、组策略、通用 TPM 上界、自助门户和真实支付仍未进入该增量。
+PR #7 已把 Chat↔Responses 文本/function SSE 转换接入显式 wire 真实执行链，PR #8 已实现每 Key 客户端协议与公开模型策略、CAS 管理接口和网页；它们均在 `main` `785f649`，不再列为待实施。2026-09-25 的最新源码增量由[Messages↔Responses SSE 与 Key 来源 IP/CIDR 契约](messages-stream-key-ip-batch-contract-2026-09-25.md)约束：两方向文本/function SSE 与真实 socket peer 来源限制已接入同一 Key policy revision/CAS；Messages→Responses 在 usage 只于终态可知时有界全流延迟，不能描述为全程实时。Gemini 跨协议 SSE、thinking/cache/media/citations、托管工具、跨协议有状态/后台转换、可信代理链、组策略、通用 TPM 上界、自助门户和真实支付均不在本批。
 
 账号换号已按[安全换号契约](account-pool-failover-contract.md)接入源码：仅允许已证明未派发的账号预检失败切换一次，进入模型执行器后禁止自动重放。公共协调器与四协议隔离进程验收已覆盖失败分类、权限/池版本重查、一条父请求、实际账号费用、429 不重放和重启撤销；完整 Go/CI 结果在[集成状态](integration-status.md)持续记录。
 

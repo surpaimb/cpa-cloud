@@ -92,6 +92,12 @@ const backgroundTasksDDL = `CREATE TABLE background_tasks (
 	CHECK((account_id IS NULL) = (account_revision IS NULL))
 )`
 
+const backgroundTaskPolicyContextsDDL = `CREATE TABLE background_task_policy_contexts (
+	task_id TEXT PRIMARY KEY NOT NULL REFERENCES background_tasks(id) ON DELETE CASCADE,
+	source_addr TEXT NOT NULL CHECK(length(source_addr) BETWEEN 1 AND 64),
+	key_policy_revision INTEGER NOT NULL CHECK(key_policy_revision BETWEEN 1 AND 9007199254740991)
+)`
+
 const managedToolRunsDDL = `CREATE TABLE managed_tool_runs (
 	id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
 	response_id TEXT NOT NULL REFERENCES response_resources(id) ON DELETE RESTRICT,
@@ -119,14 +125,15 @@ const backgroundTasksQueueIndexDDL = `CREATE INDEX background_tasks_queue_idx ON
 const managedToolRunsResponseIndexDDL = `CREATE INDEX managed_tool_runs_response_idx ON managed_tool_runs(response_id,created_at,id)`
 
 var responseResourceSchemaObjects = map[string]string{
-	"response_resources":             responseResourcesDDL,
-	"response_resource_items":        responseResourceItemsDDL,
-	"background_tasks":               backgroundTasksDDL,
-	"managed_tool_runs":              managedToolRunsDDL,
-	"response_resources_owner_idx":   responseResourcesOwnerIndexDDL,
-	"response_resources_expiry_idx":  responseResourcesExpiryIndexDDL,
-	"background_tasks_queue_idx":     backgroundTasksQueueIndexDDL,
-	"managed_tool_runs_response_idx": managedToolRunsResponseIndexDDL,
+	"response_resources":              responseResourcesDDL,
+	"response_resource_items":         responseResourceItemsDDL,
+	"background_tasks":                backgroundTasksDDL,
+	"background_task_policy_contexts": backgroundTaskPolicyContextsDDL,
+	"managed_tool_runs":               managedToolRunsDDL,
+	"response_resources_owner_idx":    responseResourcesOwnerIndexDDL,
+	"response_resources_expiry_idx":   responseResourcesExpiryIndexDDL,
+	"background_tasks_queue_idx":      backgroundTasksQueueIndexDDL,
+	"managed_tool_runs_response_idx":  managedToolRunsResponseIndexDDL,
 }
 
 func migrateResponseResources(ctx context.Context, db *sql.DB) error {
@@ -142,6 +149,7 @@ func migrateResponseResources(ctx context.Context, db *sql.DB) error {
 		responseResourcesDDL,
 		responseResourceItemsDDL,
 		backgroundTasksDDL,
+		backgroundTaskPolicyContextsDDL,
 		managedToolRunsDDL,
 		responseResourcesOwnerIndexDDL,
 		responseResourcesExpiryIndexDDL,
@@ -182,10 +190,11 @@ func validateResponseResourceSchema(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	for table, indexes := range map[string]map[string]bool{
-		"response_resources":      {"response_resources_owner_idx": true, "response_resources_expiry_idx": true},
-		"response_resource_items": {},
-		"background_tasks":        {"background_tasks_queue_idx": true},
-		"managed_tool_runs":       {"managed_tool_runs_response_idx": true},
+		"response_resources":              {"response_resources_owner_idx": true, "response_resources_expiry_idx": true},
+		"response_resource_items":         {},
+		"background_tasks":                {"background_tasks_queue_idx": true},
+		"background_task_policy_contexts": {},
+		"managed_tool_runs":               {"managed_tool_runs_response_idx": true},
 	} {
 		rows, err := tx.QueryContext(ctx, `PRAGMA index_list(`+table+`)`)
 		if err != nil {

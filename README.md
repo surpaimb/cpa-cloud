@@ -10,8 +10,8 @@
 
 | 已实现 | 尚未实现或验证 |
 | --- | --- |
-| 网页后台、管理员会话、员工启停、模型权限 | 多租户、SSO、管理员密码重置命令 |
-| 一人多个 Key、默认永久有效、可选到期、撤销；源码提供 Codex 网页授权和自动刷新 | Claude/Gemini 会员接入及真实账号验证 |
+| 网页后台、管理员会话、员工启停、模型权限 | 明确排除：多租户、员工 SSO、管理员密码重置命令 |
+| 一人多个 Key、默认永久有效、可选到期、撤销、独立协议/公开模型及真实 socket peer IP/CIDR 策略；源码提供 Codex 网页授权和自动刷新 | 可信代理链、Claude/Gemini 会员接入及真实账号验证 |
 | OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路；显式 Chat↔Responses 与 Messages↔Responses 文本/function SSE 转换 | Messages→Responses 在 usage 仅终态可知时有界全流延迟；Gemini SSE 和未列出的协议字段仍不支持 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
 | 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE；默认关闭的加密有状态资源与后台任务 | 托管工具、后台流续传/游标与完整客户端兼容性 |
@@ -102,7 +102,7 @@ RPM 使用滚动 60 秒窗口；修改策略不会清空原窗口。Chat、Respo
 
 治理组独立于部门和上游账号组，不能扩大模型权限或恢复已撤销 Key。网络中断后先核对原保存操作；版本冲突时读取最新配置并确认后再保存。**Shadow TPM 和成本不限制请求或扣费。** 最新源码新增默认关闭的独立硬预算开关：治理与预算开关都开启、策略为 `deny_unknown` 时才预留并限制请求。
 
-最新源码另提供 `/admin/api/v1/budgets` 与网页 selector-aware 通用预算：employee、Key、治理组可再按协议和公开模型收窄，多条命中策略取最严格结果。策略框架和额度窗口已通用化，但安全上界证明目前仍只覆盖官方 OpenAI `gpt-4.1-2025-04-14` 的固定参数文本非流式请求；其他模型、工具、会员和 SSE 请求在 strict `deny_unknown` 下会因无法证明上界而拒绝。成本限制还要求实际上游模型配置同币种价格。未知用量保守保留上界，不充作零，也不是供应商账单保证。集成证据和后续范围见[预算进度](docs/budget-service-integration-progress.md)；未包含在 preview.3 下载包中。租户限额不在本轮范围。
+最新源码另提供 `/admin/api/v1/budgets` 与网页 selector-aware 通用预算：employee、Key、治理组可再按协议和公开模型收窄，多条命中策略取最严格结果。策略框架和额度窗口已通用化，但安全上界证明目前仍只覆盖官方 OpenAI `gpt-4.1-2025-04-14` 的固定参数文本非流式请求；其他模型、工具、会员和 SSE 请求在 strict `deny_unknown` 下会因无法证明上界而拒绝。成本限制还要求实际上游模型配置同币种价格。未知用量保守保留上界，不充作零，也不是供应商账单保证。集成证据和后续范围见[预算进度](docs/budget-service-integration-progress.md)；未包含在 preview.3 下载包中。严格多租户由用户明确排除。
 
 <details>
 <summary>固定模型预算实验的请求条件</summary>

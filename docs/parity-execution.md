@@ -18,14 +18,14 @@
 
 每项必须分开记录“提交存在”“已集成”“模拟验收”“真实供应商验证”。本批只用合成凭据与隔离测试数据，不读取真实账号。
 
-## 2026-09-25 下一执行批次
+## 2026-09-25 当前执行批次
 
-账号池、请求/尝试账本、版本化成本、固定模型预算、余额与日/月结算首批、管理计费网页、加密备份恢复材料，以及 Chat↔Responses、Messages↔Responses、Gemini↔Responses 六个非流式显式 wire 方向均已进入上述主线基线。它们各自的限制仍以[集成状态](integration-status.md)为准；模拟验收不等于真实供应商、真实第二环境恢复或生产支付验收。
+账号池、请求/尝试账本、版本化成本、固定模型预算、余额与日/月结算首批、管理计费网页、加密备份恢复材料、六个非流式显式 wire 方向、Chat↔Responses SSE，以及每 Key 公共入口协议/公开模型策略均已进入 `785f649` 主线基线。它们各自的限制仍以[集成状态](integration-status.md)为准；模拟验收不等于真实供应商、真实第二环境恢复或生产支付验收。
 
-本轮只并行推进两项，完整字段、事务点和文件所有权见[流式与 Key 策略批次契约](stream-key-policy-batch-contract-2026-09-25.md)：
+本轮源码已接入两项，完整字段、事务点和文件所有权见[Messages↔Responses SSE 与 Key 来源 IP/CIDR 契约](messages-stream-key-ip-batch-contract-2026-09-25.md)：
 
-1. 将已有 Chat↔Responses 文本/function SSE 状态机接到显式 wire 的真实执行链，严格限制读取、提交、取消和终止语义。Messages/Gemini 跨协议 SSE、媒体、托管工具以及有状态/后台转换不在本轮范围。
-2. 交付 KEY-02 首批：每 Key 客户端协议策略与公开模型 allowlist、CAS 管理接口和管理网页。最终可用集合是员工策略、Key 策略与当前全局有效路由的交集；IP/CIDR、组策略、通用 TPM 上界、自助门户及真实支付仍属后续工作。
+1. 在已验收 Chat↔Responses SSE 上增加 Messages↔Responses 两方向文本/function SSE；usage 只在终态可知的 Messages→Responses 路径为有界全流延迟，不属于生成期间实时。Gemini 跨协议 SSE、thinking/cache/media/citations、托管工具以及跨协议有状态/后台转换不在本轮。
+2. 为同一个 Key policy revision/CAS 增加真实 socket peer IP/CIDR 限制。所有 forwarding header 均不可信；可信代理链、组策略、通用 TPM 上界、自助门户及真实支付仍属后续工作。
 
 仅明确安全且尚未输出的请求可按策略重试或换号，不重放执行结果不确定的请求；流式输出开始后不换号。计数区分请求和尝试，未知用量保留为空。
 
