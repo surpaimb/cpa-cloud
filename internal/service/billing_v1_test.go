@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -112,6 +113,15 @@ func TestBillingV1AdjustmentBalanceIdempotencyAndIsolation(t *testing.T) {
 	status, _, _ = accountingV2Request(t, server.URL+"/admin/api/v1/billing/entries", nil, nil, "", "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("entries without admin status=%d", status)
+	}
+}
+
+func TestParseBillingEntriesQueryRejectsMalformedRawQuery(t *testing.T) {
+	for _, rawQuery := range []string{"employee_id=%ZZ", "employee_id=%", "employee_id=one;currency=USD"} {
+		request := &http.Request{URL: &url.URL{RawQuery: rawQuery}}
+		if _, ok := parseBillingEntriesQuery(request); ok {
+			t.Fatalf("malformed raw query %q was accepted", rawQuery)
+		}
 	}
 }
 

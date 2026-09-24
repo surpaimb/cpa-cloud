@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -116,7 +117,10 @@ func parseBillingOwnerQuery(r *http.Request) (financial.Owner, string, bool) {
 }
 
 func parseBillingEntriesQuery(r *http.Request) (financial.EntryFilter, bool) {
-	query := r.URL.Query()
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return financial.EntryFilter{}, false
+	}
 	allowed := map[string]bool{
 		"owner_kind": true, "employee_id": true, "key_id": true,
 		"resource_kind": true, "resource_id": true, "account_id": true,
