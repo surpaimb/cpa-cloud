@@ -293,21 +293,53 @@ func TestExplicitWireCancellationPropagatesAndSettlesSharedLedgers(t *testing.T)
 	}
 }
 
-func TestExplicitCrossProtocolStreamRejectsBeforeDispatch(t *testing.T) {
+func TestExplicitCrossProtocolStreamDispatchesOnce(t *testing.T) {
 	var calls atomic.Int32
-	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r\",\"created_at\":1,\"model\":\"actual-model\"}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg\",\"type\":\"message\",\"status\":\"in_progress\",\"role\":\"assistant\",\"content\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"sequence_number\":2,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"sequence_number\":4,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"text\":\"ok\"}\n\n")
+		_, _ = io.WriteString(w, "event: response.content_part.done\ndata: {\"type\":\"response.content_part.done\",\"sequence_number\":5,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":6,\"output_index\":0,\"item\":{\"id\":\"msg\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":7,\"response\":{\"id\":\"r\",\"object\":\"response\",\"created_at\":1,\"model\":\"actual-model\",\"status\":\"completed\",\"output\":[{\"id\":\"msg\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}]}}\n\n")
+	}))
 	response := employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/chat/completions", `{"model":"wire-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`, fixture.key.Key, context.Background())
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", response.StatusCode, readBody(response))
+	body := readBody(response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"content":"ok"`) || !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
 	}
 	response.Body.Close()
-	if calls.Load() != 0 {
+	if calls.Load() != 1 {
 		t.Fatalf("cross-protocol stream dispatched %d upstream requests", calls.Load())
 	}
 	var attempts int
-	if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempt_contexts`).Scan(&attempts); err != nil || attempts != 0 {
+	if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempt_contexts`).Scan(&attempts); err != nil || attempts != 1 {
 		t.Fatalf("attempts=%d err=%v", attempts, err)
 	}
+}
+
+func TestExplicitResponsesToChatStreamDispatchesOnce(t *testing.T) {
+	var calls atomic.Int32
+	fixture := newExplicitWireFixture(t, string(wireProtocolOpenAIChat), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"actual-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	response := employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/responses", `{"model":"wire-model","stream":true,"input":"hi"}`, fixture.key.Key, context.Background())
+	body := readBody(response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "response.output_text.delta") || !strings.Contains(body, "response.completed") {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	response.Body.Close()
+	if calls.Load() != 1 {
+		t.Fatalf("cross-protocol stream dispatched %d upstream requests", calls.Load())
+	}
+	assertSingleWireAttempt(t, fixture.app, "openai-chat-completions")
 }
 
 func TestExplicitWireRateLimitPreservesRetryAfter(t *testing.T) {

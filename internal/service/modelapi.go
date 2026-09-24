@@ -304,7 +304,11 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if conversion != nil {
-		a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, modelRequestID, chatMaxJSON, nil)
+		if stream {
+			a.handleConvertedModelSSE(w, r, conversion, upstreamReq, client, modelRequestID)
+		} else {
+			a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, modelRequestID, chatMaxJSON, nil)
+		}
 		return
 	}
 	response, err := client.Do(upstreamReq)

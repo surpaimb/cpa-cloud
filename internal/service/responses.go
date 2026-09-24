@@ -273,7 +273,11 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if conversion != nil {
-		a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, reqID, responsesMaxResponse, persist)
+		if stream {
+			a.handleConvertedModelSSE(w, r, conversion, upstreamReq, client, reqID)
+		} else {
+			a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, reqID, responsesMaxResponse, persist)
+		}
 		return
 	}
 	a.handleAPIKeyResponses(w, r, upstreamReq, stream, reqID, client, persist)

@@ -8,10 +8,11 @@ import (
 // PreparedRequest freezes the protocol plan and serialized upstream body that
 // must be proved by budget admission before dispatch.
 type PreparedRequest struct {
-	Plan     Plan
-	Model    string
-	Body     []byte
-	Features FeatureSet
+	Plan      Plan
+	Model     string
+	Body      []byte
+	Features  FeatureSet
+	Streaming bool
 }
 
 // PrepareRequest selects a named conversion, validates all supported request
@@ -59,6 +60,58 @@ func PrepareRequest(capability RouteCapability, model string, raw []byte) (Prepa
 		return PreparedRequest{}, err
 	}
 	prepared.Features |= Features(FeatureUsage, FeatureFinishReason)
+	if err := requireFeatures(capability, prepared.Features); err != nil {
+		return PreparedRequest{}, err
+	}
+	return prepared, nil
+}
+
+// PrepareCrossProtocolStreamRequest prepares the exact upstream request body
+// for the independently reviewed Chat <-> Responses streaming bridge. The
+// production JSON runtime deliberately does not call this function: callers
+// must provide the bounded stream executor and durable dispatch barrier before
+// opting into this path.
+func PrepareCrossProtocolStreamRequest(capability RouteCapability, model string, raw []byte) (PreparedRequest, error) {
+	if !capability.RequestStreaming || !capability.Streaming {
+		return PreparedRequest{}, &UnsupportedRouteError{
+			ClientProtocol: capability.ClientProtocol, UpstreamProtocol: capability.UpstreamProtocol,
+			Reason: "cross-protocol streaming requires an explicit streaming route",
+		}
+	}
+	plan := Plan{ClientProtocol: capability.ClientProtocol, UpstreamProtocol: capability.UpstreamProtocol}
+	switch {
+	case capability.ClientProtocol == ProtocolOpenAIChat && capability.UpstreamProtocol == ProtocolOpenAIResponses:
+		plan.Kind = PlanChatToResponses
+	case capability.ClientProtocol == ProtocolOpenAIResponses && capability.UpstreamProtocol == ProtocolOpenAIChat:
+		plan.Kind = PlanResponsesToChat
+	default:
+		return PreparedRequest{}, &UnsupportedRouteError{
+			ClientProtocol: capability.ClientProtocol, UpstreamProtocol: capability.UpstreamProtocol,
+			Reason: "cross-protocol streaming is not enabled for this route",
+		}
+	}
+	if !bodyRequestsStreaming(raw, capability.ClientProtocol) {
+		return PreparedRequest{}, invalid("stream", "true is required for cross-protocol streaming")
+	}
+	conversionInput := raw
+	var err error
+	if model != "" {
+		conversionInput, err = replaceRequestModel(raw, model)
+		if err != nil {
+			return PreparedRequest{}, err
+		}
+	}
+	prepared := PreparedRequest{Plan: plan, Model: model, Streaming: true}
+	switch plan.Kind {
+	case PlanChatToResponses:
+		prepared.Body, err = ChatRequestToResponses(conversionInput)
+	case PlanResponsesToChat:
+		prepared.Body, err = ResponsesRequestToChat(conversionInput)
+	}
+	if err != nil {
+		return PreparedRequest{}, err
+	}
+	prepared.Features = requestFeatures(conversionInput) | Features(FeatureUsage, FeatureFinishReason)
 	if err := requireFeatures(capability, prepared.Features); err != nil {
 		return PreparedRequest{}, err
 	}

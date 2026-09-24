@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -253,6 +254,73 @@ func TestNonBudgetDispatchBarrierSerializesRevisionThroughDurableMarker(t *testi
 		t.Fatalf("durable dispatch markers=%d err=%v", dispatches, err)
 	}
 	a.finishRequest(requestID(ctx), "cancelled", 0)
+}
+
+func TestCrossProtocolStreamDispatchRejectsStaleKeyPolicyRevisionAndABA(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		aba  bool
+	}{{name: "stale_revision"}, {name: "aba", aba: true}} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRuntimeFixture(t, &runtimeSequenceRandom{}, time.Minute, 4)
+			a := f.base.app
+			a.accountPool.Close()
+			a.accountPool = f.rt
+			f.insertAccount(t, "ups_key_policy_stream", true)
+			f.insertModelPool(t, "key-policy-stream-model", "ups_key_policy_stream", 1, modelAccountView{
+				UpstreamID: "ups_key_policy_stream", UpstreamModel: "actual-model", Priority: 1, Weight: 1, MaxConcurrency: 1,
+			})
+			if _, err := a.store.db.Exec(`UPDATE models SET wire_protocol='openai-responses' WHERE id='key-policy-stream-model'`); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := context.WithValue(context.Background(), requestIDKey{}, "request-key-policy-stream-"+test.name)
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)).WithContext(ctx)
+			selected, lease, failed := a.prepareModelRoute(r, f.auth1, "key-policy-stream-model", []string{"openai-compatible"}, accounting.ProtocolOpenAIChatCompletions, true, func(_ *http.Request, selected route) (route, *modelPreflightError) {
+				return selected, nil
+			})
+			if failed != nil || lease == nil {
+				t.Fatalf("prepare failed=%+v lease=%v", failed, lease)
+			}
+			defer a.releaseModelLease(lease, requestID(ctx), true)
+
+			now := time.Now().UTC()
+			stored, err := keypolicy.Replace(ctx, a.store.db, f.auth1.KeyID, 1, keypolicy.Replacement{
+				ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
+				ModelMode: keypolicy.ModeAll, Models: []string{},
+			}, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.aba {
+				stored, err = keypolicy.Replace(ctx, a.store.db, f.auth1.KeyID, stored.Revision, keypolicy.Replacement{
+					ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
+					ModelMode: keypolicy.ModeAll, Models: []string{},
+				}, now.Add(time.Nanosecond))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stored.Revision != 3 || !keypolicy.Allows(stored, keypolicy.ProtocolOpenAIChat, "key-policy-stream-model") {
+					t.Fatalf("ABA policy=%+v", stored)
+				}
+			}
+
+			var upstreamCalls atomic.Int32
+			a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				upstreamCalls.Add(1)
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+			})}
+			client, failure := a.dispatchModelRoute(r, f.auth1, "key-policy-stream-model", selected, lease, true)
+			if client != nil || failure == nil {
+				t.Fatalf("stale key policy dispatched client=%v failure=%+v", client, failure)
+			}
+			assertDispatchAttemptCount(t, a, requestID(ctx), 0)
+			if upstreamCalls.Load() != 0 {
+				t.Fatalf("stale key policy made %d upstream calls", upstreamCalls.Load())
+			}
+			a.finishRequest(requestID(ctx), "failed", 0)
+		})
+	}
 }
 
 func TestFinalDispatchCancellationAcrossHTTPProtocols(t *testing.T) {

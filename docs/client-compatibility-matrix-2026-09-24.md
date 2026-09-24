@@ -53,7 +53,7 @@ Gemini 两侧的正向工具回合均省略 `functionCall` / `functionResponse` 
 
 可靠用量按实际 Wire 记录，不按员工响应格式猜测。上游不返回 usage 时四类 Token 均保持未知；OpenAI Chat/Responses 仅能独立证明 output 时，input/cache 保持未知；Messages 的 input/output 可分别证明；Gemini 在缺 `cachedContentTokenCount` 时 input/cache-read 保持未知、output 已知，而 generateContent 不存在的 cache-write 类别记为已知 `0`。员工 Key 未出现在任何上游请求。
 
-跨协议 SSE 仍未实现。六条原始协议流请求都返回明确 `400`，且上游调用和 attempt 都是 `0`。未经修改的三个 CLI 也分别实测了实际请求形状：Codex `/v1/responses`（含 `function`、`namespace`、`web_search` 工具类型）、Claude `/v1/messages`、Gemini `:streamGenerateContent`。捕获代理只保留安全响应元数据，并核实 CPA 分别返回 Codex `400/unsupported_feature`、Claude `400/invalid_request_error`、Gemini `400/INVALID_ARGUMENT`，三者均被固定分类为 `route_not_representable`；因此非零退出确由跨协议流路由拒绝产生，而不是鉴权或其他字段提前失败。三者仍为 `0` 上游调用、`0` attempt。parent 可能在预检拒绝前创建，也可能不创建，因此验收不把 parent 数固定为安全边界。
+本节记录的 2026-09-24 二进制尚未实现跨协议 SSE：六条原始协议流请求都返回明确 `400`，且上游调用和 attempt 都是 `0`。未经修改的三个 CLI 也分别实测了实际请求形状：Codex `/v1/responses`（含 `function`、`namespace`、`web_search` 工具类型）、Claude `/v1/messages`、Gemini `:streamGenerateContent`。捕获代理只保留安全响应元数据，并核实 CPA 分别返回 Codex `400/unsupported_feature`、Claude `400/invalid_request_error`、Gemini `400/INVALID_ARGUMENT`，三者均被固定分类为 `route_not_representable`；因此非零退出确由跨协议流路由拒绝产生，而不是鉴权或其他字段提前失败。三者仍为 `0` 上游调用、`0` attempt。parent 可能在预检拒绝前创建，也可能不创建，因此验收不把 parent 数固定为安全边界。2026-09-25 后续源码只新增 Chat Completions ↔ Responses 两个文本 SSE 方向，边界和独立证据见[流式转换契约](chat-responses-stream-contract-2026-09-25.md)；本历史矩阵的原结果不据此改写。
 
 同一最终二进制又运行了实际客户端的 `--scope core` 原生/`legacy-native` 回归：Codex、Claude、Gemini 文本 SSE 全部 PASS；Codex 两请求 `get_goal`、Claude 三请求（含一次辅助请求）MCP `echo`、Gemini 两请求 `read_file` 工具回合全部 PASS。专项过程中曾发现 provider-managed tools 被生命周期校验过早拒绝、导致 Codex 原生流零派发的回归；`13b3612` 将该校验限制到服务拥有的 stateful/background/previous 生命周期，恢复无状态原生透明转发，同时保持跨协议和有状态请求失败关闭。
 
