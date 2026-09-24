@@ -45,6 +45,7 @@ type modelAccountView struct {
 	Weight         int     `json:"weight"`
 	MaxConcurrency int     `json:"max_concurrency"`
 	ChannelID      *string `json:"channel_id"`
+	WireProtocol   *string `json:"wire_protocol,omitempty"`
 }
 
 type modelAccountsView struct {
@@ -109,6 +110,7 @@ func (s *store) migrateAccountPools(ctx context.Context) error {
 			model_id TEXT NOT NULL REFERENCES model_account_pool_configs(model_id) ON DELETE CASCADE,
 			upstream_id TEXT NOT NULL REFERENCES upstreams(id),
 			upstream_model TEXT NOT NULL,
+			wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content')),
 			priority INTEGER NOT NULL CHECK(priority BETWEEN -1000000 AND 1000000),
 			weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 10000),
 			max_concurrency INTEGER NOT NULL CHECK(max_concurrency BETWEEN 1 AND 1024),
@@ -140,6 +142,15 @@ func (s *store) migrateAccountPools(ctx context.Context) error {
 			return err
 		}
 	}
+	poolSchema, err := schemaColumns(ctx, tx, modelPoolRouteTable)
+	if err != nil {
+		return err
+	}
+	if _, ok := poolSchema["wire_protocol"]; !ok {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE model_account_pool_routes ADD COLUMN wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))`); err != nil {
+			return err
+		}
+	}
 	type tableRequirement struct {
 		columns   []string
 		fragments []string
@@ -158,13 +169,14 @@ func (s *store) migrateAccountPools(ctx context.Context) error {
 			fragments: []string{"references models(id) on delete cascade", "check(revision >= 1)"},
 		},
 		modelPoolRouteTable: {
-			columns: []string{"model_id", "upstream_id", "upstream_model", "priority", "weight", "max_concurrency", "channel_id", "position"},
+			columns: []string{"model_id", "upstream_id", "upstream_model", "wire_protocol", "priority", "weight", "max_concurrency", "channel_id", "position"},
 			fragments: []string{
 				"references model_account_pool_configs(model_id) on delete cascade",
 				"references upstreams(id)",
 				"references account_channels(id) on delete set null",
 				"primary key(model_id, upstream_id)",
 				"unique(model_id, position)",
+				"check(wire_protocol in ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))",
 			},
 		},
 		accountPoolAuditTable: {
@@ -536,8 +548,38 @@ func (a *App) putModelAccounts(w http.ResponseWriter, r *http.Request, session a
 		writeAccountPoolRevisionError(w)
 		return
 	}
-	var provider string
-	for _, item := range input.Items {
+	existingWire := make(map[string]string)
+	if current == 0 {
+		var upstreamID, wire string
+		if err := tx.QueryRowContext(r.Context(), `SELECT upstream_id,wire_protocol FROM models WHERE id=?`, r.PathValue("id")).Scan(&upstreamID, &wire); err != nil {
+			writeAccountPoolStorageError(w)
+			return
+		}
+		existingWire[upstreamID] = wire
+	} else {
+		rows, err := tx.QueryContext(r.Context(), `SELECT upstream_id,wire_protocol FROM model_account_pool_routes WHERE model_id=?`, r.PathValue("id"))
+		if err != nil {
+			writeAccountPoolStorageError(w)
+			return
+		}
+		for rows.Next() {
+			var upstreamID, wire string
+			if err := rows.Scan(&upstreamID, &wire); err != nil {
+				rows.Close()
+				writeAccountPoolStorageError(w)
+				return
+			}
+			existingWire[upstreamID] = wire
+		}
+		iterationErr, closeErr := rows.Err(), rows.Close()
+		if iterationErr != nil || closeErr != nil {
+			writeAccountPoolStorageError(w)
+			return
+		}
+	}
+	var provider, poolWire string
+	for index := range input.Items {
+		item := &input.Items[index]
 		var itemProvider string
 		if err := tx.QueryRowContext(r.Context(), `SELECT provider_kind FROM upstreams WHERE id=? AND archived=0`, item.UpstreamID).Scan(&itemProvider); errors.Is(err, sql.ErrNoRows) {
 			writeAdminError(w, http.StatusBadRequest, "invalid_request", "Model account configuration refers to an unknown upstream.")
@@ -554,10 +596,27 @@ func (a *App) putModelAccounts(w http.ResponseWriter, r *http.Request, session a
 			writeAdminError(w, http.StatusBadRequest, "invalid_request", "Invalid upstream model name.")
 			return
 		}
+		wire := string(wireProtocolLegacyNative)
+		if item.WireProtocol != nil {
+			wire = strings.TrimSpace(*item.WireProtocol)
+		} else if saved, ok := existingWire[item.UpstreamID]; ok {
+			wire = saved
+		}
+		if !validRouteWireProtocol(wire) || !providerSupportsWire(itemProvider, wire) {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request", "The wire protocol is not supported by that provider.")
+			return
+		}
+		item.WireProtocol = &wire
 		if provider == "" {
 			provider = itemProvider
 		} else if provider != itemProvider {
 			writeAdminError(w, http.StatusBadRequest, "provider_mismatch", "All accounts in a model pool must use the same provider kind.")
+			return
+		}
+		if poolWire == "" {
+			poolWire = wire
+		} else if poolWire != wire {
+			writeAdminError(w, http.StatusBadRequest, "wire_protocol_mismatch", "All accounts in a model pool must use the same wire protocol.")
 			return
 		}
 		if item.ChannelID != nil {
@@ -598,7 +657,7 @@ func (a *App) putModelAccounts(w http.ResponseWriter, r *http.Request, session a
 		}
 	}
 	for position, item := range input.Items {
-		if _, err := tx.ExecContext(r.Context(), `INSERT INTO model_account_pool_routes(model_id,upstream_id,upstream_model,priority,weight,max_concurrency,channel_id,position) VALUES(?,?,?,?,?,?,?,?)`, r.PathValue("id"), item.UpstreamID, item.UpstreamModel, item.Priority, item.Weight, item.MaxConcurrency, nullableString(item.ChannelID), position); err != nil {
+		if _, err := tx.ExecContext(r.Context(), `INSERT INTO model_account_pool_routes(model_id,upstream_id,upstream_model,wire_protocol,priority,weight,max_concurrency,channel_id,position) VALUES(?,?,?,?,?,?,?,?,?)`, r.PathValue("id"), item.UpstreamID, item.UpstreamModel, *item.WireProtocol, item.Priority, item.Weight, item.MaxConcurrency, nullableString(item.ChannelID), position); err != nil {
 			writeAccountPoolStorageError(w)
 			return
 		}
@@ -618,9 +677,11 @@ func (a *App) putModelAccounts(w http.ResponseWriter, r *http.Request, session a
 func loadModelAccounts(ctx context.Context, tx *sql.Tx, modelID string) (modelAccountsView, error) {
 	var legacy modelAccountView
 	var provider string
-	if err := tx.QueryRowContext(ctx, `SELECT m.upstream_id,m.upstream_model,u.provider_kind FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=?`, modelID).Scan(&legacy.UpstreamID, &legacy.UpstreamModel, &provider); err != nil {
+	var legacyWire string
+	if err := tx.QueryRowContext(ctx, `SELECT m.upstream_id,m.upstream_model,m.wire_protocol,u.provider_kind FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=?`, modelID).Scan(&legacy.UpstreamID, &legacy.UpstreamModel, &legacyWire, &provider); err != nil {
 		return modelAccountsView{}, err
 	}
+	legacy.WireProtocol = &legacyWire
 	view := modelAccountsView{ModelID: modelID, Items: []modelAccountView{legacy}}
 	legacy.Weight = 1
 	legacy.MaxConcurrency = 1
@@ -632,7 +693,7 @@ func loadModelAccounts(ctx context.Context, tx *sql.Tx, modelID string) (modelAc
 	if err != nil {
 		return modelAccountsView{}, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT upstream_id,upstream_model,priority,weight,max_concurrency,channel_id FROM model_account_pool_routes WHERE model_id=? ORDER BY position LIMIT ?`, modelID, maxModelAccounts+1)
+	rows, err := tx.QueryContext(ctx, `SELECT upstream_id,upstream_model,wire_protocol,priority,weight,max_concurrency,channel_id FROM model_account_pool_routes WHERE model_id=? ORDER BY position LIMIT ?`, modelID, maxModelAccounts+1)
 	if err != nil {
 		return modelAccountsView{}, err
 	}
@@ -644,9 +705,11 @@ func loadModelAccounts(ctx context.Context, tx *sql.Tx, modelID string) (modelAc
 		}
 		var item modelAccountView
 		var channelID sql.NullString
-		if err := rows.Scan(&item.UpstreamID, &item.UpstreamModel, &item.Priority, &item.Weight, &item.MaxConcurrency, &channelID); err != nil {
+		var wire string
+		if err := rows.Scan(&item.UpstreamID, &item.UpstreamModel, &wire, &item.Priority, &item.Weight, &item.MaxConcurrency, &channelID); err != nil {
 			return modelAccountsView{}, err
 		}
+		item.WireProtocol = &wire
 		item.ChannelID = nullString(channelID)
 		view.Items = append(view.Items, item)
 	}

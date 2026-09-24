@@ -11,11 +11,15 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/protocolconv"
 )
 
 func (a *App) backgroundResponseProvider(ctx context.Context, model string) (string, error) {
 	var provider string
-	err := a.store.db.QueryRowContext(ctx, `SELECT u.provider_kind FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND u.enabled=1 AND u.archived=0 AND NOT EXISTS(SELECT 1 FROM model_account_pool_configs c WHERE c.model_id=m.id)`, model).Scan(&provider)
+	var wire routeWireProtocol
+	err := a.store.db.QueryRowContext(ctx, `SELECT u.provider_kind,m.wire_protocol FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND u.enabled=1 AND u.archived=0 AND NOT EXISTS(SELECT 1 FROM model_account_pool_configs c WHERE c.model_id=m.id)`, model).Scan(&provider, &wire)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", errResponseResourceForbidden
@@ -23,6 +27,10 @@ func (a *App) backgroundResponseProvider(ctx context.Context, model string) (str
 		return "", errResponseResourceUnavailable
 	}
 	if provider != "openai-compatible" && provider != codexMembershipProvider {
+		return "", errResponseResourceForbidden
+	}
+	upstream, err := routeUpstreamProtocol(route{ProviderKind: provider, WireProtocol: wire}, accounting.ProtocolOpenAIResponses)
+	if err != nil || upstream != protocolconv.ProtocolOpenAIResponses {
 		return "", errResponseResourceForbidden
 	}
 	return provider, nil

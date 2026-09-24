@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"crypto/subtle"
 	"database/sql"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/protocolconv"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -28,6 +28,7 @@ type route struct {
 	UpstreamModel   string
 	Ciphertext      []byte
 	ProviderKind    string
+	WireProtocol    routeWireProtocol
 	Revision        int64
 	CredentialState sql.NullString
 	KeyVersion      int
@@ -178,6 +179,7 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer guard.Close()
 	var upstreamReq *http.Request
 	var codexPrepared *codexChatPreflight
+	var conversion *protocolRuntime
 	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider}, accounting.ProtocolOpenAIChatCompletions, true, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {
 		if candidate.ProviderKind == codexMembershipProvider {
 			prepared, failed := a.prepareCodexChatCompletion(candidateRequest.Context(), payload, candidate)
@@ -207,11 +209,30 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
 		}
-		target, err := upstreamChatURL(endpoint)
+		capability, err := routeCapability(candidate, accounting.ProtocolOpenAIChatCompletions, stream)
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
 		}
-		prepared, err := http.NewRequestWithContext(candidateRequest.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
+		preparedRuntime, err := prepareProtocolRuntime(capability, candidate.UpstreamModel, outgoing)
+		if err != nil {
+			if protocolconv.IsUnsupportedRoute(err) {
+				return route{}, requestPreflightFailure(http.StatusBadRequest, "unsupported_feature", "This request cannot be represented by the selected route.")
+			}
+			return route{}, requestPreflightFailure(http.StatusBadRequest, "invalid_request_error", "Invalid request.")
+		}
+		var target string
+		switch preparedRuntime.plan().UpstreamProtocol {
+		case protocolconv.ProtocolOpenAIChat:
+			target, err = upstreamChatURL(endpoint)
+		case protocolconv.ProtocolOpenAIResponses:
+			target, err = upstreamResponsesURL(endpoint)
+		default:
+			err = errors.New("unsupported OpenAI wire protocol")
+		}
+		if err != nil {
+			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		prepared, err := preparedRuntime.newRequest(candidateRequest.Context(), http.MethodPost, target, http.Header{})
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "upstream_unavailable", "Upstream is unavailable.", scheduling.FailurePermanent)
 		}
@@ -223,6 +244,9 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			prepared.Header.Set("Accept", "application/json")
 		}
 		upstreamReq = prepared
+		if preparedRuntime.plan().Kind != protocolconv.PlanNative {
+			conversion = preparedRuntime
+		}
 		return candidate, nil
 	})
 	if failure != nil {
@@ -251,6 +275,10 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if codexPrepared != nil {
 		a.handleCodexChatCompletion(w, r, model, stream, codexPrepared, modelRequestID)
+		return
+	}
+	if conversion != nil {
+		a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, modelRequestID, chatMaxJSON, nil)
 		return
 	}
 	response, err := client.Do(upstreamReq)

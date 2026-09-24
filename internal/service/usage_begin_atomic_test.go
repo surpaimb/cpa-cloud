@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cpacloud.local/server/internal/accounting"
 )
 
 func TestUsageRequestStartAtomicRollbackAndRetry(t *testing.T) {
@@ -25,7 +27,7 @@ func TestUsageRequestStartAtomicRollbackAndRetry(t *testing.T) {
 			if _, err := a.store.db.Exec(`CREATE TRIGGER reject_atomic_begin BEFORE INSERT ON ` + table + ` BEGIN SELECT RAISE(ABORT,'synthetic failure'); END`); err != nil {
 				t.Fatal(err)
 			}
-			_, lease, failed := a.selectModelRoute(r, f.auth1, "atomic-model", []string{"openai-compatible"}, true)
+			_, lease, failed := a.selectModelRoute(r, f.auth1, "atomic-model", []string{"openai-compatible"}, accounting.ProtocolOpenAIChatCompletions, true)
 			if lease != nil || failed == nil {
 				t.Fatal("failed request start acquired a route")
 			}
@@ -41,7 +43,7 @@ func TestUsageRequestStartAtomicRollbackAndRetry(t *testing.T) {
 			if _, err := a.store.db.Exec(`DROP TRIGGER reject_atomic_begin`); err != nil {
 				t.Fatal(err)
 			}
-			_, lease, failed = a.selectModelRoute(r, f.auth1, "atomic-model", []string{"openai-compatible"}, true)
+			_, lease, failed = a.selectModelRoute(r, f.auth1, "atomic-model", []string{"openai-compatible"}, accounting.ProtocolOpenAIChatCompletions, true)
 			if failed != nil || lease == nil {
 				t.Fatalf("retry failed: %+v", failed)
 			}

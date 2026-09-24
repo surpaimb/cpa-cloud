@@ -15,6 +15,7 @@ import (
 
 	"cpacloud.local/server/internal/accounting"
 	"cpacloud.local/server/internal/membership"
+	"cpacloud.local/server/internal/protocolconv"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -134,7 +135,8 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 	defer guard.Close()
 	var upstreamReq *http.Request
 	var codexPrepared *codexResponsesPreflight
-	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider}, accounting.ProtocolOpenAIResponses, true, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {
+	var conversion *protocolRuntime
+	selected, lease, failure := a.prepareModelRoute(r, auth, model, []string{"openai-compatible", codexMembershipProvider, anthropicAPIKeyProvider, geminiAPIKeyProvider}, accounting.ProtocolOpenAIResponses, true, func(candidateRequest *http.Request, candidate route) (route, *modelPreflightError) {
 		candidatePayload := make(map[string]json.RawMessage, len(payload))
 		for key, value := range payload {
 			candidatePayload[key] = value
@@ -152,26 +154,70 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 			codexPrepared = prepared
 			return prepared.selected, nil
 		}
-		if candidate.ProviderKind != "openai-compatible" || candidate.KeyVersion != 1 {
+		if candidate.ProviderKind == geminiAPIKeyProvider && candidate.KeyVersion != 2 || candidate.ProviderKind != geminiAPIKeyProvider && candidate.KeyVersion != 1 {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
 		}
-		credential, err := a.secrets.decryptCredential(candidate.AccountID, candidate.Ciphertext)
+		var credential string
+		if candidate.ProviderKind == geminiAPIKeyProvider {
+			credential, err = a.secrets.decryptGeminiAPIKey(candidate.AccountID, candidate.Ciphertext)
+		} else {
+			credential, err = a.secrets.decryptCredential(candidate.AccountID, candidate.Ciphertext)
+		}
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailureAuth)
 		}
-		endpoint, err := validateEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
+		var endpoint string
+		if candidate.ProviderKind == geminiAPIKeyProvider {
+			endpoint, err = validateGeminiEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
+		} else {
+			endpoint, err = validateEndpoint(candidateRequest.Context(), candidate.Endpoint, a.cfg.AllowLoopbackUpstream)
+		}
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
 		}
-		target, err := upstreamResponsesURL(endpoint)
+		capability, err := routeCapability(candidate, accounting.ProtocolOpenAIResponses, stream)
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
 		}
-		prepared, err := http.NewRequestWithContext(candidateRequest.Context(), http.MethodPost, target, bytes.NewReader(outgoing))
+		preparedRuntime, err := prepareProtocolRuntime(capability, candidate.UpstreamModel, outgoing)
+		if err != nil {
+			if protocolconv.IsUnsupportedRoute(err) {
+				return route{}, requestPreflightFailure(http.StatusBadRequest, "unsupported_feature", "This request cannot be represented by the selected route.")
+			}
+			return route{}, requestPreflightFailure(http.StatusBadRequest, "invalid_request_error", "Invalid request.")
+		}
+		if preparedRuntime.plan().Kind != protocolconv.PlanNative && rejectsResponsesLifecycle(candidatePayload) {
+			return route{}, requestPreflightFailure(http.StatusBadRequest, "unsupported_feature", "Stateful Responses features require a native Responses route.")
+		}
+		var target string
+		switch preparedRuntime.plan().UpstreamProtocol {
+		case protocolconv.ProtocolOpenAIResponses:
+			target, err = upstreamResponsesURL(endpoint)
+		case protocolconv.ProtocolOpenAIChat:
+			target, err = upstreamChatURL(endpoint)
+		case protocolconv.ProtocolAnthropicMessages:
+			target, err = upstreamAnthropicURL(endpoint, false)
+		case protocolconv.ProtocolGeminiGenerate:
+			target, err = geminiGenerateURL(endpoint, preparedRuntime.model(), false)
+		default:
+			err = errors.New("unsupported OpenAI wire protocol")
+		}
+		if err != nil {
+			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
+		}
+		prepared, err := preparedRuntime.newRequest(candidateRequest.Context(), http.MethodPost, target, http.Header{})
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusBadGateway, "upstream_unavailable", "Upstream is unavailable.", scheduling.FailurePermanent)
 		}
-		prepared.Header.Set("Authorization", "Bearer "+credential)
+		switch preparedRuntime.plan().UpstreamProtocol {
+		case protocolconv.ProtocolAnthropicMessages:
+			prepared.Header.Set("Authorization", "Bearer "+credential)
+			prepared.Header.Set("Anthropic-Version", "2023-06-01")
+		case protocolconv.ProtocolGeminiGenerate:
+			prepared.Header.Set("x-goog-api-key", credential)
+		default:
+			prepared.Header.Set("Authorization", "Bearer "+credential)
+		}
 		prepared.Header.Set("Content-Type", "application/json")
 		if stream {
 			prepared.Header.Set("Accept", "text/event-stream")
@@ -179,6 +225,9 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 			prepared.Header.Set("Accept", "application/json")
 		}
 		upstreamReq = prepared
+		if preparedRuntime.plan().Kind != protocolconv.PlanNative {
+			conversion = preparedRuntime
+		}
 		return candidate, nil
 	})
 	if failure != nil {
@@ -215,6 +264,10 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	if codexPrepared != nil {
 		a.handleCodexResponses(w, r, stream, codexPrepared, reqID, persist)
+		return
+	}
+	if conversion != nil {
+		a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, reqID, responsesMaxResponse, persist)
 		return
 	}
 	a.handleAPIKeyResponses(w, r, upstreamReq, stream, reqID, client, persist)

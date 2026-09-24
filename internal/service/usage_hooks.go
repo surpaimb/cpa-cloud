@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -43,18 +42,8 @@ func usageEvidenceForRequest(r *http.Request) accounting.UsageEvidence {
 	return accounting.EvidenceProviderResponse
 }
 
-func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string, selected route) error {
-	var protocol accounting.UsageProtocol
-	switch {
-	case r.URL.Path == "/v1/chat/completions":
-		protocol = accounting.ProtocolOpenAIChatCompletions
-	case r.URL.Path == "/v1/responses":
-		protocol = accounting.ProtocolOpenAIResponses
-	case r.URL.Path == "/v1/messages":
-		protocol = accounting.ProtocolAnthropicMessages
-	case strings.HasPrefix(r.URL.Path, "/v1beta/models/"):
-		protocol = accounting.ProtocolGeminiGenerateContent
-	default:
+func (a *App) beginRequestUsage(r *http.Request, auth employeeAuth, model string, selected route, protocol accounting.UsageProtocol) error {
+	if protocol == "" {
 		return errUsageLedgerInvalid
 	}
 	startedAt := time.Now().UTC()

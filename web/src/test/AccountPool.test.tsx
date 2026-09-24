@@ -84,7 +84,7 @@ describe('account pool configuration', () => {
   })
 
   it('keeps revision zero read-only until explicit save and sends the exact CAS revision', async () => {
-    const accounts = { model_id: 'public-model', revision: 0, items: [{ upstream_id: 'up-1', upstream_model: 'provider-model', priority: 0, weight: 1, max_concurrency: 1 }] }
+    const accounts = { model_id: 'public-model', revision: 0, items: [{ upstream_id: 'up-1', upstream_model: 'provider-model', wire_protocol: 'openai-responses' as const, priority: 0, weight: 1, max_concurrency: 1 }] }
     const fetchMock = editorFetch(accounts)
     vi.stubGlobal('fetch', fetchMock)
     render(<ModelAccountPoolEditor model={model()} csrf="csrf-token" routingEnabled={false} onClose={() => undefined} />)
@@ -92,6 +92,7 @@ describe('account pool configuration', () => {
     expect(await screen.findByText('当前为兼容默认路由')).toBeInTheDocument()
     expect(screen.getByText(/配置可以保存，但当前请求仍使用原有单账号路由/)).toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(false)
+    expect(screen.getByLabelText('账号 1 Wire 协议')).toHaveValue('openai-responses')
     await userEvent.click(screen.getByRole('button', { name: '保存账号池' }))
     expect(await screen.findByText('账号池已保存。')).toBeInTheDocument()
 

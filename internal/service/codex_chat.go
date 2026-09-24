@@ -153,7 +153,7 @@ func (a *App) handleCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 		writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
 		return
 	}
-	a.observeCodexChatUsage(modelRequestID, result.ResponseID, codexChatUsage(result.Usage))
+	a.observeCodexChatUsage(modelRequestID, result.ResponseID, codexResponsesUsage(result.Usage))
 	if err := a.finishRequestChecked(modelRequestID, "succeeded", http.StatusOK); err != nil {
 		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
 		return
@@ -224,7 +224,7 @@ func (a *App) streamCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 		case membership.CodexEventUsage, membership.CodexEventCompleted:
 			if codexUsageKnown(event.Usage) {
 				usage = event.Usage
-				a.observeCodexChatUsage(modelRequestID, event.ResponseID, codexChatUsage(usage))
+				a.observeCodexChatUsage(modelRequestID, event.ResponseID, codexResponsesUsage(usage))
 			}
 		case membership.CodexEventFailed, membership.CodexEventCancelled:
 			// Rendering is decided from the returned normalized error so a
@@ -425,6 +425,29 @@ func codexChatUsage(usage membership.CodexUsage) map[string]any {
 	}
 	if usage.ReasoningOutputTokens != nil {
 		result["completion_tokens_details"] = map[string]any{"reasoning_tokens": *usage.ReasoningOutputTokens}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func codexResponsesUsage(usage membership.CodexUsage) map[string]any {
+	result := make(map[string]any)
+	if usage.InputTokens != nil {
+		result["input_tokens"] = *usage.InputTokens
+	}
+	if usage.OutputTokens != nil {
+		result["output_tokens"] = *usage.OutputTokens
+	}
+	if usage.TotalTokens != nil {
+		result["total_tokens"] = *usage.TotalTokens
+	}
+	if usage.CachedInputTokens != nil {
+		result["input_tokens_details"] = map[string]any{"cached_tokens": *usage.CachedInputTokens}
+	}
+	if usage.ReasoningOutputTokens != nil {
+		result["output_tokens_details"] = map[string]any{"reasoning_tokens": *usage.ReasoningOutputTokens}
 	}
 	if len(result) == 0 {
 		return nil

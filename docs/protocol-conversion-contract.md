@@ -1,18 +1,22 @@
 # 跨协议转换能力契约
 
-状态：D1 实现模块，2026-09-24。本文只描述已进入源码并由合成黄金测试约束的转换能力；HTTP
-路由接线、真实供应商验证、有状态 Responses、后台任务和托管工具不因本模块存在而完成。
+状态：D1 转换模块及共享 HTTP 路由接线，2026-09-24。本文只描述已进入源码并由合成黄金测试约束的
+转换能力；真实供应商验证、有状态 Responses、后台任务和托管工具不因转换接线而完成。
 
 实现位于 `internal/protocolconv`。它是纯转换模块，不做网络 I/O、不保存正文、不运行工具，也不改变
 员工鉴权、Key 撤销、模型权限、账号池、出站代理、预算或归档规则。服务接线必须在既有准入和持久派发
 屏障之后调用它，并且输出开始后不得换号、重放或改换协议。
 
-## D1 已实现能力
+## 转换模块已实现能力
 
 | 方向 | 请求 | 非流式响应 | SSE |
 | --- | --- | --- | --- |
 | Chat Completions → Responses | 文本 message、developer/system/user/assistant、function tools、tool choice、并行工具、assistant tool calls、字符串 tool result | 单 choice 的文本和 function calls；usage 与 cache/reasoning 子计数 | 文本及函数参数增量；生成 Responses item/content/done/completed 事件；只有显式 `[DONE]` 且 finish reason 一致才完成 |
 | Responses → Chat Completions | 字符串或文本 message input、instructions、function tools、相邻并行 function calls、字符串 function_call_output | completed response 的文本和 function calls；usage 与 cache/reasoning 子计数 | 严格验证 sequence、item ID、output/content index、累计文本/参数、done item 和 terminal output；只在 `response.completed` 后生成 Chat finish chunk 与 `[DONE]` |
+| Messages → Responses | 文本/system、客户端 function tools、tool choice、`tool_use`/`tool_result` | 文本与客户端工具块、停止原因、usage | 未接入；共享 HTTP 路由派发前拒绝 |
+| Responses → Messages | 无状态文本/instructions、客户端 function tools、function call/output | 文本与客户端工具块、停止原因、usage | 未接入；共享 HTTP 路由派发前拒绝 |
+| Gemini generateContent → Responses | 文本、system instruction、function declarations/calls/responses、生成参数子集 | 文本与函数调用、finish reason、usage | 未接入；共享 HTTP 路由派发前拒绝 |
+| Responses → Gemini generateContent | 无状态文本/instructions、function tools/calls/results、生成参数子集 | 文本与函数调用、finish reason、usage | 未接入；共享 HTTP 路由派发前拒绝 |
 
 共同支持 `model`、严格布尔 `stream`/`parallel_tool_calls`、正整数 token 上限、范围为 0–2 的
 `temperature` 和范围为 0–1 的 `top_p`。Chat 流使用 `stream_options.include_usage=true`；Responses
@@ -24,6 +28,23 @@
 - `unsupported_feature`：源字段合法但目标协议不能在本批无损表达；
 - `invalid_upstream`：上游响应、事件或终态自相矛盾；
 - `interrupted`：Chat 未收到 `[DONE]` 或 Responses 未收到 `response.completed` 就 EOF。
+
+## 共享服务接线与配置
+
+管理员在模型及账号池路由上持久化 `wire_protocol`。值只能是 `legacy-native`、`openai-chat`、
+`openai-responses`、`anthropic-messages` 或 `gemini-generate-content`，并按上游 provider 白名单校验；同一
+账号池的 provider 与 wire 必须一致。旧数据库自动迁移为 `legacy-native`，旧管理客户端在更新时省略该字段
+会保留已有值，不会把显式路由静默重置。
+
+`legacy-native` 保持既有入口行为；只有显式 wire 才启用上述转换。服务不按 URL、provider 名称或失败结果
+猜测协议，也不试探第二个端点。跨协议请求在持久派发屏障之后只执行一次上游调用；原始上游 JSON 先交给
+实际 wire 的 usage 观察器，再转换为客户端响应。accounting attempt 记录实际上游协议，治理父记录继续记录
+客户端协议。路由、账号 revision 或 wire 在派发前变化时失败关闭。
+
+本批共享 HTTP 接线只接受跨协议非流式请求。任何显式跨协议 SSE 都在上游派发和 attempt 创建前拒绝；
+纯转换模块已有的 Chat/Responses SSE 状态机尚未作为共享运行时开放。Responses 的 state、background、
+previous response、conversation 与持久资源只允许原生 Responses 路由，不能经过转换。Messages
+`count_tokens` 也只允许原生 Anthropic 路由。
 
 ## 明确拒绝的字段和语义
 
@@ -70,12 +91,12 @@ Gemini 原生通路仍是同协议透传，不属于跨协议转换。本批根�
 
 ## 后续交付队列
 
-1. D1 集成：由独立集成任务将纯转换器接入共享路由，复用现有员工 Key、模型权限、池、出站代理、
-   归档、预算和 usage 生命周期，并做随机端口进程验收。
-2. D2：按 ADR 0003 完成默认关闭的 Responses 资源、`previous_response_id`、读取/删除/取消和后台任务；
+1. D1 进程验收：对显式 wire 做随机端口服务和真实客户端/合成上游验收；未取得真实供应商凭据前不升级
+   为真实 provider 兼容结论。
+2. D2：按 ADR 0003 继续扩展默认关闭的 Responses 资源、`previous_response_id`、读取/删除/取消和后台任务；
    先合迁移、所有权和恢复，再启 worker。
 3. D3：仅对管理员白名单且上游官方支持的托管工具透传；不在 CPA Cloud 任意执行用户代码。
-4. Messages/Gemini 跨协议：逐字段证明可表达语义后扩表；当前只有各自原生路径，不能用文本转换冒充完成。
+4. 跨协议 SSE：先把共享执行器的输出提交、取消、错误脱敏和不可重放边界绑定到转换状态机，再按方向开放。
 5. 图片/音频、reasoning、structured output、conversation 对象和其他 Responses item 另立契约与黄金测试。
 
 ## 官方来源

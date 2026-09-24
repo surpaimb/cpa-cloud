@@ -23,6 +23,7 @@ type updateModelRequest struct {
 	UpstreamID       *string `json:"upstream_id"`
 	UpstreamModel    *string `json:"upstream_model"`
 	Enabled          *bool   `json:"enabled"`
+	WireProtocol     *string `json:"wire_protocol"`
 }
 
 func includeArchivedQuery(w http.ResponseWriter, r *http.Request) (bool, bool) {
@@ -72,7 +73,7 @@ func (a *App) updateModel(w http.ResponseWriter, r *http.Request, session adminS
 		writeAdminError(w, http.StatusBadRequest, "invalid_revision", "A valid expected_revision is required.")
 		return
 	}
-	if input.UpstreamID == nil && input.UpstreamModel == nil && input.Enabled == nil {
+	if input.UpstreamID == nil && input.UpstreamModel == nil && input.Enabled == nil && input.WireProtocol == nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "No model changes were provided.")
 		return
 	}
@@ -101,7 +102,7 @@ func (a *App) updateModel(w http.ResponseWriter, r *http.Request, session adminS
 		writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
 		return
 	}
-	nextUpstream, nextModel, nextEnabled := item.UpstreamID, item.UpstreamModel, item.Enabled
+	nextUpstream, nextModel, nextEnabled, nextWire := item.UpstreamID, item.UpstreamModel, item.Enabled, item.WireProtocol
 	if input.UpstreamID != nil {
 		nextUpstream = strings.TrimSpace(*input.UpstreamID)
 	}
@@ -110,6 +111,9 @@ func (a *App) updateModel(w http.ResponseWriter, r *http.Request, session adminS
 	}
 	if input.Enabled != nil {
 		nextEnabled = *input.Enabled
+	}
+	if input.WireProtocol != nil {
+		nextWire = strings.TrimSpace(*input.WireProtocol)
 	}
 	if !validText(nextUpstream, 1, 128) || !validText(nextModel, 1, 256) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Invalid model fields.")
@@ -134,13 +138,13 @@ func (a *App) updateModel(w http.ResponseWriter, r *http.Request, session adminS
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	if !validProviderModelName(provider, nextModel) || provider == geminiAPIKeyProvider && strings.Contains(item.ID, "/") {
+	if !validProviderModelName(provider, nextModel) || provider == geminiAPIKeyProvider && strings.Contains(item.ID, "/") || !validRouteWireProtocol(nextWire) || !providerSupportsWire(provider, nextWire) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "The upstream model is not supported by that provider.")
 		return
 	}
-	item.UpstreamID, item.UpstreamModel, item.Enabled, item.Revision = nextUpstream, nextModel, nextEnabled, item.Revision+1
-	result, err := tx.ExecContext(r.Context(), `UPDATE models SET upstream_id=?,upstream_model=?,enabled=?,revision=? WHERE id=? AND revision=? AND archived=0`,
-		item.UpstreamID, item.UpstreamModel, boolInt(item.Enabled), item.Revision, item.ID, input.ExpectedRevision)
+	item.UpstreamID, item.UpstreamModel, item.Enabled, item.WireProtocol, item.Revision = nextUpstream, nextModel, nextEnabled, nextWire, item.Revision+1
+	result, err := tx.ExecContext(r.Context(), `UPDATE models SET upstream_id=?,upstream_model=?,wire_protocol=?,enabled=?,revision=? WHERE id=? AND revision=? AND archived=0`,
+		item.UpstreamID, item.UpstreamModel, item.WireProtocol, boolInt(item.Enabled), item.Revision, item.ID, input.ExpectedRevision)
 	if err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -215,8 +219,8 @@ func loadModelView(ctx context.Context, query queryRower, id string) (modelView,
 	var item modelView
 	var enabled, archived int
 	var archivedAt sql.NullString
-	err := query.QueryRowContext(ctx, `SELECT id,upstream_id,upstream_model,enabled,revision,archived,archived_at FROM models WHERE id=?`, id).
-		Scan(&item.ID, &item.UpstreamID, &item.UpstreamModel, &enabled, &item.Revision, &archived, &archivedAt)
+	err := query.QueryRowContext(ctx, `SELECT id,upstream_id,upstream_model,wire_protocol,enabled,revision,archived,archived_at FROM models WHERE id=?`, id).
+		Scan(&item.ID, &item.UpstreamID, &item.UpstreamModel, &item.WireProtocol, &enabled, &item.Revision, &archived, &archivedAt)
 	item.Enabled, item.Archived, item.ArchivedAt = enabled != 0, archived != 0, nullString(archivedAt)
 	return item, err
 }
