@@ -165,7 +165,7 @@ func TestGeminiNativeAPIKeyWorkflowStreamingDiscoveryAndRestart(t *testing.T) {
 		t.Fatalf("native models=%+v", modelList.Models)
 	}
 
-	requestBody := `{"contents":[{"role":"user","parts":[{"text":"weather"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"weather","args":{"city":"Paris"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"weather","response":{"temperature":21}}}]}],"systemInstruction":{"parts":[{"text":"Be concise."}]},"tools":[{"functionDeclarations":[{"name":"weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}],"toolConfig":{"functionCallingConfig":{"mode":"AUTO","allowedFunctionNames":["weather"]}},"generationConfig":{"candidateCount":1,"maxOutputTokens":128,"temperature":0.2,"topP":0.9,"topK":20,"stopSequences":["done"],"seed":7,"presencePenalty":0,"frequencyPenalty":0,"responseMimeType":"application/json","responseSchema":{"type":"object"}},"safetySettings":[]}`
+	requestBody := `{"contents":[{"role":"user","parts":[{"text":"weather"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"weather","args":{"city":"Paris"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"weather","response":{"temperature":21}}}]}],"systemInstruction":{"parts":[{"text":"Be concise."}]},"tools":[{"functionDeclarations":[{"name":"weather","description":"Get weather","parametersJsonSchema":{"type":"object","properties":{"city":{"type":"string"}}}}]}],"toolConfig":{"functionCallingConfig":{"mode":"AUTO","allowedFunctionNames":["weather"]}},"generationConfig":{"candidateCount":1,"maxOutputTokens":128,"temperature":0.2,"topP":0.9,"topK":20,"stopSequences":["done"],"seed":7,"presencePenalty":0,"frequencyPenalty":0,"responseMimeType":"application/json","responseSchema":{"type":"object"},"thinkingConfig":{"includeThoughts":true}},"safetySettings":[]}`
 	generated := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent", requestBody, key.Key, context.Background())
 	if generated.StatusCode != http.StatusOK {
 		t.Fatalf("generate status=%d body=%s", generated.StatusCode, readBody(generated))
@@ -179,7 +179,7 @@ func TestGeminiNativeAPIKeyWorkflowStreamingDiscoveryAndRestart(t *testing.T) {
 	receivedMu.Lock()
 	forwarded := mustMarshal(received)
 	receivedMu.Unlock()
-	for _, expected := range []string{`"systemInstruction"`, `"functionDeclarations"`, `"functionCall"`, `"functionResponse"`, `"generationConfig"`} {
+	for _, expected := range []string{`"systemInstruction"`, `"functionDeclarations"`, `"parametersJsonSchema"`, `"functionCall"`, `"functionResponse"`, `"generationConfig"`, `"thinkingConfig"`, `"includeThoughts":true`} {
 		if !bytes.Contains(forwarded, []byte(expected)) {
 			t.Fatalf("forwarded request omitted %s: %s", expected, forwarded)
 		}
@@ -387,6 +387,22 @@ func TestGeminiNativeAuthorizationValidationAndErrorRedaction(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatal("invalid generation config reached Gemini upstream")
+	}
+	unknownThinking := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent",
+		`{"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"thinkingConfig":{"includeThoughts":true,"futureSetting":1}}}`, key.Key, context.Background())
+	if unknownThinking.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(unknownThinking), `"status":"UNIMPLEMENTED"`) {
+		t.Fatal("unknown thinking config did not return an explicit unsupported error")
+	}
+	if calls.Load() != 0 {
+		t.Fatal("unsupported nested thinking config reached Gemini upstream")
+	}
+	ambiguousSchema := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent",
+		`{"contents":[{"parts":[{"text":"hello"}]}],"tools":[{"functionDeclarations":[{"name":"f","description":"f","parameters":{},"parametersJsonSchema":{}}]}]}`, key.Key, context.Background())
+	if ambiguousSchema.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(ambiguousSchema), `"status":"INVALID_ARGUMENT"`) {
+		t.Fatal("ambiguous function schema did not return an invalid argument error")
+	}
+	if calls.Load() != 0 {
+		t.Fatal("ambiguous function schema reached Gemini upstream")
 	}
 	badStream := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:streamGenerateContent",
 		`{"contents":[{"parts":[{"text":"bad-stream"}]}]}`, key.Key, context.Background())

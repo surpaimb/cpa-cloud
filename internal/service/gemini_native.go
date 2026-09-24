@@ -634,7 +634,7 @@ func validateGeminiRequest(body []byte) error {
 		}
 	}
 	if raw, ok := root["generationConfig"]; ok {
-		allowedGeneration := map[string]bool{"candidateCount": true, "stopSequences": true, "maxOutputTokens": true, "temperature": true, "topP": true, "topK": true, "seed": true, "presencePenalty": true, "frequencyPenalty": true, "responseMimeType": true, "responseSchema": true}
+		allowedGeneration := map[string]bool{"candidateCount": true, "stopSequences": true, "maxOutputTokens": true, "temperature": true, "topP": true, "topK": true, "seed": true, "presencePenalty": true, "frequencyPenalty": true, "responseMimeType": true, "responseSchema": true, "thinkingConfig": true}
 		generation, err := decodeGeminiObject(raw, allowedGeneration)
 		if err != nil {
 			return err
@@ -685,6 +685,18 @@ func validateGeminiGenerationConfig(config map[string]json.RawMessage) error {
 		var value map[string]json.RawMessage
 		if json.Unmarshal(raw, &value) != nil || value == nil {
 			return errors.New("invalid response schema")
+		}
+	}
+	if raw, ok := config["thinkingConfig"]; ok {
+		thinking, err := decodeGeminiObject(raw, map[string]bool{"includeThoughts": true})
+		if err != nil {
+			return err
+		}
+		if include, ok := thinking["includeThoughts"]; ok {
+			var enabled bool
+			if json.Unmarshal(include, &enabled) != nil {
+				return errors.New("invalid includeThoughts setting")
+			}
 		}
 	}
 	return nil
@@ -783,7 +795,7 @@ func validateGeminiTools(raw json.RawMessage) error {
 			return errors.New("invalid function declarations")
 		}
 		for _, declarationRaw := range declarations {
-			declaration, err := decodeGeminiObject(declarationRaw, map[string]bool{"name": true, "description": true, "parameters": true, "response": true})
+			declaration, err := decodeGeminiObject(declarationRaw, map[string]bool{"name": true, "description": true, "parameters": true, "parametersJsonSchema": true, "response": true})
 			if err != nil {
 				return err
 			}
@@ -791,7 +803,12 @@ func validateGeminiTools(raw json.RawMessage) error {
 			if json.Unmarshal(declaration["name"], &name) != nil || !validGeminiFunctionName(name) || json.Unmarshal(declaration["description"], &description) != nil || !validText(description, 1, 8192) {
 				return errors.New("invalid function declaration")
 			}
-			for _, field := range []string{"parameters", "response"} {
+			if _, parameters := declaration["parameters"]; parameters {
+				if _, jsonSchema := declaration["parametersJsonSchema"]; jsonSchema {
+					return errors.New("function parameters are ambiguous")
+				}
+			}
+			for _, field := range []string{"parameters", "parametersJsonSchema", "response"} {
 				if schema, ok := declaration[field]; ok {
 					var object map[string]json.RawMessage
 					if json.Unmarshal(schema, &object) != nil || object == nil {
