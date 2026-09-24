@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
@@ -54,6 +55,8 @@ type responseResourceCreateInput struct {
 	PublicModel      string
 	ParentResponseID string
 	ProviderKind     string
+	SourceAddr       netip.Addr
+	PolicyRevision   int64
 	Background       bool
 	StoreBody        bool
 	Items            []responseStateItem
@@ -146,7 +149,7 @@ func (c *responseResourceCoordinator) Create(ctx context.Context, input response
 		return responseResourceView{}, errResponseResourceUnavailable
 	}
 	defer tx.Rollback()
-	if err := c.authorizeOwnerTx(ctx, tx, input.EmployeeID, input.KeyID, input.PublicModel, created, true); err != nil {
+	if err := c.authorizeOwnerTx(ctx, tx, input.EmployeeID, input.KeyID, input.PublicModel, created, true, input.SourceAddr, input.PolicyRevision); err != nil {
 		return responseResourceView{}, err
 	}
 	if existing, storedFingerprint, found, err := loadResponseResourceByOperationTx(ctx, tx, input.EmployeeID, input.KeyID, input.OperationID); err != nil {
@@ -205,6 +208,9 @@ func (c *responseResourceCoordinator) Create(ctx context.Context, input response
 		if err != nil {
 			return responseResourceView{}, errResponseResourceUnavailable
 		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO background_task_policy_contexts(task_id,source_addr,key_policy_revision) VALUES(?,?,?)`, taskID, input.SourceAddr.String(), input.PolicyRevision); err != nil {
+			return responseResourceView{}, errResponseResourceUnavailable
+		}
 		view.TaskID, view.RequestID = taskID, requestID
 	}
 	if err := c.commitTx(tx); err != nil {
@@ -226,7 +232,7 @@ func (c *responseResourceCoordinator) Get(ctx context.Context, auth employeeAuth
 	if err != nil {
 		return responseResourceView{}, err
 	}
-	if err := c.authorizeOwnerTx(ctx, tx, auth.EmployeeID, auth.KeyID, view.PublicModel, c.now().UTC(), includeBody); err != nil {
+	if err := c.authorizeOwnerTx(ctx, tx, auth.EmployeeID, auth.KeyID, view.PublicModel, c.now().UTC(), includeBody, auth.SourceAddr, 0); err != nil {
 		return responseResourceView{}, err
 	}
 	if view.Tombstoned || !view.ExpiresAt.After(c.now().UTC()) {
@@ -326,7 +332,7 @@ func (c *responseResourceCoordinator) Recover(ctx context.Context) error {
 		return errResponseResourceUnavailable
 	}
 	now := c.now().UTC()
-	rows, err := tx.QueryContext(ctx, `SELECT t.id,t.response_id,t.request_id,COALESCE(t.attempt_id,''),t.status,t.created_at FROM background_tasks t WHERE t.status IN ('dispatch_authorized','in_progress') OR (t.status='queued' AND t.expires_at<=?) ORDER BY t.created_at,t.id`, now.Format(time.RFC3339Nano))
+	rows, err := tx.QueryContext(ctx, `SELECT t.id,t.response_id,t.request_id,COALESCE(t.attempt_id,''),t.status,t.created_at FROM background_tasks t LEFT JOIN background_task_policy_contexts pc ON pc.task_id=t.id WHERE t.status IN ('dispatch_authorized','in_progress') OR (t.status='queued' AND (t.expires_at<=? OR pc.task_id IS NULL)) ORDER BY t.created_at,t.id`, now.Format(time.RFC3339Nano))
 	if err != nil {
 		return errResponseResourceUnavailable
 	}
@@ -397,7 +403,7 @@ func (c *responseResourceCoordinator) Cancel(ctx context.Context, auth employeeA
 	if err != nil {
 		return responseResourceView{}, err
 	}
-	if err := c.authorizeOwnerTx(ctx, tx, auth.EmployeeID, auth.KeyID, view.PublicModel, c.now().UTC(), false); err != nil {
+	if err := c.authorizeOwnerTx(ctx, tx, auth.EmployeeID, auth.KeyID, view.PublicModel, c.now().UTC(), false, netip.Addr{}, 0); err != nil {
 		return responseResourceView{}, err
 	}
 	if !view.Background || responseTerminalStatus(view.Status) {
@@ -500,7 +506,7 @@ func responseTerminalStatus(status string) bool {
 }
 
 func validResponseResourceCreate(input responseResourceCreateInput) bool {
-	if !validIdentifier(input.OperationID, 128) || !validIdentifier(input.EmployeeID, 128) || !validIdentifier(input.KeyID, 128) || !validIdentifier(input.PublicModel, 128) || len(input.Items) == 0 || len(input.Items) > responseStateMaxItems || (!input.Background && !input.StoreBody) {
+	if !validIdentifier(input.OperationID, 128) || !validIdentifier(input.EmployeeID, 128) || !validIdentifier(input.KeyID, 128) || !validIdentifier(input.PublicModel, 128) || !input.SourceAddr.IsValid() || input.SourceAddr.Zone() != "" || input.SourceAddr != input.SourceAddr.Unmap() || input.PolicyRevision < 1 || input.PolicyRevision > 9007199254740991 || len(input.Items) == 0 || len(input.Items) > responseStateMaxItems || (!input.Background && !input.StoreBody) {
 		return false
 	}
 	if input.Background == (input.TerminalAt != nil) {
@@ -543,6 +549,10 @@ func (c *responseResourceCoordinator) inputFingerprint(input responseResourceCre
 	for _, value := range []string{input.OperationID, input.EmployeeID, input.KeyID, input.PublicModel, input.ParentResponseID, input.ProviderKind} {
 		writeFingerprintPart([]byte(value))
 	}
+	writeFingerprintPart([]byte(input.SourceAddr.String()))
+	var revision [8]byte
+	binary.BigEndian.PutUint64(revision[:], uint64(input.PolicyRevision))
+	writeFingerprintPart(revision[:])
 	flags := byte(0)
 	if input.Background {
 		flags |= 1
@@ -558,7 +568,7 @@ func (c *responseResourceCoordinator) inputFingerprint(input responseResourceCre
 	return h.Sum(nil), nil
 }
 
-func (c *responseResourceCoordinator) authorizeOwnerTx(ctx context.Context, tx *sql.Tx, employeeID, keyID, model string, at time.Time, requireCurrentModelPolicy bool) error {
+func (c *responseResourceCoordinator) authorizeOwnerTx(ctx context.Context, tx *sql.Tx, employeeID, keyID, model string, at time.Time, requireCurrentModelPolicy bool, sourceAddr netip.Addr, expectedPolicyRevision int64) error {
 	var status, mode string
 	var expires, revoked sql.NullString
 	err := tx.QueryRowContext(ctx, `SELECT e.status,e.model_mode,k.expires_at,k.revoked_at FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.id=? AND k.employee_id=?`, keyID, employeeID).Scan(&status, &mode, &expires, &revoked)
@@ -584,7 +594,10 @@ func (c *responseResourceCoordinator) authorizeOwnerTx(ctx context.Context, tx *
 		}
 		return errResponseResourceUnavailable
 	}
-	if !keypolicy.Allows(policy, keypolicy.ProtocolOpenAIResponses, model) {
+	if expectedPolicyRevision > 0 && policy.Revision != expectedPolicyRevision {
+		return errResponseResourceForbidden
+	}
+	if !keypolicy.Allows(policy, keypolicy.ProtocolOpenAIResponses, model) || !keypolicy.AllowsSource(policy, sourceAddr) {
 		return errResponseResourceForbidden
 	}
 	var allowed int

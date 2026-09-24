@@ -236,13 +236,18 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .key-policy-compat strong { color: #48391f; }
 .key-policy-editor { margin-bottom: 18px; padding: 16px; background: #f7fafb; border: 1px solid var(--border); border-radius: 9px; }
 .key-policy-editor h3 { margin: 0 0 13px; color: var(--navy); font-size: 14px; }
-.key-policy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.key-policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
 .key-policy-grid fieldset { min-width: 0; margin: 0; padding: 13px; border: 1px solid var(--border); border-radius: 7px; background: white; }
 .key-policy-grid legend { padding: 0 6px; color: var(--navy); font-size: 12px; font-weight: 700; }
 .key-policy-grid fieldset > label, .key-policy-options label { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; font-size: 13px; line-height: 1.4; }
 .key-policy-grid input { flex: 0 0 auto; margin-top: 2px; }
 .key-policy-options { max-height: 170px; margin-top: 10px; padding: 8px 10px; overflow: auto; background: #f7fafb; border-radius: 6px; }
 .key-policy-options p { margin: 6px 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.key-policy-source-input { display: grid; gap: 6px; margin-top: 10px; }
+.key-policy-source-input label, .key-policy-source-input small { color: var(--muted); font-size: 12px; }
+.key-policy-source-input textarea { min-height: 112px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.55; }
+.key-policy-peer-note { display: grid; gap: 4px; margin-top: 12px; padding: 10px 12px; color: #31566c; background: #edf6fa; border: 1px solid #c5dee9; border-radius: 6px; font-size: 12px; line-height: 1.55; }
+.key-policy-peer-note strong { color: var(--navy); }
 .key-policy-deny, .key-policy-conflict { margin-top: 12px; padding: 10px 12px; color: #734213; background: #fff7e8; border: 1px solid #f1d39b; border-radius: 6px; font-size: 12px; line-height: 1.55; }
 .key-policy-conflict { margin-bottom: 14px; }
 .key-warning { color: #734213; background: #fff7e8; border: 1px solid #f1d39b; border-radius: 7px; padding: 13px 15px; margin-bottom: 20px; font-size: 14px; }

@@ -19,12 +19,11 @@ func TestMigrateBackfillsExistingKeysAndIsRetryable(t *testing.T) {
 	db := openTestDB(t)
 	insertKey(t, db, "key-old", "employee-one")
 	insertModel(t, db, "public-a", false)
-	if err := Migrate(context.Background(), db); err != nil {
-		t.Fatal(err)
-	}
+	migratePolicyAndInstallSourceSchema(t, db)
 	restricted, err := Replace(context.Background(), db, "key-old", 1, Replacement{
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{},
 		ModelMode: ModeSelected, Models: []string{"public-a"},
+		SourceMode: ModeSelected, SourceCIDRs: []string{},
 	}, testTime)
 	if err != nil {
 		t.Fatal(err)
@@ -49,11 +48,10 @@ func TestMigrateBackfillsExistingKeysAndIsRetryable(t *testing.T) {
 func TestMigrateFailsClosedWhenMarkedDatabaseLosesPolicy(t *testing.T) {
 	db := openTestDB(t)
 	insertKey(t, db, "key-restricted", "employee-one")
-	if err := Migrate(context.Background(), db); err != nil {
-		t.Fatal(err)
-	}
+	migratePolicyAndInstallSourceSchema(t, db)
 	if _, err := Replace(context.Background(), db, "key-restricted", 1, Replacement{
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{},
+		SourceMode: ModeSelected, SourceCIDRs: []string{},
 	}, testTime); err != nil {
 		t.Fatal(err)
 	}
@@ -83,11 +81,10 @@ func TestMigrateFailsClosedWhenMarkedDatabaseLosesPolicy(t *testing.T) {
 func TestMigrateRejectsInvalidPersistentMarkerWithoutChangingPolicy(t *testing.T) {
 	db := openTestDB(t)
 	insertKey(t, db, "key-restricted", "employee-one")
-	if err := Migrate(context.Background(), db); err != nil {
-		t.Fatal(err)
-	}
+	migratePolicyAndInstallSourceSchema(t, db)
 	if _, err := Replace(context.Background(), db, "key-restricted", 1, Replacement{
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{},
+		SourceMode: ModeSelected, SourceCIDRs: []string{},
 	}, testTime); err != nil {
 		t.Fatal(err)
 	}
@@ -177,9 +174,7 @@ func TestMigrateRejectsMalformedExistingSchemaWithoutPartialBackfill(t *testing.
 
 func TestCreateAndReplaceTxEnforceExactPolicyAndCAS(t *testing.T) {
 	db := openTestDB(t)
-	if err := Migrate(context.Background(), db); err != nil {
-		t.Fatal(err)
-	}
+	migratePolicyAndInstallSourceSchema(t, db)
 	insertModel(t, db, "public-a", false)
 	insertKey(t, db, "key-new", "employee-one")
 	tx, err := db.Begin()
@@ -189,6 +184,7 @@ func TestCreateAndReplaceTxEnforceExactPolicyAndCAS(t *testing.T) {
 	created, err := CreateTx(context.Background(), tx, "key-new", Replacement{
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{ProtocolOpenAIResponses},
 		ModelMode: ModeSelected, Models: []string{"public-a"},
+		SourceMode: ModeAll, SourceCIDRs: []string{},
 	}, testTime)
 	if err != nil {
 		t.Fatal(err)
@@ -207,6 +203,7 @@ func TestCreateAndReplaceTxEnforceExactPolicyAndCAS(t *testing.T) {
 	updated, err := ReplaceTx(context.Background(), tx, "key-new", 1, Replacement{
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{},
 		ModelMode: ModeAll, Models: []string{},
+		SourceMode: ModeAll, SourceCIDRs: []string{},
 	}, testTime.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
@@ -219,12 +216,14 @@ func TestCreateAndReplaceTxEnforceExactPolicyAndCAS(t *testing.T) {
 	}
 	_, err = Replace(context.Background(), db, "key-new", 1, Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
+		SourceMode: ModeAll, SourceCIDRs: []string{},
 	}, testTime.Add(2*time.Minute))
 	if !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale replacement error=%v", err)
 	}
 	reset, err := Replace(context.Background(), db, "key-new", 2, Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
+		SourceMode: ModeAll, SourceCIDRs: []string{},
 	}, testTime.Add(3*time.Minute))
 	if err != nil {
 		t.Fatal(err)
@@ -234,6 +233,7 @@ func TestCreateAndReplaceTxEnforceExactPolicyAndCAS(t *testing.T) {
 	}
 	if _, err := Replace(context.Background(), db, "key-new", 1, Replacement{
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
+		SourceMode: ModeAll, SourceCIDRs: []string{},
 	}, testTime.Add(4*time.Minute)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("ABA stale revision error=%v", err)
 	}
@@ -244,17 +244,15 @@ func TestStrictPolicyValidationRejectsDuplicatesUnknownAndArchivedModels(t *test
 	insertKey(t, db, "key-one", "employee-one")
 	insertModel(t, db, "active-model", false)
 	insertModel(t, db, "archived-model", true)
-	if err := Migrate(context.Background(), db); err != nil {
-		t.Fatal(err)
-	}
+	migratePolicyAndInstallSourceSchema(t, db)
 	tests := []Replacement{
-		{ProtocolMode: ModeAll, Protocols: nil, ModelMode: ModeAll, Models: []string{}},
-		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{ProtocolOpenAIChat}, ModelMode: ModeAll, Models: []string{}},
-		{ProtocolMode: ModeSelected, Protocols: []ClientProtocol{"unknown"}, ModelMode: ModeAll, Models: []string{}},
-		{ProtocolMode: ModeSelected, Protocols: []ClientProtocol{ProtocolOpenAIChat, ProtocolOpenAIChat}, ModelMode: ModeAll, Models: []string{}},
-		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"active-model", "active-model"}},
-		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"missing-model"}},
-		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"archived-model"}},
+		{ProtocolMode: ModeAll, Protocols: nil, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}},
+		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{ProtocolOpenAIChat}, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}},
+		{ProtocolMode: ModeSelected, Protocols: []ClientProtocol{"unknown"}, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}},
+		{ProtocolMode: ModeSelected, Protocols: []ClientProtocol{ProtocolOpenAIChat, ProtocolOpenAIChat}, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}},
+		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"active-model", "active-model"}, SourceMode: ModeAll, SourceCIDRs: []string{}},
+		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"missing-model"}, SourceMode: ModeAll, SourceCIDRs: []string{}},
+		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"archived-model"}, SourceMode: ModeAll, SourceCIDRs: []string{}},
 	}
 	for index, replacement := range tests {
 		if _, err := Replace(context.Background(), db, "key-one", 1, replacement, testTime.Add(time.Duration(index)*time.Minute)); !errors.Is(err, ErrInvalidPolicy) {
@@ -267,6 +265,7 @@ func TestNormalizeReturnsDeterministicDetachedReplacement(t *testing.T) {
 	input := Replacement{
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{ProtocolGeminiGenerate, ProtocolOpenAIChat},
 		ModelMode: ModeSelected, Models: []string{"z-model", "a-model"},
+		SourceMode: ModeSelected, SourceCIDRs: []string{"2001:db8::1", "192.0.2.1"},
 	}
 	normalized, err := Normalize(input)
 	if err != nil {
@@ -274,22 +273,24 @@ func TestNormalizeReturnsDeterministicDetachedReplacement(t *testing.T) {
 	}
 	input.Protocols[0] = ProtocolAnthropicMessages
 	input.Models[0] = "changed"
+	input.SourceCIDRs[0] = "2001:db9::1"
 	if got, want := normalized.Protocols, []ClientProtocol{ProtocolOpenAIChat, ProtocolGeminiGenerate}; !slices.Equal(got, want) {
 		t.Fatalf("protocols=%v want=%v", got, want)
 	}
 	if got, want := normalized.Models, []string{"a-model", "z-model"}; !slices.Equal(got, want) {
 		t.Fatalf("models=%v want=%v", got, want)
 	}
-	if _, err := Normalize(Replacement{ProtocolMode: ModeAll, Protocols: nil, ModelMode: ModeAll, Models: []string{}}); !errors.Is(err, ErrInvalidPolicy) {
+	if got, want := normalized.SourceCIDRs, []string{"192.0.2.1/32", "2001:db8::1/128"}; !slices.Equal(got, want) {
+		t.Fatalf("source CIDRs=%v want=%v", got, want)
+	}
+	if _, err := Normalize(Replacement{ProtocolMode: ModeAll, Protocols: nil, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}}); !errors.Is(err, ErrInvalidPolicy) {
 		t.Fatalf("missing protocol array error=%v", err)
 	}
 }
 
 func TestMissingPolicyFailsClosedAndDefaultRequiresExistingKey(t *testing.T) {
 	db := openTestDB(t)
-	if err := Migrate(context.Background(), db); err != nil {
-		t.Fatal(err)
-	}
+	migratePolicyAndInstallSourceSchema(t, db)
 	insertKey(t, db, "key-missing-policy", "employee-one")
 	tx, err := db.Begin()
 	if err != nil {

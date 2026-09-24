@@ -28,13 +28,21 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 ### 每 Key 协议与模型策略（2026-09-25 批次契约）
 
-本节是下一源码批次的接口约束；只有 `features.key_access_policy=true` 才表示服务器已实现。完整迁移、事务屏障、后台资源语义和验收要求见[流式与 Key 策略批次契约](stream-key-policy-batch-contract-2026-09-25.md)。
+只有 `features.key_access_policy=true` 才表示服务器已实现协议/模型策略；来源编辑另要求只读能力 `features.key_source_policy=true`。完整迁移、事务屏障、后台资源语义和验收要求见[流式与 Key 策略批次契约](stream-key-policy-batch-contract-2026-09-25.md)。
 
 策略对象为 `{protocol_mode,protocols,model_mode,models,revision,effective_protocols,effective_models}`。`protocol_mode` 和 `model_mode` 均为 `all|selected`；`all` 必须配空数组，`selected` 使用显式数组且空数组表示全部拒绝。客户端协议枚举固定为 `openai-chat`、`openai-responses`、`anthropic-messages`、`gemini-generate-content`；模型数组只接受公开模型 ID，不接受上游模型名。`effective_*` 是只读快照。
 
 创建 Key 时省略 `policy` 等价于 `all/all`；提供 `policy` 时四个 mode/list 字段必须齐全。`PUT /admin/api/v1/keys/{id}/policy` 使用 `{expected_revision,protocol_mode,protocols,model_mode,models}` 全量替换；revision 冲突返回 409，非法策略返回 400 `invalid_key_policy`，不存在返回 404。旧库 Key 迁移为 `all/all` revision 1，只继承现有四种客户端协议与员工/全局路由能力，不产生新授权。
 
 最终模型集合取员工策略、Key 策略和当前有效路由的交集。`GET /v1/models` 只有 Key 允许至少一种 OpenAI 客户端协议时才返回过滤目录，否则返回已鉴权空列表；`GET /v1beta/models` 要求 Gemini 客户端协议，否则同样返回已鉴权空列表。四种前台入口必须在治理、预算、租约、尝试和网络派发之前检查客户端协议与公开模型，并在最终派发事务中重查冻结的策略 revision。
+
+### 每 Key socket peer 来源策略（2026-09-25 源码增量）
+
+完整边界见[Messages↔Responses SSE 与 Key 来源 IP/CIDR 契约](messages-stream-key-ip-batch-contract-2026-09-25.md)。策略对象增加 `source_mode` 与 `source_cidrs`，并与协议/模型共用同一个 revision/CAS。`source_mode=all` 必须配空数组；`selected` 的空数组拒绝所有来源。成员接受裸 IP 或 CIDR，服务端保存规范 masked prefix；重复、zone、无效或超限输入均拒绝。
+
+创建 policy 的旧四字段客户端省略来源字段时默认 `all/[]`。PUT 中来源两字段同时省略表示保留当前限制；只出现一个无效；显式 `source_mode:"all",source_cidrs:[]` 才清除限制。来源只取 `Request.RemoteAddr` 的真实 `host:port` socket peer；`Forwarded`、`X-Forwarded-For`、`X-Real-IP` 一律忽略。反向代理后的本段策略看到代理地址，不表示支持可信代理链或终端用户真实 IP。
+
+目录与四模型入口在治理、预算、parent/attempt 和上游网络前检查来源；最终派发事务用初始捕获的规范 peer 和 policy revision 重核。尚未派发的后台任务持久化并复用创建来源，不能把 worker loopback 当员工来源。资源读取/继续要求当前来源仍获权；仍有效且精确拥有资源的 Key 即使策略收紧，仍可 cancel/delete 自有任务。
 
 ### Messages↔Responses SSE（2026-09-25 源码增量）
 

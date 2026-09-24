@@ -48,6 +48,8 @@ React 网页构建产物由服务通过 --web-dir 提供；SQLite 用于预览�
 不是一次宣称全部兼容：每种协议需单独覆盖流式、工具调用、错误、取消和模型支持范围。
 优先同协议上游转发；跨协议转换须有独立规格和测试，不静默丢弃不能表达的能力。
 
+截至 `main` `785f649`，六个非流式显式 wire 方向、Chat↔Responses 文本/function SSE 和每 Key 公共入口协议/公开模型策略已合入。最新源码继续接入 Messages↔Responses 文本/function SSE 与真实 socket peer IP/CIDR 限制；其中 Messages→Responses 在 usage 仅终态可知时有界全流延迟。可信代理链、Gemini 跨协议 SSE、媒体和托管工具仍需独立设计及验收。
+
 ## 首轮详细设计
 
 已形成[核心设计提案](core-design.md)和[验收矩阵](acceptance-matrix.md)，首轮预览及多批增量已实现；每项真实范围与未完成部分以[集成状态](integration-status.md)为准。

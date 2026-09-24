@@ -258,9 +258,10 @@ func TestNonBudgetDispatchBarrierSerializesRevisionThroughDurableMarker(t *testi
 
 func TestCrossProtocolStreamDispatchRejectsStaleKeyPolicyRevisionAndABA(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		aba  bool
-	}{{name: "stale_revision"}, {name: "aba", aba: true}} {
+		name   string
+		aba    bool
+		source bool
+	}{{name: "stale_revision"}, {name: "aba", aba: true}, {name: "source_narrowing", source: true}} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newRuntimeFixture(t, &runtimeSequenceRandom{}, time.Minute, 4)
 			a := f.base.app
@@ -285,9 +286,18 @@ func TestCrossProtocolStreamDispatchRejectsStaleKeyPolicyRevisionAndABA(t *testi
 			defer a.releaseModelLease(lease, requestID(ctx), true)
 
 			now := time.Now().UTC()
+			protocolMode := keypolicy.ModeSelected
+			sourceMode := keypolicy.ModeAll
+			sourceCIDRs := []string{}
+			if test.source {
+				protocolMode = keypolicy.ModeAll
+				sourceMode = keypolicy.ModeSelected
+				sourceCIDRs = []string{"203.0.113.0/24"}
+			}
 			stored, err := keypolicy.Replace(ctx, a.store.db, f.auth1.KeyID, 1, keypolicy.Replacement{
-				ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
+				ProtocolMode: protocolMode, Protocols: []keypolicy.ClientProtocol{},
 				ModelMode: keypolicy.ModeAll, Models: []string{},
+				SourceMode: sourceMode, SourceCIDRs: sourceCIDRs,
 			}, now)
 			if err != nil {
 				t.Fatal(err)
@@ -296,6 +306,7 @@ func TestCrossProtocolStreamDispatchRejectsStaleKeyPolicyRevisionAndABA(t *testi
 				stored, err = keypolicy.Replace(ctx, a.store.db, f.auth1.KeyID, stored.Revision, keypolicy.Replacement{
 					ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
 					ModelMode: keypolicy.ModeAll, Models: []string{},
+					SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
 				}, now.Add(time.Nanosecond))
 				if err != nil {
 					t.Fatal(err)

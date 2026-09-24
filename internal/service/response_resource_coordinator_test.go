@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"net/netip"
 	"os"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ func TestResponseResourceCoordinatorEncryptedOwnershipAndDeletion(t *testing.T) 
 	input := responseResourceCreateInput{
 		OperationID: "op_state_one",
 		EmployeeID:  "emp_one", KeyID: "key_one", PublicModel: "model_one", ProviderKind: "openai-compatible",
+		SourceAddr: netip.MustParseAddr("127.0.0.1"), PolicyRevision: 1,
 		StoreBody: true, CreatedAt: now, TerminalAt: responseTimePointer(now.Add(time.Second)),
 		Items: []responseStateItem{
 			{Type: "instructions", Payload: []byte(`"synthetic-instructions-secret"`)},
@@ -53,7 +55,7 @@ func TestResponseResourceCoordinatorEncryptedOwnershipAndDeletion(t *testing.T) 
 		t.Fatalf("owner-scoped operation id create id=%q err=%v", otherCreated.ID, err)
 	}
 
-	loaded, err := coordinator.Get(context.Background(), employeeAuth{EmployeeID: "emp_one", KeyID: "key_one"}, created.ID, true)
+	loaded, err := coordinator.Get(context.Background(), employeeAuth{EmployeeID: "emp_one", KeyID: "key_one", SourceAddr: netip.MustParseAddr("127.0.0.1")}, created.ID, true)
 	if err != nil || len(loaded.Items) != len(input.Items) {
 		t.Fatalf("load items=%d err=%v", len(loaded.Items), err)
 	}
@@ -90,7 +92,7 @@ func TestResponseResourceCoordinatorEncryptedOwnershipAndDeletion(t *testing.T) 
 	if err := coordinator.Delete(context.Background(), employeeAuth{EmployeeID: "emp_one", KeyID: "key_one"}, created.ID); err != nil {
 		t.Fatalf("idempotent delete: %v", err)
 	}
-	if _, err := coordinator.Get(context.Background(), employeeAuth{EmployeeID: "emp_one", KeyID: "key_one"}, created.ID, true); !errors.Is(err, errResponseResourceNotFound) {
+	if _, err := coordinator.Get(context.Background(), employeeAuth{EmployeeID: "emp_one", KeyID: "key_one", SourceAddr: netip.MustParseAddr("127.0.0.1")}, created.ID, true); !errors.Is(err, errResponseResourceNotFound) {
 		t.Fatalf("tombstoned resource remained readable: %v", err)
 	}
 	var keys, items int
@@ -112,6 +114,7 @@ func TestResponseResourcePolicyNarrowingBlocksBodyButPreservesCancelAndDelete(t 
 	completed, err := coordinator.Create(context.Background(), responseResourceCreateInput{
 		OperationID: "op_policy_completed", EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one",
 		ProviderKind: "openai-compatible", StoreBody: true, CreatedAt: now, TerminalAt: responseTimePointer(now.Add(time.Second)),
+		SourceAddr: netip.MustParseAddr("127.0.0.1"), PolicyRevision: 1,
 		Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"synthetic"}`)}},
 	})
 	if err != nil {
@@ -120,6 +123,7 @@ func TestResponseResourcePolicyNarrowingBlocksBodyButPreservesCancelAndDelete(t 
 	queued, err := coordinator.Create(context.Background(), responseResourceCreateInput{
 		OperationID: "op_policy_background", EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one",
 		ProviderKind: "openai-compatible", Background: true, CreatedAt: now,
+		SourceAddr: netip.MustParseAddr("127.0.0.1"), PolicyRevision: 1,
 		Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"synthetic"}`)}},
 	})
 	if err != nil {
@@ -128,10 +132,11 @@ func TestResponseResourcePolicyNarrowingBlocksBodyButPreservesCancelAndDelete(t 
 	if _, err := keypolicy.Replace(context.Background(), db, "key_one", 1, keypolicy.Replacement{
 		ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeSelected, Models: []string{},
+		SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
 	}, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	auth := employeeAuth{EmployeeID: "emp_one", KeyID: "key_one"}
+	auth := employeeAuth{EmployeeID: "emp_one", KeyID: "key_one", SourceAddr: netip.MustParseAddr("127.0.0.1")}
 	if _, err := coordinator.Get(context.Background(), auth, completed.ID, true); !errors.Is(err, errResponseResourceForbidden) {
 		t.Fatalf("narrowed policy body read err=%v", err)
 	}
@@ -146,6 +151,100 @@ func TestResponseResourcePolicyNarrowingBlocksBodyButPreservesCancelAndDelete(t 
 	}
 }
 
+func TestResponseResourceSourceNarrowingBlocksBodyButPreservesCancelAndDelete(t *testing.T) {
+	coordinator, db := newResponseResourceTestCoordinator(t)
+	now := time.Date(2026, 9, 24, 6, 45, 0, 0, time.UTC)
+	coordinator.now = func() time.Time { return now }
+	create := func(operation string, background bool) responseResourceView {
+		input := responseResourceCreateInput{
+			OperationID: operation, EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one",
+			ProviderKind: "openai-compatible", SourceAddr: netip.MustParseAddr("127.0.0.1"), PolicyRevision: 1,
+			Background: background, StoreBody: true, CreatedAt: now,
+			Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"synthetic"}`)}},
+		}
+		if !background {
+			input.TerminalAt = responseTimePointer(now.Add(time.Second))
+		}
+		view, err := coordinator.Create(context.Background(), input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return view
+	}
+	completed := create("op_source_completed", false)
+	queued := create("op_source_background", true)
+	if _, err := keypolicy.Replace(context.Background(), db, "key_one", 1, keypolicy.Replacement{
+		ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
+		ModelMode: keypolicy.ModeAll, Models: []string{},
+		SourceMode: keypolicy.ModeSelected, SourceCIDRs: []string{"203.0.113.0/24"},
+	}, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	auth := employeeAuth{EmployeeID: "emp_one", KeyID: "key_one", SourceAddr: netip.MustParseAddr("127.0.0.1")}
+	if _, err := coordinator.Get(context.Background(), auth, completed.ID, true); !errors.Is(err, errResponseResourceForbidden) {
+		t.Fatalf("source-narrowed body read err=%v", err)
+	}
+	if cancelled, err := coordinator.Cancel(context.Background(), auth, queued.ID); err != nil || cancelled.Status != "cancelled" {
+		t.Fatalf("cancel after source narrowing status=%q err=%v", cancelled.Status, err)
+	}
+	if err := coordinator.Delete(context.Background(), auth, completed.ID); err != nil {
+		t.Fatalf("delete after source narrowing: %v", err)
+	}
+}
+
+func TestBackgroundResponseCapturedSourceRevisionAndMissingContextFailClosed(t *testing.T) {
+	coordinator, db := newResponseResourceTestCoordinator(t)
+	now := time.Now().UTC()
+	coordinator.now = func() time.Time { return now }
+	create := func(operation string, revision int64) responseResourceView {
+		view, err := coordinator.Create(context.Background(), responseResourceCreateInput{
+			OperationID: operation, EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one",
+			ProviderKind: "openai-compatible", SourceAddr: netip.MustParseAddr("127.0.0.1"), PolicyRevision: revision,
+			Background: true, StoreBody: true, CreatedAt: now,
+			Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"queued"}`)}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return view
+	}
+	stale := create("op_source_revision_stale", 1)
+	if _, err := keypolicy.Replace(context.Background(), db, "key_one", 1, keypolicy.Replacement{
+		ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
+		ModelMode: keypolicy.ModeAll, Models: []string{},
+		SourceMode: keypolicy.ModeSelected, SourceCIDRs: []string{"127.0.0.1/32"},
+	}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.app.responseResources = coordinator
+	worker := &backgroundResponseWorker{app: coordinator.app, ctx: context.Background()}
+	if claim, err := worker.claimOne(); err == nil || claim != nil {
+		t.Fatalf("stale source revision claim=%+v err=%v", claim, err)
+	}
+	missing := create("op_source_context_missing", 2)
+	if _, err := db.Exec(`DELETE FROM background_task_policy_contexts WHERE task_id=?`, missing.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, taskID := range []string{stale.TaskID, missing.TaskID} {
+		var taskStatus, responseStatus, requestStatus string
+		if err := db.QueryRow(`SELECT t.status,r.status,a.status FROM background_tasks t JOIN response_resources r ON r.id=t.response_id JOIN accounting_requests a ON a.id=t.request_id WHERE t.id=?`, taskID).Scan(&taskStatus, &responseStatus, &requestStatus); err != nil {
+			t.Fatal(err)
+		}
+		if taskStatus != "interrupted" || responseStatus != "interrupted" || requestStatus != "interrupted" {
+			t.Fatalf("task %s statuses=%s/%s/%s", taskID, taskStatus, responseStatus, requestStatus)
+		}
+	}
+	for _, table := range []string{"model_requests", "accounting_attempts"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s count=%d err=%v", table, count, err)
+		}
+	}
+}
+
 func TestBackgroundResponseCreationIsAtomicWithAccountingRequest(t *testing.T) {
 	coordinator, db := newResponseResourceTestCoordinator(t)
 	now := time.Date(2026, 9, 24, 7, 0, 0, 0, time.UTC)
@@ -153,6 +252,7 @@ func TestBackgroundResponseCreationIsAtomicWithAccountingRequest(t *testing.T) {
 	input := responseResourceCreateInput{
 		OperationID: "op_background_one",
 		EmployeeID:  "emp_one", KeyID: "key_one", PublicModel: "model_one", ProviderKind: "openai-compatible",
+		SourceAddr: netip.MustParseAddr("127.0.0.1"), PolicyRevision: 1,
 		Background: true, CreatedAt: now,
 		Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"queued"}`)}},
 	}
@@ -198,6 +298,7 @@ func TestBackgroundResponsePolicyNarrowingInterruptsBeforeDispatch(t *testing.T)
 	created, err := coordinator.Create(context.Background(), responseResourceCreateInput{
 		OperationID: "op_background_policy_narrow", EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one",
 		ProviderKind: "openai-compatible", Background: true, CreatedAt: now,
+		SourceAddr: netip.MustParseAddr("127.0.0.1"), PolicyRevision: 1,
 		Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"queued"}`)}},
 	})
 	if err != nil {
@@ -206,6 +307,7 @@ func TestBackgroundResponsePolicyNarrowingInterruptsBeforeDispatch(t *testing.T)
 	if _, err := keypolicy.Replace(context.Background(), db, "key_one", 1, keypolicy.Replacement{
 		ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeSelected, Models: []string{},
+		SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
 	}, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -240,6 +342,7 @@ func TestBackgroundResponseCancelAndRestartRecoveryAreNoReplay(t *testing.T) {
 		view, err := coordinator.Create(context.Background(), responseResourceCreateInput{
 			OperationID: operation, EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one", ProviderKind: "openai-compatible",
 			Background: true, CreatedAt: now, Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"queued"}`)}},
+			SourceAddr: netip.MustParseAddr("127.0.0.1"), PolicyRevision: 1,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -311,6 +414,7 @@ func TestResponseResourceCreateRequiresTerminalSuccessAndAggregateBounds(t *test
 	base := responseResourceCreateInput{
 		OperationID: "op_bounds", EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one", ProviderKind: "openai-compatible",
 		StoreBody: true, CreatedAt: now,
+		SourceAddr: netip.MustParseAddr("127.0.0.1"), PolicyRevision: 1,
 		Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"ok"}`)}},
 	}
 	if _, err := coordinator.Create(context.Background(), base); !errors.Is(err, errResponseResourceInvalid) {
@@ -342,7 +446,7 @@ func TestStoredResponseTerminalWriteSurvivesClientCancellation(t *testing.T) {
 	coordinator, db := newResponseResourceTestCoordinator(t)
 	now := time.Date(2026, 9, 24, 8, 30, 0, 0, time.UTC)
 	plan := &responsePersistencePlan{
-		coordinator: coordinator, auth: employeeAuth{EmployeeID: "emp_one", KeyID: "key_one"},
+		coordinator: coordinator, auth: employeeAuth{EmployeeID: "emp_one", KeyID: "key_one", SourceAddr: netip.MustParseAddr("127.0.0.1"), Policy: keypolicy.Policy{Revision: 1}},
 		model: "model_one", operationID: "op_cancelled_client_terminal", createdAt: now,
 		items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"secret"}`)}},
 	}
