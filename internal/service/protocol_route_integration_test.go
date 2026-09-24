@@ -237,11 +237,17 @@ func TestExplicitWireCancellationPropagatesAndSettlesSharedLedgers(t *testing.T)
 	var calls atomic.Int32
 	started := make(chan struct{}, 1)
 	cancelled := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
 	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
 		started <- struct{}{}
-		<-r.Context().Done()
-		cancelled <- struct{}{}
+		select {
+		case <-r.Context().Done():
+			cancelled <- struct{}{}
+		case <-release:
+		}
 	}))
 	enableGovernanceForExplicitWire(t, fixture.app, fixture.key.ID)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -415,12 +421,17 @@ func TestExplicitMessagesToResponsesCancellationPropagatesWithoutReplay(t *testi
 	var calls atomic.Int32
 	started := make(chan struct{}, 1)
 	cancelled := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
 	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		_, _ = io.Copy(io.Discard, r.Body)
 		started <- struct{}{}
-		<-r.Context().Done()
-		cancelled <- struct{}{}
+		select {
+		case <-r.Context().Done():
+			cancelled <- struct{}{}
+		case <-release:
+		}
 	}))
 	enableGovernanceForExplicitWire(t, fixture.app, fixture.key.ID)
 	ctx, cancel := context.WithCancel(context.Background())
