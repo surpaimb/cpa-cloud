@@ -219,6 +219,12 @@ type protocolStreamLimits struct {
 	MaxLineBytes   int
 	MaxEventBytes  int
 	MaxStreamBytes int64
+	TerminalDrainTimeout time.Duration
+}
+
+type protocolStreamWriteResult struct {
+	DownstreamCommitted bool
+	SemanticCommitted   bool
 }
 
 type protocolStreamResult struct {
@@ -235,7 +241,7 @@ func (p *protocolRuntime) executeStream(
 	request *http.Request,
 	limits protocolStreamLimits,
 	observeRaw func(protocolconv.Protocol, []byte) error,
-	writeClient func(protocolconv.SSEEvent) error,
+	writeClient func(protocolconv.SSEEvent) (protocolStreamWriteResult, error),
 ) (protocolStreamResult, error)
 ```
 
@@ -245,9 +251,15 @@ func (p *protocolRuntime) executeStream(
   （尤其 `Retry-After`）；在验证上游状态/content-type 与首个转换事件前不提交客户端 200/SSE header。
 - 每个完整 JSON data frame 先以实际 `UpstreamProtocol` 调用 `observeRaw`，成功后才交转换器；`[DONE]`
   是 Chat wire 终止标记，不送 usage observer。observer 失败时不得输出未观察的转换事件。
-- `writeClient` 同步调用；成功返回才更新 committed 标志，因此自然形成背压。写失败、客户端 context
-  取消或 observer/转换错误立即取消请求 context 并关闭 upstream body。
-- `Completed=true` 只在严格状态机确认成功终态后返回。提前 EOF 使用可 `errors.Is` 的 interrupted 错误；
+- `writeClient` 同步调用并自然形成背压。bridge 无论 callback 是否返回错误，都先把返回的 commit 位 OR 入
+  结果；callback 必须由真实 ResponseWriter 追踪 header、成功字节和 `n>0,err!=nil` 的部分写，并对任何
+  可能已被客户端观察的语义字节保守返回 `SemanticCommitted=true`。一旦 callback 报错，bridge 立即取消
+  请求并关闭 upstream body，handler 不得再补普通 JSON、第二组 header 或另一个 SSE error。
+- converter 识别到客户端成功终态时，bridge 暂存所有 `Terminal=true` 事件而不写出，继续读取并验证尾部。
+  只有在 `TerminalDrainTimeout` 内读到物理 EOF、`EOF()` 成功且没有重复终态/终态后 frame，才顺序写出
+  暂存终态并令 `Completed=true`。终态后非法 frame 必须可观测地失败；不得看到终态就停止读取。终态后
+  连接不结束则取消上游并按 interrupted 处理，不向客户端伪造 completed/[DONE]。
+- `Completed=true` 只在严格状态机确认成功终态、尾部验证且终态实际写入成功后返回。提前 EOF 使用可 `errors.Is` 的 interrupted 错误；
   context/下游写失败区分 cancelled/downstream；畸形、未知、超限或 provider failure 保留 typed error。
   任何错误都不得由 bridge 生成成功终态。
 
@@ -265,8 +277,9 @@ func (p *protocolRuntime) executeStream(
    请求并释放租约。
 
 专项测试至少覆盖任意拆包、CR/LF/CRLF、多行 data、注释、行/事件/总量上限、文本、并行 function、
-usage、严格终态、重复/未知事件、畸形参数、EOF、非 2xx/Retry-After、客户端写失败、取消、背压和
-observer-before-conversion。组合测试覆盖两方向真实 HTTP、一次 dispatch/attempt、实际 wire usage、Key
+usage、严格终态、重复/未知事件、畸形参数、EOF、非 2xx/Retry-After、客户端首写部分成功后报错、终态
+后非法 frame、重复终态、终态后连接不结束、客户端终态写失败、取消、背压和 observer-before-conversion。
+组合测试覆盖两方向真实 HTTP、一次 dispatch/attempt、实际 wire usage、Key
 策略、strict budget 零派发、native/非流式回归和员工 Key 不向上游泄露。
 
 ## 4. 文件与符号所有权
@@ -294,13 +307,18 @@ observer-before-conversion。组合测试覆盖两方向真实 HTTP、一次 dis
 ```go
 func Migrate(context.Context, *sql.DB) error
 func CreateDefaultTx(context.Context, *sql.Tx, keyID string, at time.Time) error
+func CreateTx(context.Context, *sql.Tx, keyID string, Replacement, time.Time) (Policy, error)
 func LoadTx(context.Context, *sql.Tx, keyID string) (Policy, error)
+func ReplaceTx(context.Context, *sql.Tx, keyID string, expected int64, Replacement, time.Time) (Policy, error)
 func Replace(context.Context, *sql.DB, keyID string, expected int64, Replacement, time.Time) (Policy, error)
 func Allows(Policy, ClientProtocol, publicModel string) bool
 ```
 
 E 的 `Allows` 只判定 Key 层，不复制员工/路由可用性。服务 adapter 可调用现有只读 helper 形成
-`effective_*`，但最终交集与派发屏障由集成任务拥有。
+`effective_*`，但最终交集与派发屏障由集成任务拥有。非默认策略创建必须通过 `CreateTx` 与 Key INSERT
+同事务；管理员 replacement 必须由 adapter/集成层在同一个 `*sql.Tx` 内验证员工当前授权及模型未归档，
+再调用 `ReplaceTx` 做 revision CAS 和成员替换。禁止先查授权、再由 `Replace` 另开事务提交；`Replace` 只可
+作为已经不需要外部授权交集验证的低层便利包装或专项测试入口。
 
 ### 集成任务独占
 
@@ -321,8 +339,8 @@ E 的 `Allows` 只判定 Key 层，不复制员工/路由可用性。服务 adap
 第三方登录、`DATA-02` 租户级数据域、管理员密码重置命令，以及提示词/响应正文审计。`ID-05` 的普通员工
 自助门户、`ID-03` 注册/找回流程及其他单实例目标没有因此删除，仍按依赖队列规划。
 
-截至本基线，PR #4 已交付有口令恢复材料、双版本轮换/回退和同机/异机合成恢复闭环；不等于真实第二台
-机器或 Linux/macOS 系统密钥 provider 验收。PR #5 已交付默认关闭的管理员商业管理网页；不等于员工
+截至本基线，PR #4 已交付有口令恢复材料、双版本轮换/回退，以及同一 Windows 用户下用不同 store/新目录
+完成的可移植合成恢复；不等于跨 profile、真实第二台机器或 Linux/macOS 系统密钥 provider 验收。PR #5 已交付默认关闭的管理员商业管理网页；不等于员工
 自助、自动续期或真实支付。PR #6 已交付六方向跨协议非流式执行；本批只增加 Chat↔Responses SSE。
 
 本批不访问真实供应商/会员账号，不操作既有 8787 服务，不创建包、tag、部署或生产发布。合成上游和
