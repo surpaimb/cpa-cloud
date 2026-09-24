@@ -32,6 +32,12 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 		return 2, errors.New("a subcommand is required")
 	}
 	switch args[0] {
+	case "key-export":
+		return runKeyExport(ctx, args[1:], stdin, stdout)
+	case "key-verify":
+		return runKeyVerify(ctx, args[1:], stdin, stdout)
+	case "key-import":
+		return runKeyImport(ctx, args[1:], stdin, stdout)
 	case "create":
 		flags := flag.NewFlagSet("cpa-cloud-backup create", flag.ContinueOnError)
 		flags.SetOutput(stdout)
@@ -152,8 +158,8 @@ func bytesTrimOneLineEnding(data []byte) []byte {
 }
 
 func writeUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: cpa-cloud-backup <create|verify|restore> [options]")
-	fmt.Fprintln(w, "The backup password is read only from stdin.")
+	fmt.Fprintln(w, "Usage: cpa-cloud-backup <create|verify|restore|key-export|key-verify|key-import> [options]")
+	fmt.Fprintln(w, "The backup or recovery password is read only from stdin.")
 }
 
 func wipe(data []byte) {
