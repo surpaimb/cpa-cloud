@@ -3,6 +3,7 @@
 package keyprovider
 
 import (
+	"crypto/subtle"
 	"errors"
 	"unicode/utf8"
 )
@@ -51,4 +52,18 @@ func validProviderID(value string) bool {
 
 func validVersion(version uint64) bool {
 	return version >= 1 && version <= MaxPublicVersion
+}
+
+func validateMaterial(material *Material) error {
+	if material == nil || !validProviderID(material.ProviderID) || material.Kind != KindWindowsDPAPIUser || !validVersion(material.Version) {
+		return errors.New("backup key material reference is invalid")
+	}
+	var nonzero byte
+	for _, value := range material.Key {
+		nonzero |= value
+	}
+	if subtle.ConstantTimeByteEq(nonzero, 0) == 1 {
+		return errors.New("backup key material is invalid")
+	}
+	return nil
 }
