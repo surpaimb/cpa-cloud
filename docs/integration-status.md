@@ -2,17 +2,27 @@
 
 ## 2026-09-24：显式 Wire 协议路由与跨协议非流式接线
 
-- 集成提交 `13985a0` 把纯转换模块接入共享 HTTP 执行路径。模型与账号池路由持久化显式
+- 集成提交 `13985a0` 把纯转换模块接入共享 HTTP 执行路径，后续 `01f2019` 把模型 revision 也冻结到最终派发屏障，
+  `13b3612` 恢复原生无状态 Responses 对 provider 工具声明的透明转发。模型与账号池路由持久化显式
   `wire_protocol`，旧库迁移及旧管理客户端省略字段都保持 `legacy-native`；provider/wire 不匹配、账号池内
   wire 不一致、派发前 revision/wire 改变均失败关闭，不按 provider 猜测或试探端点。
 - 合成上游验收覆盖 Chat↔Responses、Messages↔Responses、Gemini↔Responses 六个非流式方向。每个员工请求
   只有一个 parent 和一次实际派发，attempt 记录实际上游协议；原始上游 JSON 先做用量观察再转换。显式跨协议
   SSE 在派发和 attempt 创建前拒绝；state/background/previous/conversation 及 Messages token counting 仍只允许
   各自原生路由。Codex Chat 继续保留既有兼容路径，但其实际 Responses 出站现按 Responses usage/attempt 归因。
-- 管理网页可创建、修改和查看 wire，并在账号池逐路由保存；切换 provider 会重置不兼容选择。全量网页
-  17 文件/123 项测试、TypeScript 检查和生产构建通过。全仓非缓存 Go 测试通过：service 736.008s，
-  governance 135.923s，accounting 85.290s，backup 44.573s，financial 22.175s，两个 CLI 及其余包通过；
-  `go vet ./...` 与 `scripts/test-ci-plan.py` 通过。
+- 联合集成断言证明 Chat→Responses 与 Responses→Chat 的治理 parent、公开模型和通用预算 selector 仍按员工入口协议，
+  而 attempt/可靠用量按最终 wire；严格预算无法证明最终 wire 上界时返回 `budget_bound_unavailable`，零网络、零 attempt。
+  转换请求取消会传到唯一上游请求，并把 governance/accounting/model/attempt 共同结算为 `cancelled`；Key、策略、账号、
+  池和模型 revision 的最终屏障仍在 attempt 前复验。Gemini 可选 call ID 只在唯一未完成同名调用时补配，重复 ID、
+  生成碰撞和同名歧义均失败关闭。
+- 管理网页可创建、修改和查看 wire，并在账号池逐路由保存；切换 provider 会重置不兼容选择。真实浏览器在隔离 Windows
+  临时服务完成 Responses r1 创建、Chat r2 修改、Chat 账号池 r1 保存，以及旧客户端省略 wire 后模型 r3 仍保留 Chat；
+  进程重启后模型 r3、池 r1 和两处 Chat wire 均重读一致。390×844 下文档宽度等于视口，账号池对话框 390×760，
+  无横向溢出；重启后的控制台 0 error/0 warning。未连接的合成上游只在创建时产生预期目录发现失败。
+- `13b3612965629a097ddce014335b99f716db7226`（其后只增加 smoke/证据文档）的全仓非缓存 Go 测试通过：
+  service 709.517s，governance 139.694s，accounting 89.467s，backup 46.859s，recoverymaterial 55.852s，
+  financial 20.025s，两个 CLI 及其余包通过。最终源码的 `go vet ./...` 通过；网页 TypeScript、17 文件/123 项测试和
+  生产构建通过；两个客户端 smoke 脚本 `node --check`、6 项 CI 路径计划测试和 diff 检查通过。
 - 上述只是随机临时目录、本地合成 HTTP 上游和组件测试证据，没有访问真实供应商、真实会员账号或既有 8787
   服务，不证明真实 provider 兼容。Linux race 与 CI 以本批 PR 新 HEAD 的实际结果为准；旧 25 分钟 race
   总命令已因 service 套件增长稳定超时，现保留全部覆盖并把 service 与其他有状态包分组执行。
