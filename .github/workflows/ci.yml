@@ -48,7 +48,7 @@ jobs:
       - name: Race-check service and stateful capability packages
         env:
           CGO_ENABLED: '1'
-        run: go test -race ./internal/service ./internal/backup ./internal/keyprovider ./internal/membership ./internal/scheduling ./internal/accounting ./internal/financial ./internal/egress ./internal/governance ./internal/protocolconv -count=1 -timeout=25m
+        run: go test -race ./internal/service ./internal/backup ./internal/keyprovider ./internal/recoverymaterial ./internal/membership ./internal/scheduling ./internal/accounting ./internal/financial ./internal/egress ./internal/governance ./internal/protocolconv -count=1 -timeout=25m
       - run: go vet ./...
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud" ./cmd/cpa-cloud
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud-backup" ./cmd/cpa-cloud-backup
