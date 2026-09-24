@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -117,6 +118,82 @@ func assertDispatchAttemptCount(t *testing.T, a *App, id string, want int) {
 	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempts WHERE request_id=?`, id).Scan(&got); err != nil || got != want {
 		t.Fatalf("attempts=%d want=%d err=%v", got, want, err)
 	}
+}
+
+func TestLegacyModelRevisionRejectsWireABAAtFinalDispatch(t *testing.T) {
+	f := newRuntimeFixture(t, &runtimeSequenceRandom{}, time.Minute, 4)
+	a := f.base.app
+	a.accountPool.Close()
+	a.accountPool = f.rt
+	f.base.enableRuntimeAdminHTTP(t)
+	f.insertAccount(t, "ups_model_aba", true)
+	f.insertModelPool(t, "model-aba", "ups_model_aba", 0)
+	var upstreamCalls atomic.Int32
+	a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		upstreamCalls.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+
+	prepare := func(requestIDValue string) (*http.Request, route) {
+		t.Helper()
+		ctx := context.WithValue(context.Background(), requestIDKey{}, requestIDValue)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)).WithContext(ctx)
+		selected, lease, failed := a.prepareModelRoute(r, f.auth1, "model-aba", []string{"openai-compatible"}, accounting.ProtocolOpenAIChatCompletions, true, func(_ *http.Request, selected route) (route, *modelPreflightError) {
+			return selected, nil
+		})
+		if failed != nil || lease != nil {
+			t.Fatalf("prepare failed=%+v lease=%v", failed, lease)
+		}
+		return r, selected
+	}
+
+	oldRequest, oldRoute := prepare("request-model-aba-old")
+	if oldRoute.ModelRevision != 1 || oldRoute.WireProtocol != wireProtocolLegacyNative {
+		t.Fatalf("old route revision=%d wire=%q", oldRoute.ModelRevision, oldRoute.WireProtocol)
+	}
+	for _, change := range []struct {
+		expected int64
+		wire     string
+	}{{1, string(wireProtocolResponses)}, {2, string(wireProtocolLegacyNative)}} {
+		response := requestJSON(t, http.MethodPatch, f.base.server.URL+"/admin/api/v1/models/model-aba", marshalTestJSON(t, map[string]any{
+			"expected_revision": change.expected, "wire_protocol": change.wire,
+		}), f.base.cookie, f.base.csrf, f.base.server.URL)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("CAS wire %q status=%d body=%s", change.wire, response.StatusCode, readBody(response))
+		}
+		response.Body.Close()
+	}
+	if client, failure := a.dispatchModelRoute(oldRequest, f.auth1, "model-aba", oldRoute, nil, true); client != nil || failure == nil {
+		t.Fatalf("stale ABA route dispatched client=%v failure=%+v", client, failure)
+	}
+	assertDispatchAttemptCount(t, a, requestID(oldRequest.Context()), 0)
+	if upstreamCalls.Load() != 0 {
+		t.Fatalf("stale ABA route made %d upstream calls", upstreamCalls.Load())
+	}
+	a.finishRequest(requestID(oldRequest.Context()), "failed", 0)
+
+	freshRequest, freshRoute := prepare("request-model-aba-fresh")
+	if freshRoute.ModelRevision != 3 || freshRoute.WireProtocol != wireProtocolLegacyNative {
+		t.Fatalf("fresh route revision=%d wire=%q", freshRoute.ModelRevision, freshRoute.WireProtocol)
+	}
+	client, failure := a.dispatchModelRoute(freshRequest, f.auth1, "model-aba", freshRoute, nil, true)
+	if failure != nil || client == nil {
+		t.Fatalf("fresh route failed client=%v failure=%+v", client, failure)
+	}
+	request, err := http.NewRequestWithContext(freshRequest.Context(), http.MethodPost, "https://synthetic.invalid/v1/chat/completions", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	assertDispatchAttemptCount(t, a, requestID(freshRequest.Context()), 1)
+	if upstreamCalls.Load() != 1 {
+		t.Fatalf("fresh route upstream calls=%d", upstreamCalls.Load())
+	}
+	a.finishRequest(requestID(freshRequest.Context()), "cancelled", http.StatusOK)
 }
 
 func TestNonBudgetDispatchBarrierSerializesRevisionThroughDurableMarker(t *testing.T) {

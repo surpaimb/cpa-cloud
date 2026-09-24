@@ -29,6 +29,7 @@ type route struct {
 	Ciphertext      []byte
 	ProviderKind    string
 	WireProtocol    routeWireProtocol
+	ModelRevision   int64
 	Revision        int64
 	CredentialState sql.NullString
 	KeyVersion      int

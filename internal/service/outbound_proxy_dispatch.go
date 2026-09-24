@@ -155,7 +155,7 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 	}
 	var matches int
 	if lease == nil {
-		err = tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM models m WHERE m.id=? AND m.enabled=1 AND m.upstream_id=? AND m.upstream_model=? AND m.wire_protocol=? AND NOT EXISTS(SELECT 1 FROM model_account_pool_configs WHERE model_id=m.id)`, model, selected.AccountID, selected.UpstreamModel, string(selected.WireProtocol)).Scan(&matches)
+		err = tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM models m WHERE m.id=? AND m.enabled=1 AND m.revision=? AND m.upstream_id=? AND m.upstream_model=? AND m.wire_protocol=? AND NOT EXISTS(SELECT 1 FROM model_account_pool_configs WHERE model_id=m.id)`, model, selected.ModelRevision, selected.AccountID, selected.UpstreamModel, string(selected.WireProtocol)).Scan(&matches)
 	} else {
 		err = tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM model_account_pool_configs c JOIN model_account_pool_routes p ON p.model_id=c.model_id JOIN account_pool_runtime_leases l ON l.public_model=c.model_id AND l.account_id=p.upstream_id WHERE c.model_id=? AND c.revision=? AND p.upstream_id=? AND p.upstream_model=? AND p.wire_protocol=? AND l.lease_id=? AND l.employee_id=? AND l.key_id=? AND l.expires_at>?`, model, lease.PoolRevision(), selected.AccountID, selected.UpstreamModel, string(selected.WireProtocol), lease.inner.ID(), auth.EmployeeID, auth.KeyID, formatAccountPoolTime(a.accountPool.clock.Now())).Scan(&matches)
 	}
