@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { api, ApiError, type Session } from './api'
 import { messageFor } from './hooks'
 import { Button, Field, FormError, Icon, submitHandler } from './ui'
@@ -12,7 +12,9 @@ import { GovernancePage } from './pages/GovernancePage'
 import { ScheduledTestsPage } from './pages/ScheduledTestsPage'
 import { BackupsPage } from './pages/BackupsPage'
 
-type Page = 'employees' | 'upstreams' | 'proxies' | 'models' | 'scheduled-tests' | 'backups' | 'governance' | 'usage' | 'status'
+const BillingPage = lazy(() => import('./pages/BillingPage').then((module) => ({ default: module.BillingPage })))
+
+type Page = 'employees' | 'upstreams' | 'proxies' | 'models' | 'scheduled-tests' | 'backups' | 'governance' | 'usage' | 'billing' | 'status'
 
 const navigation: { id: Page; label: string; icon: 'people' | 'link' | 'route' | 'status' | 'settings' }[] = [
   { id: 'employees', label: '员工与 Key', icon: 'people' },
@@ -23,6 +25,7 @@ const navigation: { id: Page; label: string; icon: 'people' | 'link' | 'route' |
   { id: 'backups', label: '自动备份', icon: 'settings' },
   { id: 'governance', label: '请求治理', icon: 'settings' },
   { id: 'usage', label: '用量与成本', icon: 'status' },
+  { id: 'billing', label: '商业管理', icon: 'settings' },
   { id: 'status', label: '系统状态', icon: 'status' },
 ]
 
@@ -76,20 +79,22 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
   const [mobileNav, setMobileNav] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
   const [backupConfiguration, setBackupConfiguration] = useState(false)
+  const [billingCapability, setBillingCapability] = useState(false)
 
   useEffect(() => {
     let active = true
     api.status().then((status) => {
       if (active) setBackupConfiguration(status.features?.automated_backups_configuration === true)
-    }).catch(() => { if (active) setBackupConfiguration(false) })
+      if (active) setBillingCapability(status.features?.single_instance_billing === true)
+    }).catch(() => { if (active) { setBackupConfiguration(false); setBillingCapability(false) } })
     return () => { active = false }
   }, [])
 
   useEffect(() => {
-    if (page === 'backups' && !backupConfiguration) setPage('employees')
-  }, [backupConfiguration, page])
+    if ((page === 'backups' && !backupConfiguration) || (page === 'billing' && !billingCapability)) setPage('employees')
+  }, [backupConfiguration, billingCapability, page])
 
-  const visibleNavigation = navigation.filter((item) => item.id !== 'backups' || backupConfiguration)
+  const visibleNavigation = navigation.filter((item) => (item.id !== 'backups' || backupConfiguration) && (item.id !== 'billing' || billingCapability))
   const content = {
     employees: <EmployeesPage csrf={session.csrf_token} />,
     upstreams: <UpstreamsPage csrf={session.csrf_token} />,
@@ -99,6 +104,7 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
     backups: <BackupsPage csrf={session.csrf_token} />,
     governance: <GovernancePage csrf={session.csrf_token} />,
     usage: <UsagePage csrf={session.csrf_token} />,
+    billing: <Suspense fallback={<div className="loading" role="status"><span />正在加载商业管理…</div>}><BillingPage csrf={session.csrf_token} /></Suspense>,
     status: <StatusPage csrf={session.csrf_token} />,
   }[page]
 
