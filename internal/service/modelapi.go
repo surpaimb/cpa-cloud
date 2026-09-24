@@ -12,14 +12,17 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 	"cpacloud.local/server/internal/protocolconv"
 	"cpacloud.local/server/internal/scheduling"
 )
 
 type employeeAuth struct {
-	EmployeeID string
-	KeyID      string
-	Mode       string
+	EmployeeID     string
+	KeyID          string
+	Mode           string
+	Policy         keypolicy.Policy
+	ClientProtocol keypolicy.ClientProtocol
 }
 type route struct {
 	egress          *routeEgress
@@ -40,11 +43,19 @@ func (a *App) listModels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !keyPolicyAllowsProtocol(auth.Policy, keypolicy.ProtocolOpenAIChat) && !keyPolicyAllowsProtocol(auth.Policy, keypolicy.ProtocolOpenAIResponses) {
+		writeJSON(w, 200, map[string]any{"object": "list", "data": []any{}})
+		return
+	}
 	query := `SELECT m.id,m.created_at FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND m.archived=0 AND ` + a.availableModelRouteSQL(false)
 	args := []any{}
 	if auth.Mode == "selected" {
 		query += ` AND EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id)`
 		args = append(args, auth.EmployeeID)
+	}
+	if auth.Policy.ModelMode == keypolicy.ModeSelected {
+		query += ` AND EXISTS(SELECT 1 FROM access_key_policy_models kpm WHERE kpm.key_id=? AND kpm.model_id=m.id)`
+		args = append(args, auth.KeyID)
 	}
 	query += ` ORDER BY m.id`
 	rows, err := a.store.db.QueryContext(r.Context(), query, args...)
@@ -103,13 +114,22 @@ func (a *App) lookupEmployeeKey(ctx context.Context, key string) (employeeAuth, 
 	var digest []byte
 	var status string
 	var expires, revoked sql.NullString
-	err := a.store.db.QueryRowContext(ctx, `SELECT k.employee_id,k.id,k.digest,k.expires_at,k.revoked_at,e.status,e.model_mode FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.selector=?`, pair[0]).Scan(&auth.EmployeeID, &auth.KeyID, &digest, &expires, &revoked, &status, &auth.Mode)
+	tx, err := a.store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return employeeAuth{}, false
+	}
+	defer tx.Rollback()
+	err = tx.QueryRowContext(ctx, `SELECT k.employee_id,k.id,k.digest,k.expires_at,k.revoked_at,e.status,e.model_mode FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.selector=?`, pair[0]).Scan(&auth.EmployeeID, &auth.KeyID, &digest, &expires, &revoked, &status, &auth.Mode)
 	valid := err == nil && subtle.ConstantTimeCompare(a.secrets.digest("employee-key/v1\x00"+pair[0], pair[1]), digest) == 1 && status == "active" && !revoked.Valid
 	if valid && expires.Valid {
 		t, e := parseTime(expires.String)
 		valid = e == nil && time.Now().UTC().Before(t)
 	}
 	if !valid {
+		return employeeAuth{}, false
+	}
+	auth.Policy, err = keypolicy.LoadTx(ctx, tx, auth.KeyID)
+	if err != nil || tx.Commit() != nil {
 		return employeeAuth{}, false
 	}
 	return auth, true
@@ -156,6 +176,11 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	r = withUsageStreamEvidence(r, stream)
 	auth, ok := a.authenticateEmployee(w, r)
 	if !ok {
+		return
+	}
+	auth, policyFailure := authorizeKeyPolicy(auth, keypolicy.ProtocolOpenAIChat, model)
+	if policyFailure != nil {
+		writeModelError(w, policyFailure.status, policyFailure.code, policyFailure.message, requestID(r.Context()))
 		return
 	}
 	if failure := a.validatePoolSession(r, auth, model); failure != nil {
@@ -279,7 +304,11 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if conversion != nil {
-		a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, modelRequestID, chatMaxJSON, nil)
+		if stream {
+			a.handleConvertedModelSSE(w, r, conversion, upstreamReq, client, modelRequestID)
+		} else {
+			a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, modelRequestID, chatMaxJSON, nil)
+		}
 		return
 	}
 	response, err := client.Do(upstreamReq)

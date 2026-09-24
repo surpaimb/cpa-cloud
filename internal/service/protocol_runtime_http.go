@@ -6,9 +6,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"cpacloud.local/server/internal/protocolconv"
 )
+
+const protocolStreamTerminalDrainTimeout = 2 * time.Second
 
 // handleConvertedModelJSON observes the immutable raw upstream body before
 // conversion, then completes the one parent request and one dispatched attempt.
@@ -60,6 +63,64 @@ func (a *App) handleConvertedModelJSON(w http.ResponseWriter, r *http.Request, r
 	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+// handleConvertedModelSSE converts the two explicitly supported OpenAI stream
+// pairs while preserving the single dispatch and accounting parent created by
+// the caller. Raw upstream event JSON is observed before conversion.
+func (a *App) handleConvertedModelSSE(w http.ResponseWriter, r *http.Request, runtime *protocolRuntime, req *http.Request, client upstreamHTTPDoer, requestID string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		a.finishRequest(requestID, "failed", 0)
+		writeConvertedProtocolError(w, runtime, http.StatusInternalServerError, "streaming_unavailable", "Streaming is unavailable.", requestID)
+		return
+	}
+	limits := protocolStreamLimits{
+		MaxLineBytes: chatMaxLine, MaxEventBytes: chatMaxEvent,
+		MaxStreamBytes: chatMaxStream, TerminalDrainTimeout: protocolStreamTerminalDrainTimeout,
+	}
+	result, err := runtime.executeStream(r.Context(), client, req, limits, func(_ protocolconv.Protocol, raw []byte) error {
+		a.observeRequestUsage(requestID, raw)
+		return nil
+	}, func(event protocolconv.SSEEvent) (protocolStreamWriteResult, error) {
+		encoded, err := protocolconv.EncodeSSE(event)
+		if err != nil {
+			return protocolStreamWriteResult{}, err
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, writeErr := w.Write(encoded)
+		flusher.Flush()
+		return protocolStreamWriteResult{DownstreamCommitted: true, SemanticCommitted: event.Semantic}, writeErr
+	})
+	if err == nil && result.Completed {
+		_ = a.finishRequestChecked(requestID, "succeeded", result.StatusCode)
+		return
+	}
+
+	outcome, status, code := "failed", http.StatusBadGateway, "upstream_protocol_error"
+	var upstreamStatus *protocolUpstreamStatusError
+	switch {
+	case errors.As(err, &upstreamStatus):
+		result.StatusCode = upstreamStatus.StatusCode
+		code = "upstream_error"
+		if upstreamStatus.StatusCode == http.StatusTooManyRequests {
+			status, code = http.StatusTooManyRequests, "upstream_rate_limited"
+			if retryAfter := safeRetryAfter(result.Header.Get("Retry-After")); retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
+			}
+		}
+	case r.Context().Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, errProtocolStreamDownstream):
+		outcome = "cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		outcome, status, code = "cancelled", http.StatusGatewayTimeout, "upstream_timeout"
+	case errors.Is(err, protocolconv.ErrInterrupted):
+		outcome = "interrupted"
+	}
+	a.finishRequest(requestID, outcome, result.StatusCode)
+	if r.Context().Err() == nil && !result.DownstreamCommitted && !errors.Is(err, errProtocolStreamDownstream) {
+		writeConvertedProtocolError(w, runtime, status, code, "Upstream request failed.", requestID)
+	}
 }
 
 func writeConvertedProtocolError(w http.ResponseWriter, runtime *protocolRuntime, status int, code, message, requestID string) {

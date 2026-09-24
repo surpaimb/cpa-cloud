@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 )
 
 func TestResponseResourceCoordinatorEncryptedOwnershipAndDeletion(t *testing.T) {
@@ -325,6 +326,9 @@ func newResponseResourceTestCoordinator(t *testing.T) (*responseResourceCoordina
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.close() })
+	if err := keypolicy.Migrate(context.Background(), s.db); err != nil {
+		t.Fatal(err)
+	}
 	seedResponseResourceParents(t, s.db)
 	coordinator, _ := newResponseResourceTestCoordinatorFromDB(t, s.db, secretStore)
 	return coordinator, s.db

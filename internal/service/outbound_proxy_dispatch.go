@@ -140,6 +140,13 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 	if a.accountPool == nil {
 		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)
 	}
+	policyCurrent, err := keyPolicyCurrentTx(r.Context(), tx, auth, model)
+	if err != nil {
+		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)
+	}
+	if !policyCurrent {
+		return nil, poolAdmissionFailure(accountPoolAuthorizationChanged)
+	}
 	authorized, available, allowed, err := a.accountPool.authorizationCurrent(r.Context(), tx, model, auth)
 	if err != nil {
 		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)

@@ -15,12 +15,73 @@ import (
 
 	"cpacloud.local/server/internal/accounting"
 	"cpacloud.local/server/internal/governance"
+	"cpacloud.local/server/internal/keypolicy"
 )
 
 type explicitWireFixture struct {
 	app    *App
 	server *httptest.Server
 	key    keyView
+}
+
+func TestKeyPolicyDeniesEveryProtocolBeforeAdmission(t *testing.T) {
+	var calls atomic.Int32
+	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	_, err := keypolicy.Replace(context.Background(), fixture.app.store.db, fixture.key.ID, 1, keypolicy.Replacement{
+		ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
+		ModelMode: keypolicy.ModeAll, Models: []string{},
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		request func() *http.Response
+	}{
+		{"chat", func() *http.Response {
+			return employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/chat/completions", `{"model":"wire-model","messages":[{"role":"user","content":"hi"}]}`, fixture.key.Key, context.Background())
+		}},
+		{"responses", func() *http.Response {
+			return employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/responses", `{"model":"wire-model","input":"hi"}`, fixture.key.Key, context.Background())
+		}},
+		{"anthropic", func() *http.Response {
+			return anthropicEmployeeRequest(t, context.Background(), http.MethodPost, fixture.server.URL+"/v1/messages", `{"model":"wire-model","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`, fixture.key.Key, "x-api-key")
+		}},
+		{"gemini", func() *http.Response {
+			return geminiEmployeeKeyRequest(t, http.MethodPost, fixture.server.URL+"/v1beta/models/wire-model:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, fixture.key.Key, context.Background())
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := test.request()
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusForbidden {
+				t.Fatalf("status=%d body=%s", response.StatusCode, readBody(response))
+			}
+		})
+	}
+	modelsRequest, _ := http.NewRequest(http.MethodGet, fixture.server.URL+"/v1/models", nil)
+	modelsRequest.Header.Set("Authorization", "Bearer "+fixture.key.Key)
+	modelsResponse, err := http.DefaultClient.Do(modelsRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelsBody := readBody(modelsResponse)
+	modelsResponse.Body.Close()
+	if modelsResponse.StatusCode != http.StatusOK || !strings.Contains(modelsBody, `"data":[]`) {
+		t.Fatalf("models status=%d body=%s", modelsResponse.StatusCode, modelsBody)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("denied policy made %d upstream calls", calls.Load())
+	}
+	for _, table := range []string{"governance_requests", "accounting_requests", "accounting_attempts", "model_requests"} {
+		var count int
+		if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s count=%d err=%v", table, count, err)
+		}
+	}
 }
 
 func newExplicitWireFixture(t *testing.T, wire string, upstream http.Handler) explicitWireFixture {
@@ -232,21 +293,53 @@ func TestExplicitWireCancellationPropagatesAndSettlesSharedLedgers(t *testing.T)
 	}
 }
 
-func TestExplicitCrossProtocolStreamRejectsBeforeDispatch(t *testing.T) {
+func TestExplicitCrossProtocolStreamDispatchesOnce(t *testing.T) {
 	var calls atomic.Int32
-	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r\",\"created_at\":1,\"model\":\"actual-model\"}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg\",\"type\":\"message\",\"status\":\"in_progress\",\"role\":\"assistant\",\"content\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"sequence_number\":2,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"sequence_number\":4,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"text\":\"ok\"}\n\n")
+		_, _ = io.WriteString(w, "event: response.content_part.done\ndata: {\"type\":\"response.content_part.done\",\"sequence_number\":5,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":6,\"output_index\":0,\"item\":{\"id\":\"msg\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":7,\"response\":{\"id\":\"r\",\"object\":\"response\",\"created_at\":1,\"model\":\"actual-model\",\"status\":\"completed\",\"output\":[{\"id\":\"msg\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}]}}\n\n")
+	}))
 	response := employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/chat/completions", `{"model":"wire-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`, fixture.key.Key, context.Background())
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", response.StatusCode, readBody(response))
+	body := readBody(response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"content":"ok"`) || !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
 	}
 	response.Body.Close()
-	if calls.Load() != 0 {
+	if calls.Load() != 1 {
 		t.Fatalf("cross-protocol stream dispatched %d upstream requests", calls.Load())
 	}
 	var attempts int
-	if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempt_contexts`).Scan(&attempts); err != nil || attempts != 0 {
+	if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempt_contexts`).Scan(&attempts); err != nil || attempts != 1 {
 		t.Fatalf("attempts=%d err=%v", attempts, err)
 	}
+}
+
+func TestExplicitResponsesToChatStreamDispatchesOnce(t *testing.T) {
+	var calls atomic.Int32
+	fixture := newExplicitWireFixture(t, string(wireProtocolOpenAIChat), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"actual-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	response := employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/responses", `{"model":"wire-model","stream":true,"input":"hi"}`, fixture.key.Key, context.Background())
+	body := readBody(response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "response.output_text.delta") || !strings.Contains(body, "response.completed") {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	response.Body.Close()
+	if calls.Load() != 1 {
+		t.Fatalf("cross-protocol stream dispatched %d upstream requests", calls.Load())
+	}
+	assertSingleWireAttempt(t, fixture.app, "openai-chat-completions")
 }
 
 func TestExplicitWireRateLimitPreservesRetryAfter(t *testing.T) {

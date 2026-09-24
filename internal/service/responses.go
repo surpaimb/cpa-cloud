@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 	"cpacloud.local/server/internal/membership"
 	"cpacloud.local/server/internal/protocolconv"
 	"cpacloud.local/server/internal/scheduling"
@@ -82,6 +83,11 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 
 	auth, ok := a.authenticateEmployee(w, r)
 	if !ok {
+		return
+	}
+	auth, policyFailure := authorizeKeyPolicy(auth, keypolicy.ProtocolOpenAIResponses, model)
+	if policyFailure != nil {
+		writeModelError(w, policyFailure.status, policyFailure.code, policyFailure.message, requestID(r.Context()))
 		return
 	}
 	var persistence *responsePersistencePlan
@@ -267,7 +273,11 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if conversion != nil {
-		a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, reqID, responsesMaxResponse, persist)
+		if stream {
+			a.handleConvertedModelSSE(w, r, conversion, upstreamReq, client, reqID)
+		} else {
+			a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, reqID, responsesMaxResponse, persist)
+		}
 		return
 	}
 	a.handleAPIKeyResponses(w, r, upstreamReq, stream, reqID, client, persist)

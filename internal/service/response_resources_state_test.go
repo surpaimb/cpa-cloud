@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+
+	"cpacloud.local/server/internal/keypolicy"
 )
 
 func TestMigrateResponseResourcesIsExactRetryableAndAtomic(t *testing.T) {
@@ -123,6 +125,9 @@ func TestResponseResourceConstraintsRejectUnsafeRows(t *testing.T) {
 	if err := migrateResponseResources(context.Background(), s.db); err != nil {
 		t.Fatal(err)
 	}
+	if err := keypolicy.Migrate(context.Background(), s.db); err != nil {
+		t.Fatal(err)
+	}
 	seedResponseResourceParents(t, s.db)
 	base := []any{
 		"resp_one", "op_one", bytes.Repeat([]byte{1}, 32), "emp_one", "key_one", "model_one", nil,
@@ -149,6 +154,8 @@ func seedResponseResourceParents(t *testing.T, db *sql.DB) {
 		`INSERT INTO employees(id,name,status,model_mode,revision,created_at) VALUES('emp_other','other','active','all',1,'2026-09-24T00:00:00Z')`,
 		`INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,created_at) VALUES('key_one','emp_one','key','sel_one',X'01',1,'key_op','2026-09-24T00:00:00Z')`,
 		`INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,created_at) VALUES('key_other','emp_other','key','sel_other',X'02',1,'key_other_op','2026-09-24T00:00:00Z')`,
+		`INSERT INTO access_key_policies(key_id,revision,protocol_mode,model_mode,created_at,updated_at) VALUES('key_one',1,'all','all','2026-09-24T00:00:00Z','2026-09-24T00:00:00Z')`,
+		`INSERT INTO access_key_policies(key_id,revision,protocol_mode,model_mode,created_at,updated_at) VALUES('key_other',1,'all','all','2026-09-24T00:00:00Z','2026-09-24T00:00:00Z')`,
 		`INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at) VALUES('ups_one','upstream','openai-compatible','https://example.invalid/v1',1,X'01',1,1,'2026-09-24T00:00:00Z')`,
 		`INSERT INTO models(id,upstream_id,upstream_model,enabled,revision,created_at) VALUES('model_one','ups_one','actual',1,1,'2026-09-24T00:00:00Z')`,
 	} {

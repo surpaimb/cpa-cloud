@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 	"cpacloud.local/server/internal/protocolconv"
 	"cpacloud.local/server/internal/scheduling"
 )
@@ -115,6 +116,12 @@ func (w *backgroundResponseWorker) claimOne() (*backgroundResponseClaim, error) 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	claim.auth.Policy, err = w.app.loadKeyPolicySnapshot(w.ctx, claim.auth.KeyID, keypolicy.ProtocolOpenAIResponses, claim.view.PublicModel)
+	if err != nil {
+		_ = c.InterruptQueuedClaim(context.Background(), claim.view.TaskID, responseID, claim.view.RequestID, claim.claimToken)
+		return nil, err
+	}
+	claim.auth.ClientProtocol = keypolicy.ProtocolOpenAIResponses
 	loaded, err := c.Get(w.ctx, claim.auth, responseID, true)
 	if err != nil {
 		_ = c.InterruptQueuedClaim(context.Background(), claim.view.TaskID, responseID, claim.view.RequestID, claim.claimToken)

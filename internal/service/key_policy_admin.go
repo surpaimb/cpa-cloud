@@ -119,6 +119,22 @@ func (a *App) readKeyPolicyView(ctx context.Context, keyID string) (keyPolicyVie
 	if err != nil {
 		return keyPolicyView{}, err
 	}
+	return readKeyPolicyViewTxWithPolicy(ctx, tx, a, keyID, owner, policy)
+}
+
+func readKeyPolicyViewTx(ctx context.Context, tx *sql.Tx, a *App, keyID string) (keyPolicyView, error) {
+	owner, err := loadKeyPolicyOwnerTx(ctx, tx, keyID)
+	if err != nil {
+		return keyPolicyView{}, err
+	}
+	policy, err := keypolicy.LoadTx(ctx, tx, keyID)
+	if err != nil {
+		return keyPolicyView{}, err
+	}
+	return readKeyPolicyViewTxWithPolicy(ctx, tx, a, keyID, owner, policy)
+}
+
+func readKeyPolicyViewTxWithPolicy(ctx context.Context, tx *sql.Tx, a *App, keyID string, owner keyPolicyOwner, policy keypolicy.Policy) (keyPolicyView, error) {
 	view := keyPolicyView{
 		Revision: policy.Revision, ProtocolMode: policy.ProtocolMode, Protocols: policy.Protocols,
 		ModelMode: policy.ModelMode, Models: policy.Models,
