@@ -55,20 +55,27 @@ func (api *backupAutomationAPI) listKeyProviders(w http.ResponseWriter, r *http.
 		writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
 		return
 	}
-	defer rows.Close()
 	items := make([]backupKeyProviderView, 0)
 	for rows.Next() {
 		var item backupKeyProviderView
 		if err := rows.Scan(&item.ID, &item.Kind, &item.Scope, &item.Status, &item.ReasonCode, &item.ActiveVersion, &item.Revision, &item.CreatedByAdminID, &item.UpdatedByAdminID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			rows.Close()
 			writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
 			return
 		}
-		api.decorateProvider(r.Context(), &item)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
 		return
+	}
+	if err := rows.Close(); err != nil {
+		writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	for index := range items {
+		api.decorateProvider(r.Context(), &items[index])
 	}
 	ready, reason := api.coordinator.keys.Ready()
 	var reasonValue *string
@@ -111,7 +118,7 @@ func (api *backupAutomationAPI) createKeyProvider(w http.ResponseWriter, r *http
 		writeBackupAutomationError(w, http.StatusConflict, "key_provider_unavailable")
 		return
 	}
-	id, err := newID("bkp")
+	id, err := newBackupKeyProviderID()
 	if err != nil {
 		writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
 		return
@@ -158,6 +165,16 @@ func (api *backupAutomationAPI) createKeyProvider(w http.ResponseWriter, r *http
 	}
 	api.coordinator.notify()
 	writeJSON(w, http.StatusCreated, item)
+}
+
+func newBackupKeyProviderID() (string, error) {
+	id, err := newID("bkp")
+	if err != nil {
+		return "", err
+	}
+	// Host-protected stores use this identifier in authenticated file names and
+	// intentionally accept only the portable lower-case identifier alphabet.
+	return strings.ToLower(id), nil
 }
 
 func (api *backupAutomationAPI) rotateKeyProvider(w http.ResponseWriter, r *http.Request, session adminSession) {
@@ -310,29 +327,36 @@ func (api *backupAutomationAPI) listPlans(w http.ResponseWriter, r *http.Request
 		writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
 		return
 	}
-	defer rows.Close()
 	items := make([]backupPlanView, 0)
 	for rows.Next() {
 		var item backupPlanView
 		var rehearsal, enabled int
 		if err := rows.Scan(&item.ID, &item.Name, &item.KeyProviderID, &item.IntervalSeconds, &item.RetentionCount, &rehearsal, &enabled, &item.NextRunAt, &item.Revision, &item.CreatedByAdminID, &item.UpdatedByAdminID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			rows.Close()
 			writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
 			return
 		}
 		item.RehearsalEnabled, item.Enabled = rehearsal == 1, enabled == 1
-		latest, err := latestBackupRun(r.Context(), api.app.store.db, item.ID)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	if err := rows.Close(); err != nil {
+		writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	for index := range items {
+		latest, err := latestBackupRun(r.Context(), api.app.store.db, items[index].ID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
 			return
 		}
 		if err == nil {
-			item.LatestRun = &latest
+			items[index].LatestRun = &latest
 		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
-		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }

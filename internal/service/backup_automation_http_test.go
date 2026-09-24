@@ -7,8 +7,27 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestBackupKeyProviderIDUsesProtectedStoreAlphabet(t *testing.T) {
+	for range 100 {
+		id, err := newBackupKeyProviderID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(id, "bkp_") || len(id) > 64 {
+			t.Fatalf("unexpected backup key provider id %q", id)
+		}
+		for _, character := range id {
+			if !((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '_' || character == '-') {
+				t.Fatalf("backup key provider id %q contains an unsupported character", id)
+			}
+		}
+	}
+}
 
 func TestBackupAutomationAdminAPIKeyRotationPlanAndRun(t *testing.T) {
 	fixture := newBackupAutomationFixture(t, true)
@@ -72,6 +91,23 @@ func TestBackupAutomationAdminAPIKeyRotationPlanAndRun(t *testing.T) {
 	decodeResponse(t, response, &plan)
 	if plan.Enabled || plan.Revision != 1 || plan.KeyProviderID != provider.ID {
 		t.Fatalf("plan=%+v", plan)
+	}
+	client := server.Client()
+	client.Timeout = 2 * time.Second
+	for _, path := range []string{"/admin/api/v1/backups/key-providers", "/admin/api/v1/backups/plans"} {
+		request, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.AddCookie(cookie)
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatalf("list %s after create: %v", path, err)
+		}
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("list %s after create status=%d body=%s", path, response.StatusCode, readBody(response))
+		}
+		response.Body.Close()
 	}
 	if err := fixture.worker.Start(); err != nil {
 		t.Fatal(err)
