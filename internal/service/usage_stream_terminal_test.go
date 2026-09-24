@@ -124,6 +124,7 @@ func TestUsageStreamTerminalResponsesOutcomeDistinguishesCancellationAndEOF(t *t
 		{"truncated eof", nil, io.ErrUnexpectedEOF, "interrupted"},
 		{"incomplete", nil, errResponsesIncomplete, "interrupted"},
 		{"provider failed", nil, errResponsesFailed, "failed"},
+		{"downstream disconnected", nil, errResponsesDownstream, "cancelled"},
 		{"malformed", nil, errors.New("invalid SSE event"), "failed"},
 	}
 	for _, test := range tests {

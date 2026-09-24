@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"cpacloud.local/server/internal/accounting"
 	"cpacloud.local/server/internal/membership"
@@ -20,6 +21,7 @@ import (
 const (
 	responsesMaxResponse = 16 << 20
 	responsesMaxEvent    = 1 << 20
+	responsesHeartbeat   = time.Second
 )
 
 type codexResponsesExecutor interface {
@@ -293,10 +295,38 @@ type responsesSSEEvent struct {
 	kind string
 }
 
+type responsesSSEDelivery struct {
+	event responsesSSEEvent
+	ack   chan error
+}
+
+func readResponsesSSEAsync(ctx context.Context, reader io.Reader) (<-chan responsesSSEDelivery, <-chan error) {
+	events := make(chan responsesSSEDelivery)
+	done := make(chan error, 1)
+	go func() {
+		done <- readResponsesSSE(ctx, reader, func(event responsesSSEEvent) error {
+			delivery := responsesSSEDelivery{event: event, ack: make(chan error, 1)}
+			select {
+			case events <- delivery:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			select {
+			case err := <-delivery.ack:
+				return err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	}()
+	return events, done
+}
+
 var (
 	errResponsesCompleted  = errors.New("Responses stream completed")
 	errResponsesFailed     = errors.New("Responses stream failed")
 	errResponsesIncomplete = errors.New("Responses stream incomplete")
+	errResponsesDownstream = errors.New("Responses downstream disconnected")
 )
 
 func readResponsesSSE(ctx context.Context, reader io.Reader, consume func(responsesSSEEvent) error) error {
@@ -382,6 +412,12 @@ func (a *App) forwardResponsesStream(w http.ResponseWriter, r *http.Request, res
 	committed := false
 	completed := false
 	var terminal responsesSSEEvent
+	streamContext, cancelStream := context.WithCancel(r.Context())
+	defer cancelStream()
+	stopBodyClose := context.AfterFunc(streamContext, func() { _ = response.Body.Close() })
+	defer stopBodyClose()
+	heartbeat := time.NewTicker(responsesHeartbeat)
+	defer heartbeat.Stop()
 	start := func() {
 		if !committed {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -391,7 +427,7 @@ func (a *App) forwardResponsesStream(w http.ResponseWriter, r *http.Request, res
 			committed = true
 		}
 	}
-	err := readResponsesSSE(r.Context(), response.Body, func(event responsesSSEEvent) error {
+	consume := func(event responsesSSEEvent) error {
 		switch event.kind {
 		case "response.completed":
 			if validateCompletedEvent(event.data) != nil {
@@ -407,16 +443,45 @@ func (a *App) forwardResponsesStream(w http.ResponseWriter, r *http.Request, res
 		default:
 			start()
 			if err := writeResponsesSSE(w, event); err != nil {
-				return err
+				return fmt.Errorf("%w: %v", errResponsesDownstream, err)
 			}
 			flusher.Flush()
 			return nil
 		}
-	})
+	}
+	events, readDone := readResponsesSSEAsync(streamContext, response.Body)
+	var err error
+readLoop:
+	for {
+		select {
+		case delivery := <-events:
+			consumeErr := consume(delivery.event)
+			delivery.ack <- consumeErr
+			if consumeErr != nil {
+				err = consumeErr
+				break readLoop
+			}
+		case err = <-readDone:
+			break readLoop
+		case <-heartbeat.C:
+			if !committed {
+				continue
+			}
+			if _, writeErr := io.WriteString(w, ": keep-alive\n\n"); writeErr != nil {
+				cancelStream()
+				err = context.Canceled
+				break readLoop
+			}
+			flusher.Flush()
+		case <-streamContext.Done():
+			err = streamContext.Err()
+			break readLoop
+		}
+	}
 	if (!errors.Is(err, errResponsesCompleted) && err != nil) || !completed {
-		outcome := responsesStreamFailureOutcome(r.Context().Err(), err)
+		outcome := responsesStreamFailureOutcome(streamContext.Err(), err)
 		a.finishRequest(reqID, outcome, response.StatusCode)
-		if r.Context().Err() == nil {
+		if streamContext.Err() == nil {
 			if committed {
 				writeResponsesStreamError(w, reqID, "upstream_protocol_error", "Upstream request failed.")
 			} else {
@@ -442,7 +507,7 @@ func (a *App) forwardResponsesStream(w http.ResponseWriter, r *http.Request, res
 }
 
 func responsesStreamFailureOutcome(contextErr, streamErr error) string {
-	if contextErr != nil {
+	if contextErr != nil || errors.Is(streamErr, errResponsesDownstream) {
 		return "cancelled"
 	}
 	if errors.Is(streamErr, errResponsesIncomplete) || errors.Is(streamErr, io.EOF) || errors.Is(streamErr, io.ErrUnexpectedEOF) {

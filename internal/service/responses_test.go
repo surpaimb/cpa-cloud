@@ -1,9 +1,12 @@
 package service
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -128,6 +131,89 @@ func TestResponsesAPIKeyStreamingRequiresCompletedAndRedactsFailure(t *testing.T
 	var outcome string
 	if err := app.store.db.QueryRow(`SELECT outcome FROM model_requests ORDER BY started_at DESC LIMIT 1`).Scan(&outcome); err != nil || outcome == "succeeded" {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+}
+
+func TestResponsesTCPResetCancelsIdleUpstreamStream(t *testing.T) {
+	cancelReached := make(chan struct{}, 1)
+	app, server, key := newResponsesAPIKeyFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		initial := `{"type":"response.created","sequence_number":0,"response":{"id":"resp_cancel","object":"response","status":"in_progress","output":[]}}`
+		_, _ = fmt.Fprintf(w, "event: response.created\ndata: %s\n\n", initial)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		cancelReached <- struct{}{}
+	}))
+
+	connection, err := net.DialTimeout("tcp", strings.TrimPrefix(server.URL, "http://"), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"model":"company-responses","stream":true,"input":"cancel"}`
+	if _, err := fmt.Fprintf(connection, "POST /v1/responses HTTP/1.1\r\nHost: synthetic\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n%s", key.Key, len(body), body); err != nil {
+		connection.Close()
+		t.Fatal(err)
+	}
+	wireReader := bufio.NewReader(connection)
+	wireResponse, err := http.ReadResponse(wireReader, &http.Request{Method: http.MethodPost})
+	if err != nil {
+		connection.Close()
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(wireResponse.Body)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			connection.Close()
+			t.Fatal(readErr)
+		}
+		if strings.Contains(line, "response.created") {
+			break
+		}
+	}
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			connection.Close()
+			t.Fatal(readErr)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		connection.Close()
+		t.Fatal(err)
+	}
+	heartbeat, err := reader.ReadString('\n')
+	if err != nil || !strings.HasPrefix(heartbeat, ": keep-alive") {
+		connection.Close()
+		t.Fatalf("idle Responses stream heartbeat=%q err=%v", heartbeat, err)
+	}
+	if tcp, ok := connection.(*net.TCPConn); ok {
+		if err := tcp.SetLinger(0); err != nil {
+			connection.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-cancelReached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("TCP reset did not cancel the idle upstream Responses request")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var outcome string
+		if err := app.store.db.QueryRow(`SELECT outcome FROM model_requests ORDER BY started_at DESC LIMIT 1`).Scan(&outcome); err == nil && outcome == "cancelled" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cancelled Responses request did not reach a durable terminal state")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
