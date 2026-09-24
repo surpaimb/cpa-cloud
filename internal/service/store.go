@@ -94,6 +94,7 @@ func (s *store) initialize(ctx context.Context) error {
 			digest BLOB NOT NULL,
 			digest_version INTEGER NOT NULL,
 			operation_id TEXT NOT NULL,
+			operation_fingerprint TEXT NOT NULL DEFAULT '' CHECK(operation_fingerprint='' OR (length(operation_fingerprint)=64 AND operation_fingerprint NOT GLOB '*[^0-9a-f]*')),
 			expires_at TEXT,
 			revoked_at TEXT,
 			created_at TEXT NOT NULL,
@@ -169,7 +170,40 @@ func (s *store) initialize(ctx context.Context) error {
 	if err := s.migrateAccountLifecycle(ctx); err != nil {
 		return fmt.Errorf("migrate account lifecycle: %w", err)
 	}
+	if err := s.migrateAccessKeyOperationFingerprint(ctx); err != nil {
+		return fmt.Errorf("migrate access key operation fingerprints: %w", err)
+	}
 	return nil
+}
+
+// New key creation stores a digest of the complete operation semantics so an
+// operation_id retry cannot silently change the requested policy. Existing
+// rows keep the empty sentinel and are interpreted as the legacy all/all
+// creation contract by the HTTP integration layer.
+func (s *store) migrateAccessKeyOperationFingerprint(ctx context.Context) error {
+	columns, err := tableColumns(ctx, s.db, "access_keys")
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if !columns["operation_fingerprint"] {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE access_keys ADD COLUMN operation_fingerprint TEXT NOT NULL DEFAULT '' CHECK(operation_fingerprint='' OR (length(operation_fingerprint)=64 AND operation_fingerprint NOT GLOB '*[^0-9a-f]*'))`); err != nil {
+			return err
+		}
+	}
+	actual, err := schemaColumns(ctx, tx, "access_keys")
+	if err != nil {
+		return err
+	}
+	fingerprint, ok := actual["operation_fingerprint"]
+	if !ok || fingerprint.kind != "TEXT" || !fingerprint.notNull || !fingerprint.defaultSQL.Valid || strings.Trim(fingerprint.defaultSQL.String, "() '") != "" {
+		return errors.New("access key operation fingerprint column has an incompatible schema")
+	}
+	return tx.Commit()
 }
 
 // migrateAccountLifecycle is an additive, retryable migration. SQLite keeps
