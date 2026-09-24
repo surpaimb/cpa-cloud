@@ -21,15 +21,22 @@ import (
 )
 
 type importHooks struct {
-	beforePublish func() error
+	afterProtect  func(uint64) error
+	beforePublish func(string) error
 	syncParent    func(string) error
 }
 
 func Import(ctx context.Context, input, backupPackage, targetRoot string, password []byte) (Reference, error) {
+	if ctx == nil {
+		return Reference{}, errors.New("context is required")
+	}
 	return importWithHooks(ctx, input, backupPackage, targetRoot, password, importHooks{syncParent: syncRecoveryDirectory})
 }
 
 func importWithHooks(ctx context.Context, input, backupPackage, targetRoot string, password []byte, hooks importHooks) (_ Reference, returnErr error) {
+	if ctx == nil {
+		return Reference{}, errors.New("context is required")
+	}
 	target, parent, parentIdentity, err := validateNewRecoveryTarget(targetRoot)
 	if err != nil {
 		return Reference{}, err
@@ -68,7 +75,7 @@ func importWithHooks(ctx context.Context, input, backupPackage, targetRoot strin
 		if returnErr == nil || published {
 			return
 		}
-		if cleanupErr := cleanupRecoveryStage(ctx, stage, stageIdentity, dataIdentity, providerIdentity, store, bundle.Reference); cleanupErr != nil {
+		if cleanupErr := cleanupRecoveryStage(context.WithoutCancel(ctx), stage, stageIdentity, dataIdentity, providerIdentity, store, bundle.Reference); cleanupErr != nil {
 			returnErr = fmt.Errorf("recovery import cleanup failed: %w", cleanupErr)
 		}
 	}()
@@ -116,9 +123,14 @@ func importWithHooks(ctx context.Context, input, backupPackage, targetRoot strin
 			return Reference{}, err
 		}
 		prepared.Commit()
+		if hooks.afterProtect != nil {
+			if err := hooks.afterProtect(entry.Version); err != nil {
+				return Reference{}, err
+			}
+		}
 	}
 	if hooks.beforePublish != nil {
-		if err := hooks.beforePublish(); err != nil {
+		if err := hooks.beforePublish(stage); err != nil {
 			return Reference{}, err
 		}
 	}

@@ -202,6 +202,28 @@ func TestWindowsImportFailuresAreAtomicAndRetryable(t *testing.T) {
 		}
 		assertAbsent(t, target)
 	})
+	t.Run("restored-database-provider-mismatch", func(t *testing.T) {
+		alteredData := filepath.Join(fixture.root, "altered-provider-data")
+		copyRecoveryData(t, fixture.dataDir, alteredData)
+		database := openRecoveryTestDB(t, filepath.Join(alteredData, "cpa-cloud.db"))
+		if _, err := database.Exec(`UPDATE backup_key_providers SET id='different_db_provider' WHERE id=?`, fixture.providerID); err != nil {
+			database.Close()
+			t.Fatal(err)
+		}
+		if err := database.Close(); err != nil {
+			t.Fatal(err)
+		}
+		mismatchedPackage := filepath.Join(fixture.root, "database-provider-mismatch.cpacb")
+		key := backup.KeyMaterial{ProviderID: fixture.providerID, ProviderKind: keyprovider.KindWindowsDPAPIUser, ProviderVersion: 1, WrappingKey: fixture.versions[1]}
+		if _, err := backup.CreateWithKeyMaterial(context.Background(), alteredData, mismatchedPackage, key, "database-provider-mismatch"); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(fixture.root, "database-provider-mismatch-target")
+		if _, err := Import(context.Background(), fixture.materialPath, mismatchedPackage, target, []byte(recoveryTestPassword)); err == nil || !strings.Contains(err.Error(), "does not contain the recovery key provider") {
+			t.Fatalf("error=%v", err)
+		}
+		assertAbsent(t, target)
+	})
 	t.Run("instance-mismatch", func(t *testing.T) {
 		otherData := filepath.Join(fixture.root, "other-data")
 		if err := service.Initialize(context.Background(), otherData, strings.NewReader("administrator-password\n")); err != nil {
@@ -219,7 +241,7 @@ func TestWindowsImportFailuresAreAtomicAndRetryable(t *testing.T) {
 	})
 	t.Run("failure-after-staging", func(t *testing.T) {
 		target := filepath.Join(fixture.root, "injected-target")
-		_, err := importWithHooks(context.Background(), fixture.materialPath, fixture.packagePath, target, []byte(recoveryTestPassword), importHooks{beforePublish: func() error { return errors.New("injected interruption") }, syncParent: syncRecoveryDirectory})
+		_, err := importWithHooks(context.Background(), fixture.materialPath, fixture.packagePath, target, []byte(recoveryTestPassword), importHooks{beforePublish: func(string) error { return errors.New("injected interruption") }, syncParent: syncRecoveryDirectory})
 		if err == nil {
 			t.Fatal("injected failure was ignored")
 		}
@@ -232,6 +254,65 @@ func TestWindowsImportFailuresAreAtomicAndRetryable(t *testing.T) {
 			t.Fatalf("safe retry failed: %v", err)
 		}
 	})
+	t.Run("failure-after-first-reprotected-version", func(t *testing.T) {
+		target := filepath.Join(fixture.root, "partial-reprotect-target")
+		var stage string
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		_, err := importWithHooks(ctx, fixture.materialPath, fixture.packagePath, target, []byte(recoveryTestPassword), importHooks{
+			afterProtect: func(version uint64) error {
+				if version != 1 {
+					t.Fatalf("first protected version=%d", version)
+				}
+				matches, globErr := filepath.Glob(filepath.Join(fixture.root, ".cpa-cloud-key-import-*"))
+				if globErr != nil || len(matches) != 1 {
+					t.Fatalf("stage=%v err=%v", matches, globErr)
+				}
+				stage = matches[0]
+				if _, statErr := os.Stat(filepath.Join(stage, "provider-store", "bkp_portable-v0000000000000001.dpapi")); statErr != nil {
+					t.Fatalf("first re-protected version missing: %v", statErr)
+				}
+				cancel()
+				return nil
+			},
+			syncParent: syncRecoveryDirectory,
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error=%v", err)
+		}
+		assertAbsent(t, target)
+		assertAbsent(t, stage)
+	})
+}
+
+func TestWindowsCleanupRefusalPreservesUnknownStage(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	if _, err := Export(context.Background(), fixture.sourceStore, fixture.dataDir, fixture.materialPath, fixture.providerID, []uint64{1, 2}, []byte(recoveryTestPassword)); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(fixture.root, "cleanup-refusal-target")
+	var stage string
+	_, err := importWithHooks(context.Background(), fixture.materialPath, fixture.packagePath, target, []byte(recoveryTestPassword), importHooks{
+		beforePublish: func(value string) error {
+			stage = value
+			data := filepath.Join(stage, "data")
+			if err := os.Rename(data, filepath.Join(stage, "data-unrecognized")); err != nil {
+				return err
+			}
+			if err := os.Mkdir(data, 0o700); err != nil {
+				return err
+			}
+			return errors.New("injected failure after path replacement")
+		},
+		syncParent: syncRecoveryDirectory,
+	})
+	if err == nil || !strings.Contains(err.Error(), "recovery import cleanup failed") {
+		t.Fatalf("error=%v", err)
+	}
+	assertAbsent(t, target)
+	if _, err := os.Stat(filepath.Join(stage, "data-unrecognized", "master.key")); err != nil {
+		t.Fatalf("restricted stage was not preserved: %v", err)
+	}
 }
 
 func TestWindowsExportIsAllOrNothingAndNeverOverwrites(t *testing.T) {
@@ -274,8 +355,28 @@ func TestWindowsImportConflictAndUncertainPublishNeverOverwrite(t *testing.T) {
 	if value, err := os.ReadFile(marker); err != nil || string(value) != "unchanged" {
 		t.Fatalf("existing target changed: %q err=%v", value, err)
 	}
+	raced := filepath.Join(fixture.root, "actor-created-target")
+	_, err := importWithHooks(context.Background(), fixture.materialPath, fixture.packagePath, raced, []byte(recoveryTestPassword), importHooks{
+		beforePublish: func(string) error {
+			if err := os.Mkdir(raced, 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(raced, "actor-marker"), []byte("preserve"), 0o600)
+		},
+		syncParent: syncRecoveryDirectory,
+	})
+	if err == nil {
+		t.Fatal("actor-created target was overwritten")
+	}
+	if value, readErr := os.ReadFile(filepath.Join(raced, "actor-marker")); readErr != nil || string(value) != "preserve" {
+		t.Fatalf("actor-created target changed: %q err=%v", value, readErr)
+	}
+	stages, globErr := filepath.Glob(filepath.Join(fixture.root, ".cpa-cloud-key-import-*"))
+	if globErr != nil || len(stages) != 0 {
+		t.Fatalf("staging leftovers=%v err=%v", stages, globErr)
+	}
 	uncertain := filepath.Join(fixture.root, "uncertain")
-	_, err := importWithHooks(context.Background(), fixture.materialPath, fixture.packagePath, uncertain, []byte(recoveryTestPassword), importHooks{syncParent: func(string) error { return errors.New("injected sync failure") }})
+	_, err = importWithHooks(context.Background(), fixture.materialPath, fixture.packagePath, uncertain, []byte(recoveryTestPassword), importHooks{syncParent: func(string) error { return errors.New("injected sync failure") }})
 	if !errors.Is(err, ErrPublishStateUncertain) {
 		t.Fatalf("error=%v", err)
 	}
@@ -284,6 +385,22 @@ func TestWindowsImportConflictAndUncertainPublishNeverOverwrite(t *testing.T) {
 	}
 	if _, err := Import(context.Background(), fixture.materialPath, fixture.packagePath, uncertain, []byte(recoveryTestPassword)); err == nil {
 		t.Fatal("uncertain target was overwritten on retry")
+	}
+}
+
+func copyRecoveryData(t *testing.T, source, target string) {
+	t.Helper()
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"cpa-cloud.db", "master.key"} {
+		value, err := os.ReadFile(filepath.Join(source, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(target, name), value, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

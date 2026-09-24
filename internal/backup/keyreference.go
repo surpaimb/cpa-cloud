@@ -15,6 +15,9 @@ import (
 // package with VerifyWithKeyMaterial or RestoreWithKeyMaterial before trusting
 // any other content.
 func InspectKeyReference(ctx context.Context, input string) (KeyReference, error) {
+	if ctx == nil {
+		return KeyReference{}, errors.New("context is required")
+	}
 	if err := ctx.Err(); err != nil {
 		return KeyReference{}, err
 	}

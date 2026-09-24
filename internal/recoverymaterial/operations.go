@@ -23,6 +23,9 @@ var (
 )
 
 func Export(ctx context.Context, sourceStore, sourceDataDir, output, providerID string, versions []uint64, password []byte) (Reference, error) {
+	if ctx == nil {
+		return Reference{}, errors.New("context is required")
+	}
 	reference := Reference{EnvelopeVersion: FormatVersion, ProviderID: providerID, ProviderKind: keyprovider.KindWindowsDPAPIUser, Versions: append([]uint64(nil), versions...)}
 	if err := validateReference(reference); err != nil {
 		return Reference{}, err
@@ -71,6 +74,9 @@ func Export(ctx context.Context, sourceStore, sourceDataDir, output, providerID 
 }
 
 func Verify(ctx context.Context, input string, password []byte) (Reference, error) {
+	if ctx == nil {
+		return Reference{}, errors.New("context is required")
+	}
 	bundle, err := readBundle(ctx, input, password)
 	if err != nil {
 		return Reference{}, err
@@ -80,6 +86,9 @@ func Verify(ctx context.Context, input string, password []byte) (Reference, erro
 }
 
 func readBundle(ctx context.Context, input string, password []byte) (*Bundle, error) {
+	if ctx == nil {
+		return nil, errors.New("context is required")
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

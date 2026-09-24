@@ -4,8 +4,12 @@ package recoverymaterial
 
 import (
 	"context"
+	"errors"
 )
 
-func Import(context.Context, string, string, string, []byte) (Reference, error) {
+func Import(ctx context.Context, _, _, _ string, _ []byte) (Reference, error) {
+	if ctx == nil {
+		return Reference{}, errors.New("context is required")
+	}
 	return Reference{}, ErrUnsupported
 }
