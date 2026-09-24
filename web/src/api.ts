@@ -56,8 +56,8 @@ export type KeyAccessPolicy = {
   protocols: ClientProtocol[]
   model_mode: 'all' | 'selected'
   models: string[]
-  source_mode: 'all' | 'selected'
-  source_cidrs: string[]
+  source_mode?: 'all' | 'selected'
+  source_cidrs?: string[]
   effective_protocols: ClientProtocol[]
   effective_models: string[]
 }
@@ -314,6 +314,7 @@ export type SystemStatus = {
     account_lifecycle_management?: boolean
     single_instance_billing?: boolean
     key_access_policy?: boolean
+    key_source_policy?: boolean
   }
 }
 

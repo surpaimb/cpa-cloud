@@ -19,9 +19,18 @@ const allPolicy = {
   effective_models: ['public-model'],
 }
 const key = { id: 'key-1', name: 'Laptop', expires_at: null, revoked_at: null, policy: allPolicy }
+const legacyPolicy = {
+  revision: 1,
+  protocol_mode: 'all',
+  protocols: [],
+  model_mode: 'all',
+  models: [],
+  effective_protocols: ['openai-chat'],
+  effective_models: ['public-model'],
+}
 
-function systemStatus(keyPolicy: boolean | undefined) {
-  return { version: 'test', ready: true, storage: 'sqlite-wal', limitations: [], features: keyPolicy === undefined ? {} : { key_access_policy: keyPolicy } }
+function systemStatus(keyPolicy: boolean | undefined, sourcePolicy?: boolean) {
+  return { version: 'test', ready: true, storage: 'sqlite-wal', limitations: [], features: keyPolicy === undefined ? {} : { key_access_policy: keyPolicy, ...(sourcePolicy === undefined ? {} : { key_source_policy: sourcePolicy }) } }
 }
 
 describe('access-key policy administration', () => {
@@ -32,7 +41,7 @@ describe('access-key policy administration', () => {
     const writes: Array<Record<string, unknown>> = []
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.endsWith('/system/status')) return response(systemStatus(true))
+      if (url.endsWith('/system/status')) return response(systemStatus(true, true))
       if (url.endsWith('/employees') && !init?.method) return response({ items: [employee] })
       if (url.endsWith('/models')) return response({ items: [model] })
       if (url.endsWith('/employees/emp-1/keys') && init?.method === 'POST') {
@@ -82,6 +91,74 @@ describe('access-key policy administration', () => {
     expect(within(dialog).queryByRole('button', { name: '保存独立权限' })).not.toBeInTheDocument()
   })
 
+  it('keeps PR8 protocol and model policy management without sending source fields', async () => {
+    const writes: Array<Record<string, unknown>> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response(systemStatus(true))
+      if (url.endsWith('/employees') && !init?.method) return response({ items: [employee] })
+      if (url.endsWith('/models')) return response({ items: [model] })
+      if (url.endsWith('/employees/emp-1/keys')) return response({ items: [{ ...key, policy: legacyPolicy }] })
+      if (url.endsWith('/keys/key-1/policy') && init?.method === 'PUT') {
+        writes.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return response({ ...legacyPolicy, revision: 2, protocol_mode: 'selected', protocols: ['openai-chat'] })
+      }
+      if (url.endsWith('/keys/key-1/policy')) return response(legacyPolicy)
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<EmployeesPage csrf="csrf" />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '管理 Key' }))
+    const keyDialog = await screen.findByRole('dialog')
+    expect(keyDialog).toHaveTextContent('配置：全部协议 · 员工可用的全部模型 · 来源限制不可用')
+    expect(keyDialog).toHaveTextContent('当前服务不支持 Key 来源限制')
+    expect(within(keyDialog).queryByLabelText('仅指定 IP / CIDR')).not.toBeInTheDocument()
+
+    await userEvent.click(within(keyDialog).getByRole('button', { name: '编辑独立权限' }))
+    const dialogs = await screen.findAllByRole('dialog')
+    const editor = dialogs[dialogs.length - 1]
+    expect(await within(editor).findByText('当前服务不支持 Key 来源限制')).toBeInTheDocument()
+    await userEvent.click(within(editor).getByLabelText('仅指定协议'))
+    await userEvent.click(within(editor).getByLabelText('OpenAI Chat Completions'))
+    await userEvent.click(within(editor).getByRole('button', { name: '保存独立权限' }))
+
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0]).toMatchObject({ expected_revision: 1, protocol_mode: 'selected', protocols: ['openai-chat'], model_mode: 'all', models: [] })
+    expect(writes[0]).not.toHaveProperty('source_mode')
+    expect(writes[0]).not.toHaveProperty('source_cidrs')
+  })
+
+  it.each([
+    ['missing source fields', legacyPolicy],
+    ['invalid source mode', { ...legacyPolicy, source_mode: 'unexpected', source_cidrs: [] }],
+    ['non-array source members', { ...legacyPolicy, source_mode: 'selected', source_cidrs: '192.0.2.0/24' }],
+    ['null source members', { ...legacyPolicy, source_mode: 'selected', source_cidrs: null }],
+  ])('fails closed when source capability is declared with %s', async (_name, malformedPolicy) => {
+    let writes = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response(systemStatus(true, true))
+      if (url.endsWith('/employees') && !init?.method) return response({ items: [employee] })
+      if (url.endsWith('/models')) return response({ items: [model] })
+      if (url.endsWith('/employees/emp-1/keys')) return response({ items: [{ ...key, policy: malformedPolicy }] })
+      if (url.endsWith('/keys/key-1/policy') && init?.method === 'PUT') { writes += 1; return response(allPolicy) }
+      if (url.endsWith('/keys/key-1/policy')) return response(malformedPolicy)
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    }))
+    render(<EmployeesPage csrf="csrf" />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '管理 Key' }))
+    const keyDialog = await screen.findByRole('dialog')
+    expect(keyDialog).toHaveTextContent('配置：全部协议 · 员工可用的全部模型 · 来源策略响应无效')
+    await userEvent.click(within(keyDialog).getByRole('button', { name: '编辑独立权限' }))
+    const dialogs = await screen.findAllByRole('dialog')
+    const editor = dialogs[dialogs.length - 1]
+    expect(await within(editor).findByText(/Key 来源策略无效/)).toBeInTheDocument()
+    expect(within(editor).getByRole('button', { name: '保存独立权限' })).toBeDisabled()
+    expect(writes).toBe(0)
+  })
+
   it('preserves the draft across a conflict and retries against the freshly loaded revision', async () => {
     const policyReads = [
       { ...allPolicy, revision: 2 },
@@ -91,7 +168,7 @@ describe('access-key policy administration', () => {
     let keyListReads = 0
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.endsWith('/system/status')) return response(systemStatus(true))
+      if (url.endsWith('/system/status')) return response(systemStatus(true, true))
       if (url.endsWith('/employees') && !init?.method) return response({ items: [employee] })
       if (url.endsWith('/models')) return response({ items: [model] })
       if (url.endsWith('/employees/emp-1/keys')) {
