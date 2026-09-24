@@ -20,7 +20,15 @@ type protocolRuntime struct {
 }
 
 func prepareProtocolRuntime(capability protocolconv.RouteCapability, model string, body []byte) (*protocolRuntime, error) {
-	prepared, err := protocolconv.PrepareRequest(capability, model, body)
+	var prepared protocolconv.PreparedRequest
+	var err error
+	if capability.RequestStreaming && capability.Streaming &&
+		(capability.ClientProtocol == protocolconv.ProtocolOpenAIChat && capability.UpstreamProtocol == protocolconv.ProtocolOpenAIResponses ||
+			capability.ClientProtocol == protocolconv.ProtocolOpenAIResponses && capability.UpstreamProtocol == protocolconv.ProtocolOpenAIChat) {
+		prepared, err = protocolconv.PrepareCrossProtocolStreamRequest(capability, model, body)
+	} else {
+		prepared, err = protocolconv.PrepareRequest(capability, model, body)
+	}
 	if err != nil {
 		return nil, err
 	}
