@@ -1,5 +1,17 @@
 # 集成状态
 
+## 2026-09-24：剩余能力首个可验收截止
+
+- 从 main `19388be` 开始，本批集成默认关闭的加密有状态 Responses 与后台创建/查询/取消、可靠用量事实与更正、selector-aware 通用预算、单实例金额/套餐/充值/兑换/退款流程，以及自动加密备份。实现仍保持员工模型请求鉴权、上游执行和管理面在一个 Go 服务进程内；没有引入多租户、员工 SSO 或管理员密码重置，也未创建发布包、tag 或部署。
+- Responses 后台任务使用持久 dispatch barrier，停机/重启把已派发而未完成的任务记为 `interrupted`，不自动重放；资源归员工所有并加密保存。当前不支持托管工具、后台 SSE 游标续传、WebSocket 或完整 Responses 输入面，相关 feature flag 默认关闭。通用预算策略可按 scope、协议和公开模型选择并取最严格结果，但可信请求上界仍只证明固定官方 `gpt-4.1-2025-04-14` 严格子集，不能外推到任意模型、媒体或流式工具回合。
+- 财务采用定点整数和追加式流水，覆盖日/月汇总、有界 CSV、套餐 revision 快照、钱包购买/取消、待支付充值、摘要存储兑换码、部分/全额退款及冲正。商业总开关默认关闭；支付仅有本地通用 HMAC callback 契约、五分钟时间窗和事件反重放，没有 Stripe、Airwallex、二维码或其他生产 provider client，不能称为真实支付接入。
+- 自动备份默认关闭，限定本地目标根，记录有界历史，支持 verify、保留清理和可选临时目录恢复演练。Windows 当前用户 DPAPI provider 可用且没有明文回退；跨机器恢复材料、Linux/macOS 密钥 provider、对象存储、远程副本和生产轮换/升级回滚仍未交付。
+- 独立集成任务在 `1970b8b9cc9f655781506f0ea50b56d055b882bd` 上完成首轮本机回归：`go test ./... -count=1 -timeout 15m` 全部通过（service 690.479s，governance 134.732s，accounting 85.808s，backup 44.480s，financial 18.993s，两个 CLI 及其余包均通过），`go vet ./...` 通过；网页 TypeScript、17 文件/122 项测试和生产构建通过。最终程序通过 Responses 同步 smoke，以及生命周期、定时任务和加密备份组合进程 smoke；只使用临时目录、随机回环端口和合成凭据，未访问 8787 或真实提供商。
+- 协调补验在 service HTTP/持久层级逐项通过：有状态 Responses 所有权/previous/delete，后台 create→poll→complete、queued/in-progress cancel、accounting 原子创建和重启 `interrupted` 不重放；通用预算 selector 匹配、命中最严格窗口、缺上界/超额派发前拒绝、已知与 unknown usage 独立窗口；自动备份 API、worker 实际 create→verify→临时副本 rehearsal→保留/历史、互斥/取消及 Windows DPAPI 版本生命周期。它们是定向 Go 测试证据，不冒充额外进程或真实 provider 验证。
+- Playwright 首轮桌面与 390×844 移动验收覆盖 selector-aware 通用预算和自动备份的入口、默认关闭/未 ready/空历史状态、表单、导航与窄屏布局，两页均无横向溢出或可见控件截断。随后在真实 Windows 临时服务正向验收中创建 DPAPI 受保护密钥、保存启用且每次演练的计划、执行真实 worker，页面与磁盘均出现约 1.1 MiB 的加密包，历史显示“校验通过/恢复演练通过”；同一页面在进程重启后可重读密钥和计划。另创建员工、保存 `openai-responses`/1000 Token 的 strict selector，并从网页启用治理与预算。一次故意填写尚未配置的模型 selector 得到预期 409；除此以外只有认证前 session 探测的预期 401，没有页面异常。
+- 上述正向 UI 首轮发现并修复两项生产单连接路径缺陷：随机备份 provider ID 含大写字符而被受保护存储拒绝，以及创建首条密钥/计划后列表在仍持有 rows 时嵌套查询导致永久等待。`178dad060d124a5570c3013c1652462cf23a9b55` 改用受保护存储允许的小写字母表，并在解封/查询最新运行前完整读取且关闭 rows；增加 100 次字母表检查和创建后两列表的两秒超时回归。修复后再次执行 `go test ./... -count=1 -timeout 15m` 全部通过（service 666.243s、accounting 84.929s、backup 46.540s、governance 132.680s、financial 19.347s，两个 CLI 及其余包均通过），全仓 vet 通过。所有浏览器、服务、备份包、DPAPI 测试材料和临时二进制均已清理。商业流程目前没有网页入口，本批只按 API/service 测试验收。
+- 真实客户端隔离矩阵已有 Codex/Gemini 文本、工具和取消通过；Claude 官方客户端的严格取消场景失败：客户端发出了两个不同的员工请求，每次各一次，上游均收到取消且没有遗留 socket，因此不能把它描述为透明兼容。Claude/Gemini 会员授权及三家真实 provider/会员端到端仍受协议和凭据条件阻塞；API Key 能力不等于会员能力。Linux `-race` 和完整轻量 CI 结果以本批 PR 的实际运行记录为准，在结果出现前不借用旧 SHA 的 CI 证据。
+
 ## 2026-09-24：生命周期、持久定时测试与加密备份本地组合验收
 
 - 账号/模型墓碑与 revision、默认关闭的定时凭据/目录测试、独立 `cpa-cloud-backup` 已按 A→B→C 顺序合入集成分支。调度运行期直接要求 `upstreams.archived=0`，缺字段或 SQL 错误失败关闭；上游归档在同一事务停用相关计划、增加 revision、清空 `next_run_at`，提交后取消本进程拥有的运行。

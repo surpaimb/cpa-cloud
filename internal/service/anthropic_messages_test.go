@@ -1,10 +1,13 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +18,46 @@ import (
 	"testing"
 	"time"
 )
+
+func TestAnthropicMessagesTCPDisconnectCancelsUpstream(t *testing.T) {
+	cancelReached := make(chan struct{}, 1)
+	fixture := newAnthropicFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		cancelReached <- struct{}{}
+	}))
+
+	connection, err := net.DialTimeout("tcp", strings.TrimPrefix(fixture.server.URL, "http://"), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"model":"company-claude","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"disconnect"}]}`
+	if _, err := fmt.Fprintf(connection, "POST /v1/messages HTTP/1.1\r\nHost: synthetic\r\nAuthorization: Bearer %s\r\nAnthropic-Version: 2023-06-01\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n%s", fixture.key.Key, len(body), body); err != nil {
+		connection.Close()
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(connection)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			connection.Close()
+			t.Fatal(readErr)
+		}
+		if strings.Contains(line, "message_start") {
+			break
+		}
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-cancelReached:
+	case <-time.After(3 * time.Second):
+		t.Fatal("TCP disconnect did not cancel the upstream request")
+	}
+}
 
 type anthropicFixture struct {
 	app        *App

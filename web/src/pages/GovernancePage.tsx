@@ -16,6 +16,7 @@ import {
 } from '../api'
 import { Button, Dialog, EmptyState, Field, FormError, Icon, PageState, submitHandler } from '../ui'
 import { GovernanceObservations } from '../GovernanceObservations'
+import { GeneralBudgets } from '../GeneralBudgets'
 import { PageHeader } from './EmployeesPage'
 
 type TargetKey = EmployeeKey & { employeeID: string; employeeName: string }
@@ -291,6 +292,11 @@ export function GovernancePage({ csrf }: { csrf: string }) {
         <Button variant={settings.budget_enabled ? 'danger' : 'primary'} disabled={settingsWrite.busy || settingsWrite.pending || settingsWrite.conflictPending || unsupported} onClick={() => void toggleSettings('budget')}>{settingsWrite.busy ? '处理中…' : settings.budget_enabled ? '关闭预算限制' : '启用预算限制'}</Button>
         <WriteRecovery state={settingsWrite} />
       </section>
+
+      <GeneralBudgets csrf={csrf}
+        employees={employees.map((employee) => ({ id: employee.id, label: employee.name }))}
+        keys={keys.map((key) => ({ id: key.id, label: `${key.employeeName} · ${key.name}` }))}
+        groups={groups.map((group) => ({ id: group.id, label: group.name }))} />
 
       <section className="content-panel governance-panel">
         <div className="section-heading"><div><h2>治理组</h2><p>只使用显式员工成员；部门和上游账号组不会自动成为成员。</p></div><Button onClick={() => setGroupEditor('create')}><Icon name="plus" />新建治理组</Button></div>

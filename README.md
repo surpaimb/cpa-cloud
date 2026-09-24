@@ -14,8 +14,8 @@
 | 一人多个 Key、默认永久有效、可选到期、撤销；源码提供 Codex 网页授权和自动刷新 | Claude/Gemini 会员接入及真实账号验证 |
 | OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路 | 跨协议自动转换和未列出的协议字段 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
-| 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE | Responses 有状态会话、后台任务、托管工具与完整客户端兼容性 |
-| SQLite 持久化、上游凭据加密、重启恢复；源码提供多账号路由 | 可靠计费用量、自动备份、生产密钥托管 |
+| 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE；默认关闭的加密有状态资源与后台任务 | 托管工具、后台流续传/游标与完整客户端兼容性 |
+| SQLite 持久化、上游凭据加密、多账号路由；可靠用量/通用预算、单实例财务账本、Windows DPAPI 自动备份 | 生产支付渠道、跨机/非 Windows 密钥托管与对象存储 |
 
 员工 Key 正常重启后仍有效；撤销、员工停用、可选到期时间及权限限制仍会生效。员工无需知道上游供应商 Key。
 
@@ -61,7 +61,8 @@
 
 - 支持非流式 JSON、SSE、函数工具定义、调用参数与 `call_id`，以及下一回合的 `function_call_output`；网关不替员工执行工具。
 - Codex 子集支持文本 `input`、system/developer/user/assistant 消息、`instructions`、函数工具选择及已验证的 reasoning/text 参数。工具回合需要推理历史时，请请求 `include:["reasoning.encrypted_content"]` 并回传对应完整 output items。详见[实现范围](docs/research/codex-responses-implementation.md)。
-- 当前为无状态请求：拒绝 `store:true`、后台任务和引用服务端会话；没有资源读取/删除或 WebSocket 接口。Codex 图片、音频、托管工具及未支持字段会明确拒绝。
+- 默认仍是无状态请求。源码可通过 `--responses-stateful-resources` 启用员工/Key 所有权绑定的加密 `store:true`、`previous_response_id`、`GET/DELETE /v1/responses/{id}`；再显式增加 `--responses-background-tasks` 才启用创建、轮询和取消后台任务。已派发但崩溃结果未知的任务记为 `interrupted`，不会自动重放。
+- 后台请求只接受已经完整持久化的文本、instructions 和 function-call 结果子集；额外字段会在入队前拒绝。托管/hosted tools 的白名单仍为空，`managed_tools=false`，没有隐藏启用开关；没有后台流续传/游标或 WebSocket 接口。Codex 图片、音频及未支持字段会明确拒绝。
 - 流式只有完整 `response.completed` 才表示成功；上游失败、提前断流或凭据状态保存失败不能当作完成。上游错误正文不会直接返回。
 
 这不等于已经通过真实 Codex CLI 或会员账号验收。完整功能的阶段与待办见[功能对齐计划](docs/feature-parity-plan.md)。
@@ -89,7 +90,7 @@ Claude/Gemini 订阅会员不属于上述 API Key 能力；各自接入条件仍
 
 Chat、Responses、Messages（含 count_tokens）和 Gemini 共用调度。排队结束会重新检查 Key、员工权限和配置 revision。同一账号跨池共享容量，配置不同时取所有启用模型池中的最小值。
 
-可选请求头 `X-CPA-Session` 接受 1–256 字节会话标识；仅使用绑定员工、Key、模型和协议的 HMAC 做短时粘滞，不保存或转发原值。租约会续期、释放并在重启后保守恢复。显式账号池中，凭据解密等账号预检失败且模型请求尚未派发时，最多切换一个不同账号，并重新检查权限和池版本；账本使用实际发送账号及模型的价格。**进入上游 HTTP 调用或 Codex 执行器后不自动重放**，包括连接错误、429 和流式错误。429、认证或暂时故障的冷却影响后续独立请求。默认关闭的恢复探测见下文；出站代理首批见下文；配额采集和通用员工预算仍待实现；固定模型硬预算实验见下文。见 [运行时契约](docs/account-pool-runtime-contract.md)和[安全换号契约](docs/account-pool-failover-contract.md)。以上为源码功能，不包含在 preview.3 下载包中。
+可选请求头 `X-CPA-Session` 接受 1–256 字节会话标识；仅使用绑定员工、Key、模型和协议的 HMAC 做短时粘滞，不保存或转发原值。租约会续期、释放并在重启后保守恢复。显式账号池中，凭据解密等账号预检失败且模型请求尚未派发时，最多切换一个不同账号，并重新检查权限和池版本；账本使用实际发送账号及模型的价格。**进入上游 HTTP 调用或 Codex 执行器后不自动重放**，包括连接错误、429 和流式错误。429、认证或暂时故障的冷却影响后续独立请求。默认关闭的恢复探测见下文；出站代理首批见下文；供应商配额采集仍待实现；selector-aware 通用预算与固定模型硬预算见下文。见 [运行时契约](docs/account-pool-runtime-contract.md)和[安全换号契约](docs/account-pool-failover-contract.md)。以上为源码功能，不包含在 preview.3 下载包中。
 
 用量账本将员工请求与上游尝试分开记录，只保存调用元数据及供应商明确返回的 Token 计数；不记录提示词、回复或工具参数。未知用量和未配置价格的成本保持为空，不能视为零费用。详见 [用量接线契约](docs/usage-service-contract.md)。
 
@@ -101,7 +102,7 @@ RPM 使用滚动 60 秒窗口；修改策略不会清空原窗口。Chat、Respo
 
 治理组独立于部门和上游账号组，不能扩大模型权限或恢复已撤销 Key。网络中断后先核对原保存操作；版本冲突时读取最新配置并确认后再保存。**Shadow TPM 和成本不限制请求或扣费。** 最新源码新增默认关闭的独立硬预算开关：治理与预算开关都开启、策略为 `deny_unknown` 时才预留并限制请求。
 
-硬预算目前仅对官方 OpenAI `gpt-4.1-2025-04-14` 的固定参数文本非流式请求提供上界证明；其他模型、工具、会员和 SSE 请求会因无法证明上界而拒绝。成本限制还要求实际上游模型配置了同币种价格。未知用量保守保留上界，不充作零，也不是供应商账单保证。集成证据和后续范围见[预算进度](docs/budget-service-integration-progress.md)；未包含在 preview.3 下载包中。通用预算覆盖、租户限额和收费仍待实现。
+最新源码另提供 `/admin/api/v1/budgets` 与网页 selector-aware 通用预算：employee、Key、治理组可再按协议和公开模型收窄，多条命中策略取最严格结果。策略框架和额度窗口已通用化，但安全上界证明目前仍只覆盖官方 OpenAI `gpt-4.1-2025-04-14` 的固定参数文本非流式请求；其他模型、工具、会员和 SSE 请求在 strict `deny_unknown` 下会因无法证明上界而拒绝。成本限制还要求实际上游模型配置同币种价格。未知用量保守保留上界，不充作零，也不是供应商账单保证。集成证据和后续范围见[预算进度](docs/budget-service-integration-progress.md)；未包含在 preview.3 下载包中。租户限额不在本轮范围。
 
 <details>
 <summary>固定模型预算实验的请求条件</summary>
@@ -170,7 +171,17 @@ RPM 使用滚动 60 秒窗口；修改策略不会清空原窗口。Chat、Respo
 
 保存会追加不可修改的新版本，每个上游尝试在派发前固定价格；后续改价不修改在途或历史记录。账号池使用实际选中的账号与模型价格。取消“启用价格”会追加停用版本，后续成本为未知。其他管理员改价引发版本冲突时保留表单，先重新加载再确认保存；网络结果未确认时可用同一操作编号重试。
 
-页面显示的是内部**估算成本**，不是供应商账单或向员工收费。部分 Token 未知时不会编造完整成本；未定价、未知用量的次数单独显示。余额、售价、通用预算覆盖、日/月报表导出与支付仍待实现。接口和精度规则见 [用量与价格契约](docs/usage-management-contract.md)。
+页面显示的是内部**估算成本**，不是供应商账单或向员工收费。最新源码新增可靠派发/usage 事实、日/月汇总、有界 CSV 导出与追加更正；部分 Token 未知时不会编造完整成本，未定价和未知用量次数单列。接口和精度规则见 [用量与价格契约](docs/usage-management-contract.md)。
+
+### 单实例账本与商业流程（默认关闭）
+
+`/admin/api/v1/billing` 提供 employee、Key 或员工资源所有者范围内的定点余额、套餐快照、订阅购买/取消、待支付充值、兑换码和部分/全额退款。金额与已接受操作是不可变追加事实，相同 operation ID 只允许相同 actor/action/payload 幂等重放。商业执行在数据库中默认关闭，管理员可先配置套餐和加密 connector，再显式开启。
+
+支付回调只是本地通用 HMAC 接口，覆盖五分钟时间窗、常量时间验签、事件反重放以及回调/支付/账本原子提交；它**不是 Stripe、Airwallex、二维码或任何真实供应商的生产接入**，也没有自动续费、税务、发票、通知或多实例协调。见[单实例计费契约](docs/single-instance-billing-contract.md)。
+
+### 自动加密备份（默认关闭）
+
+源码增加 `--automated-backups-enabled`、受限输出根、计划/运行历史、保留与恢复演练。当前只有 Windows 当前用户 DPAPI key provider 能进入 ready/running；Linux/macOS 不会降级到明文密钥，跨机器恢复材料、对象存储、远程复制和生产轮换仍未交付。离线密码 CLI 继续可用，细节见[备份与恢复](docs/backup-restore.md)。
 
 ## 1. 下载安装
 
@@ -383,7 +394,7 @@ preview.3 会自动读取上游模型作为候选；勾选所需模型，可修�
 
 远程员工不能用 `127.0.0.1` 连接管理员电脑，该地址指向员工自己的电脑。
 
-CC Switch 可用于配置工具，但最终调用工具必须支持当前协议。**preview.3 下载包仅提供 Chat Completions；最新源码增加上述 Responses、Claude Messages 和 Gemini 原生子集。**完整实机兼容验收仍待完成，参见[员工接入说明](docs/employee-access.md)。
+CC Switch 可用于配置工具，但最终调用工具必须支持当前协议。**preview.3 下载包仅提供 Chat Completions；最新源码增加上述 Responses、Claude Messages 和 Gemini 原生子集。**最新源码已完成三种 CLI 的固定 Windows/合成上游实机矩阵，但 CC Switch GUI、真实供应商和会员账号仍未验证，且 Claude 取消仍有一个明确 FAIL；参见[员工接入说明](docs/employee-access.md)和[真实客户端兼容矩阵](docs/client-compatibility-matrix-2026-09-24.md)。
 
 Bash + curl 测试示例（Key 交互输入，请求头经 stdin 传入）：
 
@@ -526,7 +537,7 @@ node scripts/smoke-codex-oauth.mjs <absolute-executable-path>
 
 ## 文档与许可证
 
-- [集成证据](docs/integration-status.md) · [开发计划](docs/development-plan.md) · [接口契约](docs/preview-contract.md)
+- [集成证据](docs/integration-status.md) · [真实客户端兼容矩阵](docs/client-compatibility-matrix-2026-09-24.md) · [开发计划](docs/development-plan.md) · [接口契约](docs/preview-contract.md)
 - [完整功能对齐计划](docs/feature-parity-plan.md) · [Responses 契约](docs/responses-preview-contract.md) · [任务分工](docs/work-coordination.md)
 - [产品规划](docs/product-plan.md) · [核心设计](docs/core-design.md) · [验收矩阵](docs/acceptance-matrix.md)
 - [会员接入研究](docs/research/membership-feasibility.md) · [协议来源](docs/protocol-sources.md)

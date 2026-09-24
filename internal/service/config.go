@@ -26,11 +26,17 @@ type Config struct {
 	AllowLoopbackUpstream       bool
 	AccountRecoveryEnabled      bool
 	ScheduledTestsEnabled       bool
+	AutomatedBackupsEnabled     bool
+	AutomatedBackupsOutputDir   string
+	BackupKeyProviderStoreDir   string
 	ExperimentalCodexMembership bool
+	ResponsesStatefulResources  bool
+	ResponsesBackgroundTasks    bool
 	CodexOAuthClientID          string
 	CodexOAuthRedirectURI       string
 	InstanceID                  string
 	Version                     string
+	backupAutomationRehearsal   bool
 }
 
 const (

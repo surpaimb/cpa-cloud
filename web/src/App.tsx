@@ -10,8 +10,9 @@ import { UsagePage } from './pages/UsagePage'
 import { ProxiesPage } from './pages/ProxiesPage'
 import { GovernancePage } from './pages/GovernancePage'
 import { ScheduledTestsPage } from './pages/ScheduledTestsPage'
+import { BackupsPage } from './pages/BackupsPage'
 
-type Page = 'employees' | 'upstreams' | 'proxies' | 'models' | 'scheduled-tests' | 'governance' | 'usage' | 'status'
+type Page = 'employees' | 'upstreams' | 'proxies' | 'models' | 'scheduled-tests' | 'backups' | 'governance' | 'usage' | 'status'
 
 const navigation: { id: Page; label: string; icon: 'people' | 'link' | 'route' | 'status' | 'settings' }[] = [
   { id: 'employees', label: '员工与 Key', icon: 'people' },
@@ -19,6 +20,7 @@ const navigation: { id: Page; label: string; icon: 'people' | 'link' | 'route' |
   { id: 'proxies', label: '出站代理', icon: 'route' },
   { id: 'models', label: '模型路由', icon: 'route' },
   { id: 'scheduled-tests', label: '定时测试', icon: 'status' },
+  { id: 'backups', label: '自动备份', icon: 'settings' },
   { id: 'governance', label: '请求治理', icon: 'settings' },
   { id: 'usage', label: '用量与成本', icon: 'status' },
   { id: 'status', label: '系统状态', icon: 'status' },
@@ -73,12 +75,28 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
   const [page, setPage] = useState<Page>('employees')
   const [mobileNav, setMobileNav] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
+  const [backupConfiguration, setBackupConfiguration] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    api.status().then((status) => {
+      if (active) setBackupConfiguration(status.features?.automated_backups_configuration === true)
+    }).catch(() => { if (active) setBackupConfiguration(false) })
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    if (page === 'backups' && !backupConfiguration) setPage('employees')
+  }, [backupConfiguration, page])
+
+  const visibleNavigation = navigation.filter((item) => item.id !== 'backups' || backupConfiguration)
   const content = {
     employees: <EmployeesPage csrf={session.csrf_token} />,
     upstreams: <UpstreamsPage csrf={session.csrf_token} />,
     proxies: <ProxiesPage csrf={session.csrf_token} />,
     models: <ModelsPage csrf={session.csrf_token} />,
     'scheduled-tests': <ScheduledTestsPage csrf={session.csrf_token} />,
+    backups: <BackupsPage csrf={session.csrf_token} />,
     governance: <GovernancePage csrf={session.csrf_token} />,
     usage: <UsagePage csrf={session.csrf_token} />,
     status: <StatusPage csrf={session.csrf_token} />,
@@ -88,7 +106,7 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
     <aside className={`sidebar ${mobileNav ? 'sidebar--open' : ''}`}>
       <div className="brand-lockup sidebar__brand"><div className="brand-mark">C</div><div><strong>CPA Cloud</strong><span>AI 访问管理平台</span></div></div>
       <nav aria-label="主导航">
-        {navigation.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => { setPage(item.id); setMobileNav(false) }}><Icon name={item.icon} />{item.label}</button>)}
+        {visibleNavigation.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => { setPage(item.id); setMobileNav(false) }}><Icon name={item.icon} />{item.label}</button>)}
       </nav>
       <div className="sidebar__account">
         <div className="account-line"><span className="avatar">{session.username.slice(0, 1).toUpperCase()}</span><span><strong>{session.username}</strong><small>系统管理员</small></span></div>

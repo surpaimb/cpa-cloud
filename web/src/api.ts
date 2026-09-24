@@ -282,6 +282,9 @@ export type SystemStatus = {
   features?: {
 	  scheduled_tests_configuration?: boolean
 	  scheduled_tests_running?: boolean
+	  automated_backups_configuration?: boolean
+	  automated_backups_running?: boolean
+	  backup_key_provider_ready?: boolean
     account_recovery?: boolean
     codex_membership_import?: boolean
     codex_membership_oauth?: boolean
@@ -327,6 +330,68 @@ export type ScheduledTestInput = {
   enabled: boolean
 }
 export type ScheduledTestRunsPage = { items: ScheduledTestRun[]; next_cursor: string | null }
+
+export type BackupKeyProvider = {
+  id: string
+  kind: 'windows-dpapi-user'
+  scope: 'current-user'
+  status: 'ready' | 'unavailable' | 'degraded'
+  reason_code: string | null
+  active_version: number
+  revision: number
+  created_by_admin_id: string
+  updated_by_admin_id: string
+  created_at: string
+  updated_at: string
+}
+export type BackupRun = {
+  id: string
+  plan_id: string
+  plan_revision: number
+  key_provider_id: string
+  key_provider_kind: 'windows-dpapi-user'
+  key_provider_version: number
+  trigger_kind: 'scheduled' | 'manual'
+  requested_by_admin_id: string | null
+  scheduled_for: string
+  started_at: string
+  finished_at: string | null
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
+  package_name: string
+  package_size: number | null
+  package_retained: boolean
+  package_deleted_at: string | null
+  verified_at: string | null
+  rehearsal_status: 'pending' | 'succeeded' | 'failed' | 'skipped'
+  rehearsed_at: string | null
+  error_code: string | null
+  created_at: string
+}
+export type BackupPlan = {
+  id: string
+  name: string
+  key_provider_id: string
+  interval_seconds: number
+  retention_count: number
+  rehearsal_enabled: boolean
+  enabled: boolean
+  next_run_at: string | null
+  revision: number
+  created_by_admin_id: string
+  updated_by_admin_id: string
+  created_at: string
+  updated_at: string
+  latest_run?: BackupRun
+}
+export type BackupPlanInput = {
+  name: string
+  key_provider_id: string
+  interval_seconds: number
+  retention_count: number
+  rehearsal_enabled: boolean
+  enabled: boolean
+}
+export type BackupRunsPage = { items: BackupRun[]; next_cursor: string | null }
 
 export type UsageStatus = 'pending' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
 export type UsageProvider = 'openai' | 'openai-compatible' | 'anthropic' | 'gemini' | 'codex'
@@ -395,6 +460,28 @@ export type UsageAttempt = {
   cache_write_tokens: string | null
   cost_micro: string | null
 }
+export type UsageSettlementReportItem = {
+  period_start: string
+  period_end: string
+  currency: string
+  requests: string
+  attempts: string
+  corrections: string
+  missing_evidence_attempts: string
+  known_estimated_cost_micro: string
+  unknown_cost_attempts: string
+  input_tokens: UsageCounter
+  output_tokens: UsageCounter
+  cache_read_tokens: UsageCounter
+  cache_write_tokens: UsageCounter
+  reasoning_tokens: UsageCounter
+}
+export type UsageSettlementReport = {
+  from: string
+  to: string
+  granularity: 'day' | 'month'
+  items: UsageSettlementReportItem[]
+}
 export type PriceRate = {
   currency: string
   input_per_million_micro: string
@@ -422,6 +509,7 @@ export type GovernanceBudgetLimits = {
 }
 export type GovernanceShadowLimits = { tpm: number | null; cost_micro: string | null; currency: string | null; window: 'rolling_24h' | null }
 export type GovernanceScopeKind = 'employee' | 'key' | 'group'
+export type GeneralBudgetProtocol = 'openai-chat-completions' | 'openai-responses' | 'anthropic-messages' | 'gemini-generate-content'
 export type GovernancePolicy = {
   id: string
   scope_kind: GovernanceScopeKind
@@ -437,7 +525,7 @@ export type GovernancePolicy = {
 export type GovernancePage<T> = { items: T[]; next_cursor: string | null }
 export type GovernanceReceipt = {
   operation_id: string
-  resource_kind: 'settings' | 'group' | 'policy'
+  resource_kind: 'settings' | 'group' | 'policy' | 'budget'
   resource_id: string
   revision: number
   created_at: string
@@ -510,6 +598,41 @@ function usageSearch(filters: UsageFilters, cursor?: string) {
   }
   if (cursor) query.set('cursor', cursor)
   return query.toString()
+}
+export type GeneralBudgetPolicy = {
+  id: string
+  scope: { kind: GovernanceScopeKind; id: string; protocol: GeneralBudgetProtocol | null; model: string | null }
+  enabled: boolean
+  enforcement: 'strict'
+  unknown_mode: 'deny_unknown'
+  token: { limit: number | null; window: 'rolling_60s' | null }
+  cost: { limit_micro: string | null; currency: string | null; window: 'rolling_24h' | null }
+  revision: number
+  created_at: string
+  updated_at: string
+}
+export type GeneralBudgetCreate = {
+  operation_id: string
+  scope_kind: GovernanceScopeKind
+  scope_id: string
+  protocol: GeneralBudgetProtocol | null
+  model: string | null
+  enabled: boolean
+  token_limit: number | null
+  cost_limit_micro: string | null
+  currency: string | null
+}
+export type GeneralBudgetUpdate = {
+  operation_id: string
+  expected_revision: number
+  enabled: boolean
+  token_limit: number | null
+  cost_limit_micro: string | null
+  currency: string | null
+}
+
+export function usageExportURL(filters: UsageFilters, limit = 5000) {
+  return `${API_ROOT}/usage/export?${usageSearch(filters)}&limit=${limit}`
 }
 
 function governanceObservationSearch(filters: GovernanceObservationFilters, cursor?: string) {
@@ -615,6 +738,10 @@ export const api = {
     request<UsageRequestsPage>(`/usage/requests?${usageSearch(filters, cursor)}`, { signal }),
   usageAttempts: (requestId: string, signal?: AbortSignal) =>
     request<{ items: UsageAttempt[] }>(`/usage/requests/${encodeURIComponent(requestId)}/attempts`, { signal }),
+  usageSettlementDaily: (filters: UsageFilters, signal?: AbortSignal) =>
+    request<UsageSettlementReport>(`/usage/daily?${usageSearch(filters)}`, { signal }),
+  usageSettlementMonthly: (filters: UsageFilters, signal?: AbortSignal) =>
+    request<UsageSettlementReport>(`/usage/monthly?${usageSearch(filters)}`, { signal }),
   upstreamPrices: (upstreamId: string, signal?: AbortSignal) =>
     request<{ items: UpstreamPrice[] }>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { signal }),
   governanceSettings: (signal?: AbortSignal) => request<GovernanceSettings>('/governance/settings', { signal }),
@@ -642,11 +769,39 @@ export const api = {
     request<GovernanceReceipt>(`/governance/policies/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body), signal }, csrf),
   governanceOperation: (operationId: string, signal?: AbortSignal) =>
     request<GovernanceReceipt>(`/governance/operations/${encodeURIComponent(operationId)}`, { signal }),
+  generalBudgets: (afterId?: string, limit = 50, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: String(limit) })
+    if (afterId) query.set('after_id', afterId)
+    return request<GovernancePage<GeneralBudgetPolicy>>(`/budgets?${query}`, { signal })
+  },
+  generalBudget: (id: string, signal?: AbortSignal) => request<GeneralBudgetPolicy>(`/budgets/${encodeURIComponent(id)}`, { signal }),
+  createGeneralBudget: (body: GeneralBudgetCreate, csrf: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>('/budgets', { method: 'POST', body: JSON.stringify(body), signal }, csrf),
+  updateGeneralBudget: (id: string, body: GeneralBudgetUpdate, csrf: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>(`/budgets/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body), signal }, csrf),
+  generalBudgetOperation: (operationId: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>(`/budgets/operations/${encodeURIComponent(operationId)}`, { signal }),
   governanceObservations: (filters: GovernanceObservationFilters, cursor?: string, signal?: AbortSignal) =>
     request<GovernanceObservationsPage>(`/governance/observations?${governanceObservationSearch(filters, cursor)}`, { signal }),
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
     request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   status: () => request<SystemStatus>('/system/status'),
+	backupKeyProviders: (signal?: AbortSignal) => request<{ items: BackupKeyProvider[]; ready: boolean; store_ready: boolean; reason_code: string | null }>('/backups/key-providers', { signal }),
+	createBackupKeyProvider: (csrf: string) => request<BackupKeyProvider>('/backups/key-providers', { method: 'POST', body: JSON.stringify({ kind: 'windows-dpapi-user' }) }, csrf),
+	rotateBackupKeyProvider: (id: string, expectedRevision: number, csrf: string) => request<BackupKeyProvider>(`/backups/key-providers/${encodeURIComponent(id)}/rotate`, { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }) }, csrf),
+	activateBackupKeyProviderVersion: (id: string, expectedRevision: number, version: number, csrf: string) => request<BackupKeyProvider>(`/backups/key-providers/${encodeURIComponent(id)}/activate-version`, { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, version }) }, csrf),
+	backupPlans: (signal?: AbortSignal) => request<{ items: BackupPlan[] }>('/backups/plans', { signal }),
+	createBackupPlan: (body: BackupPlanInput, csrf: string) => request<BackupPlan>('/backups/plans', { method: 'POST', body: JSON.stringify(body) }, csrf),
+	updateBackupPlan: (id: string, body: { expected_revision: number } & Partial<BackupPlanInput>, csrf: string) => request<BackupPlan>(`/backups/plans/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+	disableBackupPlan: (id: string, expectedRevision: number, csrf: string) => request<{ result: 'disabled'; id: string; revision: number }>(`/backups/plans/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ expected_revision: expectedRevision }) }, csrf),
+	backupRuns: (planId?: string, cursor?: string, signal?: AbortSignal) => {
+	  const query = new URLSearchParams({ limit: '50' })
+	  if (planId) query.set('plan_id', planId)
+	  if (cursor) query.set('cursor', cursor)
+	  return request<BackupRunsPage>(`/backups/runs?${query}`, { signal })
+	},
+	createBackupRun: (planId: string, expectedRevision: number, csrf: string) => request<BackupRun>('/backups/runs', { method: 'POST', body: JSON.stringify({ plan_id: planId, expected_revision: expectedRevision }) }, csrf),
+	cancelBackupRun: (id: string, csrf: string) => request<{ result: 'cancellation_requested'; id: string }>(`/backups/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }, csrf),
 	scheduledTests: (signal?: AbortSignal) => request<{ items: ScheduledTestPlan[] }>('/scheduled-tests', { signal }),
 	scheduledTest: (id: string, signal?: AbortSignal) => request<ScheduledTestPlan>(`/scheduled-tests/${encodeURIComponent(id)}`, { signal }),
 	createScheduledTest: (body: ScheduledTestInput, csrf: string) => request<ScheduledTestPlan>('/scheduled-tests', { method: 'POST', body: JSON.stringify(body) }, csrf),

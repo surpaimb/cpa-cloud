@@ -53,7 +53,7 @@ func (a *App) listGeminiModels(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "Invalid request.")
 		return
 	}
-	auth, err := a.authenticateEmployeeRequest(r)
+	auth, err := a.authenticateGeminiEmployeeRequest(r)
 	if err != nil {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
@@ -138,8 +138,9 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusBadRequest, status, "Unsupported or invalid Gemini request.")
 		return
 	}
+	r = withUsageStreamEvidence(r, stream)
 
-	auth, err := a.authenticateEmployeeRequest(r)
+	auth, err := a.authenticateGeminiEmployeeRequest(r)
 	if err != nil {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
@@ -233,6 +234,35 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.forwardGeminiJSON(w, response, modelRequestID)
+}
+
+// Gemini clients conventionally send API keys through x-goog-api-key. On the
+// CPA-facing native Gemini routes only, one such header may carry an employee
+// key. It is consumed locally and is never copied to the upstream request.
+func (a *App) authenticateGeminiEmployeeRequest(r *http.Request) (employeeAuth, error) {
+	authorization := r.Header.Values("Authorization")
+	googleKeys := r.Header.Values("X-Goog-Api-Key")
+	if len(authorization)+len(googleKeys) != 1 {
+		return employeeAuth{}, errors.New("invalid employee key")
+	}
+	var key string
+	if len(authorization) == 1 {
+		parts := strings.Fields(authorization[0])
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			return employeeAuth{}, errors.New("invalid employee key")
+		}
+		key = parts[1]
+	} else {
+		key = googleKeys[0]
+		if key == "" || strings.TrimSpace(key) != key || strings.Contains(key, ",") || strings.ContainsAny(key, " \t\r\n") {
+			return employeeAuth{}, errors.New("invalid employee key")
+		}
+	}
+	auth, valid := a.lookupEmployeeKey(r.Context(), key)
+	if !valid {
+		return employeeAuth{}, errors.New("invalid employee key")
+	}
+	return auth, nil
 }
 
 func writeGeminiError(w http.ResponseWriter, code int, status, message string) {
@@ -634,7 +664,7 @@ func validateGeminiRequest(body []byte) error {
 		}
 	}
 	if raw, ok := root["generationConfig"]; ok {
-		allowedGeneration := map[string]bool{"candidateCount": true, "stopSequences": true, "maxOutputTokens": true, "temperature": true, "topP": true, "topK": true, "seed": true, "presencePenalty": true, "frequencyPenalty": true, "responseMimeType": true, "responseSchema": true}
+		allowedGeneration := map[string]bool{"candidateCount": true, "stopSequences": true, "maxOutputTokens": true, "temperature": true, "topP": true, "topK": true, "seed": true, "presencePenalty": true, "frequencyPenalty": true, "responseMimeType": true, "responseSchema": true, "thinkingConfig": true}
 		generation, err := decodeGeminiObject(raw, allowedGeneration)
 		if err != nil {
 			return err
@@ -687,6 +717,18 @@ func validateGeminiGenerationConfig(config map[string]json.RawMessage) error {
 			return errors.New("invalid response schema")
 		}
 	}
+	if raw, ok := config["thinkingConfig"]; ok {
+		thinking, err := decodeGeminiObject(raw, map[string]bool{"includeThoughts": true})
+		if err != nil {
+			return err
+		}
+		if include, ok := thinking["includeThoughts"]; ok {
+			var enabled bool
+			if json.Unmarshal(include, &enabled) != nil {
+				return errors.New("invalid includeThoughts setting")
+			}
+		}
+	}
 	return nil
 }
 
@@ -711,11 +753,14 @@ func validateGeminiContents(raw json.RawMessage, system bool) error {
 			return errors.New("invalid content parts")
 		}
 		for _, partRaw := range parts {
-			part, err := decodeGeminiObject(partRaw, map[string]bool{"text": true, "functionCall": true, "functionResponse": true})
-			if err != nil || len(part) != 1 {
+			part, err := decodeGeminiObject(partRaw, map[string]bool{"text": true, "functionCall": true, "functionResponse": true, "thoughtSignature": true})
+			if err != nil || len(part) == 0 || len(part) > 2 {
 				return errGeminiUnsupported
 			}
 			if textRaw, ok := part["text"]; ok {
+				if len(part) != 1 {
+					return errGeminiUnsupported
+				}
 				var text string
 				if json.Unmarshal(textRaw, &text) != nil {
 					return errors.New("invalid text part")
@@ -726,15 +771,29 @@ func validateGeminiContents(raw json.RawMessage, system bool) error {
 				return errGeminiUnsupported
 			}
 			if call, ok := part["functionCall"]; ok {
+				if signatureRaw, present := part["thoughtSignature"]; present {
+					var signature string
+					if json.Unmarshal(signatureRaw, &signature) != nil || !validText(signature, 1, 64<<10) {
+						return errors.New("invalid thought signature")
+					}
+				} else if len(part) != 1 {
+					return errGeminiUnsupported
+				}
 				if err := validateGeminiFunctionCall(call, false); err != nil {
 					return err
 				}
+				continue
 			}
 			if response, ok := part["functionResponse"]; ok {
+				if len(part) != 1 {
+					return errGeminiUnsupported
+				}
 				if err := validateGeminiFunctionCall(response, true); err != nil {
 					return err
 				}
+				continue
 			}
+			return errGeminiUnsupported
 		}
 	}
 	return nil
@@ -783,7 +842,7 @@ func validateGeminiTools(raw json.RawMessage) error {
 			return errors.New("invalid function declarations")
 		}
 		for _, declarationRaw := range declarations {
-			declaration, err := decodeGeminiObject(declarationRaw, map[string]bool{"name": true, "description": true, "parameters": true, "response": true})
+			declaration, err := decodeGeminiObject(declarationRaw, map[string]bool{"name": true, "description": true, "parameters": true, "parametersJsonSchema": true, "response": true})
 			if err != nil {
 				return err
 			}
@@ -791,7 +850,12 @@ func validateGeminiTools(raw json.RawMessage) error {
 			if json.Unmarshal(declaration["name"], &name) != nil || !validGeminiFunctionName(name) || json.Unmarshal(declaration["description"], &description) != nil || !validText(description, 1, 8192) {
 				return errors.New("invalid function declaration")
 			}
-			for _, field := range []string{"parameters", "response"} {
+			if _, parameters := declaration["parameters"]; parameters {
+				if _, jsonSchema := declaration["parametersJsonSchema"]; jsonSchema {
+					return errors.New("function parameters are ambiguous")
+				}
+			}
+			for _, field := range []string{"parameters", "parametersJsonSchema", "response"} {
 				if schema, ok := declaration[field]; ok {
 					var object map[string]json.RawMessage
 					if json.Unmarshal(schema, &object) != nil || object == nil {

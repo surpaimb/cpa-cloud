@@ -153,7 +153,7 @@ func (a *App) handleCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 		writeModelError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
 		return
 	}
-	a.observeCodexChatUsage(modelRequestID, codexChatUsage(result.Usage))
+	a.observeCodexChatUsage(modelRequestID, result.ResponseID, codexChatUsage(result.Usage))
 	if err := a.finishRequestChecked(modelRequestID, "succeeded", http.StatusOK); err != nil {
 		writeModelError(w, 503, "storage_unavailable", "Service is temporarily unavailable.", modelRequestID)
 		return
@@ -224,7 +224,7 @@ func (a *App) streamCodexChatCompletion(w http.ResponseWriter, r *http.Request, 
 		case membership.CodexEventUsage, membership.CodexEventCompleted:
 			if codexUsageKnown(event.Usage) {
 				usage = event.Usage
-				a.observeCodexChatUsage(modelRequestID, codexChatUsage(usage))
+				a.observeCodexChatUsage(modelRequestID, event.ResponseID, codexChatUsage(usage))
 			}
 		case membership.CodexEventFailed, membership.CodexEventCancelled:
 			// Rendering is decided from the returned normalized error so a

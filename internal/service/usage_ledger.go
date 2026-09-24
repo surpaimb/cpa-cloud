@@ -23,14 +23,17 @@ var (
 // executors and accounting. It does not select a route, retry an upstream, or
 // retain protocol bodies.
 type usageLedgerCoordinator struct {
-	db          *sql.DB
-	ledger      *accounting.Ledger
-	now         func() time.Time
-	priceLookup func(context.Context, string, string) (*accounting.PriceSnapshot, error)
-	governance  *governance.Coordinator
-	budget      *governance.Budget
+	db            *sql.DB
+	ledger        *accounting.Ledger
+	now           func() time.Time
+	priceLookup   func(context.Context, string, string) (*accounting.PriceSnapshot, error)
+	priceLookupTx func(context.Context, *sql.Tx, string, string) (*accounting.PriceSnapshot, error)
+	governance    *governance.Coordinator
+	budget        *governance.Budget
 	// Package-private commit fault injection for the joint budget settlement.
 	budgetCommit func(*sql.Tx) error
+	// Package-private fault injection for the non-budget dispatch barrier.
+	dispatchCommit func(*sql.Tx) error
 }
 
 type usageRequestStart struct {
@@ -40,19 +43,23 @@ type usageRequestStart struct {
 	PublicModel  string
 	ProviderKind string
 	Protocol     accounting.UsageProtocol
+	Evidence     accounting.UsageEvidence
 	StartedAt    time.Time
 	Governed     bool
 	guard        *governedRequest
 }
 
 type usageLedgerRequest struct {
-	coordinator *usageLedgerCoordinator
-	id          string
-	provider    accounting.Provider
-	protocol    accounting.UsageProtocol
-	startedAt   time.Time
-	governance  *governance.Coordinator
-	guard       *governedRequest
+	coordinator    *usageLedgerCoordinator
+	id             string
+	provider       accounting.Provider
+	protocol       accounting.UsageProtocol
+	publicModel    string
+	evidence       accounting.UsageEvidence
+	startedAt      time.Time
+	governance     *governance.Coordinator
+	guard          *governedRequest
+	terminalTxHook func(context.Context, *sql.Tx, accounting.Status, time.Time) error
 
 	mu             sync.Mutex
 	attempt        *usageLedgerAttempt
@@ -60,13 +67,14 @@ type usageLedgerRequest struct {
 }
 
 type usageLedgerAttempt struct {
-	request   *usageLedgerRequest
-	id        string
-	accountID string
-	dispatch  accounting.Dispatch
-	startedAt time.Time
-	usage     *accounting.UsageAccumulator
-	budget    *budgetAttemptState
+	request           *usageLedgerRequest
+	id                string
+	accountID         string
+	dispatch          accounting.Dispatch
+	startedAt         time.Time
+	usage             *accounting.UsageAccumulator
+	budget            *budgetAttemptState
+	dispatchUncertain bool
 
 	mu             sync.Mutex
 	finishSnapshot *usageAttemptFinishSnapshot
@@ -84,9 +92,10 @@ type usageAttemptFinishSnapshot struct {
 
 func newUsageLedgerCoordinator(db *sql.DB) *usageLedgerCoordinator {
 	return &usageLedgerCoordinator{
-		db:     db,
-		ledger: accounting.NewLedger(db),
-		now:    time.Now,
+		db:            db,
+		ledger:        accounting.NewLedger(db),
+		now:           time.Now,
+		priceLookupTx: accounting.NewPriceCatalog(db).CurrentTx,
 	}
 }
 
@@ -98,6 +107,9 @@ func (c *usageLedgerCoordinator) start(ctx context.Context) error {
 		return errUsageLedgerUnavailable
 	}
 	if err := c.ledger.Migrate(ctx); err != nil {
+		return classifyUsageLedgerError(err)
+	}
+	if err := c.ledger.MigrateV2(ctx); err != nil {
 		return classifyUsageLedgerError(err)
 	}
 	if _, err := c.ledger.RecoverInterrupted(ctx, c.now().UTC()); err != nil {
@@ -124,6 +136,12 @@ func (c *usageLedgerCoordinator) beginRequestTx(ctx context.Context, tx *sql.Tx,
 func (c *usageLedgerCoordinator) beginRequestInTransaction(ctx context.Context, tx *sql.Tx, input usageRequestStart) (*usageLedgerRequest, error) {
 	if c == nil || c.ledger == nil || ctx == nil {
 		return nil, errUsageLedgerUnavailable
+	}
+	if input.Evidence == "" {
+		input.Evidence = accounting.EvidenceProviderResponse
+	}
+	if input.Evidence != accounting.EvidenceProviderResponse && input.Evidence != accounting.EvidenceProviderStream && input.Evidence != accounting.EvidenceBackgroundResult {
+		return nil, errUsageLedgerInvalid
 	}
 	provider, err := usageProvider(input.ProviderKind, input.Protocol)
 	if err != nil {
@@ -157,6 +175,8 @@ func (c *usageLedgerCoordinator) beginRequestInTransaction(ctx context.Context, 
 		id:          input.RequestID,
 		provider:    provider,
 		protocol:    input.Protocol,
+		publicModel: input.PublicModel,
+		evidence:    input.Evidence,
 		startedAt:   input.StartedAt,
 		governance:  governanceCore,
 		guard:       input.guard,
@@ -171,11 +191,30 @@ func (r *usageLedgerRequest) beginAttempt(ctx context.Context, accountID string,
 }
 
 func (r *usageLedgerRequest) beginPricedAttempt(ctx context.Context, accountID string, startedAt time.Time, price *accounting.PriceSnapshot) (*usageLedgerAttempt, error) {
-	return r.beginDispatchedAttempt(ctx, accountID, startedAt, price, accounting.DispatchPrimary)
+	return r.beginDispatchedAttempt(ctx, accountID, r.publicModel, startedAt, price, accounting.DispatchPrimary)
 }
 
-func (r *usageLedgerRequest) beginDispatchedAttempt(ctx context.Context, accountID string, startedAt time.Time, price *accounting.PriceSnapshot, dispatch accounting.Dispatch) (*usageLedgerAttempt, error) {
-	if r == nil || r.coordinator == nil || ctx == nil || (dispatch != accounting.DispatchPrimary && dispatch != accounting.DispatchFailover) {
+func (r *usageLedgerRequest) beginDispatchedAttempt(ctx context.Context, accountID, effectiveModel string, startedAt time.Time, price *accounting.PriceSnapshot, dispatch accounting.Dispatch) (*usageLedgerAttempt, error) {
+	if r == nil || r.coordinator == nil || r.coordinator.db == nil {
+		return nil, errUsageLedgerInvalid
+	}
+	tx, err := r.coordinator.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, errUsageLedgerUnavailable
+	}
+	defer tx.Rollback()
+	attempt, err := r.beginDispatchedAttemptTx(ctx, tx, accountID, effectiveModel, startedAt, price, dispatch)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, errUsageLedgerUnavailable
+	}
+	return attempt, nil
+}
+
+func (r *usageLedgerRequest) beginDispatchedAttemptTx(ctx context.Context, tx *sql.Tx, accountID, effectiveModel string, startedAt time.Time, price *accounting.PriceSnapshot, dispatch accounting.Dispatch) (*usageLedgerAttempt, error) {
+	if r == nil || r.coordinator == nil || ctx == nil || tx == nil || effectiveModel == "" || (dispatch != accounting.DispatchPrimary && dispatch != accounting.DispatchFailover) {
 		return nil, errUsageLedgerInvalid
 	}
 	r.mu.Lock()
@@ -201,7 +240,7 @@ func (r *usageLedgerRequest) beginDispatchedAttempt(ctx context.Context, account
 		startedAt: startedAt,
 		usage:     accumulator,
 	}
-	if err := r.coordinator.ledger.BeginAttempt(ctx, accounting.AttemptStart{
+	if err := r.coordinator.ledger.BeginAttemptTx(ctx, tx, accounting.AttemptStart{
 		ID:        attempt.id,
 		RequestID: r.id,
 		AccountID: accountID,
@@ -209,7 +248,11 @@ func (r *usageLedgerRequest) beginDispatchedAttempt(ctx context.Context, account
 		Dispatch:  dispatch,
 		StartedAt: startedAt,
 		Price:     price,
+		Protocol:  r.protocol, EffectiveModel: effectiveModel, Evidence: r.evidence,
 	}); err != nil {
+		return nil, classifyUsageLedgerError(err)
+	}
+	if err := r.coordinator.ledger.MarkAttemptDispatchedTx(ctx, tx, accounting.AttemptDispatch{ID: attempt.id, OperationID: attempt.id + ":dispatch", DispatchedAt: startedAt}); err != nil {
 		return nil, classifyUsageLedgerError(err)
 	}
 	r.attempt = attempt
@@ -254,12 +297,11 @@ func (a *usageLedgerAttempt) finish(ctx context.Context, status accounting.Statu
 		return errUsageLedgerConflict
 	}
 	snapshot := a.finishSnapshot
+	reasoning, responseID := a.usage.ReliableMetadata()
 	if err := a.request.coordinator.persist(ctx, func(writeCtx context.Context) error {
 		return a.request.coordinator.ledger.FinishAttempt(writeCtx, accounting.AttemptFinish{
-			ID:         a.id,
-			Status:     snapshot.status,
-			FinishedAt: snapshot.finishedAt,
-			Usage:      snapshot.usage,
+			ID: a.id, Status: snapshot.status, FinishedAt: snapshot.finishedAt, Usage: snapshot.usage,
+			ReasoningTokens: reasoning, ResponseID: responseID, ReliableUsage: true,
 		})
 	}); err != nil {
 		return err

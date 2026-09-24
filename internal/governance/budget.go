@@ -85,12 +85,16 @@ type BudgetSettle struct {
 }
 
 type BudgetScope struct {
+	General          bool
 	Kind             ScopeKind
 	ID               string
+	SelectorProtocol accounting.UsageProtocol
+	SelectorModel    string
 	PolicyID         string
 	PolicyRevision   int64
 	GroupRevision    *int64
 	SettingsRevision int64
+	SelectorRevision int64
 	HardTPM          *int64
 	HardCostMicro    *int64
 	HardCurrency     string
@@ -214,7 +218,7 @@ func (b *Budget) ReserveTx(ctx context.Context, tx *sql.Tx, input BudgetReserve)
 		return BudgetReserveResult{}, err
 	}
 	for _, scope := range enforced {
-		tokenTotal, costTotal, comparable, err := budgetScopeUsage(ctx, tx, scope.Kind, scope.ID, scope.HardCurrency, effective)
+		tokenTotal, costTotal, comparable, err := budgetScopeUsage(ctx, tx, scope, scope.HardCurrency, effective)
 		if err != nil {
 			return BudgetReserveResult{}, err
 		}
@@ -602,8 +606,17 @@ func loadBudgetRequestAndScopes(ctx context.Context, tx *sql.Tx, id string) (bud
 		scopes = append(scopes, scope)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return budgetRequestFact{}, nil, ErrUnavailable
 	}
+	if err := rows.Close(); err != nil {
+		return budgetRequestFact{}, nil, ErrUnavailable
+	}
+	general, err := loadGeneralBudgetRequestScopes(ctx, tx, id)
+	if err != nil {
+		return budgetRequestFact{}, nil, err
+	}
+	scopes = append(scopes, general...)
 	return request, scopes, nil
 }
 
@@ -784,6 +797,16 @@ func insertBudgetReservation(ctx context.Context, tx *sql.Tx, row BudgetReservat
 }
 
 func insertBudgetScope(ctx context.Context, tx *sql.Tx, attemptID string, scope BudgetScope) error {
+	if scope.General {
+		_, err := tx.ExecContext(ctx, `INSERT INTO governance_general_budget_reservation_scopes(
+			attempt_id,scope_kind,scope_id,protocol,model,policy_id,policy_revision,group_revision,settings_revision,selector_revision,hard_tpm,hard_cost_micro,hard_currency,hard_window,unknown_mode
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, string(scope.Kind), scope.ID, string(scope.SelectorProtocol), scope.SelectorModel, scope.PolicyID, scope.PolicyRevision, nullableBudgetInt(scope.GroupRevision),
+			scope.SettingsRevision, scope.SelectorRevision, nullableBudgetInt(scope.HardTPM), nullableBudgetInt(scope.HardCostMicro), scope.HardCurrency, scope.HardWindow, scope.UnknownMode)
+		if err != nil {
+			return ErrUnavailable
+		}
+		return nil
+	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO governance_budget_reservation_scopes(
 		attempt_id,scope_kind,scope_id,policy_id,policy_revision,group_revision,settings_revision,hard_tpm,hard_cost_micro,hard_currency,hard_window,unknown_mode
 	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, string(scope.Kind), scope.ID, scope.PolicyID, scope.PolicyRevision, nullableBudgetInt(scope.GroupRevision),
@@ -839,10 +862,18 @@ func budgetProfileQuarantined(ctx context.Context, tx *sql.Tx, provider accounti
 	return true, nil
 }
 
-func budgetScopeUsage(ctx context.Context, tx *sql.Tx, kind ScopeKind, id, currency string, now time.Time) (int64, int64, bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT r.lifecycle,r.token_upper,r.cost_upper,r.cost_currency,r.token_known,r.actual_tokens,r.cost_known,r.actual_cost_micro,
+func budgetScopeUsage(ctx context.Context, tx *sql.Tx, scope BudgetScope, currency string, now time.Time) (int64, int64, bool, error) {
+	query := `SELECT r.lifecycle,r.token_upper,r.cost_upper,r.cost_currency,r.token_known,r.actual_tokens,r.cost_known,r.actual_cost_micro,
 		r.effective_settled_at,r.attribution_at FROM governance_budget_reservation_scopes s JOIN governance_budget_reservations r ON r.attempt_id=s.attempt_id
-		WHERE s.scope_kind=? AND s.scope_id=? ORDER BY r.attempt_id`, string(kind), id)
+		WHERE s.scope_kind=? AND s.scope_id=? ORDER BY r.attempt_id`
+	args := []any{string(scope.Kind), scope.ID}
+	if scope.General {
+		query = `SELECT r.lifecycle,r.token_upper,r.cost_upper,r.cost_currency,r.token_known,r.actual_tokens,r.cost_known,r.actual_cost_micro,
+			r.effective_settled_at,r.attribution_at FROM governance_general_budget_reservation_scopes s JOIN governance_budget_reservations r ON r.attempt_id=s.attempt_id
+			WHERE s.scope_kind=? AND s.scope_id=? AND s.protocol=? AND s.model=? ORDER BY r.attempt_id`
+		args = append(args, string(scope.SelectorProtocol), scope.SelectorModel)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, 0, false, ErrUnavailable
 	}
@@ -1075,7 +1106,6 @@ func loadBudgetScopes(ctx context.Context, query budgetQuery, attemptID string) 
 	if err != nil {
 		return nil, ErrUnavailable
 	}
-	defer rows.Close()
 	result := make([]BudgetScope, 0)
 	for rows.Next() {
 		var scope BudgetScope
@@ -1090,8 +1120,17 @@ func loadBudgetScopes(ctx context.Context, query budgetQuery, attemptID string) 
 		result = append(result, scope)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, ErrUnavailable
 	}
+	if err := rows.Close(); err != nil {
+		return nil, ErrUnavailable
+	}
+	general, err := loadGeneralBudgetReservationScopes(ctx, query, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	result = append(result, general...)
 	return result, nil
 }
 
@@ -1188,6 +1227,13 @@ func validBudgetScope(scope BudgetScope) bool {
 		!validRevision(scope.PolicyRevision) || scope.Kind == ScopeGroup != (scope.GroupRevision != nil) || scope.GroupRevision != nil && !validRevision(*scope.GroupRevision) ||
 		scope.HardTPM != nil && (*scope.HardTPM < 1 || *scope.HardTPM > MaxRevision) || scope.HardCostMicro != nil && *scope.HardCostMicro < 1 ||
 		scope.UnknownMode != "shadow" && scope.UnknownMode != "deny_unknown" {
+		return false
+	}
+	if scope.General {
+		if !validRevision(scope.SelectorRevision) || scope.SelectorProtocol != "" && !validProtocol(scope.SelectorProtocol) || scope.SelectorModel != "" && !validMetadata(scope.SelectorModel, 256) {
+			return false
+		}
+	} else if scope.SelectorRevision != 0 || scope.SelectorProtocol != "" || scope.SelectorModel != "" {
 		return false
 	}
 	if scope.HardCostMicro == nil {

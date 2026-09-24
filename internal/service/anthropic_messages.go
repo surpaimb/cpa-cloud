@@ -63,6 +63,7 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "The anthropic-beta header is invalid.", requestID(r.Context()))
 		return
 	}
+	r = withUsageStreamEvidence(r, stream)
 
 	auth, ok := a.authenticateAnthropicEmployee(w, r)
 	if !ok {

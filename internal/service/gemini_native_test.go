@@ -164,9 +164,14 @@ func TestGeminiNativeAPIKeyWorkflowStreamingDiscoveryAndRestart(t *testing.T) {
 	if len(modelList.Models) != 1 || modelList.Models[0].Name != "models/company-gemini" {
 		t.Fatalf("native models=%+v", modelList.Models)
 	}
+	xGoogModels := geminiEmployeeKeyRequest(t, http.MethodGet, server.URL+"/v1beta/models?pageSize=1", "", key.Key, context.Background())
+	if xGoogModels.StatusCode != http.StatusOK {
+		t.Fatalf("x-goog native model list status=%d body=%s", xGoogModels.StatusCode, readBody(xGoogModels))
+	}
+	xGoogModels.Body.Close()
 
-	requestBody := `{"contents":[{"role":"user","parts":[{"text":"weather"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"weather","args":{"city":"Paris"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"weather","response":{"temperature":21}}}]}],"systemInstruction":{"parts":[{"text":"Be concise."}]},"tools":[{"functionDeclarations":[{"name":"weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}],"toolConfig":{"functionCallingConfig":{"mode":"AUTO","allowedFunctionNames":["weather"]}},"generationConfig":{"candidateCount":1,"maxOutputTokens":128,"temperature":0.2,"topP":0.9,"topK":20,"stopSequences":["done"],"seed":7,"presencePenalty":0,"frequencyPenalty":0,"responseMimeType":"application/json","responseSchema":{"type":"object"}},"safetySettings":[]}`
-	generated := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent", requestBody, key.Key, context.Background())
+	requestBody := `{"contents":[{"role":"user","parts":[{"text":"weather"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"weather","args":{"city":"Paris"}},"thoughtSignature":"cli-0.61-synthetic-signature"}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"weather","response":{"temperature":21}}}]}],"systemInstruction":{"parts":[{"text":"Be concise."}]},"tools":[{"functionDeclarations":[{"name":"weather","description":"Get weather","parametersJsonSchema":{"type":"object","properties":{"city":{"type":"string"}}}}]}],"toolConfig":{"functionCallingConfig":{"mode":"AUTO","allowedFunctionNames":["weather"]}},"generationConfig":{"candidateCount":1,"maxOutputTokens":128,"temperature":0.2,"topP":0.9,"topK":20,"stopSequences":["done"],"seed":7,"presencePenalty":0,"frequencyPenalty":0,"responseMimeType":"application/json","responseSchema":{"type":"object"},"thinkingConfig":{"includeThoughts":true}},"safetySettings":[]}`
+	generated := geminiEmployeeKeyRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent", requestBody, key.Key, context.Background())
 	if generated.StatusCode != http.StatusOK {
 		t.Fatalf("generate status=%d body=%s", generated.StatusCode, readBody(generated))
 	}
@@ -179,13 +184,13 @@ func TestGeminiNativeAPIKeyWorkflowStreamingDiscoveryAndRestart(t *testing.T) {
 	receivedMu.Lock()
 	forwarded := mustMarshal(received)
 	receivedMu.Unlock()
-	for _, expected := range []string{`"systemInstruction"`, `"functionDeclarations"`, `"functionCall"`, `"functionResponse"`, `"generationConfig"`} {
+	for _, expected := range []string{`"systemInstruction"`, `"functionDeclarations"`, `"parametersJsonSchema"`, `"functionCall"`, `"thoughtSignature":"cli-0.61-synthetic-signature"`, `"functionResponse"`, `"generationConfig"`, `"thinkingConfig"`, `"includeThoughts":true`} {
 		if !bytes.Contains(forwarded, []byte(expected)) {
 			t.Fatalf("forwarded request omitted %s: %s", expected, forwarded)
 		}
 	}
 
-	stream := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:streamGenerateContent?alt=sse",
+	stream := geminiEmployeeKeyRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:streamGenerateContent?alt=sse",
 		`{"contents":[{"parts":[{"text":"stream"}]}]}`, key.Key, context.Background())
 	if stream.StatusCode != http.StatusOK || !strings.HasPrefix(stream.Header.Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("stream status=%d type=%q body=%s", stream.StatusCode, stream.Header.Get("Content-Type"), readBody(stream))
@@ -239,6 +244,25 @@ func TestGeminiNativeAPIKeyWorkflowStreamingDiscoveryAndRestart(t *testing.T) {
 	}
 	if requestCount.Load() < 4 {
 		t.Fatalf("Gemini request count=%d", requestCount.Load())
+	}
+}
+
+func TestGeminiFunctionCallThoughtSignatureIsStrict(t *testing.T) {
+	valid := `[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read_file","args":{"path":"synthetic.txt"}},"thoughtSignature":"opaque-synthetic-signature"}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"read_file","response":{"output":"synthetic"}}}]}]`
+	if err := validateGeminiContents(json.RawMessage(valid), false); err != nil {
+		t.Fatalf("Gemini CLI 0.61 tool round rejected: %v", err)
+	}
+	invalid := []string{
+		`[{"role":"model","parts":[{"text":"x","thoughtSignature":"opaque"}]}]`,
+		`[{"role":"model","parts":[{"functionResponse":{"id":"call-1","name":"read_file","response":{}},"thoughtSignature":"opaque"}]}]`,
+		`[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read_file","args":{}},"thoughtSignature":7}]}]`,
+		`[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read_file","args":{}},"thoughtSignature":""}]}]`,
+		`[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read_file","args":{}},"thoughtSignature":"opaque","futureField":true}]}]`,
+	}
+	for _, body := range invalid {
+		if err := validateGeminiContents(json.RawMessage(body), false); err == nil {
+			t.Fatalf("invalid thought signature shape accepted: %s", body)
+		}
 	}
 }
 
@@ -380,6 +404,35 @@ func TestGeminiNativeAuthorizationValidationAndErrorRedaction(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("invalid requests reached Gemini upstream")
 	}
+	for _, setHeaders := range []func(*http.Request){
+		func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer "+key.Key)
+			r.Header.Set("X-Goog-Api-Key", key.Key)
+		},
+		func(r *http.Request) {
+			r.Header.Add("X-Goog-Api-Key", key.Key)
+			r.Header.Add("X-Goog-Api-Key", key.Key)
+		},
+		func(r *http.Request) { r.Header.Set("X-Goog-Api-Key", key.Key+","+key.Key) },
+	} {
+		request, err := http.NewRequest(http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent", strings.NewReader(`{"contents":[{"parts":[{"text":"hello"}]}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		setHeaders(request)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("ambiguous Gemini credentials status=%d body=%s", response.StatusCode, readBody(response))
+		}
+		response.Body.Close()
+	}
+	if calls.Load() != 0 {
+		t.Fatal("ambiguous Gemini credentials reached upstream")
+	}
 	badGeneration := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent",
 		`{"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"temperature":"hot"}}`, key.Key, context.Background())
 	if badGeneration.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(badGeneration), `"status":"INVALID_ARGUMENT"`) {
@@ -387,6 +440,22 @@ func TestGeminiNativeAuthorizationValidationAndErrorRedaction(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatal("invalid generation config reached Gemini upstream")
+	}
+	unknownThinking := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent",
+		`{"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"thinkingConfig":{"includeThoughts":true,"futureSetting":1}}}`, key.Key, context.Background())
+	if unknownThinking.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(unknownThinking), `"status":"UNIMPLEMENTED"`) {
+		t.Fatal("unknown thinking config did not return an explicit unsupported error")
+	}
+	if calls.Load() != 0 {
+		t.Fatal("unsupported nested thinking config reached Gemini upstream")
+	}
+	ambiguousSchema := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent",
+		`{"contents":[{"parts":[{"text":"hello"}]}],"tools":[{"functionDeclarations":[{"name":"f","description":"f","parameters":{},"parametersJsonSchema":{}}]}]}`, key.Key, context.Background())
+	if ambiguousSchema.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(ambiguousSchema), `"status":"INVALID_ARGUMENT"`) {
+		t.Fatal("ambiguous function schema did not return an invalid argument error")
+	}
+	if calls.Load() != 0 {
+		t.Fatal("ambiguous function schema reached Gemini upstream")
 	}
 	badStream := employeeRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:streamGenerateContent",
 		`{"contents":[{"parts":[{"text":"bad-stream"}]}]}`, key.Key, context.Background())
@@ -444,6 +513,16 @@ func TestGeminiNativeAuthorizationValidationAndErrorRedaction(t *testing.T) {
 		t.Fatalf("revoked key model list status=%d", revoked.StatusCode)
 	}
 	revoked.Body.Close()
+	beforeRevokedGenerate := calls.Load()
+	revokedGenerate := geminiEmployeeKeyRequest(t, http.MethodPost, server.URL+"/v1beta/models/company-gemini:generateContent",
+		`{"contents":[{"parts":[{"text":"revoked"}]}]}`, key.Key, context.Background())
+	if revokedGenerate.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("revoked x-goog key generate status=%d body=%s", revokedGenerate.StatusCode, readBody(revokedGenerate))
+	}
+	revokedGenerate.Body.Close()
+	if calls.Load() != beforeRevokedGenerate {
+		t.Fatal("revoked x-goog employee key reached Gemini upstream")
+	}
 
 	var provider string
 	if err := app.store.db.QueryRow(`SELECT provider_kind FROM upstreams WHERE id=?`, upstreamObject.ID).Scan(&provider); err != nil || provider != geminiAPIKeyProvider {
@@ -703,6 +782,21 @@ func setupGeminiTest(t *testing.T, upstreamURL string) (*httptest.Server, *App, 
 	decodeResponse(t, employeeResponse, &employee)
 	key := createTestKey(t, server.URL, employee.ID, "gemini-op", cookie, csrf)
 	return server, app, cookie, csrf, upstream, employee, key
+}
+
+func geminiEmployeeKeyRequest(t *testing.T, method, target, body, key string, ctx context.Context) *http.Response {
+	t.Helper()
+	request, err := http.NewRequestWithContext(ctx, method, target, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Goog-Api-Key", key)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
 }
 
 func mustMarshal(value any) []byte {

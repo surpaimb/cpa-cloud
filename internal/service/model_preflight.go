@@ -142,6 +142,8 @@ func (a *App) finishModelPreflight(r *http.Request, lease *accountPoolLease, rec
 			failed = &modelPreflightError{Failure: poolAdmissionFailure(accountPoolStorageUnavailable)}
 		}
 	}
-	a.cleanupRequestUsage(requestID(r.Context()))
+	if record {
+		a.cleanupRequestUsage(requestID(r.Context()))
+	}
 	return route{}, nil, failed.Failure
 }

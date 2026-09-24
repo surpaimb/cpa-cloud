@@ -31,7 +31,15 @@ func (a *App) recoverRequestLedgers(ctx context.Context, core *governance.Coordi
 		}
 		at = recovered.EffectiveAt
 	}
-	if _, err := a.usage.ledger.RecoverInterruptedTx(ctx, tx, at); err != nil {
+	// Queued background Responses have not crossed a dispatch barrier and are
+	// the one pending request class that is safe to resume after restart.
+	// Dispatched/in-progress background tasks were terminalized by the response
+	// resource recovery step before this joint recovery transaction.
+	stamp := at.Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE accounting_attempts SET status='interrupted',finished_at=? WHERE status='pending' AND NOT EXISTS(SELECT 1 FROM background_tasks t WHERE t.request_id=accounting_attempts.request_id AND t.status='queued')`, stamp); err != nil {
+		return errUsageLedgerUnavailable
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE accounting_requests SET status='interrupted',finished_at=? WHERE status='pending' AND NOT EXISTS(SELECT 1 FROM background_tasks t WHERE t.request_id=accounting_requests.id AND t.status='queued')`, stamp); err != nil {
 		return errUsageLedgerUnavailable
 	}
 	if _, err := core.RecoverInterruptedTx(ctx, tx, at); err != nil {
