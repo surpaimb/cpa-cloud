@@ -27,7 +27,7 @@
 
 ## 2. Go 运行时依赖
 
-项目源码直接导入 `golang.org/x/crypto/bcrypt` 和 `modernc.org/sqlite`。其余 10 项由 `go.mod` 显式标为 indirect；它们可能随目标平台和构建标签进入静态 Go 二进制。由于盘点环境没有可执行的 `go` 命令，未运行 `go list -m all`、`go list -deps` 或二进制符号/构建信息检查，因此下表是“清单与本地源码许可证已核对”，不是“每个目标均确认已链接”。
+项目源码直接导入 `golang.org/x/crypto/bcrypt`、`golang.org/x/crypto/scrypt`、`modernc.org/sqlite`，Windows 备份权限实现还直接导入 `golang.org/x/sys/windows`。其余清单项可能随目标平台和构建标签进入静态 Go 二进制。2026-09-24 的备份实现测试已使用仓库指定 Go 1.26.6 工具链，但发布前仍需对最终目标运行 `go list -m all`、`go list -deps` 和制品构建信息检查；下表是“清单与本地源码许可证已核对”，不是“每个目标均确认已链接”。
 
 | 模块 | 版本 | `go.mod` 类型 | 本地许可证结论 | 发布时收集的原始文件 |
 | --- | --- | --- | --- | --- |

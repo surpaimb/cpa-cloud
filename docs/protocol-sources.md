@@ -12,6 +12,9 @@
 | https://platform.claude.com/docs/en/api/messages/count_tokens | Token Counting 请求与响应 | 2026-09-23 已核实独立端点及对 messages/tools/images/documents 的计数用途 |
 | https://support.claude.com/en/articles/9876003-i-have-a-paid-claude-subscription-pro-max-team-or-enterprise-plans-why-do-i-have-to-pay-separately-to-use-the-claude-api-and-console | Claude 订阅与 API 边界 | 2026-09-23 已核实订阅不包含 Claude API/Console 访问，本批不将 API Key 称为会员支持 |
 | https://sqlite.org/wal.html | 单机 WAL 运维边界 | 已读取；备份不可遗漏活跃 WAL，WAL 不适合网络共享文件系统 |
+| https://sqlite.org/backup.html | SQLite 一致在线备份 | 2026-09-24 已核实 online backup API 用于活动 WAL 数据库的一致快照；实现范围见 [加密备份命令行](backup-restore.md) |
+| https://www.rfc-editor.org/rfc/rfc7914 | scrypt 密钥派生 | 2026-09-24 已核实参数语义；首批格式固定并限制 `N/r/p`，不接受包提升成本 |
+| https://csrc.nist.gov/pubs/sp/800/38/d/final | AES-GCM 认证加密 | 2026-09-24 用于自有备份格式的随机 nonce、密文认证与头部 AAD 设计 |
 
 核心设计中的 API 路径和支持批次是产品目标，不代表所有官方接口字段已经验证。
 后续新增来源应记录具体章节、版本/日期、支持子集与独立测试证据；不抄录大段原文。
