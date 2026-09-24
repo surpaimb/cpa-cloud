@@ -16,7 +16,8 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 | /employees | GET/POST | POST {name,department?,note?}; employee {id,name,department,note,status,model_mode,models,revision} |
 | /employees/{id} | PATCH | {expected_revision,name?,department?,note?,status?}; status active/disabled |
 | /employees/{id}/model-policy | PUT | {expected_revision,mode,models}; mode all/selected |
-| /employees/{id}/keys | GET/POST | POST {name,operation_id,expires_at?}; 默认 null；返回 {id,name,key?,expires_at,revoked_at}，只有首次创建有 key |
+| /employees/{id}/keys | GET/POST | POST {name,operation_id,expires_at?,policy?}; 默认 null；返回 {id,name,key?,expires_at,revoked_at,policy?}，只有首次创建有 key |
+| /keys/{id}/policy | GET/PUT | GET 返回 Key 策略；PUT 使用 expected_revision 全量替换 |
 | /keys/{id}/revoke | POST | {}；返回 {ok:true} |
 | /upstreams | GET/POST | POST {name,provider_kind,endpoint?,api_key}; kind openai-compatible 或 gemini-api-key；Gemini 生产端点固定为 Google 官方地址；列表绝不返回 api_key/ciphertext |
 | /upstreams/{id} | PATCH | {expected_revision,name?,enabled?,api_key?} |
@@ -24,6 +25,16 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 | /system/status | GET | {version,ready,storage,limitations:[]} |
 
 普通 upstream 对象 {id,name,provider_kind,endpoint,enabled,revision}。
+
+### 每 Key 协议与模型策略（2026-09-25 批次契约）
+
+本节是下一源码批次的接口约束；只有 `features.key_access_policy=true` 才表示服务器已实现。完整迁移、事务屏障、后台资源语义和验收要求见[流式与 Key 策略批次契约](stream-key-policy-batch-contract-2026-09-25.md)。
+
+策略对象为 `{protocol_mode,protocols,model_mode,models,revision,effective_protocols,effective_models}`。`protocol_mode` 和 `model_mode` 均为 `all|selected`；`all` 必须配空数组，`selected` 使用显式数组且空数组表示全部拒绝。客户端协议枚举固定为 `openai-chat`、`openai-responses`、`anthropic-messages`、`gemini-generate-content`；模型数组只接受公开模型 ID，不接受上游模型名。`effective_*` 是只读快照。
+
+创建 Key 时省略 `policy` 等价于 `all/all`；提供 `policy` 时四个 mode/list 字段必须齐全。`PUT /admin/api/v1/keys/{id}/policy` 使用 `{expected_revision,protocol_mode,protocols,model_mode,models}` 全量替换；revision 冲突返回 409，非法策略返回 400 `invalid_key_policy`，不存在返回 404。旧库 Key 迁移为 `all/all` revision 1，只继承现有四种客户端协议与员工/全局路由能力，不产生新授权。
+
+最终模型集合取员工策略、Key 策略和当前有效路由的交集。`GET /v1/models` 只有 Key 允许至少一种 OpenAI 客户端协议时才返回过滤目录，否则返回已鉴权空列表；`GET /v1beta/models` 要求 Gemini 客户端协议，否则同样返回已鉴权空列表。四种前台入口必须在治理、预算、租约、尝试和网络派发之前检查客户端协议与公开模型，并在最终派发事务中重查冻结的策略 revision。
 
 ### 账号与模型生命周期（开发预览增量）
 
