@@ -38,6 +38,16 @@
 - `internal/service` 的单 dispatch、clean EOF、非法 tail、terminal drain、取消、backpressure 测试；
 - 终端事件 write/flush 失败不能完成，以及 30 秒逐事件 write/flush deadline 的确定性测试。
 
+## Key 策略合并后的组合复验
+
+PR #8 合入后的 `main` 为 `4090130e59f972951db1a9f1b32d8a4e9b8ee3fa`。流式分支合并该基线后，生产与组合测试提交固定为 `5b74d9be716a22615e85ab5e7326c33d60b77c0a`；Windows 二进制为 `C:\Users\apple\.codex\tmp\cpa-cloud-combined-5b74d9b.exe`，SHA-256 为 `5AE310AC3E9C66BEA61AF03FE6C931032756811883C133D42BED86DA761EDDD5`。
+
+同一二进制重新通过本页完整真实进程矩阵；停止读取在 `30279 ms` 后取消唯一上游请求。另以创建时的显式 Key `selected` 策略运行双向 SSE：只允许 `openai-chat`/`openai-responses` 和三个指定公开模型，两个允许方向各自成功且保持一 parent、一 attempt、原 wire output usage 和未知 input；未列入 Key 策略的第四个模型以及策略收窄后不再允许的 Responses 入口都返回 `403`，上游调用数不变且不新增 parent。允许的 Chat 取消仍只派发一次并取消唯一上游请求。
+
+服务层新增最终事务组合断言：跨协议流完成准入后，Key policy revision 改变会在 attempt/网络前拒绝；策略从允许变为拒绝、再恢复相同允许内容的 ABA 也因 revision 从 1 增至 3 而拒绝。两种情况均为零 attempt、零上游。原 KEY-02 四协议拒绝/目录交集/CAS/重启进程 smoke 也在该组合二进制上再次通过。
+
+组合分支的完整 Linux Go、`CGO_ENABLED=1` race、vet、构建与隔离进程结果只以最终 PR HEAD 的实际 CI 为准；本节不借用合并前两个 PR 的绿色 run。
+
 ## Actual Codex CLI
 
 实际 `codex-cli 0.155.0-alpha.16.3`（SHA-256
