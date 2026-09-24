@@ -2,12 +2,17 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
+
+	"cpacloud.local/server/internal/keypolicy"
 )
 
 type employee struct {
@@ -290,11 +295,12 @@ func (a *App) employeeModels(ctx context.Context, id string) ([]string, error) {
 }
 
 type keyView struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Key       string  `json:"key,omitempty"`
-	ExpiresAt *string `json:"expires_at"`
-	RevokedAt *string `json:"revoked_at"`
+	ID        string        `json:"id"`
+	Name      string        `json:"name"`
+	Key       string        `json:"key,omitempty"`
+	ExpiresAt *string       `json:"expires_at"`
+	RevokedAt *string       `json:"revoked_at"`
+	Policy    keyPolicyView `json:"policy"`
 }
 
 func (a *App) listKeys(w http.ResponseWriter, r *http.Request, _ adminSession) {
@@ -308,7 +314,6 @@ func (a *App) listKeys(w http.ResponseWriter, r *http.Request, _ adminSession) {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	defer rows.Close()
 	items := make([]keyView, 0)
 	for rows.Next() {
 		var item keyView
@@ -321,13 +326,28 @@ func (a *App) listKeys(w http.ResponseWriter, r *http.Request, _ adminSession) {
 		item.RevokedAt = nullString(rev)
 		items = append(items, item)
 	}
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	if iterationErr != nil || closeErr != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	for index := range items {
+		policy, err := a.readKeyPolicyView(r.Context(), items[index].ID)
+		if err != nil {
+			writeKeyPolicyAdminError(w, err)
+			return
+		}
+		items[index].Policy = policy
+	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
 
 type createKeyRequest struct {
-	Name        string  `json:"name"`
-	OperationID string  `json:"operation_id"`
-	ExpiresAt   *string `json:"expires_at"`
+	Name        string                 `json:"name"`
+	OperationID string                 `json:"operation_id"`
+	ExpiresAt   *string                `json:"expires_at"`
+	Policy      *keypolicy.Replacement `json:"policy"`
 }
 
 func (a *App) createKey(w http.ResponseWriter, r *http.Request, _ adminSession) {
@@ -341,6 +361,18 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request, _ adminSession) 
 		writeAdminError(w, 400, "invalid_request", "Invalid key fields.")
 		return
 	}
+	replacement := keypolicy.Replacement{
+		ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
+		ModelMode: keypolicy.ModeAll, Models: []string{},
+	}
+	if input.Policy != nil {
+		replacement = *input.Policy
+	}
+	normalizedPolicy, err := keypolicy.Normalize(replacement)
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_key_policy", "Invalid key policy.")
+		return
+	}
 	var expires any
 	if input.ExpiresAt != nil {
 		t, err := time.Parse(time.RFC3339, *input.ExpiresAt)
@@ -352,12 +384,40 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request, _ adminSession) 
 		input.ExpiresAt = &normalized
 		expires = normalized
 	}
+	fingerprint, err := keyCreateFingerprint(input.Name, input.ExpiresAt, normalizedPolicy)
+	if err != nil {
+		writeAdminError(w, 503, "service_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+
+	a.admission.Lock()
+	defer a.admission.Unlock()
+	tx, err := a.store.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	defer tx.Rollback()
 	var prior keyView
 	var exp, rev sql.NullString
-	err := a.store.db.QueryRowContext(r.Context(), `SELECT id,name,expires_at,revoked_at FROM access_keys WHERE employee_id=? AND operation_id=?`, r.PathValue("id"), input.OperationID).Scan(&prior.ID, &prior.Name, &exp, &rev)
+	var priorFingerprint string
+	err = tx.QueryRowContext(r.Context(), `SELECT id,name,expires_at,revoked_at,operation_fingerprint FROM access_keys WHERE employee_id=? AND operation_id=?`, r.PathValue("id"), input.OperationID).Scan(&prior.ID, &prior.Name, &exp, &rev, &priorFingerprint)
 	if err == nil {
 		prior.ExpiresAt = nullString(exp)
 		prior.RevokedAt = nullString(rev)
+		if !keyCreateRetryMatches(prior, priorFingerprint, input, fingerprint, normalizedPolicy) {
+			writeAdminError(w, http.StatusConflict, "operation_conflict", "The operation ID was already used with different key fields.")
+			return
+		}
+		prior.Policy, err = readKeyPolicyViewTx(r.Context(), tx, a, prior.ID)
+		if err != nil {
+			writeKeyPolicyAdminError(w, err)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
 		writeJSON(w, 200, prior)
 		return
 	}
@@ -365,9 +425,17 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request, _ adminSession) 
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	var exists int
-	if err := a.store.db.QueryRowContext(r.Context(), `SELECT 1 FROM employees WHERE id=?`, r.PathValue("id")).Scan(&exists); err != nil {
+	owner, err := loadKeyPolicyCreateOwnerTx(r.Context(), tx, r.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, 404, "not_found", "Employee was not found.")
+		return
+	}
+	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if err := a.validateKeyPolicyModelsTx(r.Context(), tx, owner, normalizedPolicy); err != nil {
+		writeKeyPolicyAdminError(w, err)
 		return
 	}
 	id, err := newID("key")
@@ -386,22 +454,64 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request, _ adminSession) 
 		return
 	}
 	full := "cpac_" + selector + "." + secret
-	_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, id, r.PathValue("id"), input.Name, selector, a.secrets.digest("employee-key/v1\x00"+selector, secret), 1, input.OperationID, expires, utcNow())
+	now := time.Now().UTC()
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,operation_fingerprint,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, id, r.PathValue("id"), input.Name, selector, a.secrets.digest("employee-key/v1\x00"+selector, secret), 1, input.OperationID, fingerprint, expires, now.Format(time.RFC3339Nano))
 	if err != nil {
-		if isConflict(err) {
-			err = a.store.db.QueryRowContext(r.Context(), `SELECT id,name,expires_at,revoked_at FROM access_keys WHERE employee_id=? AND operation_id=?`, r.PathValue("id"), input.OperationID).Scan(&prior.ID, &prior.Name, &exp, &rev)
-			if err == nil {
-				prior.ExpiresAt = nullString(exp)
-				prior.RevokedAt = nullString(rev)
-				writeJSON(w, 200, prior)
-				return
-			}
-		}
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	policy, err := keypolicy.CreateTx(r.Context(), tx, id, normalizedPolicy, now)
+	if err != nil {
+		writeKeyPolicyAdminError(w, err)
+		return
+	}
+	view, err := readKeyPolicyViewTxWithPolicy(r.Context(), tx, a, id, owner, policy)
+	if err != nil {
+		writeKeyPolicyAdminError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, 201, keyView{ID: id, Name: input.Name, Key: full, ExpiresAt: input.ExpiresAt})
+	writeJSON(w, 201, keyView{ID: id, Name: input.Name, Key: full, ExpiresAt: input.ExpiresAt, Policy: view})
+}
+
+func loadKeyPolicyCreateOwnerTx(ctx context.Context, tx *sql.Tx, employeeID string) (keyPolicyOwner, error) {
+	var owner keyPolicyOwner
+	err := tx.QueryRowContext(ctx, `SELECT id,model_mode,status FROM employees WHERE id=?`, employeeID).
+		Scan(&owner.EmployeeID, &owner.EmployeeMode, &owner.Status)
+	return owner, err
+}
+
+func keyCreateFingerprint(name string, expiresAt *string, policy keypolicy.Replacement) (string, error) {
+	canonical := struct {
+		Name      string                `json:"name"`
+		ExpiresAt *string               `json:"expires_at"`
+		Policy    keypolicy.Replacement `json:"policy"`
+	}{Name: name, ExpiresAt: expiresAt, Policy: policy}
+	raw, err := json.Marshal(canonical)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func keyCreateRetryMatches(prior keyView, storedFingerprint string, input createKeyRequest, requestedFingerprint string, policy keypolicy.Replacement) bool {
+	if storedFingerprint != "" {
+		return storedFingerprint == requestedFingerprint
+	}
+	legacyAll := policy.ProtocolMode == keypolicy.ModeAll && len(policy.Protocols) == 0 && policy.ModelMode == keypolicy.ModeAll && len(policy.Models) == 0
+	return legacyAll && prior.Name == input.Name && sameOptionalString(prior.ExpiresAt, input.ExpiresAt)
+}
+
+func sameOptionalString(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, _ adminSession) {

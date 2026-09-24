@@ -100,7 +100,7 @@ func TestOutboundProxyAdminPermissionsCASAndRedaction(t *testing.T) {
 
 func TestOutboundProxyFinalDispatchRevisionAndAuthorization(t *testing.T) {
 	for _, pooled := range []bool{false, true} {
-		for _, change := range []string{"none", "bind", "proxy_name", "proxy_connection", "proxy_disabled", "account", "key", "policy", "model", "route"} {
+		for _, change := range []string{"none", "bind", "proxy_name", "proxy_connection", "proxy_disabled", "account", "key", "policy", "key_policy", "model", "route"} {
 			t.Run(fmt.Sprintf("pooled_%t/%s", pooled, change), func(t *testing.T) {
 				f := newRuntimeFixture(t, &runtimeSequenceRandom{}, time.Minute, 4)
 				a := f.base.app
@@ -148,6 +148,8 @@ func TestOutboundProxyFinalDispatchRevisionAndAuthorization(t *testing.T) {
 					_, err = a.store.db.Exec(`UPDATE access_keys SET revoked_at=? WHERE id=?`, utcNow(), f.auth1.KeyID)
 				case "policy":
 					_, err = a.store.db.Exec(`DELETE FROM employee_models WHERE employee_id=?`, f.auth1.EmployeeID)
+				case "key_policy":
+					_, err = a.store.db.Exec(`UPDATE access_key_policies SET revision=revision+1 WHERE key_id=?`, f.auth1.KeyID)
 				case "model":
 					_, err = a.store.db.Exec(`UPDATE models SET enabled=0 WHERE id='dispatch-model'`)
 				case "route":

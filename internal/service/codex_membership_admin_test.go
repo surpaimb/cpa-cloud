@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/egress"
+	"cpacloud.local/server/internal/keypolicy"
 )
 
 func TestCodexMembershipAdminImportReplacementAndFeatureFlag(t *testing.T) {
@@ -642,6 +643,9 @@ func assertMigratedLegacyData(t *testing.T, migrated *store, secretStore *secret
 
 func assertMigratedLegacyRoute(t *testing.T, migrated *store, secretStore *secrets) {
 	t.Helper()
+	if err := keypolicy.Migrate(context.Background(), migrated.db); err != nil {
+		t.Fatal(err)
+	}
 	app := &App{
 		cfg: Config{AllowLoopbackUpstream: true}, store: migrated, secrets: secretStore,
 		http: newUpstreamClient(true), codex: newProductionCodexExecutor(), logins: make(map[string]*loginAttempt),

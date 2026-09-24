@@ -15,12 +15,73 @@ import (
 
 	"cpacloud.local/server/internal/accounting"
 	"cpacloud.local/server/internal/governance"
+	"cpacloud.local/server/internal/keypolicy"
 )
 
 type explicitWireFixture struct {
 	app    *App
 	server *httptest.Server
 	key    keyView
+}
+
+func TestKeyPolicyDeniesEveryProtocolBeforeAdmission(t *testing.T) {
+	var calls atomic.Int32
+	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	_, err := keypolicy.Replace(context.Background(), fixture.app.store.db, fixture.key.ID, 1, keypolicy.Replacement{
+		ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
+		ModelMode: keypolicy.ModeAll, Models: []string{},
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		request func() *http.Response
+	}{
+		{"chat", func() *http.Response {
+			return employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/chat/completions", `{"model":"wire-model","messages":[{"role":"user","content":"hi"}]}`, fixture.key.Key, context.Background())
+		}},
+		{"responses", func() *http.Response {
+			return employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/responses", `{"model":"wire-model","input":"hi"}`, fixture.key.Key, context.Background())
+		}},
+		{"anthropic", func() *http.Response {
+			return anthropicEmployeeRequest(t, context.Background(), http.MethodPost, fixture.server.URL+"/v1/messages", `{"model":"wire-model","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`, fixture.key.Key, "x-api-key")
+		}},
+		{"gemini", func() *http.Response {
+			return geminiEmployeeKeyRequest(t, http.MethodPost, fixture.server.URL+"/v1beta/models/wire-model:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, fixture.key.Key, context.Background())
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := test.request()
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusForbidden {
+				t.Fatalf("status=%d body=%s", response.StatusCode, readBody(response))
+			}
+		})
+	}
+	modelsRequest, _ := http.NewRequest(http.MethodGet, fixture.server.URL+"/v1/models", nil)
+	modelsRequest.Header.Set("Authorization", "Bearer "+fixture.key.Key)
+	modelsResponse, err := http.DefaultClient.Do(modelsRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelsBody := readBody(modelsResponse)
+	modelsResponse.Body.Close()
+	if modelsResponse.StatusCode != http.StatusOK || !strings.Contains(modelsBody, `"data":[]`) {
+		t.Fatalf("models status=%d body=%s", modelsResponse.StatusCode, modelsBody)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("denied policy made %d upstream calls", calls.Load())
+	}
+	for _, table := range []string{"governance_requests", "accounting_requests", "accounting_attempts", "model_requests"} {
+		var count int
+		if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s count=%d err=%v", table, count, err)
+		}
+	}
 }
 
 func newExplicitWireFixture(t *testing.T, wire string, upstream http.Handler) explicitWireFixture {

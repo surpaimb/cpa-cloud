@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 )
 
 const (
@@ -145,7 +146,7 @@ func (c *responseResourceCoordinator) Create(ctx context.Context, input response
 		return responseResourceView{}, errResponseResourceUnavailable
 	}
 	defer tx.Rollback()
-	if err := c.authorizeOwnerTx(ctx, tx, input.EmployeeID, input.KeyID, input.PublicModel, created); err != nil {
+	if err := c.authorizeOwnerTx(ctx, tx, input.EmployeeID, input.KeyID, input.PublicModel, created, true); err != nil {
 		return responseResourceView{}, err
 	}
 	if existing, storedFingerprint, found, err := loadResponseResourceByOperationTx(ctx, tx, input.EmployeeID, input.KeyID, input.OperationID); err != nil {
@@ -225,7 +226,7 @@ func (c *responseResourceCoordinator) Get(ctx context.Context, auth employeeAuth
 	if err != nil {
 		return responseResourceView{}, err
 	}
-	if err := c.authorizeOwnerTx(ctx, tx, auth.EmployeeID, auth.KeyID, view.PublicModel, c.now().UTC()); err != nil {
+	if err := c.authorizeOwnerTx(ctx, tx, auth.EmployeeID, auth.KeyID, view.PublicModel, c.now().UTC(), includeBody); err != nil {
 		return responseResourceView{}, err
 	}
 	if view.Tombstoned || !view.ExpiresAt.After(c.now().UTC()) {
@@ -396,7 +397,7 @@ func (c *responseResourceCoordinator) Cancel(ctx context.Context, auth employeeA
 	if err != nil {
 		return responseResourceView{}, err
 	}
-	if err := c.authorizeOwnerTx(ctx, tx, auth.EmployeeID, auth.KeyID, view.PublicModel, c.now().UTC()); err != nil {
+	if err := c.authorizeOwnerTx(ctx, tx, auth.EmployeeID, auth.KeyID, view.PublicModel, c.now().UTC(), false); err != nil {
 		return responseResourceView{}, err
 	}
 	if !view.Background || responseTerminalStatus(view.Status) {
@@ -557,7 +558,7 @@ func (c *responseResourceCoordinator) inputFingerprint(input responseResourceCre
 	return h.Sum(nil), nil
 }
 
-func (c *responseResourceCoordinator) authorizeOwnerTx(ctx context.Context, tx *sql.Tx, employeeID, keyID, model string, at time.Time) error {
+func (c *responseResourceCoordinator) authorizeOwnerTx(ctx context.Context, tx *sql.Tx, employeeID, keyID, model string, at time.Time, requireCurrentModelPolicy bool) error {
 	var status, mode string
 	var expires, revoked sql.NullString
 	err := tx.QueryRowContext(ctx, `SELECT e.status,e.model_mode,k.expires_at,k.revoked_at FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.id=? AND k.employee_id=?`, keyID, employeeID).Scan(&status, &mode, &expires, &revoked)
@@ -572,6 +573,19 @@ func (c *responseResourceCoordinator) authorizeOwnerTx(ctx context.Context, tx *
 		if err != nil || !at.Before(expiry) {
 			return errResponseResourceForbidden
 		}
+	}
+	if !requireCurrentModelPolicy {
+		return nil
+	}
+	policy, err := keypolicy.LoadTx(ctx, tx, keyID)
+	if err != nil {
+		if errors.Is(err, keypolicy.ErrNotFound) || errors.Is(err, keypolicy.ErrPolicyMissing) {
+			return errResponseResourceForbidden
+		}
+		return errResponseResourceUnavailable
+	}
+	if !keypolicy.Allows(policy, keypolicy.ProtocolOpenAIResponses, model) {
+		return errResponseResourceForbidden
 	}
 	var allowed int
 	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND u.enabled=1 AND u.archived=0 AND (?='all' OR EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id))`, model, mode, employeeID).Scan(&allowed)

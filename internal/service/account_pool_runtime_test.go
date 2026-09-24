@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"cpacloud.local/server/internal/keypolicy"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -118,11 +119,13 @@ func newRuntimeFixtureWithBase(t *testing.T, base *accountPoolFixture, random sc
 	}
 	t.Cleanup(func() { _ = rt.Close() })
 	fixture := &runtimeFixture{base: base, clock: clock, rt: rt,
-		auth1: employeeAuth{EmployeeID: "emp_runtime_1", KeyID: "key_runtime_1", Mode: "selected"},
-		auth2: employeeAuth{EmployeeID: "emp_runtime_2", KeyID: "key_runtime_2", Mode: "selected"},
+		auth1: employeeAuth{EmployeeID: "emp_runtime_1", KeyID: "key_runtime_1", Mode: "selected", ClientProtocol: keypolicy.ProtocolOpenAIChat},
+		auth2: employeeAuth{EmployeeID: "emp_runtime_2", KeyID: "key_runtime_2", Mode: "selected", ClientProtocol: keypolicy.ProtocolOpenAIChat},
 	}
 	fixture.insertEmployee(t, fixture.auth1)
 	fixture.insertEmployee(t, fixture.auth2)
+	fixture.auth1.Policy = keypolicy.Policy{Revision: 1, ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{}, ModelMode: keypolicy.ModeAll, Models: []string{}}
+	fixture.auth2.Policy = fixture.auth1.Policy
 	return fixture
 }
 
@@ -132,6 +135,9 @@ func (f *runtimeFixture) insertEmployee(t *testing.T, auth employeeAuth) {
 		t.Fatal(err)
 	}
 	if _, err := f.base.app.store.db.Exec(`INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,created_at) VALUES(?,?,?, ?,X'01',1,?,?)`, auth.KeyID, auth.EmployeeID, "runtime", "selector-"+auth.KeyID, "operation-"+auth.KeyID, utcNow()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.base.app.store.db.Exec(`INSERT INTO access_key_policies(key_id,revision,protocol_mode,model_mode,created_at,updated_at) VALUES(?,1,'all','all',?,?)`, auth.KeyID, utcNow(), utcNow()); err != nil {
 		t.Fatal(err)
 	}
 }
