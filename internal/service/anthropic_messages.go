@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 	"cpacloud.local/server/internal/protocolconv"
 	"cpacloud.local/server/internal/scheduling"
 )
@@ -68,6 +69,11 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 
 	auth, ok := a.authenticateAnthropicEmployee(w, r)
 	if !ok {
+		return
+	}
+	auth, policyFailure := authorizeKeyPolicy(auth, keypolicy.ProtocolAnthropicMessages, model)
+	if policyFailure != nil {
+		writeAnthropicError(w, policyFailure.status, anthropicAdmissionType(policyFailure.status), policyFailure.message, requestID(r.Context()))
 		return
 	}
 	modelRequestID := requestID(r.Context())

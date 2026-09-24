@@ -111,6 +111,37 @@ func TestPreviewWorkflowPersistenceStreamingAndRevocation(t *testing.T) {
 	if duplicate.ID != firstKey.ID || duplicate.Key != "" {
 		t.Fatal("idempotent key creation re-exposed or replaced the secret")
 	}
+	if firstKey.Policy.Revision != 1 || firstKey.Policy.ProtocolMode != "all" || firstKey.Policy.ModelMode != "all" {
+		t.Fatalf("default key policy=%+v", firstKey.Policy)
+	}
+	conflict := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/employees/"+employeeObject.ID+"/keys",
+		`{"name":"Different","operation_id":"first-op"}`, cookie, csrf, server.URL)
+	if conflict.StatusCode != http.StatusConflict {
+		t.Fatalf("changed key retry status=%d body=%s", conflict.StatusCode, readBody(conflict))
+	}
+	conflict.Body.Close()
+	selectedBody := `{"name":"Selected","operation_id":"selected-op","policy":{"protocol_mode":"selected","protocols":["openai-chat"],"model_mode":"selected","models":["company-model"]}}`
+	selectedResponse := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/employees/"+employeeObject.ID+"/keys", selectedBody, cookie, csrf, server.URL)
+	if selectedResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("selected key status=%d body=%s", selectedResponse.StatusCode, readBody(selectedResponse))
+	}
+	var selectedKey keyView
+	decodeResponse(t, selectedResponse, &selectedKey)
+	replace := requestJSON(t, http.MethodPut, server.URL+"/admin/api/v1/keys/"+selectedKey.ID+"/policy",
+		`{"expected_revision":1,"protocol_mode":"all","protocols":[],"model_mode":"all","models":[]}`, cookie, csrf, server.URL)
+	if replace.StatusCode != http.StatusOK {
+		t.Fatalf("replace selected policy status=%d body=%s", replace.StatusCode, readBody(replace))
+	}
+	replace.Body.Close()
+	retrySelected := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/employees/"+employeeObject.ID+"/keys", selectedBody, cookie, csrf, server.URL)
+	if retrySelected.StatusCode != http.StatusOK {
+		t.Fatalf("original selected retry status=%d body=%s", retrySelected.StatusCode, readBody(retrySelected))
+	}
+	var retriedSelected keyView
+	decodeResponse(t, retrySelected, &retriedSelected)
+	if retriedSelected.ID != selectedKey.ID || retriedSelected.Key != "" || retriedSelected.Policy.Revision != 2 {
+		t.Fatalf("selected retry=%+v", retriedSelected)
+	}
 
 	modelsRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/v1/models", nil)
 	modelsRequest.Header.Set("Authorization", "Bearer "+firstKey.Key)

@@ -1,5 +1,11 @@
 # 集成状态
 
+## 2026-09-25：主线基线与下一批边界
+
+- `main` 基线 `481f8b788aba2b2f159808b2ddabe8f09eaa526a` 已包含 PR #4 的恢复材料、双版本恢复路径与同一 Windows 用户下不同 store/新目录的可移植合成恢复，PR #5 的管理员余额/日月结算/CSV 与计费网页，以及 PR #6 的 Chat↔Responses、Messages↔Responses、Gemini↔Responses 六个非流式显式 wire 方向。它们不代表跨 profile 或真实第二环境灾备、员工自助门户、生产支付或真实供应商兼容性已经验收。
+- 跨协议流式在该基线仍只允许既有同协议通路；Chat↔Responses SSE 的真实执行链接线与每 Key 协议/模型策略进入下一批，范围见[流式与 Key 策略批次契约](stream-key-policy-batch-contract-2026-09-25.md)。Messages/Gemini 跨协议 SSE、媒体、托管工具及有状态/后台转换不在该批。
+- 严格多租户、租户域名、SSO、管理员密码重置命令以及提示词/响应正文审计不属于当前实现目标；普通自助注册、员工门户和其他未排除能力仍按[功能矩阵](feature-parity-plan.md)推进。
+
 ## 2026-09-24：显式 Wire 协议路由与跨协议非流式接线
 
 - 集成提交 `13985a0` 把纯转换模块接入共享 HTTP 执行路径，后续 `01f2019` 把模型 revision 也冻结到最终派发屏障，

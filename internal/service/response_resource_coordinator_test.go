@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 )
 
 func TestResponseResourceCoordinatorEncryptedOwnershipAndDeletion(t *testing.T) {
@@ -104,6 +105,47 @@ func TestResponseResourceCoordinatorEncryptedOwnershipAndDeletion(t *testing.T) 
 	}
 }
 
+func TestResponseResourcePolicyNarrowingBlocksBodyButPreservesCancelAndDelete(t *testing.T) {
+	coordinator, db := newResponseResourceTestCoordinator(t)
+	now := time.Date(2026, 9, 24, 6, 30, 0, 0, time.UTC)
+	coordinator.now = func() time.Time { return now }
+	completed, err := coordinator.Create(context.Background(), responseResourceCreateInput{
+		OperationID: "op_policy_completed", EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one",
+		ProviderKind: "openai-compatible", StoreBody: true, CreatedAt: now, TerminalAt: responseTimePointer(now.Add(time.Second)),
+		Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"synthetic"}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := coordinator.Create(context.Background(), responseResourceCreateInput{
+		OperationID: "op_policy_background", EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one",
+		ProviderKind: "openai-compatible", Background: true, CreatedAt: now,
+		Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"synthetic"}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keypolicy.Replace(context.Background(), db, "key_one", 1, keypolicy.Replacement{
+		ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
+		ModelMode: keypolicy.ModeSelected, Models: []string{},
+	}, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	auth := employeeAuth{EmployeeID: "emp_one", KeyID: "key_one"}
+	if _, err := coordinator.Get(context.Background(), auth, completed.ID, true); !errors.Is(err, errResponseResourceForbidden) {
+		t.Fatalf("narrowed policy body read err=%v", err)
+	}
+	if metadata, err := coordinator.Get(context.Background(), auth, completed.ID, false); err != nil || len(metadata.Items) != 0 {
+		t.Fatalf("metadata read items=%d err=%v", len(metadata.Items), err)
+	}
+	if cancelled, err := coordinator.Cancel(context.Background(), auth, queued.ID); err != nil || cancelled.Status != "cancelled" {
+		t.Fatalf("cancel status=%q err=%v", cancelled.Status, err)
+	}
+	if err := coordinator.Delete(context.Background(), auth, completed.ID); err != nil {
+		t.Fatalf("delete after narrowing: %v", err)
+	}
+}
+
 func TestBackgroundResponseCreationIsAtomicWithAccountingRequest(t *testing.T) {
 	coordinator, db := newResponseResourceTestCoordinator(t)
 	now := time.Date(2026, 9, 24, 7, 0, 0, 0, time.UTC)
@@ -146,6 +188,47 @@ func TestBackgroundResponseCreationIsAtomicWithAccountingRequest(t *testing.T) {
 	}
 	if leaked != 0 {
 		t.Fatalf("failed commit leaked %d durable rows", leaked)
+	}
+}
+
+func TestBackgroundResponsePolicyNarrowingInterruptsBeforeDispatch(t *testing.T) {
+	coordinator, db := newResponseResourceTestCoordinator(t)
+	now := time.Now().UTC()
+	coordinator.now = func() time.Time { return now }
+	created, err := coordinator.Create(context.Background(), responseResourceCreateInput{
+		OperationID: "op_background_policy_narrow", EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one",
+		ProviderKind: "openai-compatible", Background: true, CreatedAt: now,
+		Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"queued"}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keypolicy.Replace(context.Background(), db, "key_one", 1, keypolicy.Replacement{
+		ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
+		ModelMode: keypolicy.ModeSelected, Models: []string{},
+	}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.app.responseResources = coordinator
+	worker := &backgroundResponseWorker{app: coordinator.app, ctx: context.Background()}
+	claim, err := worker.claimOne()
+	if err == nil || claim != nil {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	var taskStatus, responseStatus, requestStatus string
+	var claimToken sql.NullString
+	if err := db.QueryRow(`SELECT t.status,r.status,a.status,t.claim_token FROM background_tasks t JOIN response_resources r ON r.id=t.response_id JOIN accounting_requests a ON a.id=t.request_id WHERE t.id=?`, created.TaskID).
+		Scan(&taskStatus, &responseStatus, &requestStatus, &claimToken); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != "interrupted" || responseStatus != "interrupted" || requestStatus != "interrupted" || claimToken.Valid {
+		t.Fatalf("task=%s response=%s request=%s claim=%v", taskStatus, responseStatus, requestStatus, claimToken)
+	}
+	for _, table := range []string{"model_requests", "accounting_attempts"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s count=%d err=%v", table, count, err)
+		}
 	}
 }
 
@@ -325,6 +408,9 @@ func newResponseResourceTestCoordinator(t *testing.T) (*responseResourceCoordina
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.close() })
+	if err := keypolicy.Migrate(context.Background(), s.db); err != nil {
+		t.Fatal(err)
+	}
 	seedResponseResourceParents(t, s.db)
 	coordinator, _ := newResponseResourceTestCoordinatorFromDB(t, s.db, secretStore)
 	return coordinator, s.db
