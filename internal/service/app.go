@@ -42,6 +42,7 @@ type App struct {
 	refresh            *codexRefreshCoordinator
 	accountPool        *accountPoolRuntime
 	healthTests        *upstreamHealthCoordinator
+	scheduledTests     *scheduledTestCoordinator
 	systemProbes       *accounting.SystemProbeLedger
 	recovery           *accountRecoveryCoordinator
 	usage              *usageLedgerCoordinator
@@ -135,6 +136,10 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	app.scheduledTests, err = newScheduledTestCoordinator(ctx, app)
+	if err != nil {
+		return nil, err
+	}
 	if err := app.refresh.Start(); err != nil {
 		return nil, err
 	}
@@ -178,6 +183,9 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 }
 
 func (a *App) Close() error {
+	if a.scheduledTests != nil {
+		a.scheduledTests.Close()
+	}
 	if a.governance != nil {
 		a.governance.Close()
 	}
@@ -215,6 +223,7 @@ func (a *App) Handler() http.Handler {
 	a.registerUsageHandlers(mux)
 	a.registerSystemProbeHandlers(mux)
 	a.registerAccountRecoveryHandlers(mux)
+	a.registerScheduledTestHandlers(mux)
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("POST /admin/api/v1/sessions", a.login)
 	mux.HandleFunc("DELETE /admin/api/v1/sessions", a.requireAdmin(a.logout, true))
@@ -294,6 +303,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"development preview; not production hardened",
 		"Responses resources, background execution, failover after upstream dispatch, and reliable billing-grade usage are not implemented; Messages is available only for Anthropic API-key routes",
 		"manual account tests check local credentials or catalogs; generation recovery requires both startup allowance and administrator opt-in, uses bounded synthetic prompts, and consumes upstream usage",
+		"scheduled tests, when enabled, check local credentials or model catalogs only and do not prove generation availability",
 		"backup/restore automation, production key custody, and multi-process storage are not implemented",
 		"the host administrator can access runtime secrets and must protect the data directory and master key",
 		"single process and single SQLite database only",
@@ -321,6 +331,8 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"codex_model_discovery":           a.cfg.ExperimentalCodexMembership,
 			"upstream_batch_import":           true,
 			"upstream_account_tests":          a.healthTests != nil,
+			"scheduled_tests_configuration":   a.scheduledTests != nil,
+			"scheduled_tests_running":         a.scheduledTests != nil && a.cfg.ScheduledTestsEnabled,
 			"upstream_cooldown_management":    a.accountPool != nil,
 			"account_pool_configuration":      true,
 			"account_pool_routing":            a.accountPool != nil,

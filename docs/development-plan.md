@@ -22,6 +22,8 @@ Responses 首批、Claude/Gemini API Key 原生协议、Codex 网页 OAuth 与�
 
 普通提交只跑相关测试/编译，文档不触发安装构建；阶段交付验收后再集中发布，不为每个功能生成全平台安装包。
 
+默认关闭的[持久定时测试首批](scheduled-tests-contract.md)已接入源码：可保存凭据检查/模型目录计划，worker 复用既有健康测试路径并持久化有界历史。真实临时子进程与浏览器验收覆盖默认关闭零出站、开启后目录单次执行及重启不重放；这不证明模型生成可用，也不包含通知、cron 或收费生成测试。
+
 [出站代理首批](outbound-proxy-contract.md)已接入 API Key 生成/目录/测试/恢复与网页，包含版本绑定及持久化仅握手检查；独立证据见[集成状态](integration-status.md)。Codex 全生命周期出口、其他代理协议与自动轮换仍未实现。
 [员工治理](governance-contract.md)的 RPM/并发已合入主线且通过轻量 CI；[观测读路径](governance-observation-contract.md)也已通过独立验收与轻量 CI。
 治理先接 RPM/并发，Token/成本未知值不当作零；完整硬预算、租户及其余矩阵需求继续保留。测试夹具优化独立审阅，

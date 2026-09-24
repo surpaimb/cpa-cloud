@@ -9,14 +9,16 @@ import { StatusPage } from './pages/StatusPage'
 import { UsagePage } from './pages/UsagePage'
 import { ProxiesPage } from './pages/ProxiesPage'
 import { GovernancePage } from './pages/GovernancePage'
+import { ScheduledTestsPage } from './pages/ScheduledTestsPage'
 
-type Page = 'employees' | 'upstreams' | 'proxies' | 'models' | 'governance' | 'usage' | 'status'
+type Page = 'employees' | 'upstreams' | 'proxies' | 'models' | 'scheduled-tests' | 'governance' | 'usage' | 'status'
 
 const navigation: { id: Page; label: string; icon: 'people' | 'link' | 'route' | 'status' | 'settings' }[] = [
   { id: 'employees', label: '员工与 Key', icon: 'people' },
   { id: 'upstreams', label: '上游连接', icon: 'link' },
   { id: 'proxies', label: '出站代理', icon: 'route' },
   { id: 'models', label: '模型路由', icon: 'route' },
+  { id: 'scheduled-tests', label: '定时测试', icon: 'status' },
   { id: 'governance', label: '请求治理', icon: 'settings' },
   { id: 'usage', label: '用量与成本', icon: 'status' },
   { id: 'status', label: '系统状态', icon: 'status' },
@@ -76,6 +78,7 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
     upstreams: <UpstreamsPage csrf={session.csrf_token} />,
     proxies: <ProxiesPage csrf={session.csrf_token} />,
     models: <ModelsPage csrf={session.csrf_token} />,
+    'scheduled-tests': <ScheduledTestsPage csrf={session.csrf_token} />,
     governance: <GovernancePage csrf={session.csrf_token} />,
     usage: <UsagePage csrf={session.csrf_token} />,
     status: <StatusPage csrf={session.csrf_token} />,

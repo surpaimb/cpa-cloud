@@ -280,6 +280,8 @@ export type SystemStatus = {
   storage: string
   limitations: string[]
   features?: {
+	  scheduled_tests_configuration?: boolean
+	  scheduled_tests_running?: boolean
     account_recovery?: boolean
     codex_membership_import?: boolean
     codex_membership_oauth?: boolean
@@ -292,6 +294,39 @@ export type SystemStatus = {
     account_lifecycle_management?: boolean
   }
 }
+
+export type ScheduledTestScope = 'local_credential' | 'catalog'
+export type ScheduledTestRun = {
+  plan_revision: number
+  operation_id: string
+  scope: ScheduledTestScope
+  state: 'running' | 'completed'
+  result_code: string | null
+  started_at: string
+  finished_at: string | null
+  latency_ms: number | null
+}
+export type ScheduledTestPlan = {
+  id: string
+  name: string
+  upstream_id: string
+  scope: ScheduledTestScope
+  interval_seconds: number
+  enabled: boolean
+  revision: number
+  next_run_at: string | null
+  latest_result: ScheduledTestRun | null
+  created_at: string
+  updated_at: string
+}
+export type ScheduledTestInput = {
+  name: string
+  upstream_id: string
+  scope: ScheduledTestScope
+  interval_seconds: number
+  enabled: boolean
+}
+export type ScheduledTestRunsPage = { items: ScheduledTestRun[]; next_cursor: string | null }
 
 export type UsageStatus = 'pending' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
 export type UsageProvider = 'openai' | 'openai-compatible' | 'anthropic' | 'gemini' | 'codex'
@@ -612,6 +647,16 @@ export const api = {
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
     request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   status: () => request<SystemStatus>('/system/status'),
+	scheduledTests: (signal?: AbortSignal) => request<{ items: ScheduledTestPlan[] }>('/scheduled-tests', { signal }),
+	scheduledTest: (id: string, signal?: AbortSignal) => request<ScheduledTestPlan>(`/scheduled-tests/${encodeURIComponent(id)}`, { signal }),
+	createScheduledTest: (body: ScheduledTestInput, csrf: string) => request<ScheduledTestPlan>('/scheduled-tests', { method: 'POST', body: JSON.stringify(body) }, csrf),
+	updateScheduledTest: (id: string, body: { expected_revision: number } & Partial<ScheduledTestInput>, csrf: string) => request<ScheduledTestPlan>(`/scheduled-tests/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+	deleteScheduledTest: (id: string, revision: number, csrf: string) => request<{ result: 'archived' | 'already_archived'; id: string; revision: number }>(`/scheduled-tests/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ expected_revision: revision }) }, csrf),
+	scheduledTestRuns: (id: string, cursor?: string, signal?: AbortSignal) => {
+	  const query = new URLSearchParams({ limit: '50' })
+	  if (cursor) query.set('cursor', cursor)
+	  return request<ScheduledTestRunsPage>(`/scheduled-tests/${encodeURIComponent(id)}/runs?${query}`, { signal })
+	},
   accountRecovery: () => request<AccountRecoveryStatus>('/account-recovery'),
   accountRecoveryAccounts: () => request<{items: AccountRecoveryState[]; server_time: string}>('/account-recovery/accounts'),
   setAccountRecovery: (enabled: boolean, revision: number, csrf: string) =>
