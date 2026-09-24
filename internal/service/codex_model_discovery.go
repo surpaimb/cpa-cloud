@@ -48,7 +48,7 @@ func (a *App) discoverCodexUpstreamModels(w http.ResponseWriter, r *http.Request
 	}
 	var selected route
 	var enabled int
-	err := a.store.db.QueryRowContext(r.Context(), `SELECT id,provider_kind,enabled,revision,credential_ciphertext,key_version,credential_state FROM upstreams WHERE id=?`, id).
+	err := a.store.db.QueryRowContext(r.Context(), `SELECT id,provider_kind,enabled,revision,credential_ciphertext,key_version,credential_state FROM upstreams WHERE id=? AND archived=0`, id).
 		Scan(&selected.AccountID, &selected.ProviderKind, &enabled, &selected.Revision, &selected.Ciphertext, &selected.KeyVersion, &selected.CredentialState)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, http.StatusNotFound, "not_found", "Upstream was not found.")
@@ -163,7 +163,7 @@ func (a *App) discoverCodexUpstreamModels(w http.ResponseWriter, r *http.Request
 
 func (a *App) validateCatalogRevision(w http.ResponseWriter, r *http.Request, selected route) bool {
 	var current int
-	if err := a.store.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM upstreams WHERE id=? AND revision=? AND enabled=1 AND provider_kind=? AND credential_state<>?`, selected.AccountID, selected.Revision, codexMembershipProvider, codexStateReauth).Scan(&current); err != nil {
+	if err := a.store.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM upstreams WHERE id=? AND revision=? AND enabled=1 AND archived=0 AND provider_kind=? AND credential_state<>?`, selected.AccountID, selected.Revision, codexMembershipProvider, codexStateReauth).Scan(&current); err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return false
 	}

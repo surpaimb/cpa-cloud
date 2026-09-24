@@ -109,6 +109,8 @@ func (s *store) initialize(ctx context.Context) error {
 			credential_ciphertext BLOB NOT NULL,
 			key_version INTEGER NOT NULL,
 			revision INTEGER NOT NULL,
+			archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
+			archived_at TEXT,
 			created_at TEXT NOT NULL,
 			credential_state TEXT CHECK(credential_state IS NULL OR credential_state IN ('imported_unverified','verified','reauth_required')),
 			verified_at TEXT,
@@ -124,6 +126,9 @@ func (s *store) initialize(ctx context.Context) error {
 			upstream_id TEXT NOT NULL REFERENCES upstreams(id),
 			upstream_model TEXT NOT NULL,
 			enabled INTEGER NOT NULL,
+			revision INTEGER NOT NULL DEFAULT 1 CHECK(revision BETWEEN 1 AND 9007199254740991),
+			archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
+			archived_at TEXT,
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS model_requests (
@@ -159,6 +164,169 @@ func (s *store) initialize(ctx context.Context) error {
 	}
 	if err := s.migrateAccountPoolRuntime(ctx); err != nil {
 		return fmt.Errorf("migrate account pool runtime: %w", err)
+	}
+	if err := s.migrateAccountLifecycle(ctx); err != nil {
+		return fmt.Errorf("migrate account lifecycle: %w", err)
+	}
+	return nil
+}
+
+// migrateAccountLifecycle is an additive, retryable migration. SQLite keeps
+// ALTER TABLE statements transactional, so an interrupted or rejected schema
+// change leaves the prior database usable and a later startup can retry it.
+func (s *store) migrateAccountLifecycle(ctx context.Context) error {
+	upstreamColumns, err := tableColumns(ctx, s.db, "upstreams")
+	if err != nil {
+		return err
+	}
+	modelColumns, err := tableColumns(ctx, s.db, "models")
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, migration := range []struct {
+		missing bool
+		sql     string
+	}{
+		{!upstreamColumns["archived"], `ALTER TABLE upstreams ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))`},
+		{!upstreamColumns["archived_at"], `ALTER TABLE upstreams ADD COLUMN archived_at TEXT`},
+		{!modelColumns["revision"], `ALTER TABLE models ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK(revision BETWEEN 1 AND 9007199254740991)`},
+		{!modelColumns["archived"], `ALTER TABLE models ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))`},
+		{!modelColumns["archived_at"], `ALTER TABLE models ADD COLUMN archived_at TEXT`},
+	} {
+		if migration.missing {
+			if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS account_lifecycle_audit (
+		id TEXT PRIMARY KEY,
+		actor_id TEXT NOT NULL,
+		action TEXT NOT NULL,
+		target_type TEXT NOT NULL,
+		target_id TEXT NOT NULL,
+		result TEXT NOT NULL,
+		occurred_at TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS account_lifecycle_audit_time_idx ON account_lifecycle_audit(occurred_at,id)`); err != nil {
+		return err
+	}
+	if err := validateAccountLifecycleSchema(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type schemaColumn struct {
+	kind       string
+	notNull    bool
+	defaultSQL sql.NullString
+	primaryKey int
+}
+
+type schemaQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func schemaColumns(ctx context.Context, query schemaQueryer, table string) (map[string]schemaColumn, error) {
+	rows, err := query.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := make(map[string]schemaColumn)
+	for rows.Next() {
+		var cid int
+		var name, kind string
+		var notNull, primaryKey int
+		var defaultSQL sql.NullString
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultSQL, &primaryKey); err != nil {
+			return nil, err
+		}
+		columns[name] = schemaColumn{kind: strings.ToUpper(kind), notNull: notNull != 0, defaultSQL: defaultSQL, primaryKey: primaryKey}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, rows.Close()
+}
+
+func validateAccountLifecycleSchema(ctx context.Context, query schemaQueryer) error {
+	upstreams, err := schemaColumns(ctx, query, "upstreams")
+	if err != nil {
+		return err
+	}
+	models, err := schemaColumns(ctx, query, "models")
+	if err != nil {
+		return err
+	}
+	audit, err := schemaColumns(ctx, query, "account_lifecycle_audit")
+	if err != nil {
+		return err
+	}
+	validArchived := func(columns map[string]schemaColumn) bool {
+		archived, ok := columns["archived"]
+		if !ok || archived.kind != "INTEGER" || !archived.notNull || !archived.defaultSQL.Valid || strings.Trim(archived.defaultSQL.String, "() '") != "0" {
+			return false
+		}
+		archivedAt, ok := columns["archived_at"]
+		return ok && archivedAt.kind == "TEXT" && !archivedAt.notNull && !archivedAt.defaultSQL.Valid
+	}
+	if !validArchived(upstreams) || !validArchived(models) {
+		return errors.New("account lifecycle columns have an incompatible schema")
+	}
+	revision, ok := models["revision"]
+	if !ok || revision.kind != "INTEGER" || !revision.notNull || !revision.defaultSQL.Valid || strings.Trim(revision.defaultSQL.String, "() '") != "1" {
+		return errors.New("model revision column has an incompatible schema")
+	}
+	for name, expected := range map[string]schemaColumn{
+		"id":          {kind: "TEXT", primaryKey: 1},
+		"actor_id":    {kind: "TEXT", notNull: true},
+		"action":      {kind: "TEXT", notNull: true},
+		"target_type": {kind: "TEXT", notNull: true},
+		"target_id":   {kind: "TEXT", notNull: true},
+		"result":      {kind: "TEXT", notNull: true},
+		"occurred_at": {kind: "TEXT", notNull: true},
+	} {
+		actual, ok := audit[name]
+		if !ok || actual.kind != expected.kind || actual.notNull != expected.notNull || actual.primaryKey != expected.primaryKey || actual.defaultSQL.Valid {
+			return errors.New("account lifecycle audit table has an incompatible schema")
+		}
+	}
+	if len(audit) != 7 {
+		return errors.New("account lifecycle audit table has unexpected columns")
+	}
+	var upstreamSQL, modelSQL, indexSQL string
+	if err := query.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='upstreams'`).Scan(&upstreamSQL); err != nil {
+		return err
+	}
+	if err := query.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='models'`).Scan(&modelSQL); err != nil {
+		return err
+	}
+	if err := query.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name='account_lifecycle_audit_time_idx'`).Scan(&indexSQL); err != nil {
+		return err
+	}
+	normalize := func(value string) string { return strings.ToLower(strings.Join(strings.Fields(value), "")) }
+	if !strings.Contains(normalize(upstreamSQL), "check(archivedin(0,1))") || !strings.Contains(normalize(modelSQL), "check(archivedin(0,1))") ||
+		!strings.Contains(normalize(modelSQL), "check(revisionbetween1and9007199254740991)") || !strings.Contains(normalize(indexSQL), "onaccount_lifecycle_audit(occurred_at,id)") {
+		return errors.New("account lifecycle constraints have an incompatible schema")
+	}
+	var invalid int
+	if err := query.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM upstreams WHERE archived NOT IN (0,1) OR (archived=0 AND archived_at IS NOT NULL) OR (archived=1 AND archived_at IS NULL)) +
+		(SELECT COUNT(*) FROM models WHERE revision<1 OR revision>9007199254740991 OR archived NOT IN (0,1) OR (archived=0 AND archived_at IS NOT NULL) OR (archived=1 AND archived_at IS NULL))`).Scan(&invalid); err != nil {
+		return err
+	}
+	if invalid != 0 {
+		return errors.New("account lifecycle rows are invalid")
 	}
 	return nil
 }

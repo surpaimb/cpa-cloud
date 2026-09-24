@@ -228,6 +228,10 @@ func (a *App) replaceCodexCredential(w http.ResponseWriter, r *http.Request, _ a
 		writeAdminError(w, http.StatusBadRequest, "invalid_upstream_type", "This upstream does not use Codex membership credentials.")
 		return
 	}
+	if item.Archived {
+		writeAdminError(w, http.StatusConflict, "upstream_archived", "Archived upstreams cannot accept credentials.")
+		return
+	}
 	if item.Revision != input.ExpectedRevision {
 		writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
 		return
@@ -279,7 +283,7 @@ func parseSchedulableCodexAuth(raw []byte) (*membership.CodexAuthCredential, err
 
 func (a *App) loadUpstreamByOperation(ctx context.Context, operationID string) (upstreamView, error) {
 	var id string
-	err := a.store.db.QueryRowContext(ctx, `SELECT id FROM upstreams WHERE provider_kind=? AND operation_id=?`, codexMembershipProvider, operationID).Scan(&id)
+	err := a.store.db.QueryRowContext(ctx, `SELECT id FROM upstreams WHERE provider_kind=? AND operation_id=? AND archived=0`, codexMembershipProvider, operationID).Scan(&id)
 	if err != nil {
 		return upstreamView{}, err
 	}
@@ -295,11 +299,13 @@ func (a *App) loadUpstreamByOperation(ctx context.Context, operationID string) (
 
 func loadUpstreamView(ctx context.Context, query queryRower, id string) (upstreamView, error) {
 	var item upstreamView
-	var enabled int
-	var state, verified sql.NullString
-	err := query.QueryRowContext(ctx, `SELECT id,name,provider_kind,endpoint,enabled,revision,credential_state,verified_at FROM upstreams WHERE id=?`, id).
-		Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision, &state, &verified)
+	var enabled, archived int
+	var state, verified, archivedAt sql.NullString
+	err := query.QueryRowContext(ctx, `SELECT id,name,provider_kind,endpoint,enabled,revision,credential_state,verified_at,archived,archived_at FROM upstreams WHERE id=?`, id).
+		Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision, &state, &verified, &archived, &archivedAt)
 	item.Enabled = enabled != 0
+	item.Archived = archived != 0
+	item.ArchivedAt = nullString(archivedAt)
 	item.CredentialState = nullString(state)
 	item.VerifiedAt = nullString(verified)
 	return item, err

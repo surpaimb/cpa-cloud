@@ -30,7 +30,7 @@ func (a *App) routeEgressTx(ctx context.Context, tx *sql.Tx, selected route) (*r
 	var enabled int
 	var revision int64
 	var provider, endpoint string
-	err := tx.QueryRowContext(ctx, `SELECT enabled,revision,provider_kind,endpoint FROM upstreams WHERE id=?`, selected.AccountID).Scan(&enabled, &revision, &provider, &endpoint)
+	err := tx.QueryRowContext(ctx, `SELECT enabled,revision,provider_kind,endpoint FROM upstreams WHERE id=? AND archived=0`, selected.AccountID).Scan(&enabled, &revision, &provider, &endpoint)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errUpstreamProxyBindingConflict
 	}

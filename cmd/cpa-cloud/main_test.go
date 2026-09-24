@@ -135,7 +135,7 @@ func TestHelpDoesNotStartOrWriteData(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("help: code=%d err=%v", code, err)
 	}
-	if !strings.Contains(output.String(), "check-initialized") || !strings.Contains(output.String(), "shutdown-on-stdin-eof") || !strings.Contains(output.String(), "codex-oauth-client-id") {
+	if !strings.Contains(output.String(), "check-initialized") || !strings.Contains(output.String(), "shutdown-on-stdin-eof") || !strings.Contains(output.String(), "codex-oauth-client-id") || !strings.Contains(output.String(), "scheduled-tests-enabled") {
 		t.Fatalf("help omitted launcher flags: %s", output.String())
 	}
 	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {

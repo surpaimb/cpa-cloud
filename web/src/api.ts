@@ -63,6 +63,9 @@ export type Upstream = {
   endpoint: string
   enabled: boolean
   revision: number
+  archived?: boolean
+  archived_at?: string | null
+  archive_result?: 'archived' | 'already_archived'
   credential_state: 'imported_unverified' | 'verified' | 'reauth_required' | null
   verified_at: string | null
   oauth_refresh?: {
@@ -243,6 +246,10 @@ export type ModelRoute = {
   upstream_id: string
   upstream_model: string
   enabled: boolean
+  revision?: number
+  archived?: boolean
+  archived_at?: string | null
+  archive_result?: 'archived' | 'already_archived'
 }
 export type AccountGroup = { id: string; name: string; revision: number }
 export type AccountChannel = { id: string; name: string; group_id?: string | null; revision: number }
@@ -273,6 +280,8 @@ export type SystemStatus = {
   storage: string
   limitations: string[]
   features?: {
+	  scheduled_tests_configuration?: boolean
+	  scheduled_tests_running?: boolean
     account_recovery?: boolean
     codex_membership_import?: boolean
     codex_membership_oauth?: boolean
@@ -282,8 +291,42 @@ export type SystemStatus = {
     gemini_native_api?: boolean
     account_pool_configuration?: boolean
     account_pool_routing?: boolean
+    account_lifecycle_management?: boolean
   }
 }
+
+export type ScheduledTestScope = 'local_credential' | 'catalog'
+export type ScheduledTestRun = {
+  plan_revision: number
+  operation_id: string
+  scope: ScheduledTestScope
+  state: 'running' | 'completed'
+  result_code: string | null
+  started_at: string
+  finished_at: string | null
+  latency_ms: number | null
+}
+export type ScheduledTestPlan = {
+  id: string
+  name: string
+  upstream_id: string
+  scope: ScheduledTestScope
+  interval_seconds: number
+  enabled: boolean
+  revision: number
+  next_run_at: string | null
+  latest_result: ScheduledTestRun | null
+  created_at: string
+  updated_at: string
+}
+export type ScheduledTestInput = {
+  name: string
+  upstream_id: string
+  scope: ScheduledTestScope
+  interval_seconds: number
+  enabled: boolean
+}
+export type ScheduledTestRunsPage = { items: ScheduledTestRun[]; next_cursor: string | null }
 
 export type UsageStatus = 'pending' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
 export type UsageProvider = 'openai' | 'openai-compatible' | 'anthropic' | 'gemini' | 'codex'
@@ -501,7 +544,7 @@ export const api = {
     }, csrf),
   revokeKey: (keyId: string, csrf: string) =>
     request<{ ok: true }>(`/keys/${encodeURIComponent(keyId)}/revoke`, { method: 'POST', body: '{}' }, csrf),
-  upstreams: (signal?: AbortSignal) => request<UpstreamsResponse>('/upstreams', { signal }),
+  upstreams: (signal?: AbortSignal, includeArchived = false) => request<UpstreamsResponse>(`/upstreams${includeArchived ? '?include_archived=true' : ''}`, { signal }),
   outboundProxies: (afterId?: string, limit = 50, signal?: AbortSignal) => {
     const query = new URLSearchParams({ limit: String(limit) })
     if (afterId) query.set('after_id', afterId)
@@ -537,6 +580,8 @@ export const api = {
     request<Upstream>(`/upstreams/${encodeURIComponent(id)}/codex-refresh`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   updateUpstream: (id: string, body: Record<string, unknown>, csrf: string) =>
     request<Upstream>(`/upstreams/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+  archiveUpstream: (id: string, expectedRevision: number, csrf: string) =>
+    request<Upstream>(`/upstreams/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ expected_revision: expectedRevision }) }, csrf),
   discoverUpstreamModels: (id: string, csrf: string) =>
     request<{ items: DiscoveredModel[] }>(`/upstreams/${encodeURIComponent(id)}/discover-models`, { method: 'POST' }, csrf),
   startUpstreamTest: (id: string, body: { operation_id: string; expected_revision: number; scope: UpstreamHealthScope }, csrf: string, signal?: AbortSignal) =>
@@ -545,9 +590,13 @@ export const api = {
     request<UpstreamTestOperation>(`/upstreams/${encodeURIComponent(id)}/tests/${encodeURIComponent(operationId)}`, { signal }),
   clearUpstreamCooldown: (id: string, body: { expected_revision: number; expected_cooldown_event_id: string }, csrf: string, signal?: AbortSignal) =>
     request<CooldownClearResult>(`/upstreams/${encodeURIComponent(id)}/cooldown/clear`, { method: 'POST', body: JSON.stringify(body), signal }, csrf),
-  models: () => request<{ items: ModelRoute[] }>('/models'),
+  models: (includeArchived = false) => request<{ items: ModelRoute[] }>(`/models${includeArchived ? '?include_archived=true' : ''}`),
   createModel: (body: Record<string, unknown>, csrf: string) =>
     request<ModelRoute>('/models', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  updateModel: (id: string, body: Record<string, unknown>, csrf: string) =>
+    request<ModelRoute>(`/models/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+  archiveModel: (id: string, expectedRevision: number, csrf: string) =>
+    request<ModelRoute>(`/models/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ expected_revision: expectedRevision }) }, csrf),
   accountGroups: (signal?: AbortSignal) => request<{ items: AccountGroup[] }>('/account-groups', { signal }),
   createAccountGroup: (body: { name: string }, csrf: string) =>
     request<AccountGroup>('/account-groups', { method: 'POST', body: JSON.stringify(body) }, csrf),
@@ -598,6 +647,16 @@ export const api = {
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
     request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   status: () => request<SystemStatus>('/system/status'),
+	scheduledTests: (signal?: AbortSignal) => request<{ items: ScheduledTestPlan[] }>('/scheduled-tests', { signal }),
+	scheduledTest: (id: string, signal?: AbortSignal) => request<ScheduledTestPlan>(`/scheduled-tests/${encodeURIComponent(id)}`, { signal }),
+	createScheduledTest: (body: ScheduledTestInput, csrf: string) => request<ScheduledTestPlan>('/scheduled-tests', { method: 'POST', body: JSON.stringify(body) }, csrf),
+	updateScheduledTest: (id: string, body: { expected_revision: number } & Partial<ScheduledTestInput>, csrf: string) => request<ScheduledTestPlan>(`/scheduled-tests/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+	deleteScheduledTest: (id: string, revision: number, csrf: string) => request<{ result: 'archived' | 'already_archived'; id: string; revision: number }>(`/scheduled-tests/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ expected_revision: revision }) }, csrf),
+	scheduledTestRuns: (id: string, cursor?: string, signal?: AbortSignal) => {
+	  const query = new URLSearchParams({ limit: '50' })
+	  if (cursor) query.set('cursor', cursor)
+	  return request<ScheduledTestRunsPage>(`/scheduled-tests/${encodeURIComponent(id)}/runs?${query}`, { signal })
+	},
   accountRecovery: () => request<AccountRecoveryStatus>('/account-recovery'),
   accountRecoveryAccounts: () => request<{items: AccountRecoveryState[]; server_time: string}>('/account-recovery/accounts'),
   setAccountRecovery: (enabled: boolean, revision: number, csrf: string) =>

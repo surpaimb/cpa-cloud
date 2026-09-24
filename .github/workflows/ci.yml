@@ -45,12 +45,13 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - run: go test ./... -count=1 -timeout=5m
-      - name: Race-check service, membership, scheduling, accounting, egress, and governance concurrency
+      - name: Race-check service, backup, membership, scheduling, accounting, egress, and governance concurrency
         env:
           CGO_ENABLED: '1'
-        run: go test -race ./internal/service ./internal/membership ./internal/scheduling ./internal/accounting ./internal/egress ./internal/governance -count=1 -timeout=25m
+        run: go test -race ./internal/service ./internal/backup ./internal/membership ./internal/scheduling ./internal/accounting ./internal/egress ./internal/governance -count=1 -timeout=25m
       - run: go vet ./...
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud" ./cmd/cpa-cloud
+      - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud-backup" ./cmd/cpa-cloud-backup
       - name: Test default-off governance and atomic lifecycle with synthetic traffic
         run: node scripts/smoke-governance.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test governance observations with isolated synthetic usage
@@ -63,6 +64,8 @@ jobs:
         run: node scripts/smoke-recovery-foundations.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in automatic recovery with isolated synthetic providers
         run: node scripts/smoke-account-recovery.mjs "$RUNNER_TEMP/cpa-cloud"
+      - name: Test lifecycle, scheduled tests, and encrypted restore in isolated processes
+        run: node scripts/verify-next-batch.mjs --server "$RUNNER_TEMP/cpa-cloud" --backup "$RUNNER_TEMP/cpa-cloud-backup" --web-dir "$GITHUB_WORKSPACE/web"
 
   web:
     needs: changes

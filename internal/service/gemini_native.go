@@ -58,7 +58,7 @@ func (a *App) listGeminiModels(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
 	}
-	query := `SELECT m.id FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND ` + a.availableModelRouteSQL(true)
+	query := `SELECT m.id FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND m.archived=0 AND ` + a.availableModelRouteSQL(true)
 	args := []any{}
 	if auth.Mode == "selected" {
 		query += ` AND EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id)`

@@ -38,7 +38,7 @@ func (a *App) listModels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	query := `SELECT m.id,m.created_at FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND ` + a.availableModelRouteSQL(false)
+	query := `SELECT m.id,m.created_at FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND m.archived=0 AND ` + a.availableModelRouteSQL(false)
 	args := []any{}
 	if auth.Mode == "selected" {
 		query += ` AND EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id)`

@@ -38,7 +38,7 @@ func (a *App) discoverUpstreamModels(w http.ResponseWriter, r *http.Request, _ a
 	var revision int64
 	var ciphertext []byte
 	a.admission.RLock()
-	err := a.store.db.QueryRowContext(r.Context(), `SELECT endpoint,enabled,provider_kind,key_version,credential_ciphertext,revision FROM upstreams WHERE id=?`, id).
+	err := a.store.db.QueryRowContext(r.Context(), `SELECT endpoint,enabled,provider_kind,key_version,credential_ciphertext,revision FROM upstreams WHERE id=? AND archived=0`, id).
 		Scan(&endpoint, &enabled, &providerKind, &keyVersion, &ciphertext, &revision)
 	a.admission.RUnlock()
 	if errors.Is(err, sql.ErrNoRows) {

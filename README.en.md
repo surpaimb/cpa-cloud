@@ -435,12 +435,13 @@ This example uses TLS provided directly by the service. Trusted reverse-proxy co
 | `--experimental-codex-membership` | Latest source only; Codex file import, membership requests, and OAuth experiments are disabled by default |
 | `--codex-oauth-client-id` / `--codex-oauth-redirect-uri` | Latest source only; set both to enable web authorization and automatic/manual refresh, with the membership experiment enabled |
 | `--allow-loopback-upstream` | Disabled by default; local development testing only |
+| `--scheduled-tests-enabled` | Disabled by default; runs saved local-credential/catalog test plans |
 
 Run `cpa-cloud --help` to see the binary flags.
 
 The data directory contains `cpa-cloud.db`, possible WAL/SHM files, and **`master.key`**. Employee keys are stored as keyed digests, and upstream credentials are encrypted. The host administrator can still access secrets used by the running service. Losing or replacing `master.key` makes existing encrypted credentials unusable.
 
-There is currently no automated backup or restore command and no upgrade-migration guarantee. Before a manual upgrade, stop the service, copy the **entire data directory** to a protected location, and retain the previous executable and web files. To restore, stop the service, restore one complete data snapshot with the corresponding application version, and test it in an isolated environment first. Do not copy only the main database file while the service is running. This manual maintenance procedure has not yet received complete automated restore validation.
+The latest source includes the separate encrypted `cpa-cloud-backup create|verify|restore` CLI. It takes a consistent snapshot of a live WAL database and restores only into a nonexistent new directory; see the [encrypted backup guide](docs/backup-restore.md) for usage, security boundaries, and the first-preview 128 MiB limit. It does not provide scheduled backups, retention, remote upload, or in-place rollback. Keep the matching old executable and web files for upgrades, validate restores in isolation, and never copy only the main database file from a running instance.
 
 ## 8. Build from source
 

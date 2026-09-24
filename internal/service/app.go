@@ -42,6 +42,7 @@ type App struct {
 	refresh            *codexRefreshCoordinator
 	accountPool        *accountPoolRuntime
 	healthTests        *upstreamHealthCoordinator
+	scheduledTests     *scheduledTestCoordinator
 	systemProbes       *accounting.SystemProbeLedger
 	recovery           *accountRecoveryCoordinator
 	usage              *usageLedgerCoordinator
@@ -55,6 +56,11 @@ type App struct {
 	catalogMu          sync.Mutex
 	catalogs           map[string]codexCatalogCacheEntry
 	codexCatalog       codexCatalogLister
+	// Lifecycle integration hooks are SQL-only before commit and non-blocking
+	// after commit. Scheduled-test integration wires these without changing the
+	// account lock -> admission lock -> transaction ordering.
+	archiveUpstreamTxHook func(context.Context, *sql.Tx, string, string, string) error
+	upstreamArchivedHook  func(string)
 }
 
 type loginAttempt struct {
@@ -130,6 +136,19 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	app.scheduledTests, err = newScheduledTestCoordinator(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	app.archiveUpstreamTxHook = func(ctx context.Context, tx *sql.Tx, upstreamID, adminID, archivedAt string) error {
+		when, err := parseTime(archivedAt)
+		if err != nil {
+			return err
+		}
+		_, err = archiveScheduledTestsForUpstreamTx(ctx, tx, upstreamID, adminID, when)
+		return err
+	}
+	app.upstreamArchivedHook = app.scheduledTests.cancelUpstream
 	if err := app.refresh.Start(); err != nil {
 		return nil, err
 	}
@@ -139,6 +158,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	}
 	app.proxyTests, err = newOutboundProxyTestCoordinator(app)
 	if err != nil {
+		return nil, err
+	}
+	if err := app.scheduledTests.Start(); err != nil {
 		return nil, err
 	}
 	opened = true
@@ -173,6 +195,9 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 }
 
 func (a *App) Close() error {
+	if a.scheduledTests != nil {
+		a.scheduledTests.Close()
+	}
 	if a.governance != nil {
 		a.governance.Close()
 	}
@@ -210,6 +235,7 @@ func (a *App) Handler() http.Handler {
 	a.registerUsageHandlers(mux)
 	a.registerSystemProbeHandlers(mux)
 	a.registerAccountRecoveryHandlers(mux)
+	a.registerScheduledTestHandlers(mux)
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("POST /admin/api/v1/sessions", a.login)
 	mux.HandleFunc("DELETE /admin/api/v1/sessions", a.requireAdmin(a.logout, true))
@@ -226,6 +252,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/v1/upstreams/batch-import", a.requireAdmin(a.batchImportUpstreams, true))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/codex-import", a.requireAdmin(a.importCodexUpstream, true))
 	mux.HandleFunc("PATCH /admin/api/v1/upstreams/{id}", a.requireAdmin(a.updateUpstream, true))
+	mux.HandleFunc("DELETE /admin/api/v1/upstreams/{id}", a.requireAdmin(a.archiveUpstream, true))
 	mux.HandleFunc("PUT /admin/api/v1/upstreams/{id}/codex-auth", a.requireAdmin(a.replaceCodexCredential, true))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/codex-oauth-sessions", a.requireAdmin(a.createCodexOAuthSession, true))
 	mux.HandleFunc("GET /admin/api/v1/upstreams/codex-oauth-sessions/{id}", a.requireAdmin(a.getCodexOAuthSession, false))
@@ -237,6 +264,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/cooldown/clear", a.requireAdmin(a.clearUpstreamCooldown, true))
 	mux.HandleFunc("GET /admin/api/v1/models", a.requireAdmin(a.listAdminModels, false))
 	mux.HandleFunc("POST /admin/api/v1/models", a.requireAdmin(a.createModel, true))
+	mux.HandleFunc("PATCH /admin/api/v1/models/{id}", a.requireAdmin(a.updateModel, true))
+	mux.HandleFunc("DELETE /admin/api/v1/models/{id}", a.requireAdmin(a.archiveModel, true))
 	mux.HandleFunc("GET /admin/api/v1/system/status", a.requireAdmin(a.systemStatus, false))
 	mux.HandleFunc("GET /v1/models", a.listModels)
 	mux.HandleFunc("POST /v1/chat/completions", a.chatCompletions)
@@ -286,6 +315,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"development preview; not production hardened",
 		"Responses resources, background execution, failover after upstream dispatch, and reliable billing-grade usage are not implemented; Messages is available only for Anthropic API-key routes",
 		"manual account tests check local credentials or catalogs; generation recovery requires both startup allowance and administrator opt-in, uses bounded synthetic prompts, and consumes upstream usage",
+		"scheduled tests, when enabled, check local credentials or model catalogs only and do not prove generation availability",
 		"backup/restore automation, production key custody, and multi-process storage are not implemented",
 		"the host administrator can access runtime secrets and must protect the data directory and master key",
 		"single process and single SQLite database only",
@@ -313,6 +343,8 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"codex_model_discovery":           a.cfg.ExperimentalCodexMembership,
 			"upstream_batch_import":           true,
 			"upstream_account_tests":          a.healthTests != nil,
+			"scheduled_tests_configuration":   a.scheduledTests != nil,
+			"scheduled_tests_running":         a.scheduledTests != nil && a.cfg.ScheduledTestsEnabled,
 			"upstream_cooldown_management":    a.accountPool != nil,
 			"account_pool_configuration":      true,
 			"account_pool_routing":            a.accountPool != nil,
@@ -322,6 +354,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"system_probe_accounting":         a.systemProbes != nil,
 			"account_recovery":                a.recovery != nil,
 			"codex_membership_auto_refresh":   a.refresh != nil && a.refresh.enabled(),
+			"account_lifecycle_management":    true,
 		},
 		"limitations": limitations,
 	})

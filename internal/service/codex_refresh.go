@@ -175,7 +175,7 @@ func (c *codexRefreshCoordinator) scanIDs(ctx context.Context, after string) ([]
 		FROM codex_oauth_refresh_states r
 		JOIN codex_oauth_bindings b ON b.upstream_id=r.upstream_id
 		JOIN upstreams u ON u.id=r.upstream_id
-		WHERE r.state='ready' AND u.provider_kind=? AND u.enabled=1 AND r.upstream_id>?
+		WHERE r.state='ready' AND u.provider_kind=? AND u.enabled=1 AND u.archived=0 AND r.upstream_id>?
 		ORDER BY r.upstream_id LIMIT ?`, codexMembershipProvider, after, codexRefreshScanLimit)
 	if err != nil {
 		return nil, err
@@ -251,7 +251,7 @@ func (c *codexRefreshCoordinator) refreshGuarded(ctx context.Context, id string,
 		FROM upstreams u
 		LEFT JOIN codex_oauth_bindings b ON b.upstream_id=u.id
 		LEFT JOIN codex_oauth_refresh_states r ON r.upstream_id=u.id
-		WHERE u.id=?`, id).Scan(&provider, &enabled, &snapshot.revision, &snapshot.ciphertext, &keyVersion, &snapshot.credentialState,
+		WHERE u.id=? AND u.archived=0`, id).Scan(&provider, &enabled, &snapshot.revision, &snapshot.ciphertext, &keyVersion, &snapshot.credentialState,
 		&boundClient, &boundSource, &refreshState, &reason)
 	if err != nil {
 		return snapshot, err
@@ -281,7 +281,7 @@ func (c *codexRefreshCoordinator) refreshGuarded(ctx context.Context, id string,
 			(upstream_id,state,reason_code,attempt_revision,updated_at)
 			SELECT u.id,'ready',NULL,u.revision,? FROM upstreams u
 			JOIN codex_oauth_bindings b ON b.upstream_id=u.id
-			WHERE u.id=? AND u.provider_kind=? AND u.enabled=? AND u.revision=?
+			WHERE u.id=? AND u.provider_kind=? AND u.enabled=? AND u.archived=0 AND u.revision=?
 				AND b.client_id=? AND b.source='authorization_code'`, utcNow(), id, codexMembershipProvider, enabled, snapshot.revision, boundClient)
 		if err != nil {
 			return snapshot, err
@@ -325,7 +325,7 @@ func (c *codexRefreshCoordinator) refreshGuarded(ctx context.Context, id string,
 		SET state='in_progress',reason_code=NULL,attempt_revision=?,updated_at=?
 		WHERE upstream_id=? AND state='ready'
 			AND EXISTS(SELECT 1 FROM upstreams u JOIN codex_oauth_bindings b ON b.upstream_id=u.id
-				WHERE u.id=codex_oauth_refresh_states.upstream_id AND u.provider_kind=? AND u.enabled=? AND u.revision=?
+				WHERE u.id=codex_oauth_refresh_states.upstream_id AND u.provider_kind=? AND u.enabled=? AND u.archived=0 AND u.revision=?
 					AND b.client_id=? AND b.source='authorization_code')`, snapshot.revision, utcNow(), id,
 		codexMembershipProvider, enabled, snapshot.revision, boundClient)
 	if err != nil {
@@ -376,7 +376,7 @@ func (c *codexRefreshCoordinator) refreshGuarded(ctx context.Context, id string,
 			result, err := c.app.store.db.ExecContext(ctx, `UPDATE codex_oauth_refresh_states SET state='ready',reason_code='rate_limited',updated_at=?
 				WHERE upstream_id=? AND state='in_progress' AND attempt_revision=?
 					AND EXISTS(SELECT 1 FROM upstreams u JOIN codex_oauth_bindings b ON b.upstream_id=u.id
-						WHERE u.id=codex_oauth_refresh_states.upstream_id AND u.provider_kind=? AND u.enabled=? AND u.revision=?
+						WHERE u.id=codex_oauth_refresh_states.upstream_id AND u.provider_kind=? AND u.enabled=? AND u.archived=0 AND u.revision=?
 							AND b.client_id=? AND b.source='authorization_code')`, utcNow(), id, snapshot.revision,
 				codexMembershipProvider, enabled, snapshot.revision, boundClient)
 			if err != nil {
@@ -432,7 +432,7 @@ func (c *codexRefreshCoordinator) persistRotated(ctx context.Context, id string,
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE upstreams SET credential_ciphertext=?,key_version=2,
 		revision=revision+1,credential_state=?,verified_at=NULL
-		WHERE id=? AND provider_kind=? AND enabled=? AND revision=?
+		WHERE id=? AND provider_kind=? AND enabled=? AND archived=0 AND revision=?
 			AND EXISTS(SELECT 1 FROM codex_oauth_bindings b WHERE b.upstream_id=upstreams.id
 				AND b.client_id=? AND b.source='authorization_code')`, ciphertext, codexStateImported, id, codexMembershipProvider, enabled, revision, clientID)
 	if err != nil {
@@ -473,7 +473,7 @@ func (c *codexRefreshCoordinator) requireCurrentAttempt(ctx context.Context, id 
 		JOIN upstreams u ON u.id=r.upstream_id
 		JOIN codex_oauth_bindings b ON b.upstream_id=r.upstream_id
 		WHERE r.upstream_id=? AND r.state='in_progress' AND r.attempt_revision=?
-			AND u.provider_kind=? AND u.enabled=? AND u.revision=?
+			AND u.provider_kind=? AND u.enabled=? AND u.archived=0 AND u.revision=?
 			AND b.client_id=? AND b.source='authorization_code'`, id, revision, codexMembershipProvider, enabled, revision, clientID).Scan(&present)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &codexRefreshFailure{code: "revision_conflict"}
@@ -509,7 +509,7 @@ func (c *codexRefreshCoordinator) markReauthorization(id string, revision int64)
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE upstreams SET credential_state=?,verified_at=NULL
-		WHERE id=? AND provider_kind=? AND revision=?`, codexStateReauth, id, codexMembershipProvider, revision)
+		WHERE id=? AND provider_kind=? AND archived=0 AND revision=?`, codexStateReauth, id, codexMembershipProvider, revision)
 	if err != nil {
 		return err
 	}

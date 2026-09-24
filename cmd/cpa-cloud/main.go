@@ -45,6 +45,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.StringVar(&cfg.InstanceID, "instance-id", "", "public UUID identifying this service process in /healthz")
 	flags.BoolVar(&cfg.AllowLoopbackUpstream, "allow-loopback-upstream", false, "allow loopback upstream endpoints for local development tests")
 	flags.BoolVar(&cfg.AccountRecoveryEnabled, "allow-account-recovery", false, "permit administrator-enabled background generation recovery probes (may consume upstream usage)")
+	flags.BoolVar(&cfg.ScheduledTestsEnabled, "scheduled-tests-enabled", false, "run saved local credential and model catalog test plans in the background")
 	flags.BoolVar(&cfg.ExperimentalCodexMembership, "experimental-codex-membership", false, "enable experimental Codex membership credential import and routing")
 	flags.StringVar(&cfg.CodexOAuthClientID, "codex-oauth-client-id", "", "registered OAuth client ID for the experimental Codex membership lifecycle")
 	flags.StringVar(&cfg.CodexOAuthRedirectURI, "codex-oauth-redirect-uri", "", "registered OAuth callback URI ending in /admin/api/v1/codex/oauth/callback")

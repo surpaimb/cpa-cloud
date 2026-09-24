@@ -126,7 +126,7 @@ func (a *App) legacyEmployeeRoute(ctx context.Context, auth employeeAuth, model 
 		}
 	}
 	var selected route
-	err = a.store.db.QueryRowContext(ctx, `SELECT u.id,u.endpoint,m.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND u.enabled=1
+	err = a.store.db.QueryRowContext(ctx, `SELECT u.id,u.endpoint,m.upstream_model,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND u.enabled=1 AND u.archived=0
 		AND NOT EXISTS(SELECT 1 FROM account_recovery_states recovery WHERE recovery.account_id=u.id)`, model).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return route{}, poolAdmissionFailure(accountPoolNoCompatible)
@@ -234,7 +234,7 @@ func (a *App) releaseModelLease(lease *accountPoolLease, reqID string, record bo
 // is temporary and neither state changes employee authorization.
 func (a *App) availableModelRouteSQL(geminiOnly bool) string {
 	eligible := func(alias string) string {
-		condition := alias + ".enabled=1"
+		condition := alias + ".enabled=1 AND " + alias + ".archived=0"
 		if geminiOnly {
 			return condition + " AND " + alias + ".provider_kind='gemini-api-key'"
 		}

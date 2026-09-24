@@ -220,7 +220,7 @@ func (a *App) upstreamProxyView(ctx context.Context, id string) (upstreamProxyDT
 		return result, err
 	}
 	defer tx.Rollback()
-	if err = tx.QueryRowContext(ctx, `SELECT revision FROM upstreams WHERE id=?`, id).Scan(&result.UpstreamRevision); errors.Is(err, sql.ErrNoRows) {
+	if err = tx.QueryRowContext(ctx, `SELECT revision FROM upstreams WHERE id=? AND archived=0`, id).Scan(&result.UpstreamRevision); errors.Is(err, sql.ErrNoRows) {
 		return result, errOutboundProxyNotFound
 	} else if err != nil {
 		return result, err
@@ -267,7 +267,7 @@ func (a *App) setUpstreamProxy(w http.ResponseWriter, r *http.Request, _ adminSe
 		a.admission.Lock()
 		defer a.admission.Unlock()
 		var provider, endpoint string
-		err := a.store.db.QueryRowContext(r.Context(), `SELECT provider_kind,endpoint FROM upstreams WHERE id=?`, r.PathValue("id")).Scan(&provider, &endpoint)
+		err := a.store.db.QueryRowContext(r.Context(), `SELECT provider_kind,endpoint FROM upstreams WHERE id=? AND archived=0`, r.PathValue("id")).Scan(&provider, &endpoint)
 		if errors.Is(err, sql.ErrNoRows) {
 			return upstreamProxyDTO{}, errOutboundProxyNotFound
 		}

@@ -22,6 +22,8 @@ const outboundProxyTestUpstreamDDL = `CREATE TABLE upstreams (
 	credential_ciphertext BLOB NOT NULL,
 	key_version INTEGER NOT NULL,
 	revision INTEGER NOT NULL,
+	archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
+	archived_at TEXT,
 	created_at TEXT NOT NULL,
 	credential_state TEXT,
 	verified_at TEXT,

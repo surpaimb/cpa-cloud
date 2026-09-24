@@ -25,6 +25,10 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 普通 upstream 对象 {id,name,provider_kind,endpoint,enabled,revision}。
 
+### 账号与模型生命周期（开发预览增量）
+
+`PATCH/DELETE /admin/api/v1/models/{id}`、`DELETE /admin/api/v1/upstreams/{id}`、墓碑列表和 CAS 语义见[账号与模型生命周期管理契约](account-lifecycle-management-contract.md)。归档不是物理删除：模型 ID 不可重建，上游可恢复凭据被销毁，历史账本关联保留。网页只在 `features.account_lifecycle_management=true` 时显示入口。
+
 ### 上游模型同步（新增）
 
 `POST /admin/api/v1/upstreams/{id}/discover-models` 使用管理员会话及写请求的 CSRF/Origin 校验，返回 `{items:[{id:string}]}`。服务端使用已保存的上游凭据读取 OpenAI-compatible models 接口，复用模型请求的安全连接与地址校验，不向浏览器回传上游 Key 或原始错误响应。发现操作有超时、响应大小与条目数量上限；停用上游不能发现模型。
