@@ -13,15 +13,19 @@ import (
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/financial"
 )
 
 const accountingV2MaxExportBytes = 4 << 20
 
 // migrateAccountingV2 is the single integration hook for E accounting and
-// selector-aware budget schema. The App owner controls when it runs relative
-// to the existing governance budget migrations.
+// financial-ledger schema. Selector-aware budgets migrate after the existing
+// governance tables have been initialized by the App owner.
 func migrateAccountingV2(ctx context.Context, db *sql.DB) error {
-	return accounting.NewLedger(db).MigrateV2(ctx)
+	if err := accounting.NewLedger(db).MigrateV2(ctx); err != nil {
+		return err
+	}
+	return financial.NewLedger(db).Migrate(ctx)
 }
 
 // registerAccountingV2Handlers is intentionally separate from App.Handler so
@@ -32,6 +36,7 @@ func (a *App) registerAccountingV2Handlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/api/v1/usage/export", a.requireAdmin(a.accountingV2Export, false))
 	mux.HandleFunc("POST /admin/api/v1/billing/usage-corrections", a.requireAdmin(a.accountingV2Correction, true))
 	a.registerGeneralBudgetHandlers(mux)
+	a.registerBillingV1Handlers(mux)
 }
 
 type accountingV2ReportView struct {
