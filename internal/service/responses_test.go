@@ -235,20 +235,39 @@ func TestResponsesRejectsStatefulLifecycleBeforeUpstream(t *testing.T) {
 	}
 }
 
-func TestResponsesManagedToolsStayDisabledAndBackgroundDoesNotDropFields(t *testing.T) {
+func TestResponsesNativeManagedToolsPassThroughButStatefulStayDisabled(t *testing.T) {
 	var calls atomic.Int32
-	app, server, key := newResponsesAPIKeyFixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
-	managed := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","input":"x","tools":[{"type":"web_search_preview"}]}`, key.Key, context.Background())
-	if managed.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(managed), "unsupported_feature") {
-		t.Fatalf("managed tool status=%d", managed.StatusCode)
+	app, server, key := newResponsesAPIKeyFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		for _, marker := range []string{`"model":"provider-responses"`, `"stream":true`, `"type":"namespace"`, `"type":"web_search"`} {
+			if !strings.Contains(string(body), marker) {
+				t.Errorf("native Responses body missing %s: %s", marker, body)
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native_tools\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	managed := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","stream":true,"input":"x","tools":[{"type":"namespace","name":"codex"},{"type":"web_search"}]}`, key.Key, context.Background())
+	managedBody := readBody(managed)
+	if managed.StatusCode != http.StatusOK || !strings.Contains(managedBody, "response.completed") {
+		t.Fatalf("native managed-tool passthrough status=%d body=%s", managed.StatusCode, managedBody)
 	}
-	app.cfg.ResponsesStatefulResources, app.cfg.ResponsesBackgroundTasks = true, true
+	app.cfg.ResponsesStatefulResources = true
+	stored := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","store":true,"input":"x","tools":[{"type":"web_search"}]}`, key.Key, context.Background())
+	if stored.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(stored), "unsupported_feature") {
+		t.Fatalf("stateful managed tool status=%d", stored.StatusCode)
+	}
+	app.cfg.ResponsesBackgroundTasks = true
 	altered := employeeRequest(t, http.MethodPost, server.URL+"/v1/responses", `{"model":"company-responses","background":true,"input":"x","temperature":0.2}`, key.Key, context.Background())
 	if altered.StatusCode != http.StatusBadRequest || !strings.Contains(readBody(altered), "unsupported_feature") {
 		t.Fatalf("background unsupported field status=%d", altered.StatusCode)
 	}
-	if calls.Load() != 0 {
-		t.Fatalf("rejected managed/background requests reached upstream: %d", calls.Load())
+	if calls.Load() != 1 {
+		t.Fatalf("native/stateful/background upstream calls=%d want=1", calls.Load())
 	}
 }
 
@@ -456,8 +475,14 @@ func TestCodexResponsesExecutorBuffersCompletionUntilStateWrite(t *testing.T) {
 	fixture := newCodexServiceFixture(t, runner)
 	defer fixture.close()
 	fixture.app.responses = fakeCodexResponsesExecutor{fn: func(_ context.Context, _ *membership.CodexAuthCredential, body []byte, consume func(json.RawMessage) error) (json.RawMessage, *codexRunError) {
-		if !strings.Contains(string(body), `"model":"gpt-codex-provider"`) {
-			t.Errorf("mapped body=%s", body)
+		markers := []string{`"model":"gpt-codex-provider"`}
+		if strings.Contains(string(body), `"input":"hi"`) {
+			markers = append(markers, `"type":"namespace"`, `"type":"web_search"`)
+		}
+		for _, marker := range markers {
+			if !strings.Contains(string(body), marker) {
+				t.Errorf("mapped body missing %s: %s", marker, body)
+			}
 		}
 		added := json.RawMessage(`{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_codex"}}`)
 		completed := json.RawMessage(`{"type":"response.completed","response":{"id":"resp_codex","object":"response","status":"completed","output":[]}}`)
@@ -471,7 +496,7 @@ func TestCodexResponsesExecutorBuffersCompletionUntilStateWrite(t *testing.T) {
 		}
 		return json.RawMessage(`{"id":"resp_codex","object":"response","status":"completed","output":[]}`), nil
 	}}
-	response := employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/responses", `{"model":"company-codex","stream":true,"input":"hi"}`, fixture.employeeKey.Key, context.Background())
+	response := employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/responses", `{"model":"company-codex","stream":true,"input":"hi","tools":[{"type":"namespace","name":"codex"},{"type":"web_search"}]}`, fixture.employeeKey.Key, context.Background())
 	body := readBody(response)
 	if response.StatusCode != 200 || !strings.Contains(body, "call_codex") || !strings.Contains(body, "response.completed") {
 		t.Fatalf("status=%d body=%s", response.StatusCode, body)

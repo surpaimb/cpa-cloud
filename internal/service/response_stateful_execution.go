@@ -94,8 +94,14 @@ func parseResponsesLifecycle(payload map[string]json.RawMessage, cfg Config, str
 			}
 		}
 	}
-	if err := validateManagedResponseTools(payload["tools"]); err != nil {
-		return lifecycle, err
+	// Native stateless Responses requests are transparent provider passthroughs,
+	// so provider-managed tool declarations remain intact there. The service
+	// still rejects them whenever it owns lifecycle state, and cross-protocol
+	// routes independently reject tool kinds they cannot represent.
+	if lifecycle.store || lifecycle.background || lifecycle.previousID != "" {
+		if err := validateManagedResponseTools(payload["tools"]); err != nil {
+			return lifecycle, err
+		}
 	}
 	return lifecycle, nil
 }
