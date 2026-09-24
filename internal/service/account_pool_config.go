@@ -517,7 +517,7 @@ func (a *App) putModelAccounts(w http.ResponseWriter, r *http.Request, session a
 	}
 	defer tx.Rollback()
 	var modelExists int
-	if err := tx.QueryRowContext(r.Context(), `SELECT 1 FROM models WHERE id=?`, r.PathValue("id")).Scan(&modelExists); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(r.Context(), `SELECT 1 FROM models WHERE id=? AND archived=0`, r.PathValue("id")).Scan(&modelExists); errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, http.StatusNotFound, "not_found", "Model was not found.")
 		return
 	} else if err != nil {
@@ -539,7 +539,7 @@ func (a *App) putModelAccounts(w http.ResponseWriter, r *http.Request, session a
 	var provider string
 	for _, item := range input.Items {
 		var itemProvider string
-		if err := tx.QueryRowContext(r.Context(), `SELECT provider_kind FROM upstreams WHERE id=?`, item.UpstreamID).Scan(&itemProvider); errors.Is(err, sql.ErrNoRows) {
+		if err := tx.QueryRowContext(r.Context(), `SELECT provider_kind FROM upstreams WHERE id=? AND archived=0`, item.UpstreamID).Scan(&itemProvider); errors.Is(err, sql.ErrNoRows) {
 			writeAdminError(w, http.StatusBadRequest, "invalid_request", "Model account configuration refers to an unknown upstream.")
 			return
 		} else if err != nil {

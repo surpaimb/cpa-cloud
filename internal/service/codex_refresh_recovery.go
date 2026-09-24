@@ -92,7 +92,7 @@ func (g *codexRecoveryRefreshGuard) adopt(ctx context.Context, tx *sql.Tx, trans
 			AND NOT EXISTS(SELECT 1 FROM account_pool_maintenance_leases l
 				WHERE l.account_id=account_recovery_states.account_id)
 			AND EXISTS(SELECT 1 FROM upstreams u JOIN codex_oauth_bindings b ON b.upstream_id=u.id
-				WHERE u.id=account_recovery_states.account_id AND u.provider_kind=? AND u.revision=?
+				WHERE u.id=account_recovery_states.account_id AND u.provider_kind=? AND u.archived=0 AND u.revision=?
 					AND b.source='authorization_code' AND b.client_id=?)`,
 		transition.toRevision, formatAccountPoolTime(updatedAt), g.state.AccountID, g.state.CooldownEventID,
 		g.state.OperationID, g.state.RecoveryRevision, g.state.PoolRevision, transition.fromRevision,
@@ -164,7 +164,7 @@ func (a *App) acquireCodexRecoveryCredential(ctx context.Context, selected route
 		var ciphertext []byte
 		err = a.store.db.QueryRowContext(ctx, `SELECT u.provider_kind,u.enabled,u.revision,u.credential_ciphertext,
 			u.key_version,COALESCE(u.credential_state,''),(SELECT COUNT(*) FROM codex_oauth_bindings b WHERE b.upstream_id=u.id)
-			FROM upstreams u WHERE u.id=?`, state.AccountID).Scan(&provider, &enabled, &revision, &ciphertext, &keyVersion, &credentialState, &bindingCount)
+			FROM upstreams u WHERE u.id=? AND u.archived=0`, state.AccountID).Scan(&provider, &enabled, &revision, &ciphertext, &keyVersion, &credentialState, &bindingCount)
 		if err != nil {
 			return selected, nil, state, recoveryRefreshFailure(ctx, err)
 		}

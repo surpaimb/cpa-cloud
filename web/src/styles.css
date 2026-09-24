@@ -328,6 +328,9 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .proxy-state-summary strong { margin: 5px 0; }
 .proxy-test-snapshot { display: grid; gap: 5px; padding: 12px 14px; color: #31566c; background: #edf6fa; border: 1px solid #c5dee9; border-radius: 7px; font-size: 13px; }
 .proxy-test-snapshot strong { color: var(--navy); }
+.lifecycle-warning { margin-top: 16px; padding: 13px 15px; color: #7b321f; background: #fff1ed; border: 1px solid #efc1b5; border-radius: 7px; }
+.lifecycle-warning strong { display: block; }
+.lifecycle-warning p { margin: 6px 0 0; font-size: 13px; line-height: 1.55; }
 
 .governance-boundary { margin-bottom: 20px; padding: 18px 21px; color: #31566c; background: #edf6fa; border: 1px solid #c5dee9; border-left: 4px solid var(--teal); border-radius: var(--radius); }
 .governance-boundary strong { display: block; margin-bottom: 6px; color: var(--navy); }
@@ -461,6 +464,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .proxy-notice { padding: 16px; }
   .proxy-form-grid { grid-template-columns: 1fr; }
   .proxy-panel .section-heading { flex-direction: column; }
+	.lifecycle-warning + .dialog__actions { align-items: stretch; flex-direction: column-reverse; }
+	.lifecycle-warning + .dialog__actions .button { width: 100%; }
   .governance-settings { grid-template-columns: 1fr; }
   .governance-settings .button { width: 100%; }
   .governance-form-grid { grid-template-columns: 1fr; }

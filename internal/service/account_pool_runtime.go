@@ -526,7 +526,7 @@ func (rt *accountPoolRuntime) authorizationCurrent(ctx context.Context, tx *sql.
 		return false, false, false, nil
 	}
 	var modelEnabled int
-	err = query(`SELECT enabled FROM models WHERE id=?`, model).Scan(&modelEnabled)
+	err = query(`SELECT enabled FROM models WHERE id=? AND archived=0`, model).Scan(&modelEnabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return true, false, false, nil
 	}
@@ -565,7 +565,7 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 		FROM model_account_pool_routes r JOIN upstreams u ON u.id=r.upstream_id
 		LEFT JOIN account_pool_runtime_cooldowns c ON c.account_id=u.id
 		LEFT JOIN account_recovery_states rs ON rs.account_id=u.id
-		WHERE r.model_id=? ORDER BY r.position LIMIT ?`, model, maxModelAccounts+1)
+		WHERE r.model_id=? AND u.archived=0 ORDER BY r.position LIMIT ?`, model, maxModelAccounts+1)
 	if err != nil {
 		return poolSnapshot{}, false, accountPoolStorageUnavailable
 	}

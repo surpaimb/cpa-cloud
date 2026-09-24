@@ -26,6 +26,9 @@ type upstreamView struct {
 	Endpoint          string                          `json:"endpoint"`
 	Enabled           bool                            `json:"enabled"`
 	Revision          int64                           `json:"revision"`
+	Archived          bool                            `json:"archived"`
+	ArchivedAt        *string                         `json:"archived_at"`
+	ArchiveResult     string                          `json:"archive_result,omitempty"`
 	CredentialState   *string                         `json:"credential_state"`
 	VerifiedAt        *string                         `json:"verified_at"`
 	OAuthRefresh      *codexOAuthRefreshView          `json:"oauth_refresh,omitempty"`
@@ -48,12 +51,17 @@ type createUpstreamRequest struct {
 }
 
 func (a *App) listUpstreams(w http.ResponseWriter, r *http.Request, _ adminSession) {
+	includeArchived, ok := includeArchivedQuery(w, r)
+	if !ok {
+		return
+	}
 	rows, err := a.store.db.QueryContext(r.Context(), `SELECT u.id,u.name,u.provider_kind,u.endpoint,u.enabled,u.revision,u.credential_state,u.verified_at,
-		b.client_id,b.source,rs.state,rs.reason_code
+		u.archived,u.archived_at,b.client_id,b.source,rs.state,rs.reason_code
 		FROM upstreams u
 		LEFT JOIN codex_oauth_bindings b ON b.upstream_id=u.id
 		LEFT JOIN codex_oauth_refresh_states rs ON rs.upstream_id=u.id
-		ORDER BY u.created_at,u.id`)
+		WHERE (?=1 OR u.archived=0)
+		ORDER BY u.created_at,u.id`, boolInt(includeArchived))
 	if err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -62,14 +70,16 @@ func (a *App) listUpstreams(w http.ResponseWriter, r *http.Request, _ adminSessi
 	items := make([]upstreamView, 0)
 	for rows.Next() {
 		var item upstreamView
-		var enabled int
-		var state, verified, clientID, source, refreshState, reason sql.NullString
+		var enabled, archived int
+		var state, verified, archivedAt, clientID, source, refreshState, reason sql.NullString
 		if err := rows.Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision, &state, &verified,
-			&clientID, &source, &refreshState, &reason); err != nil {
+			&archived, &archivedAt, &clientID, &source, &refreshState, &reason); err != nil {
 			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 			return
 		}
 		item.Enabled = enabled != 0
+		item.Archived = archived != 0
+		item.ArchivedAt = nullString(archivedAt)
 		item.CredentialState = nullString(state)
 		item.VerifiedAt = nullString(verified)
 		item.OAuthRefresh = a.codexOAuthRefreshView(item.ProviderKind, clientID, source, refreshState, reason)
@@ -163,7 +173,7 @@ func (a *App) decorateUpstreamOAuthRefresh(ctx context.Context, item *upstreamVi
 	return nil
 }
 
-func (a *App) createUpstream(w http.ResponseWriter, r *http.Request, _ adminSession) {
+func (a *App) createUpstream(w http.ResponseWriter, r *http.Request, session adminSession) {
 	var input createUpstreamRequest
 	if !decodeJSON(w, r, adminMaxBody, &input) {
 		return
@@ -203,8 +213,18 @@ func (a *App) createUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 		return
 	}
 	item := upstreamView{ID: id, Name: input.Name, ProviderKind: input.ProviderKind, Endpoint: endpoint, Enabled: true, Revision: 1}
-	_, err = a.store.db.ExecContext(r.Context(), `INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, item.ID, item.Name, item.ProviderKind, item.Endpoint, 1, ciphertext, keyVersion, item.Revision, utcNow())
+	tx, err := a.store.db.BeginTx(r.Context(), nil)
 	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, item.ID, item.Name, item.ProviderKind, item.Endpoint, 1, ciphertext, keyVersion, item.Revision, utcNow())
+	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "upstream.create", "upstream", item.ID, "succeeded"); err != nil || tx.Commit() != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
@@ -218,9 +238,13 @@ type updateUpstreamRequest struct {
 	APIKey           *string `json:"api_key"`
 }
 
-func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSession) {
+func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, session adminSession) {
 	var input updateUpstreamRequest
-	if !decodeJSON(w, r, adminMaxBody, &input) || input.ExpectedRevision < 1 {
+	if !decodeJSON(w, r, adminMaxBody, &input) {
+		return
+	}
+	if input.ExpectedRevision < 1 {
+		writeAdminError(w, http.StatusBadRequest, "invalid_revision", "A valid expected_revision is required.")
 		return
 	}
 	if input.Name == nil && input.Enabled == nil && input.APIKey == nil {
@@ -243,10 +267,10 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 	}
 	defer tx.Rollback()
 	var item upstreamView
-	var enabled int
+	var enabled, archived int
 	var ciphertext []byte
-	var state, verified sql.NullString
-	err = tx.QueryRowContext(r.Context(), `SELECT id,name,provider_kind,endpoint,enabled,revision,credential_ciphertext,credential_state,verified_at FROM upstreams WHERE id=?`, id).Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision, &ciphertext, &state, &verified)
+	var state, verified, archivedAt sql.NullString
+	err = tx.QueryRowContext(r.Context(), `SELECT id,name,provider_kind,endpoint,enabled,revision,credential_ciphertext,credential_state,verified_at,archived,archived_at FROM upstreams WHERE id=?`, id).Scan(&item.ID, &item.Name, &item.ProviderKind, &item.Endpoint, &enabled, &item.Revision, &ciphertext, &state, &verified, &archived, &archivedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, 404, "not_found", "Upstream was not found.")
 		return
@@ -256,8 +280,14 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 		return
 	}
 	item.Enabled = enabled != 0
+	item.Archived = archived != 0
+	item.ArchivedAt = nullString(archivedAt)
 	item.CredentialState = nullString(state)
 	item.VerifiedAt = nullString(verified)
+	if item.Archived {
+		writeAdminError(w, http.StatusConflict, "upstream_archived", "Archived upstreams cannot be changed.")
+		return
+	}
 	if item.Revision != input.ExpectedRevision {
 		writeAdminError(w, 409, "revision_conflict", "The object was changed by another request.")
 		return
@@ -303,6 +333,10 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, _ adminSess
 		writeAdminError(w, 409, "revision_conflict", "The object was changed by another request.")
 		return
 	}
+	if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "upstream.update", "upstream", id, "succeeded"); err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -346,14 +380,22 @@ func validateGeminiEndpoint(ctx context.Context, raw string, allowLoopback bool)
 }
 
 type modelView struct {
-	ID            string `json:"id"`
-	UpstreamID    string `json:"upstream_id"`
-	UpstreamModel string `json:"upstream_model"`
-	Enabled       bool   `json:"enabled"`
+	ID            string  `json:"id"`
+	UpstreamID    string  `json:"upstream_id"`
+	UpstreamModel string  `json:"upstream_model"`
+	Enabled       bool    `json:"enabled"`
+	Revision      int64   `json:"revision"`
+	Archived      bool    `json:"archived"`
+	ArchivedAt    *string `json:"archived_at"`
+	ArchiveResult string  `json:"archive_result,omitempty"`
 }
 
 func (a *App) listAdminModels(w http.ResponseWriter, r *http.Request, _ adminSession) {
-	rows, err := a.store.db.QueryContext(r.Context(), `SELECT id,upstream_id,upstream_model,enabled FROM models ORDER BY id`)
+	includeArchived, ok := includeArchivedQuery(w, r)
+	if !ok {
+		return
+	}
+	rows, err := a.store.db.QueryContext(r.Context(), `SELECT id,upstream_id,upstream_model,enabled,revision,archived,archived_at FROM models WHERE (?=1 OR archived=0) ORDER BY id`, boolInt(includeArchived))
 	if err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -362,12 +404,15 @@ func (a *App) listAdminModels(w http.ResponseWriter, r *http.Request, _ adminSes
 	items := make([]modelView, 0)
 	for rows.Next() {
 		var item modelView
-		var enabled int
-		if err := rows.Scan(&item.ID, &item.UpstreamID, &item.UpstreamModel, &enabled); err != nil {
+		var enabled, archived int
+		var archivedAt sql.NullString
+		if err := rows.Scan(&item.ID, &item.UpstreamID, &item.UpstreamModel, &enabled, &item.Revision, &archived, &archivedAt); err != nil {
 			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 			return
 		}
 		item.Enabled = enabled != 0
+		item.Archived = archived != 0
+		item.ArchivedAt = nullString(archivedAt)
 		items = append(items, item)
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
@@ -379,7 +424,7 @@ type createModelRequest struct {
 	UpstreamModel string `json:"upstream_model"`
 }
 
-func (a *App) createModel(w http.ResponseWriter, r *http.Request, _ adminSession) {
+func (a *App) createModel(w http.ResponseWriter, r *http.Request, session adminSession) {
 	var input createModelRequest
 	if !decodeJSON(w, r, adminMaxBody, &input) {
 		return
@@ -388,18 +433,24 @@ func (a *App) createModel(w http.ResponseWriter, r *http.Request, _ adminSession
 		writeAdminError(w, 400, "invalid_request", "Invalid model fields.")
 		return
 	}
+	a.admission.Lock()
+	defer a.admission.Unlock()
+	tx, err := a.store.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	defer tx.Rollback()
 	var providerKind string
-	if err := a.store.db.QueryRowContext(r.Context(), `SELECT provider_kind FROM upstreams WHERE id=?`, input.UpstreamID).Scan(&providerKind); err != nil {
+	if err := tx.QueryRowContext(r.Context(), `SELECT provider_kind FROM upstreams WHERE id=? AND archived=0`, input.UpstreamID).Scan(&providerKind); err != nil {
 		writeAdminError(w, 400, "invalid_request", "Upstream was not found.")
 		return
 	}
-	if providerKind == geminiAPIKeyProvider && (strings.Contains(input.ID, "/") || !validGeminiUpstreamModel(input.UpstreamModel)) {
-		writeAdminError(w, 400, "invalid_request", "Invalid Gemini model fields.")
+	if !validProviderModelName(providerKind, input.UpstreamModel) || providerKind == geminiAPIKeyProvider && strings.Contains(input.ID, "/") {
+		writeAdminError(w, 400, "invalid_request", "Invalid model fields.")
 		return
 	}
-	a.admission.Lock()
-	defer a.admission.Unlock()
-	_, err := a.store.db.ExecContext(r.Context(), `INSERT INTO models(id,upstream_id,upstream_model,enabled,created_at) VALUES(?,?,?,?,?)`, input.ID, input.UpstreamID, input.UpstreamModel, 1, utcNow())
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO models(id,upstream_id,upstream_model,enabled,revision,archived,created_at) VALUES(?,?,?,?,1,0,?)`, input.ID, input.UpstreamID, input.UpstreamModel, 1, utcNow())
 	if err != nil {
 		if isConflict(err) {
 			writeAdminError(w, 409, "already_exists", "Model already exists.")
@@ -408,7 +459,11 @@ func (a *App) createModel(w http.ResponseWriter, r *http.Request, _ adminSession
 		}
 		return
 	}
-	writeJSON(w, 201, modelView{ID: input.ID, UpstreamID: input.UpstreamID, UpstreamModel: input.UpstreamModel, Enabled: true})
+	if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "model.create", "model", input.ID, "succeeded"); err != nil || tx.Commit() != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	writeJSON(w, 201, modelView{ID: input.ID, UpstreamID: input.UpstreamID, UpstreamModel: input.UpstreamModel, Enabled: true, Revision: 1})
 }
 
 func validateEndpoint(ctx context.Context, raw string, allowLoopback bool) (string, error) {

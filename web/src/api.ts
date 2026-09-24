@@ -63,6 +63,9 @@ export type Upstream = {
   endpoint: string
   enabled: boolean
   revision: number
+  archived?: boolean
+  archived_at?: string | null
+  archive_result?: 'archived' | 'already_archived'
   credential_state: 'imported_unverified' | 'verified' | 'reauth_required' | null
   verified_at: string | null
   oauth_refresh?: {
@@ -243,6 +246,10 @@ export type ModelRoute = {
   upstream_id: string
   upstream_model: string
   enabled: boolean
+  revision?: number
+  archived?: boolean
+  archived_at?: string | null
+  archive_result?: 'archived' | 'already_archived'
 }
 export type AccountGroup = { id: string; name: string; revision: number }
 export type AccountChannel = { id: string; name: string; group_id?: string | null; revision: number }
@@ -282,6 +289,7 @@ export type SystemStatus = {
     gemini_native_api?: boolean
     account_pool_configuration?: boolean
     account_pool_routing?: boolean
+    account_lifecycle_management?: boolean
   }
 }
 
@@ -501,7 +509,7 @@ export const api = {
     }, csrf),
   revokeKey: (keyId: string, csrf: string) =>
     request<{ ok: true }>(`/keys/${encodeURIComponent(keyId)}/revoke`, { method: 'POST', body: '{}' }, csrf),
-  upstreams: (signal?: AbortSignal) => request<UpstreamsResponse>('/upstreams', { signal }),
+  upstreams: (signal?: AbortSignal, includeArchived = false) => request<UpstreamsResponse>(`/upstreams${includeArchived ? '?include_archived=true' : ''}`, { signal }),
   outboundProxies: (afterId?: string, limit = 50, signal?: AbortSignal) => {
     const query = new URLSearchParams({ limit: String(limit) })
     if (afterId) query.set('after_id', afterId)
@@ -537,6 +545,8 @@ export const api = {
     request<Upstream>(`/upstreams/${encodeURIComponent(id)}/codex-refresh`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   updateUpstream: (id: string, body: Record<string, unknown>, csrf: string) =>
     request<Upstream>(`/upstreams/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+  archiveUpstream: (id: string, expectedRevision: number, csrf: string) =>
+    request<Upstream>(`/upstreams/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ expected_revision: expectedRevision }) }, csrf),
   discoverUpstreamModels: (id: string, csrf: string) =>
     request<{ items: DiscoveredModel[] }>(`/upstreams/${encodeURIComponent(id)}/discover-models`, { method: 'POST' }, csrf),
   startUpstreamTest: (id: string, body: { operation_id: string; expected_revision: number; scope: UpstreamHealthScope }, csrf: string, signal?: AbortSignal) =>
@@ -545,9 +555,13 @@ export const api = {
     request<UpstreamTestOperation>(`/upstreams/${encodeURIComponent(id)}/tests/${encodeURIComponent(operationId)}`, { signal }),
   clearUpstreamCooldown: (id: string, body: { expected_revision: number; expected_cooldown_event_id: string }, csrf: string, signal?: AbortSignal) =>
     request<CooldownClearResult>(`/upstreams/${encodeURIComponent(id)}/cooldown/clear`, { method: 'POST', body: JSON.stringify(body), signal }, csrf),
-  models: () => request<{ items: ModelRoute[] }>('/models'),
+  models: (includeArchived = false) => request<{ items: ModelRoute[] }>(`/models${includeArchived ? '?include_archived=true' : ''}`),
   createModel: (body: Record<string, unknown>, csrf: string) =>
     request<ModelRoute>('/models', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  updateModel: (id: string, body: Record<string, unknown>, csrf: string) =>
+    request<ModelRoute>(`/models/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+  archiveModel: (id: string, expectedRevision: number, csrf: string) =>
+    request<ModelRoute>(`/models/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ expected_revision: expectedRevision }) }, csrf),
   accountGroups: (signal?: AbortSignal) => request<{ items: AccountGroup[] }>('/account-groups', { signal }),
   createAccountGroup: (body: { name: string }, csrf: string) =>
     request<AccountGroup>('/account-groups', { method: 'POST', body: JSON.stringify(body) }, csrf),

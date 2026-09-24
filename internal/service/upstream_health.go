@@ -613,7 +613,7 @@ func (c *upstreamHealthCoordinator) loadSnapshotFrom(ctx context.Context, query 
 	var snapshot upstreamHealthSnapshot
 	var clientID, bindingSource sql.NullString
 	err := query.QueryRowContext(ctx, `SELECT u.id,u.provider_kind,u.endpoint,u.revision,u.key_version,u.credential_ciphertext,u.credential_state,b.client_id,b.source
-		FROM upstreams u LEFT JOIN codex_oauth_bindings b ON b.upstream_id=u.id WHERE u.id=?`, id).
+		FROM upstreams u LEFT JOIN codex_oauth_bindings b ON b.upstream_id=u.id WHERE u.id=? AND u.archived=0`, id).
 		Scan(&snapshot.id, &snapshot.provider, &snapshot.endpoint, &snapshot.revision, &snapshot.keyVersion, &snapshot.ciphertext, &snapshot.credentialState, &clientID, &bindingSource)
 	if err != nil {
 		return snapshot, err

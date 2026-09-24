@@ -421,7 +421,7 @@ func (s *outboundProxyStore) SetBinding(ctx context.Context, input upstreamProxy
 	defer tx.Rollback()
 	var provider, endpoint string
 	var upstreamRevision int64
-	if err := tx.QueryRowContext(ctx, `SELECT provider_kind,endpoint,revision FROM upstreams WHERE id=?`, input.UpstreamID).Scan(&provider, &endpoint, &upstreamRevision); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT provider_kind,endpoint,revision FROM upstreams WHERE id=? AND archived=0`, input.UpstreamID).Scan(&provider, &endpoint, &upstreamRevision); errors.Is(err, sql.ErrNoRows) {
 		return zero, errOutboundProxyNotFound
 	} else if err != nil {
 		return zero, errors.New("outbound proxy storage unavailable")
@@ -544,7 +544,7 @@ func (s *outboundProxyStore) LoadBindingTx(ctx context.Context, tx *sql.Tx, upst
 	}
 	var provider, endpoint string
 	var revision int64
-	if err := tx.QueryRowContext(ctx, `SELECT provider_kind,endpoint,revision FROM upstreams WHERE id=?`, upstreamID).Scan(&provider, &endpoint, &revision); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT provider_kind,endpoint,revision FROM upstreams WHERE id=? AND archived=0`, upstreamID).Scan(&provider, &endpoint, &revision); errors.Is(err, sql.ErrNoRows) {
 		return nil, errOutboundProxyNotFound
 	} else if err != nil {
 		return nil, errors.New("outbound proxy storage unavailable")

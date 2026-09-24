@@ -55,6 +55,11 @@ type App struct {
 	catalogMu          sync.Mutex
 	catalogs           map[string]codexCatalogCacheEntry
 	codexCatalog       codexCatalogLister
+	// Lifecycle integration hooks are SQL-only before commit and non-blocking
+	// after commit. Scheduled-test integration wires these without changing the
+	// account lock -> admission lock -> transaction ordering.
+	archiveUpstreamTxHook func(context.Context, *sql.Tx, string, string, string) error
+	upstreamArchivedHook  func(string)
 }
 
 type loginAttempt struct {
@@ -226,6 +231,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/v1/upstreams/batch-import", a.requireAdmin(a.batchImportUpstreams, true))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/codex-import", a.requireAdmin(a.importCodexUpstream, true))
 	mux.HandleFunc("PATCH /admin/api/v1/upstreams/{id}", a.requireAdmin(a.updateUpstream, true))
+	mux.HandleFunc("DELETE /admin/api/v1/upstreams/{id}", a.requireAdmin(a.archiveUpstream, true))
 	mux.HandleFunc("PUT /admin/api/v1/upstreams/{id}/codex-auth", a.requireAdmin(a.replaceCodexCredential, true))
 	mux.HandleFunc("POST /admin/api/v1/upstreams/codex-oauth-sessions", a.requireAdmin(a.createCodexOAuthSession, true))
 	mux.HandleFunc("GET /admin/api/v1/upstreams/codex-oauth-sessions/{id}", a.requireAdmin(a.getCodexOAuthSession, false))
@@ -237,6 +243,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/v1/upstreams/{id}/cooldown/clear", a.requireAdmin(a.clearUpstreamCooldown, true))
 	mux.HandleFunc("GET /admin/api/v1/models", a.requireAdmin(a.listAdminModels, false))
 	mux.HandleFunc("POST /admin/api/v1/models", a.requireAdmin(a.createModel, true))
+	mux.HandleFunc("PATCH /admin/api/v1/models/{id}", a.requireAdmin(a.updateModel, true))
+	mux.HandleFunc("DELETE /admin/api/v1/models/{id}", a.requireAdmin(a.archiveModel, true))
 	mux.HandleFunc("GET /admin/api/v1/system/status", a.requireAdmin(a.systemStatus, false))
 	mux.HandleFunc("GET /v1/models", a.listModels)
 	mux.HandleFunc("POST /v1/chat/completions", a.chatCompletions)
@@ -322,6 +330,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"system_probe_accounting":         a.systemProbes != nil,
 			"account_recovery":                a.recovery != nil,
 			"codex_membership_auto_refresh":   a.refresh != nil && a.refresh.enabled(),
+			"account_lifecycle_management":    true,
 		},
 		"limitations": limitations,
 	})
