@@ -383,7 +383,7 @@ preview.3 会自动读取上游模型作为候选；勾选所需模型，可修�
 
 远程员工不能用 `127.0.0.1` 连接管理员电脑，该地址指向员工自己的电脑。
 
-CC Switch 可用于配置工具，但最终调用工具必须支持当前协议。**preview.3 下载包仅提供 Chat Completions；最新源码增加上述 Responses、Claude Messages 和 Gemini 原生子集。**最新源码已完成三种 CLI 的固定 Windows/合成上游实机矩阵，但 CC Switch GUI、真实供应商和会员账号仍未验证，且取消仍有两个明确 FAIL；参见[员工接入说明](docs/employee-access.md)和[真实客户端兼容矩阵](docs/client-compatibility-matrix-2026-09-24.md)。
+CC Switch 可用于配置工具，但最终调用工具必须支持当前协议。**preview.3 下载包仅提供 Chat Completions；最新源码增加上述 Responses、Claude Messages 和 Gemini 原生子集。**最新源码已完成三种 CLI 的固定 Windows/合成上游实机矩阵，但 CC Switch GUI、真实供应商和会员账号仍未验证，且 Claude 取消仍有一个明确 FAIL；参见[员工接入说明](docs/employee-access.md)和[真实客户端兼容矩阵](docs/client-compatibility-matrix-2026-09-24.md)。
 
 Bash + curl 测试示例（Key 交互输入，请求头经 stdin 传入）：
 

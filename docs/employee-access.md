@@ -25,7 +25,7 @@ CC Switch 是配置工具，也有可选本地代理模式。普通配置模式�
 
 ## 配置指引
 
-后台接入说明仍需按 Codex、Claude Code、Gemini CLI 分开，列出 Base URL、认证方式、模型和已验证版本。当前源码已有三种 CLI 的文本与工具回合实测，但 Codex 取消传播和 Claude 终止边界重发仍为 FAIL，也没有一键配置。
+后台接入说明仍需按 Codex、Claude Code、Gemini CLI 分开，列出 Base URL、认证方式、模型和已验证版本。当前源码已有三种 CLI 的文本与工具回合实测；Codex 与 Gemini 取消已通过，Claude 终止边界重发仍为 FAIL，也没有一键配置。
 上游有 Gemini 账号不等于 Gemini CLI 已兼容；需单独验证其客户端协议，不能只以 /v1/models 通过代替。
 仅将已验证的客户端配置标记为可用，提供普通手工配置路径，不强制 CC Switch。
 

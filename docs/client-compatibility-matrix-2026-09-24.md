@@ -7,7 +7,7 @@
 | 组件 | 固定版本 | SHA-256 / 来源 | 备注 |
 | --- | --- | --- | --- |
 | Windows | 10.0.19045 x64 | 本机运行环境 | 本轮唯一操作系统样本 |
-| CPA Cloud | 临时组合树：`981ab83` + `1bdd3a4` | 测试二进制 `df1d76a18cf13df63561dbd608303e4b56df038596000839aac25744395fef08` | 两项 Gemini 兼容修复已进入 `869c1d7`；该集成提交还包含本轮二进制未覆盖的其他变化，不能据本轮结果宣称整个 `869c1d7` 已实测 |
+| CPA Cloud | 集成提交 `b997206` | 测试二进制 `a3a72255aa6945e4f594ed5319ab9baa194a6efc0282728fde915f04614bcf92` | 临时 Go 1.26.8 工具链构建；包含 `f7f1e91` Responses 空闲流断连探测；服务自报版本 `dev` |
 | Codex CLI | `codex-cli 0.155.0-alpha.16.3` | `a19f8f6c3c9dd5b71b6b1e3eb1ec55d75aafb2fdfb686d9e1f7a5f47db07d0d2` | 本机已有官方 Codex 安装，不随仓库分发 |
 | Claude Code | `2.1.266 (Claude Code)` | `d2c5f7b3b6a12819097ceb6efbce2a390157166003fcaee32dbde0e6d7b45ef7` | 本机已有官方 Claude 安装，不随仓库分发 |
 | Gemini CLI | `0.61.0` | 入口 `gemini.js`：`0b6e283ae88682b0e27e8ef85a608ab74807a1513dc0c053e5aa80d5b80b29ab` | 仅装入任务临时目录；包声明 Apache-2.0，不加入产品依赖 |
@@ -21,7 +21,7 @@ PASS 表示本轮固定版本和固定平台上观察到预期结果；FAIL 是�
 
 | 客户端 | 文本 SSE | 工具调用及结果回传 | 客户端终止后取消 | 服务重启后原 Key | 撤销后零上游派发 |
 | --- | --- | --- | --- | --- | --- |
-| Codex CLI | PASS | PASS：两次 Responses 请求，执行只读 `get_goal`，第二次带 `function_call_output` | **FAIL**：见取消证据 | PASS | PASS |
+| Codex CLI | PASS | PASS：两次 Responses 请求，执行只读 `get_goal`，第二次带 `function_call_output` | PASS | PASS | PASS |
 | Claude Code | PASS | PASS：1 次无工具辅助请求 + 2 次带合成 MCP `echo` 的工具对话请求，后续含 `tool_result` | **FAIL**：见取消证据 | PASS | PASS |
 | Gemini CLI | PASS | PASS：两次原生 generation 请求，真实执行只读 `read_file`，后续含 `functionResponse` | PASS | PASS | PASS |
 | CC Switch 3.20.3 图形化配置 | SKIP | SKIP | SKIP | SKIP | SKIP |
@@ -30,7 +30,7 @@ PASS 表示本轮固定版本和固定平台上观察到预期结果；FAIL 是�
 
 ### 取消证据
 
-- Codex：终止脚本创建的完整客户端进程树后等待 10 秒，合成上游响应仍未关闭。账本只有 1 个员工请求、1 个上游 attempt，状态仍为 `pending`；`Get-NetTCPConnection` 显示连接由 CPA Cloud PID 持有，已终止的客户端 PID 不持有。因此这是 CPA Cloud 的上游取消传播失败，不是 CLI 重试。
+- Codex：`f7f1e91` 修复后，终止脚本创建的完整客户端进程树会在 10 秒界限内关闭上游响应。账本只有 1 个员工请求、1 个上游 attempt，状态为 `cancelled`，没有残留 TCP 连接，PASS。相同二进制上的普通文本 SSE 和两请求工具回合也保持 PASS，空闲心跳没有破坏 Codex 事件解析。
 - Claude：观察到 2 个不同员工请求，各只有 1 个 attempt，均最终为 `cancelled`，没有残留 TCP 连接。因此这是 Claude Code 在终止边界附近重发员工请求，不是 CPA Cloud 在单个员工请求内重试。当前兼容验收仍按“取消只产生一次逻辑请求”判为 FAIL。
 - Gemini：1 个员工请求、1 个 attempt，状态为 `cancelled`，上游连接关闭，无重放，PASS。
 
@@ -60,4 +60,4 @@ node scripts/smoke-real-clients.mjs \
 
 脚本为每次运行创建独立临时 HOME、配置目录、服务数据目录、随机端口、随机员工 Key 和合成上游凭据；不读取用户客户端配置。它只终止自己创建的客户端进程树，结束后校验临时根目录已删除。输出不包含客户端原始 stdout/stderr、提示词、Key 或 Token；服务日志和持久文件还会扫描合成秘密与提示词。员工 Key 未出现在上游请求，撤销后的三个客户端均为零上游派发。
 
-由于当前矩阵包含两个明确 FAIL，脚本按设计返回非零；不能把其余 PASS 汇总成整体通过。
+由于当前矩阵仍包含 Claude 取消这一项明确 FAIL，脚本按设计返回非零；不能把其余 PASS 汇总成整体通过。
