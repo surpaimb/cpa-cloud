@@ -66,6 +66,23 @@ async function admin(route, method = 'GET', body) {
 async function employee(pathname, key, body, signal = AbortSignal.timeout(5000)) {
   return fetch(origin + pathname, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
 }
+async function assertSingleSettledAttempt(model, expectedOutput) {
+  let rows = [];
+  for (let attempt = 0; attempt < 30; attempt++) {
+    rows = (await admin(`/usage/requests?model_id=${encodeURIComponent(model)}&limit=100`)).items;
+    if (rows.length === 1 && rows[0].status !== 'pending') break;
+    await delay(100);
+  }
+  assert.equal(rows.length, 1, `${model}: parent request count`);
+  assert.equal(rows[0].status, 'succeeded', `${model}: parent status`);
+  assert.equal(Number(rows[0].attempt_count), 1, `${model}: attempt count`);
+  const attempts = (await admin(`/usage/requests/${rows[0].id}/attempts`)).items;
+  assert.equal(attempts.length, 1, `${model}: attempt detail count`);
+  assert.equal(attempts[0].status, 'succeeded', `${model}: attempt status`);
+  assert.equal(attempts[0].output_tokens, expectedOutput, `${model}: original wire output usage`);
+  assert.equal(attempts[0].input_tokens, null, `${model}: unknown input usage was coerced`);
+  return rows;
+}
 
 try {
   console.error('stage: initialize');
@@ -82,16 +99,42 @@ try {
     { id: 'chat-via-responses', upstream_model: 'actual-responses', wire_protocol: 'openai-responses' },
     { id: 'responses-via-chat', upstream_model: 'actual-chat', wire_protocol: 'openai-chat' },
     { id: 'cancel-via-responses', upstream_model: 'actual-cancel', wire_protocol: 'openai-responses' },
+    { id: 'denied-via-responses', upstream_model: 'actual-responses', wire_protocol: 'openai-responses' },
   ]) await admin('/models', 'POST', { ...model, upstream_id: upstream.id });
   const employeeObject = await admin('/employees', 'POST', { name: 'Synthetic stream employee' });
-  const issued = await admin(`/employees/${employeeObject.id}/keys`, 'POST', { name: 'stream', operation_id: randomUUID() });
+  const selectedModels = ['chat-via-responses', 'responses-via-chat', 'cancel-via-responses'];
+  const issued = await admin(`/employees/${employeeObject.id}/keys`, 'POST', {
+    name: 'stream', operation_id: randomUUID(),
+    policy: {
+      protocol_mode: 'selected', protocols: ['openai-chat', 'openai-responses'],
+      model_mode: 'selected', models: selectedModels,
+    },
+  });
 
   console.error('stage: chat-to-responses');
   const chat = await employee('/v1/chat/completions', issued.key, { model: 'chat-via-responses', stream: true, messages: [{ role: 'user', content: 'hello' }] });
   const chatBody = await chat.text(); assert.equal(chat.status, 200); assert.match(chatBody, /stream-ok/); assert.match(chatBody, /data: \[DONE\]/);
+  await assertSingleSettledAttempt('chat-via-responses', '1');
   console.error('stage: responses-to-chat');
   const responses = await employee('/v1/responses', issued.key, { model: 'responses-via-chat', stream: true, input: 'hello' });
   const responsesBody = await responses.text(); assert.equal(responses.status, 200); assert.match(responsesBody, /response\.output_text\.delta/); assert.match(responsesBody, /response\.completed/);
+  const responseRows = await assertSingleSettledAttempt('responses-via-chat', null);
+
+  console.error('stage: selected-model-deny');
+  const deniedModel = await employee('/v1/chat/completions', issued.key, { model: 'denied-via-responses', stream: true, messages: [{ role: 'user', content: 'deny' }] });
+  assert.equal(deniedModel.status, 403); await deniedModel.body.cancel(); assert.equal(calls, 2, 'Denied model reached upstream');
+  assert.equal((await admin('/usage/requests?model_id=denied-via-responses&limit=100')).items.length, 0, 'Denied model created a parent request');
+
+  console.error('stage: selected-protocol-deny');
+  const narrowed = await admin(`/keys/${issued.id}/policy`, 'PUT', {
+    expected_revision: issued.policy.revision,
+    protocol_mode: 'selected', protocols: ['openai-chat'],
+    model_mode: 'selected', models: selectedModels,
+  });
+  assert.equal(narrowed.revision, issued.policy.revision + 1);
+  const deniedProtocol = await employee('/v1/responses', issued.key, { model: 'responses-via-chat', stream: true, input: 'deny' });
+  assert.equal(deniedProtocol.status, 403); await deniedProtocol.body.cancel(); assert.equal(calls, 2, 'Denied protocol reached upstream');
+  assert.deepEqual((await admin('/usage/requests?model_id=responses-via-chat&limit=100')).items.map(item => item.id), responseRows.map(item => item.id), 'Denied protocol changed the request ledger');
 
   console.error('stage: cancel');
   const abort = new AbortController();
@@ -100,7 +143,7 @@ try {
   for (let attempt = 0; attempt < 50 && !cancelled; attempt++) await delay(20);
   assert.ok(cancelled, 'Client cancellation did not close the single upstream stream');
   assert.equal(calls, 3, 'Cross-protocol streams replayed or dispatched extra upstream calls');
-  console.log('PASS: real process Chat<->Responses SSE, terminal conversion, single dispatch, credential isolation and cancellation');
+  console.log('PASS: real process key-selected Chat<->Responses SSE, model/protocol denial, terminal conversion, single dispatch, credential isolation and cancellation');
 } finally {
   await stop(); mock.closeAllConnections(); if (mock.listening) await new Promise(resolve => mock.close(resolve));
   const resolved = path.resolve(directory); assert.equal(path.dirname(resolved), path.resolve(os.tmpdir())); assert.ok(path.basename(resolved).startsWith('cpac-protocol-stream-'));
