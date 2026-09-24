@@ -36,7 +36,7 @@ func TestMessagesToResponsesStreamTextUsagePingAndCompletedOutcome(t *testing.T)
 		`{"type":"content_block_stop","index":0}`,
 		`{"type":"message_delta","delta":{"stop_reason":null,"stop_sequence":null},"usage":{"input_tokens":5,"output_tokens":1,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}`,
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":null,"output_tokens":3,"cache_read_input_tokens":null}}`,
-		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":null}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}`,
 		`{"type":"message_stop"}`,
 	)
 	if err := stream.EOF(); err != nil {
@@ -62,21 +62,24 @@ func TestMessagesToResponsesStreamTextUsagePingAndCompletedOutcome(t *testing.T)
 	}
 }
 
-func TestMessagesToResponsesStreamDoesNotForgeUnknownUsage(t *testing.T) {
-	stream := new(MessagesToResponsesStream)
-	events := feedMessagesStream(t, stream,
-		`{"type":"message_start","message":{"id":"msg_unknown","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"stop_sequence":null}}`,
-		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
-		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
-		`{"type":"content_block_stop","index":0}`,
-		`{"type":"message_delta","delta":{"stop_reason":null,"stop_sequence":null},"usage":null}`,
-		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`,
-		`{"type":"message_stop"}`,
-	)
-	terminal := events[len(events)-1]
-	if bytes.Contains(terminal.Data, []byte(`"usage"`)) || bytes.Contains(terminal.Data, []byte(`"input_tokens":0`)) || bytes.Contains(terminal.Data, []byte(`"output_tokens":0`)) {
-		t.Fatalf("unknown usage was forged: %s", terminal.Data)
-	}
+func TestMessagesToResponsesStreamRequiresOfficialUsageShape(t *testing.T) {
+	t.Run("message start", func(t *testing.T) {
+		stream := new(MessagesToResponsesStream)
+		_, err := stream.Feed([]byte(`{"type":"message_start","message":{"id":"msg_unknown","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"stop_sequence":null}}`))
+		if !errors.Is(err, ErrInvalidUpstream) {
+			t.Fatalf("missing message_start usage accepted: %v", err)
+		}
+	})
+	t.Run("message delta", func(t *testing.T) {
+		stream := new(MessagesToResponsesStream)
+		if _, err := stream.Feed([]byte(messagesStart("msg_unknown"))); err != nil {
+			t.Fatal(err)
+		}
+		_, err := stream.Feed([]byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`))
+		if !errors.Is(err, ErrInvalidUpstream) {
+			t.Fatalf("missing message_delta usage accepted: %v", err)
+		}
+	})
 }
 
 func TestMessagesResponsesRoundTripFunctionsAndStableFragments(t *testing.T) {
@@ -148,10 +151,13 @@ func TestResponsesToMessagesStreamOrdersParallelFunctionBlocks(t *testing.T) {
 	}
 	var blockEvents []string
 	var convertedEvents []SSEEvent
-	for _, raw := range events {
+	for index, raw := range events {
 		converted, err := stream.Feed([]byte(raw))
 		if err != nil {
 			t.Fatalf("feed: %v\n%s", err, raw)
+		}
+		if index < len(events)-1 && len(converted) != 0 {
+			t.Fatalf("unknown created usage must delay all output, event %d emitted %#v", index, converted)
 		}
 		convertedEvents = append(convertedEvents, converted...)
 		for _, event := range converted {
@@ -166,8 +172,8 @@ func TestResponsesToMessagesStreamOrdersParallelFunctionBlocks(t *testing.T) {
 	if fmt.Sprint(blockEvents) != fmt.Sprint(want) {
 		t.Fatalf("interleaved Messages blocks: %v", blockEvents)
 	}
-	if bytes.Contains(convertedEvents[0].Data, []byte(`"usage"`)) {
-		t.Fatalf("created event forged unknown usage: %s", convertedEvents[0].Data)
+	if !bytes.Contains(convertedEvents[0].Data, []byte(`"usage":{"input_tokens":2,"output_tokens":1}`)) {
+		t.Fatalf("delayed message_start lacks authoritative terminal usage: %s", convertedEvents[0].Data)
 	}
 	messageDelta := convertedEvents[len(convertedEvents)-2]
 	if !bytes.Contains(messageDelta.Data, []byte(`"input_tokens":2`)) || !bytes.Contains(messageDelta.Data, []byte(`"output_tokens":1`)) {
@@ -201,44 +207,40 @@ func TestResponsesToMessagesStreamPreservesKnownAndUnknownUsage(t *testing.T) {
 		name              string
 		createdUsage      string
 		terminalUsage     string
-		wantStartUsage    bool
-		wantDeltaUsage    bool
+		wantImmediate     bool
 		wantInput         float64
 		wantOutput        float64
 		wantCacheRead     float64
 		wantCacheCreation float64
 	}{
 		{
-			name:           "created unknown terminal known",
-			terminalUsage:  `{"input_tokens":7,"output_tokens":3,"total_tokens":10,"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":1}}`,
-			wantDeltaUsage: true, wantInput: 7, wantOutput: 3, wantCacheRead: 2, wantCacheCreation: 1,
+			name:          "created unknown terminal known",
+			terminalUsage: `{"input_tokens":7,"output_tokens":3,"total_tokens":10,"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":1}}`,
+			wantInput:     7, wantOutput: 3, wantCacheRead: 2, wantCacheCreation: 1,
 		},
 		{
-			name:          "created known terminal null",
-			createdUsage:  `{"input_tokens":5,"output_tokens":1,"total_tokens":6,"input_tokens_details":{"cached_tokens":1,"cache_write_tokens":2}}`,
-			terminalUsage: "null", wantStartUsage: true, wantInput: 5, wantOutput: 1, wantCacheRead: 1, wantCacheCreation: 2,
+			name:          "terminal updates base and preserves omitted cache",
+			createdUsage:  `{"input_tokens":5,"output_tokens":0,"total_tokens":5,"input_tokens_details":{"cached_tokens":1,"cache_write_tokens":2}}`,
+			terminalUsage: `{"input_tokens":6,"output_tokens":2,"total_tokens":8}`,
+			wantImmediate: true, wantInput: 6, wantOutput: 2, wantCacheRead: 1, wantCacheCreation: 2,
 		},
-		{
-			name:           "terminal updates base and preserves omitted cache",
-			createdUsage:   `{"input_tokens":5,"output_tokens":0,"total_tokens":5,"input_tokens_details":{"cached_tokens":1,"cache_write_tokens":2}}`,
-			terminalUsage:  `{"input_tokens":6,"output_tokens":2,"total_tokens":8}`,
-			wantStartUsage: true, wantDeltaUsage: true, wantInput: 6, wantOutput: 2, wantCacheRead: 1, wantCacheCreation: 2,
-		},
-		{name: "usage always unknown", createdUsage: "null", terminalUsage: "null"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			stream := new(ResponsesToMessagesStream)
 			var converted []SSEEvent
-			for _, raw := range responsesTextStream(test.createdUsage, test.terminalUsage) {
+			for index, raw := range responsesTextStream(test.createdUsage, test.terminalUsage) {
 				events, err := stream.Feed([]byte(raw))
 				if err != nil {
 					t.Fatalf("feed: %v\n%s", err, raw)
 				}
+				if index == 0 && (len(events) != 0) != test.wantImmediate {
+					t.Fatalf("message_start timing immediate=%t events=%#v", test.wantImmediate, events)
+				}
 				converted = append(converted, events...)
 			}
 			var accumulated map[string]any
-			startHasUsage, deltaHasUsage := false, false
+			startCount, deltaCount := 0, 0
 			for _, event := range converted {
 				if event.Name != "message_start" && event.Name != "message_delta" {
 					continue
@@ -253,12 +255,18 @@ func TestResponsesToMessagesStreamPreservesKnownAndUnknownUsage(t *testing.T) {
 				}
 				usage, ok := container["usage"].(map[string]any)
 				if !ok {
-					continue
+					t.Fatalf("strict Messages %s event omitted required usage: %s", event.Name, event.Data)
 				}
 				if event.Name == "message_start" {
-					startHasUsage = true
+					startCount++
+					if _, ok := usage["input_tokens"]; !ok {
+						t.Fatalf("message_start usage lacks input_tokens: %#v", usage)
+					}
 				} else {
-					deltaHasUsage = true
+					deltaCount++
+				}
+				if _, ok := usage["output_tokens"]; !ok {
+					t.Fatalf("%s usage lacks output_tokens: %#v", event.Name, usage)
 				}
 				if accumulated == nil {
 					accumulated = map[string]any{}
@@ -267,15 +275,62 @@ func TestResponsesToMessagesStreamPreservesKnownAndUnknownUsage(t *testing.T) {
 					accumulated[key] = value
 				}
 			}
-			if startHasUsage != test.wantStartUsage || deltaHasUsage != test.wantDeltaUsage {
-				t.Fatalf("usage presence start=%t delta=%t events=%#v", startHasUsage, deltaHasUsage, converted)
+			if startCount != 1 || deltaCount != 1 {
+				t.Fatalf("strict event counts start=%d delta=%d events=%#v", startCount, deltaCount, converted)
 			}
-			if test.wantStartUsage || test.wantDeltaUsage {
-				if accumulated["input_tokens"] != test.wantInput || accumulated["output_tokens"] != test.wantOutput || accumulated["cache_read_input_tokens"] != test.wantCacheRead || accumulated["cache_creation_input_tokens"] != test.wantCacheCreation {
-					t.Fatalf("accumulated usage=%#v", accumulated)
+			if accumulated["input_tokens"] != test.wantInput || accumulated["output_tokens"] != test.wantOutput || accumulated["cache_read_input_tokens"] != test.wantCacheRead || accumulated["cache_creation_input_tokens"] != test.wantCacheCreation {
+				t.Fatalf("accumulated usage=%#v", accumulated)
+			}
+		})
+	}
+}
+
+func TestResponsesToMessagesStreamStartsWhenInProgressUsageBecomesKnown(t *testing.T) {
+	stream := new(ResponsesToMessagesStream)
+	if events, err := stream.Feed([]byte(`{"type":"response.created","sequence_number":0,"response":{"id":"r","created_at":1,"model":"m","usage":null}}`)); err != nil || len(events) != 0 {
+		t.Fatalf("created events=%#v err=%v", events, err)
+	}
+	events, err := stream.Feed([]byte(`{"type":"response.in_progress","sequence_number":1,"response":{"id":"r","created_at":1,"model":"m","usage":{"input_tokens":4,"output_tokens":0,"total_tokens":4}}}`))
+	if err != nil || len(events) != 1 || events[0].Name != "message_start" || !bytes.Contains(events[0].Data, []byte(`"usage":{"input_tokens":4,"output_tokens":0}`)) {
+		t.Fatalf("in_progress events=%#v err=%v", events, err)
+	}
+}
+
+func TestResponsesToMessagesStreamBoundsDelayedOutput(t *testing.T) {
+	stream := new(ResponsesToMessagesStream)
+	_, err := stream.emitOrHold([]SSEEvent{{Data: bytes.Repeat([]byte("x"), maxConvertedStreamBytes+1)}})
+	if !errors.Is(err, ErrInvalidUpstream) || len(stream.held) != 0 {
+		t.Fatalf("oversized delayed output was retained: held=%d err=%v", len(stream.held), err)
+	}
+}
+
+func TestResponsesToMessagesStreamRejectsUnknownTerminalUsage(t *testing.T) {
+	tests := []struct {
+		name         string
+		createdUsage string
+		wantZeroWire bool
+	}{
+		{name: "unknown throughout", createdUsage: "null", wantZeroWire: true},
+		{name: "known created but unknown terminal", createdUsage: `{"input_tokens":5,"output_tokens":0,"total_tokens":5}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stream := new(ResponsesToMessagesStream)
+			var converted []SSEEvent
+			var terminalErr error
+			for _, raw := range responsesTextStream(test.createdUsage, "null") {
+				events, err := stream.Feed([]byte(raw))
+				converted = append(converted, events...)
+				if err != nil {
+					terminalErr = err
+					break
 				}
-			} else if accumulated != nil {
-				t.Fatalf("unknown usage was forged: %#v", accumulated)
+			}
+			if !errors.Is(terminalErr, ErrInvalidUpstream) {
+				t.Fatalf("expected unknown terminal usage rejection, got %v", terminalErr)
+			}
+			if test.wantZeroWire && len(converted) != 0 {
+				t.Fatalf("unknown usage path emitted target wire: %#v", converted)
 			}
 		})
 	}
@@ -381,8 +436,8 @@ func TestMessagesToResponsesStreamRejectsInvalidStateAndArguments(t *testing.T) 
 		{name: "array arguments", events: []string{messagesStart("m"), `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c","name":"f","input":{}}}`, `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"[]"}}`, `{"type":"content_block_stop","index":0}`}},
 		{name: "no argument fragments", events: []string{messagesStart("m"), `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c","name":"f","input":{}}}`, `{"type":"content_block_stop","index":0}`}},
 		{name: "decreasing usage", events: []string{`{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":2}}}`, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`}},
-		{name: "conflicting stop reason", events: []string{messagesStart("m"), `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`, `{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null}}`}},
-		{name: "decreasing cache usage", events: []string{messagesStart("m"), `{"type":"message_delta","delta":{"stop_reason":null,"stop_sequence":null},"usage":{"cache_read_input_tokens":1}}`}},
+		{name: "conflicting stop reason", events: []string{messagesStart("m"), `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}`, `{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":0}}`}},
+		{name: "decreasing cache usage", events: []string{messagesStart("m"), `{"type":"message_delta","delta":{"stop_reason":null,"stop_sequence":null},"usage":{"output_tokens":0,"cache_read_input_tokens":1}}`}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

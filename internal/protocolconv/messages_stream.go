@@ -9,6 +9,8 @@ import (
 // https://platform.claude.com/docs/en/build-with-claude/streaming
 // Official Go SDK accumulation semantics for optional cumulative usage fields:
 // https://github.com/anthropics/anthropic-sdk-go/blob/main/messageutil.go
+// Official TypeScript SDK requires usage on message_start and message_delta:
+// https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/lib/MessageStream.ts
 
 type messagesStreamBlock struct {
 	index     int
@@ -194,7 +196,7 @@ func (s *MessagesToResponsesStream) feedMessageStart(event map[string]json.RawMe
 			return nil, invalidUpstream("message."+field, "message_start field must be null")
 		}
 	}
-	usage, _, err := parseMessagesStreamUsage(message["usage"])
+	usage, err := parseMessagesStreamUsage(message["usage"], true, true)
 	if err != nil {
 		return nil, err
 	}
@@ -437,7 +439,7 @@ func (s *MessagesToResponsesStream) feedMessageDelta(event map[string]json.RawMe
 	if s.stopReason != "stop_sequence" && s.stopSequence != nil {
 		return nil, invalidUpstream("delta.stop_sequence", "stop sequence does not match stop reason")
 	}
-	usage, _, err := parseMessagesStreamUsage(event["usage"])
+	usage, err := parseMessagesStreamUsage(event["usage"], false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -574,19 +576,19 @@ func (s *MessagesToResponsesStream) EOF() error {
 	return interrupted("Messages stream ended before message_stop")
 }
 
-func parseMessagesStreamUsage(raw json.RawMessage) (streamUsageState, bool, error) {
+func parseMessagesStreamUsage(raw json.RawMessage, requireInput, requireOutput bool) (streamUsageState, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return streamUsageState{}, false, nil
+		return streamUsageState{}, invalidUpstream("usage", "a usage object is required")
 	}
 	object, err := decodeObject(raw, CodeInvalidUpstream, "usage")
 	if err != nil {
-		return streamUsageState{}, false, err
+		return streamUsageState{}, err
 	}
 	if err := rejectUnknown(object, map[string]bool{
 		"input_tokens": true, "output_tokens": true,
 		"cache_read_input_tokens": true, "cache_creation_input_tokens": true,
 	}, "usage"); err != nil {
-		return streamUsageState{}, false, err
+		return streamUsageState{}, err
 	}
 	var result streamUsageState
 	fields := []struct {
@@ -606,24 +608,35 @@ func parseMessagesStreamUsage(raw json.RawMessage) (streamUsageState, bool, erro
 		}
 		value, err := requireInteger(rawValue, "usage."+field.name, true)
 		if err != nil || value < 0 {
-			return streamUsageState{}, false, invalidUpstream("usage."+field.name, "a non-negative integer is required")
+			return streamUsageState{}, invalidUpstream("usage."+field.name, "a non-negative integer is required")
 		}
 		*field.value = value
 		*field.known = true
 	}
-	return result, true, nil
+	if requireInput && !result.inputKnown {
+		return streamUsageState{}, invalidUpstream("usage.input_tokens", "a non-negative integer is required")
+	}
+	if requireOutput && !result.outputKnown {
+		return streamUsageState{}, invalidUpstream("usage.output_tokens", "a non-negative integer is required")
+	}
+	return result, nil
 }
 
 // ResponsesToMessagesStream converts the supported Responses event subset to
 // Anthropic Messages SSE. Responses validation is shared with the proven Chat
-// converter; Messages framing is emitted independently.
+// converter; Messages framing is emitted independently. When response.created
+// lacks the usage required by Messages, converted events are held under the
+// existing byte/item bounds until a later response snapshot supplies it.
 type ResponsesToMessagesStream struct {
-	validator ResponsesToChatStream
-	messageID string
-	pending   map[int]*messagesPendingBlock
-	nextBlock int
-	usage     streamUsageState
-	terminal  bool
+	validator      ResponsesToChatStream
+	messageID      string
+	messageStarted bool
+	pending        map[int]*messagesPendingBlock
+	nextBlock      int
+	usage          streamUsageState
+	held           []SSEEvent
+	heldBytes      int
+	terminal       bool
 }
 
 type messagesPendingBlock struct {
@@ -664,15 +677,23 @@ func (s *ResponsesToMessagesStream) Feed(raw []byte) ([]SSEEvent, error) {
 		if err := s.usage.apply(usage); err != nil {
 			return nil, err
 		}
-		message := map[string]any{
-			"id": s.messageID, "type": "message", "role": "assistant", "model": s.validator.model,
-			"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
+		if !present {
+			return nil, nil
 		}
-		if present {
-			message["usage"] = s.usage.messagesUsage()
+		return s.startMessages()
+	case "response.in_progress":
+		usage, present, err := parseResponsesStreamUsage(event["response"])
+		if err != nil {
+			return nil, err
 		}
-		return messagesEvents("message_start", map[string]any{"message": message}, false, false)
-	case "response.in_progress", "response.output_text.done", "response.content_part.done", "response.function_call_arguments.done":
+		if err := s.usage.apply(usage); err != nil {
+			return nil, err
+		}
+		if present && !s.messageStarted {
+			return s.startMessages()
+		}
+		return nil, nil
+	case "response.output_text.done", "response.content_part.done", "response.function_call_arguments.done":
 		return nil, nil
 	case "response.output_item.added":
 		item, err := responseStreamEventItem(event, &s.validator)
@@ -688,7 +709,7 @@ func (s *ResponsesToMessagesStream) Feed(raw []byte) ([]SSEEvent, error) {
 		start, _ := messagesEvent("content_block_start", map[string]any{"index": item.outputIndex, "content_block": block}, true, false)
 		pending.events = append(pending.events, start)
 		pending.started = true
-		return s.flushPendingBlocks(), nil
+		return s.emitOrHold(s.flushPendingBlocks())
 	case "response.content_part.added":
 		item, err := responseStreamEventItem(event, &s.validator)
 		if err != nil {
@@ -701,7 +722,7 @@ func (s *ResponsesToMessagesStream) Feed(raw []byte) ([]SSEEvent, error) {
 		start, _ := messagesEvent("content_block_start", map[string]any{"index": item.outputIndex, "content_block": map[string]any{"type": "text", "text": ""}}, false, false)
 		pending.events = append(pending.events, start)
 		pending.started = true
-		return s.flushPendingBlocks(), nil
+		return s.emitOrHold(s.flushPendingBlocks())
 	case "response.output_text.delta":
 		item, err := responseStreamEventItem(event, &s.validator)
 		if err != nil {
@@ -710,7 +731,7 @@ func (s *ResponsesToMessagesStream) Feed(raw []byte) ([]SSEEvent, error) {
 		delta, _ := requireString(event["delta"], "delta", true)
 		converted, _ := messagesEvent("content_block_delta", map[string]any{"index": item.outputIndex, "delta": map[string]any{"type": "text_delta", "text": delta}}, delta != "", false)
 		s.pending[item.outputIndex].events = append(s.pending[item.outputIndex].events, converted)
-		return s.flushPendingBlocks(), nil
+		return s.emitOrHold(s.flushPendingBlocks())
 	case "response.function_call_arguments.delta":
 		item, err := responseStreamEventItem(event, &s.validator)
 		if err != nil {
@@ -719,7 +740,7 @@ func (s *ResponsesToMessagesStream) Feed(raw []byte) ([]SSEEvent, error) {
 		delta, _ := requireString(event["delta"], "delta", true)
 		converted, _ := messagesEvent("content_block_delta", map[string]any{"index": item.outputIndex, "delta": map[string]any{"type": "input_json_delta", "partial_json": delta}}, delta != "", false)
 		s.pending[item.outputIndex].events = append(s.pending[item.outputIndex].events, converted)
-		return s.flushPendingBlocks(), nil
+		return s.emitOrHold(s.flushPendingBlocks())
 	case "response.output_item.done":
 		item, err := responseStreamEventItem(event, &s.validator)
 		if err != nil {
@@ -732,7 +753,7 @@ func (s *ResponsesToMessagesStream) Feed(raw []byte) ([]SSEEvent, error) {
 		stop, _ := messagesEvent("content_block_stop", map[string]any{"index": item.outputIndex}, false, false)
 		pending.events = append(pending.events, stop)
 		pending.done = true
-		return s.flushPendingBlocks(), nil
+		return s.emitOrHold(s.flushPendingBlocks())
 	case "response.completed":
 		return s.finishResponse(event, false)
 	default:
@@ -852,6 +873,9 @@ func (s *ResponsesToMessagesStream) finishResponse(event map[string]json.RawMess
 	if err != nil {
 		return nil, err
 	}
+	if !usagePresent {
+		return nil, invalidUpstream("response.usage", "terminal usage is required for Messages streaming")
+	}
 	if err := s.usage.apply(usage); err != nil {
 		return nil, err
 	}
@@ -873,8 +897,13 @@ func (s *ResponsesToMessagesStream) finishResponse(event map[string]json.RawMess
 	deltaPayload := map[string]any{
 		"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
 	}
-	if usagePresent {
-		deltaPayload["usage"] = s.usage.messagesUsage()
+	deltaPayload["usage"] = s.usage.messagesUsage()
+	prefix := []SSEEvent(nil)
+	if !s.messageStarted {
+		prefix, err = s.startMessages()
+		if err != nil {
+			return nil, err
+		}
 	}
 	messageDelta, _ := messagesEvent("message_delta", deltaPayload, false, false)
 	messageStop, _ := messagesEvent("message_stop", map[string]any{}, false, true)
@@ -884,7 +913,45 @@ func (s *ResponsesToMessagesStream) finishResponse(event map[string]json.RawMess
 		messageStop.TerminalOutcome = StreamTerminalCompleted
 	}
 	s.terminal = true
-	return []SSEEvent{messageDelta, messageStop}, nil
+	return append(prefix, messageDelta, messageStop), nil
+}
+
+func (s *ResponsesToMessagesStream) startMessages() ([]SSEEvent, error) {
+	if s.messageStarted {
+		return nil, invalidUpstream("stream", "message_start is duplicated")
+	}
+	if !s.usage.inputKnown || !s.usage.outputKnown {
+		return nil, invalidUpstream("response.usage", "input and output usage are required for Messages streaming")
+	}
+	message := map[string]any{
+		"id": s.messageID, "type": "message", "role": "assistant", "model": s.validator.model,
+		"content": []any{}, "stop_reason": nil, "stop_sequence": nil, "usage": s.usage.messagesUsage(),
+	}
+	start, err := messagesEvent("message_start", map[string]any{"message": message}, false, false)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]SSEEvent, 0, 1+len(s.held))
+	result = append(result, start)
+	result = append(result, s.held...)
+	s.held = nil
+	s.heldBytes = 0
+	s.messageStarted = true
+	return result, nil
+}
+
+func (s *ResponsesToMessagesStream) emitOrHold(events []SSEEvent) ([]SSEEvent, error) {
+	if len(events) == 0 || s.messageStarted {
+		return events, nil
+	}
+	for _, event := range events {
+		if len(event.Data) > maxConvertedStreamBytes-s.heldBytes {
+			return nil, invalidUpstream("stream", "delayed Messages stream exceeded the configured byte limit")
+		}
+		s.heldBytes += len(event.Data)
+		s.held = append(s.held, event)
+	}
+	return nil, nil
 }
 
 func (s *ResponsesToMessagesStream) flushPendingBlocks() []SSEEvent {
@@ -964,14 +1031,6 @@ func parseResponsesStreamUsage(rawResponse json.RawMessage) (streamUsageState, b
 		}
 	}
 	return result, true, nil
-}
-
-func messagesEvents(name string, payload map[string]any, semantic, terminal bool) ([]SSEEvent, error) {
-	event, err := messagesEvent(name, payload, semantic, terminal)
-	if err != nil {
-		return nil, err
-	}
-	return []SSEEvent{event}, nil
 }
 
 func messagesEvent(name string, payload map[string]any, semantic, terminal bool) (SSEEvent, error) {
