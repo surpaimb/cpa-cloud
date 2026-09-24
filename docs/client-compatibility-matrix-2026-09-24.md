@@ -49,11 +49,11 @@ PASS 表示本轮固定版本和固定平台上观察到预期结果；FAIL 是�
 | Responses → Messages | `/v1/messages` | PASS | PASS | PASS | 每次 `1 / 1` |
 | Responses → Gemini `generateContent` | `/v1beta/models/{model}:generateContent` | PASS | PASS | PASS | 每次 `1 / 1` |
 
-Gemini 两侧的正向工具回合均省略 `functionCall` / `functionResponse` 的可选 ID；CPA Cloud 生成确定的内部 call ID 并按函数名和顺序关联，未改写任何显式 ID。重复显式 ID 或同名多待处理调用下无法唯一匹配的无 ID 结果仍由集成测试失败关闭，本脚本不把歧义情形当作可用能力。
+Gemini 两侧的正向工具回合均省略 `functionCall` / `functionResponse` 的可选 ID；CPA Cloud 为无 ID 调用生成确定的内部 call ID。有显式 ID 时严格按 ID 关联；缺 ID 的结果仅在存在唯一未完成同名调用时关联，不按顺序猜配，也不改写任何显式 ID。重复显式 ID 或同名多待处理调用下无法唯一匹配的无 ID 结果仍由集成测试失败关闭，本脚本不把歧义情形当作可用能力。
 
 可靠用量按实际 Wire 记录，不按员工响应格式猜测。上游不返回 usage 时四类 Token 均保持未知；OpenAI Chat/Responses 仅能独立证明 output 时，input/cache 保持未知；Messages 的 input/output 可分别证明；Gemini 在缺 `cachedContentTokenCount` 时 input/cache-read 保持未知、output 已知，而 generateContent 不存在的 cache-write 类别记为已知 `0`。员工 Key 未出现在任何上游请求。
 
-跨协议 SSE 仍未实现。六条原始协议流请求都返回明确 `400`，且上游调用和 attempt 都是 `0`。未经修改的三个 CLI 也分别实测了实际请求形状：Codex `/v1/responses`（含 `function`、`namespace`、`web_search` 工具类型）、Claude `/v1/messages`、Gemini `:streamGenerateContent`；三者均在跨 Wire 路由上非零退出，且仍为 `0` 上游调用、`0` attempt。parent 可能在预检拒绝前创建，也可能不创建，因此验收不把 parent 数固定为非安全边界。
+跨协议 SSE 仍未实现。六条原始协议流请求都返回明确 `400`，且上游调用和 attempt 都是 `0`。未经修改的三个 CLI 也分别实测了实际请求形状：Codex `/v1/responses`（含 `function`、`namespace`、`web_search` 工具类型）、Claude `/v1/messages`、Gemini `:streamGenerateContent`。捕获代理只保留安全响应元数据，并核实 CPA 分别返回 Codex `400/unsupported_feature`、Claude `400/invalid_request_error`、Gemini `400/INVALID_ARGUMENT`，三者均被固定分类为 `route_not_representable`；因此非零退出确由跨协议流路由拒绝产生，而不是鉴权或其他字段提前失败。三者仍为 `0` 上游调用、`0` attempt。parent 可能在预检拒绝前创建，也可能不创建，因此验收不把 parent 数固定为安全边界。
 
 同一最终二进制又运行了实际客户端的 `--scope core` 原生/`legacy-native` 回归：Codex、Claude、Gemini 文本 SSE 全部 PASS；Codex 两请求 `get_goal`、Claude 三请求（含一次辅助请求）MCP `echo`、Gemini 两请求 `read_file` 工具回合全部 PASS。专项过程中曾发现 provider-managed tools 被生命周期校验过早拒绝、导致 Codex 原生流零派发的回归；`13b3612` 将该校验限制到服务拥有的 stateful/background/previous 生命周期，恢复无状态原生透明转发，同时保持跨协议和有状态请求失败关闭。
 

@@ -25,7 +25,6 @@ const dataDir = path.join(root, 'data');
 const workspace = path.join(root, 'workspace');
 const clientRoot = path.join(root, 'clients');
 const password = randomBytes(24).toString('hex');
-const employeeSecret = `employee-${randomUUID()}`;
 const upstreamSecrets = {
   openai: `upstream-openai-${randomUUID()}`,
   anthropic: `upstream-anthropic-${randomUUID()}`,
@@ -87,15 +86,19 @@ const upstream = http.createServer(async (req, res) => {
   try {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
-    const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : undefined;
+    const bytes = Buffer.concat(chunks);
+    const rawBody = bytes.toString('utf8');
+    assert.ok(employeeKey, 'Employee credential was not initialized');
+    assert.equal(req.url.includes(employeeKey), false, 'Employee credential reached upstream URL');
+    assert.equal(Object.values(req.headers).some(value => (Array.isArray(value) ? value : [value])
+      .some(item => String(item ?? '').includes(employeeKey))), false, 'Employee credential reached upstream headers');
+    assert.equal(rawBody.includes(employeeKey), false, 'Employee credential reached upstream body');
+    const body = bytes.length ? JSON.parse(bytes) : undefined;
     const serialized = JSON.stringify(body ?? {});
     const model = body?.model ?? req.url.match(/\/models\/([^:]+):/)?.[1];
     const route = routes.find(item => `up-${item.id}` === model);
     assert.ok(route, `Unknown synthetic model ${model}`);
     assert.equal(req.url.split('?')[0], route.path);
-    assert.equal(serialized.includes(employeeSecret), false, 'Employee credential reached upstream body');
-    assert.notEqual(req.headers.authorization, `Bearer ${employeeSecret}`);
-    assert.notEqual(req.headers['x-goog-api-key'], employeeSecret);
     if (route.provider === 'openai') assert.equal(req.headers.authorization, `Bearer ${upstreamSecrets.openai}`);
     if (route.provider === 'anthropic') assert.equal(req.headers.authorization, `Bearer ${upstreamSecrets.anthropic}`);
     if (route.provider === 'gemini') assert.equal(req.headers['x-goog-api-key'], upstreamSecrets.gemini);
@@ -116,10 +119,11 @@ const captureProxy = http.createServer(async (req, res) => {
     for await (const chunk of req) chunks.push(chunk);
     const bytes = Buffer.concat(chunks);
     const body = bytes.length ? JSON.parse(bytes) : undefined;
-    captures.push({ path: req.url.split('?')[0], fields: Object.keys(body ?? {}).sort(),
+    const capture = { path: req.url.split('?')[0], fields: Object.keys(body ?? {}).sort(),
       tool_types: [...new Set((body?.tools ?? []).map(tool => tool?.type ??
         (tool?.functionDeclarations ? 'functionDeclarations' : 'unknown')))].sort(),
-      stream: body?.stream === true || req.url.includes(':streamGenerateContent') });
+      stream: body?.stream === true || req.url.includes(':streamGenerateContent') };
+    captures.push(capture);
     const headers = {};
     for (const [name, value] of Object.entries(req.headers)) {
       if (!['host', 'connection', 'content-length'].includes(name) && value !== undefined) headers[name] = value;
@@ -127,6 +131,19 @@ const captureProxy = http.createServer(async (req, res) => {
     const forwarded = await fetch(`${origin}${req.url}`, { method: req.method, headers,
       body: bytes.length ? bytes : undefined, signal: AbortSignal.timeout(20000) });
     const responseBytes = Buffer.from(await forwarded.arrayBuffer());
+    capture.http_status = forwarded.status;
+    try {
+      const envelope = JSON.parse(responseBytes);
+      const error = envelope?.error;
+      if (error && typeof error === 'object') {
+        if (typeof error.code === 'string' || typeof error.code === 'number') capture.error_code = error.code;
+        if (typeof error.type === 'string') capture.error_type = error.type;
+        if (typeof error.status === 'string') capture.error_status = error.status;
+        if (error.message === 'This request cannot be represented by the selected route.') {
+          capture.rejection_reason = 'route_not_representable';
+        }
+      }
+    } catch { /* Non-JSON responses retain only their safe status. */ }
     res.writeHead(forwarded.status, { 'content-type': forwarded.headers.get('content-type') ?? 'application/json' });
     res.end(responseBytes);
   } catch (error) {
@@ -339,6 +356,11 @@ async function rejectRealCLI(name, route, executable, clientArgs, env) {
   const relevant = captures.slice(beforeCaptures).filter(item => item.path.includes(name === 'Codex CLI' ? '/responses' :
     name === 'Claude Code' ? '/messages' : ':streamGenerateContent'));
   assert.ok(relevant.length >= 1 && relevant.every(item => item.stream), `${name} stream shape was not captured`);
+  assert.ok(relevant.every(item => item.http_status === 400 && item.rejection_reason === 'route_not_representable'),
+    `${name} did not receive the cross-protocol route rejection`);
+  if (name === 'Codex CLI') assert.ok(relevant.every(item => item.error_code === 'unsupported_feature'));
+  if (name === 'Claude Code') assert.ok(relevant.every(item => item.error_type === 'invalid_request_error'));
+  if (name === 'Gemini CLI') assert.ok(relevant.every(item => item.error_code === 400 && item.error_status === 'INVALID_ARGUMENT'));
   const afterRows = await usageRows(route.id);
   const prior = new Set(beforeRows.map(item => item.id));
   const added = afterRows.filter(item => !prior.has(item.id));
@@ -372,7 +394,6 @@ try {
     upstream_model: `up-${route.id}`, wire_protocol: route.wireName });
   const employee = await admin('/employees', 'POST', { name: 'protocol route acceptance' });
   employeeKey = (await admin(`/employees/${employee.id}/keys`, 'POST', { name: 'route smoke', operation_id: randomUUID() })).key;
-  assert.notEqual(employeeKey, employeeSecret);
 
   for (const route of routes) {
     const scenarios = {};
