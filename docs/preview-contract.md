@@ -36,6 +36,10 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 最终模型集合取员工策略、Key 策略和当前有效路由的交集。`GET /v1/models` 只有 Key 允许至少一种 OpenAI 客户端协议时才返回过滤目录，否则返回已鉴权空列表；`GET /v1beta/models` 要求 Gemini 客户端协议，否则同样返回已鉴权空列表。四种前台入口必须在治理、预算、租约、尝试和网络派发之前检查客户端协议与公开模型，并在最终派发事务中重查冻结的策略 revision。
 
+### Messages↔Responses SSE（2026-09-25 源码增量）
+
+显式 wire 只支持契约列出的 text/function 子集、严格事件顺序与累计 usage；Gemini 跨协议 SSE、thinking、cache-control、媒体、引用、托管工具、有状态/后台跨协议转换仍拒绝。completed/incomplete/failed 分别结算为成功/中断/失败。Messages→Responses 请求方向（Responses 上游事件转换为 Messages 客户端事件）在 created 或较早 in_progress 已有完整 usage 时可生成期间增量；若 usage 只在 terminal 可知则有界全流延迟，终态仍未知则零合法目标事件并失败关闭。合成上游测试不等于真实 Anthropic SDK/CLI 或供应商账号兼容验收。
+
 ### 账号与模型生命周期（开发预览增量）
 
 `PATCH/DELETE /admin/api/v1/models/{id}`、`DELETE /admin/api/v1/upstreams/{id}`、墓碑列表和 CAS 语义见[账号与模型生命周期管理契约](account-lifecycle-management-contract.md)。归档不是物理删除：模型 ID 不可重建，上游可恢复凭据被销毁，历史账本关联保留。网页只在 `features.account_lifecycle_management=true` 时显示入口。
