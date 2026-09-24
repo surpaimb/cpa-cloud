@@ -25,7 +25,10 @@ func migrateAccountingV2(ctx context.Context, db *sql.DB) error {
 	if err := accounting.NewLedger(db).MigrateV2(ctx); err != nil {
 		return err
 	}
-	return financial.NewLedger(db).Migrate(ctx)
+	if err := financial.NewLedger(db).Migrate(ctx); err != nil {
+		return err
+	}
+	return financial.NewCommercial(db).Migrate(ctx)
 }
 
 // registerAccountingV2Handlers is intentionally separate from App.Handler so

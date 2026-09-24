@@ -93,6 +93,34 @@ type Balance struct {
 	AmountMicro int64
 }
 
+// EnsureAccountTx validates the single-instance owner boundary and returns a
+// stable currency account in the caller-owned transaction. It never posts a
+// money entry.
+func (l *Ledger) EnsureAccountTx(ctx context.Context, tx *sql.Tx, owner Owner, currency string, at time.Time) (string, Owner, error) {
+	if l == nil || l.db == nil || ctx == nil || tx == nil || !validCurrency(currency) || at.Location() != time.UTC {
+		return "", Owner{}, ErrInvalid
+	}
+	resolved, err := resolveOwner(ctx, tx, owner)
+	if err != nil {
+		return "", Owner{}, err
+	}
+	id, err := ensureAccount(ctx, tx, resolved, currency, at)
+	return id, resolved, err
+}
+
+func (l *Ledger) BalanceTx(ctx context.Context, tx *sql.Tx, accountID string) (int64, error) {
+	if l == nil || l.db == nil || ctx == nil || tx == nil || !validText(accountID, 256) {
+		return 0, ErrInvalid
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM financial_accounts WHERE id=?`, accountID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	} else if err != nil {
+		return 0, ErrUnavailable
+	}
+	return accountBalance(ctx, tx, accountID)
+}
+
 type Ledger struct{ db *sql.DB }
 
 func NewLedger(db *sql.DB) *Ledger { return &Ledger{db: db} }
@@ -232,13 +260,17 @@ func (l *Ledger) PostTx(ctx context.Context, tx *sql.Tx, input Post) ([]Entry, e
 			return nil, err
 		}
 		if item.OriginalEntryID != "" {
-			var originalAccount string
-			if err := tx.QueryRowContext(ctx, `SELECT account_id FROM financial_entries WHERE id=?`, item.OriginalEntryID).Scan(&originalAccount); errors.Is(err, sql.ErrNoRows) {
+			var originalAccount, originalKind string
+			var originalAmount int64
+			if err := tx.QueryRowContext(ctx, `SELECT account_id,kind,amount_micro FROM financial_entries WHERE id=?`, item.OriginalEntryID).Scan(&originalAccount, &originalKind, &originalAmount); errors.Is(err, sql.ErrNoRows) {
 				return nil, ErrNotFound
 			} else if err != nil {
 				return nil, ErrUnavailable
 			} else if originalAccount != accountID {
 				return nil, ErrConflict
+			}
+			if err := validateReversalLimit(ctx, tx, item, EntryKind(originalKind), originalAmount); err != nil {
+				return nil, err
 			}
 		}
 		current := deltas[accountID]
@@ -524,11 +556,11 @@ func validEntryKind(value EntryKind) bool {
 }
 
 func validPostEntry(action string, item EntryInput) bool {
-	credit := item.Kind == EntryAdjustmentCredit || item.Kind == EntryTopUp || item.Kind == EntryRedemption || item.Kind == EntrySubscriptionCredit
+	credit := item.Kind == EntryAdjustmentCredit || item.Kind == EntryTopUp || item.Kind == EntryRedemption || item.Kind == EntrySubscriptionCredit || item.Kind == EntryRefund
 	if credit != (item.AmountMicro > 0) {
 		return false
 	}
-	if item.Kind == EntryRefund {
+	if item.Kind == EntryRefund || action == "refund" && item.Kind == EntryAdjustmentDebit {
 		if !validText(item.OriginalEntryID, 256) {
 			return false
 		}
@@ -545,12 +577,73 @@ func validPostEntry(action string, item EntryInput) bool {
 	case "subscription_purchase":
 		return item.Kind == EntrySubscriptionCharge || item.Kind == EntrySubscriptionCredit
 	case "refund":
-		return item.Kind == EntryRefund
+		return item.Kind == EntryRefund || item.Kind == EntryAdjustmentDebit
 	case "usage_charge":
 		return item.Kind == EntryUsageCharge
 	default:
 		return false
 	}
+}
+
+func validateReversalLimit(ctx context.Context, tx *sql.Tx, item EntryInput, originalKind EntryKind, originalAmount int64) error {
+	eligible := false
+	if item.Kind == EntryRefund {
+		eligible = originalAmount < 0 && (originalKind == EntryAdjustmentDebit || originalKind == EntrySubscriptionCharge || originalKind == EntryUsageCharge)
+	} else if item.Kind == EntryAdjustmentDebit {
+		eligible = originalAmount > 0 && originalKind == EntryTopUp
+	}
+	if !eligible {
+		return ErrConflict
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT amount_micro FROM financial_entries WHERE original_entry_id=? ORDER BY id`, item.OriginalEntryID)
+	if err != nil {
+		return ErrUnavailable
+	}
+	defer rows.Close()
+	var reversed int64
+	for rows.Next() {
+		var amount int64
+		if err := rows.Scan(&amount); err != nil {
+			return ErrUnavailable
+		}
+		magnitude := amount
+		if magnitude < 0 {
+			if magnitude == math.MinInt64 {
+				return ErrUnavailable
+			}
+			magnitude = -magnitude
+		}
+		var ok bool
+		reversed, ok = checkedAdd(reversed, magnitude)
+		if !ok {
+			return ErrUnavailable
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return ErrUnavailable
+	}
+	current := item.AmountMicro
+	if current < 0 {
+		if current == math.MinInt64 {
+			return ErrInvalid
+		}
+		current = -current
+	}
+	limit := originalAmount
+	if limit < 0 {
+		if limit == math.MinInt64 {
+			return ErrUnavailable
+		}
+		limit = -limit
+	}
+	total, ok := checkedAdd(reversed, current)
+	if !ok {
+		return ErrUnavailable
+	}
+	if total > limit {
+		return ErrConflict
+	}
+	return nil
 }
 
 func validCurrency(value string) bool {
@@ -615,10 +708,10 @@ func validateSchema(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	var explicitIndexes, triggerCount int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND tbl_name LIKE 'financial_%'`).Scan(&explicitIndexes); err != nil || explicitIndexes != 3 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND name IN ('financial_accounts_owner_idx','financial_entries_account_idx','financial_entries_resource_idx')`).Scan(&explicitIndexes); err != nil || explicitIndexes != 3 {
 		return ErrSchema
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name LIKE 'financial_%'`).Scan(&triggerCount); err != nil || triggerCount != 6 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('financial_entries_no_update','financial_entries_no_delete','financial_operations_no_update','financial_operations_no_delete','financial_accounts_no_update','financial_accounts_no_delete')`).Scan(&triggerCount); err != nil || triggerCount != 6 {
 		return ErrSchema
 	}
 	return nil

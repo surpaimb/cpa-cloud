@@ -14,6 +14,7 @@ const billingV1MaxBody = 64 << 10
 func (a *App) registerBillingV1Handlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/api/v1/billing/balances", a.requireAdmin(a.billingV1Balance, false))
 	mux.HandleFunc("POST /admin/api/v1/billing/adjustments", a.requireAdmin(a.billingV1Adjustment, true))
+	a.registerBillingCommercialHandlers(mux)
 }
 
 func (a *App) billingV1Balance(w http.ResponseWriter, r *http.Request, _ adminSession) {
