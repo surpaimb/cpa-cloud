@@ -383,7 +383,7 @@ preview.3 会自动读取上游模型作为候选；勾选所需模型，可修�
 
 远程员工不能用 `127.0.0.1` 连接管理员电脑，该地址指向员工自己的电脑。
 
-CC Switch 可用于配置工具，但最终调用工具必须支持当前协议。**preview.3 下载包仅提供 Chat Completions；最新源码增加上述 Responses、Claude Messages 和 Gemini 原生子集。**完整实机兼容验收仍待完成，参见[员工接入说明](docs/employee-access.md)。
+CC Switch 可用于配置工具，但最终调用工具必须支持当前协议。**preview.3 下载包仅提供 Chat Completions；最新源码增加上述 Responses、Claude Messages 和 Gemini 原生子集。**最新源码已完成三种 CLI 的固定 Windows/合成上游实机矩阵，但 CC Switch GUI、真实供应商和会员账号仍未验证，且取消仍有两个明确 FAIL；参见[员工接入说明](docs/employee-access.md)和[真实客户端兼容矩阵](docs/client-compatibility-matrix-2026-09-24.md)。
 
 Bash + curl 测试示例（Key 交互输入，请求头经 stdin 传入）：
 
@@ -526,7 +526,7 @@ node scripts/smoke-codex-oauth.mjs <absolute-executable-path>
 
 ## 文档与许可证
 
-- [集成证据](docs/integration-status.md) · [开发计划](docs/development-plan.md) · [接口契约](docs/preview-contract.md)
+- [集成证据](docs/integration-status.md) · [真实客户端兼容矩阵](docs/client-compatibility-matrix-2026-09-24.md) · [开发计划](docs/development-plan.md) · [接口契约](docs/preview-contract.md)
 - [完整功能对齐计划](docs/feature-parity-plan.md) · [Responses 契约](docs/responses-preview-contract.md) · [任务分工](docs/work-coordination.md)
 - [产品规划](docs/product-plan.md) · [核心设计](docs/core-design.md) · [验收矩阵](docs/acceptance-matrix.md)
 - [会员接入研究](docs/research/membership-feasibility.md) · [协议来源](docs/protocol-sources.md)

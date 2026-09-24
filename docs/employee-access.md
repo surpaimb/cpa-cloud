@@ -1,6 +1,6 @@
 # 员工直接使用 CC Switch
 
-状态：CPA Cloud 已实现开发预览的 Chat Completions API Key 闭环；CC Switch 与实际工具的完整兼容性仍待验证。
+状态：最新源码已完成固定 Windows 样本上的 Codex CLI、Claude Code 和 Gemini CLI 真实客户端合成上游验收；CC Switch GUI、真实供应商和会员账号仍未验收。逐项 PASS/FAIL/SKIP、版本及哈希见[真实客户端兼容矩阵](client-compatibility-matrix-2026-09-24.md)。
 
 最新源码新增 `POST /v1/responses` 的 API Key 同协议转发及 Codex 实验文本/函数工具子集，以及 Anthropic API Key 的 Messages/count_tokens 和 Gemini Developer API 的原生文本/函数工具入口；下载版 preview.3 不包含这些功能。接口自动测试不等于真实客户端兼容验收，范围见 [Responses 契约](responses-preview-contract.md)、[Claude 契约](claude-messages-contract.md) 和 [Gemini 契约](gemini-native-contract.md)。三种原生协议分别连接对应上游类型，不代表 Claude/Gemini 订阅会员可用。
 
@@ -25,7 +25,7 @@ CC Switch 是配置工具，也有可选本地代理模式。普通配置模式�
 
 ## 配置指引
 
-规划中的后台接入说明将按 Codex、Claude Code、Gemini CLI 分开，列出 Base URL、认证方式、模型和已验证版本；当前未实现这些工具需要的全部协议或一键配置。
+后台接入说明仍需按 Codex、Claude Code、Gemini CLI 分开，列出 Base URL、认证方式、模型和已验证版本。当前源码已有三种 CLI 的文本与工具回合实测，但 Codex 取消传播和 Claude 终止边界重发仍为 FAIL，也没有一键配置。
 上游有 Gemini 账号不等于 Gemini CLI 已兼容；需单独验证其客户端协议，不能只以 /v1/models 通过代替。
 仅将已验证的客户端配置标记为可用，提供普通手工配置路径，不强制 CC Switch。
 
