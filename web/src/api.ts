@@ -56,10 +56,12 @@ export type KeyAccessPolicy = {
   protocols: ClientProtocol[]
   model_mode: 'all' | 'selected'
   models: string[]
+  source_mode: 'all' | 'selected'
+  source_cidrs: string[]
   effective_protocols: ClientProtocol[]
   effective_models: string[]
 }
-export type KeyPolicyInput = Pick<KeyAccessPolicy, 'protocol_mode' | 'protocols' | 'model_mode' | 'models'>
+export type KeyPolicyInput = Pick<KeyAccessPolicy, 'protocol_mode' | 'protocols' | 'model_mode' | 'models' | 'source_mode' | 'source_cidrs'>
 export type EmployeeKey = {
   id: string
   name: string

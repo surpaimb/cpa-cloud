@@ -78,7 +78,7 @@ const protocolChoices: Array<{ id: ClientProtocol; label: string }> = [
   { id: 'gemini-generate-content', label: 'Gemini generateContent' },
 ]
 
-const defaultKeyPolicy: KeyPolicyInput = { protocol_mode: 'all', protocols: [], model_mode: 'all', models: [] }
+const defaultKeyPolicy: KeyPolicyInput = { protocol_mode: 'all', protocols: [], model_mode: 'all', models: [], source_mode: 'all', source_cidrs: [] }
 
 function normalizedPolicy(draft: KeyPolicyInput): KeyPolicyInput {
   return {
@@ -86,6 +86,8 @@ function normalizedPolicy(draft: KeyPolicyInput): KeyPolicyInput {
     protocols: draft.protocol_mode === 'all' ? [] : [...draft.protocols],
     model_mode: draft.model_mode,
     models: draft.model_mode === 'all' ? [] : [...draft.models],
+    source_mode: draft.source_mode,
+    source_cidrs: draft.source_mode === 'all' ? [] : [...draft.source_cidrs],
   }
 }
 
@@ -129,6 +131,7 @@ function KeysDialog({ employee, csrf, capability, onClose }: { employee: Employe
 function KeyPolicyEditor({ draft, onChange, modelIds, loading, error, onRetry, context }: { draft: KeyPolicyInput; onChange: (next: KeyPolicyInput) => void; modelIds: string[]; loading: boolean; error: string | null; onRetry: () => void; context: string }) {
   const selectedProtocols = new Set(draft.protocols)
   const selectedModels = new Set(draft.models)
+  const sourceInputId = context.startsWith('创建') ? 'create-key-source-cidrs' : 'edit-key-source-cidrs'
   return <section className="key-policy-editor" aria-label={context}>
     <h3>{context}</h3>
     <div className="key-policy-grid">
@@ -142,15 +145,22 @@ function KeyPolicyEditor({ draft, onChange, modelIds, loading, error, onRetry, c
         <label><input type="radio" name={`${context}-model-mode`} checked={draft.model_mode === 'selected'} onChange={() => onChange({ ...draft, model_mode: 'selected' })} />仅指定模型</label>
         {draft.model_mode === 'selected' ? <><PageState loading={loading} error={error} onRetry={onRetry} />{!loading && !error ? <div className="key-policy-options">{modelIds.length ? modelIds.map((model) => <label key={model}><input type="checkbox" checked={selectedModels.has(model)} onChange={(event) => onChange({ ...draft, models: event.target.checked ? [...draft.models, model] : draft.models.filter((id) => id !== model) })} />{model}</label>) : <p>员工当前没有可供此 Key 选择的模型。</p>}</div> : null}</> : null}
       </fieldset>
+      <fieldset><legend>来源地址</legend>
+        <label><input type="radio" name={`${context}-source-mode`} checked={draft.source_mode === 'all'} onChange={() => onChange({ ...draft, source_mode: 'all' })} />任意 socket peer</label>
+        <label><input type="radio" name={`${context}-source-mode`} checked={draft.source_mode === 'selected'} onChange={() => onChange({ ...draft, source_mode: 'selected' })} />仅指定 IP / CIDR</label>
+        {draft.source_mode === 'selected' ? <div className="key-policy-source-input"><label htmlFor={sourceInputId}>允许的 IP / CIDR，每行一项</label><textarea id={sourceInputId} aria-label="允许的 IP / CIDR" rows={5} value={draft.source_cidrs.join('\n')} onChange={(event) => onChange({ ...draft, source_cidrs: event.target.value === '' ? [] : event.target.value.split(/\r?\n/) })} placeholder={'192.0.2.10\n10.20.0.0/16\n2001:db8::/48'} /><small>{draft.source_cidrs.length} / 64 项</small></div> : null}
+      </fieldset>
     </div>
-    {(draft.protocol_mode === 'selected' && draft.protocols.length === 0) || (draft.model_mode === 'selected' && draft.models.length === 0) ? <div className="key-policy-deny" role="status">空的“仅指定”列表是显式 deny-all：该 Key 将不能通过对应入口或访问对应模型。</div> : null}
+    <div className="key-policy-peer-note"><strong>按真实 socket peer 判断</strong><span>服务不会读取 Forwarded、X-Forwarded-For 或 X-Real-IP。使用反向代理时，此处通常匹配代理地址，而不是最终用户地址。</span></div>
+    {(draft.protocol_mode === 'selected' && draft.protocols.length === 0) || (draft.model_mode === 'selected' && draft.models.length === 0) || (draft.source_mode === 'selected' && draft.source_cidrs.length === 0) ? <div className="key-policy-deny" role="status">空的“仅指定”列表是显式 deny-all：该 Key 将不能使用对应入口、模型或来源。</div> : null}
   </section>
 }
 
 function KeyPolicySummary({ policy }: { policy: KeyAccessPolicy }) {
   const configuredProtocols = policy.protocol_mode === 'all' ? '全部协议' : policy.protocols.length ? `${policy.protocols.length} 个协议` : '禁止全部协议'
   const configuredModels = policy.model_mode === 'all' ? '员工可用的全部模型' : policy.models.length ? `${policy.models.length} 个模型` : '禁止全部模型'
-  return <div className="key-policy-summary"><span>配置：{configuredProtocols} · {configuredModels}</span><small>当前生效：{policy.effective_protocols.length} 个协议 · {policy.effective_models.length} 个模型 · 修订 {policy.revision}</small></div>
+  const configuredSources = policy.source_mode === 'all' ? '任意 socket peer' : policy.source_cidrs.length ? `${policy.source_cidrs.length} 个来源网段` : '禁止全部来源'
+  return <div className="key-policy-summary"><span>配置：{configuredProtocols} · {configuredModels} · {configuredSources}</span><small>当前生效：{policy.effective_protocols.length} 个协议 · {policy.effective_models.length} 个模型 · 修订 {policy.revision}</small></div>
 }
 
 function EditKeyPolicyDialog({ employee, keyItem, csrf, modelIds, modelsLoading, modelsError, onRetryModels, onClose, onSaved }: { employee: Employee; keyItem: EmployeeKey; csrf: string; modelIds: string[]; modelsLoading: boolean; modelsError: string | null; onRetryModels: () => void; onClose: () => void; onSaved: () => void }) {

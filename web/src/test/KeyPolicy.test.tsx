@@ -13,6 +13,8 @@ const allPolicy = {
   protocols: [],
   model_mode: 'all',
   models: [],
+  source_mode: 'all',
+  source_cidrs: [],
   effective_protocols: ['openai-chat', 'openai-responses', 'anthropic-messages', 'gemini-generate-content'],
   effective_models: ['public-model'],
 }
@@ -47,14 +49,16 @@ describe('access-key policy administration', () => {
     const dialog = await screen.findByRole('dialog')
     await userEvent.click(within(dialog).getByLabelText('仅指定协议'))
     await userEvent.click(within(dialog).getByLabelText('仅指定模型'))
+    await userEvent.click(within(dialog).getByLabelText('仅指定 IP / CIDR'))
     expect(dialog).toHaveTextContent('显式 deny-all')
+    expect(dialog).toHaveTextContent('服务不会读取 Forwarded、X-Forwarded-For 或 X-Real-IP')
     await userEvent.click(within(dialog).getByRole('button', { name: '生成永久 Key' }))
 
     expect(await screen.findByTestId('created-key')).toHaveTextContent('cpa_plaintext_once')
     expect(writes).toHaveLength(1)
     expect(writes[0]).toMatchObject({
       name: '默认 Key', operation_id: 'operation-1', expires_at: null,
-      policy: { protocol_mode: 'selected', protocols: [], model_mode: 'selected', models: [] },
+      policy: { protocol_mode: 'selected', protocols: [], model_mode: 'selected', models: [], source_mode: 'selected', source_cidrs: [] },
     })
     await userEvent.click(screen.getByRole('button', { name: '我已保存，关闭' }))
     expect(screen.queryByText('cpa_plaintext_once')).not.toBeInTheDocument()
@@ -111,14 +115,17 @@ describe('access-key policy administration', () => {
     const editor = dialogs[dialogs.length - 1]
     await userEvent.click(await within(editor).findByLabelText('仅指定协议'))
     await userEvent.click(within(editor).getByLabelText('OpenAI Chat Completions'))
+    await userEvent.click(within(editor).getByLabelText('仅指定 IP / CIDR'))
+    await userEvent.type(within(editor).getByLabelText('允许的 IP / CIDR'), '192.0.2.9{enter}2001:db8::/48')
     await userEvent.click(within(editor).getByRole('button', { name: '保存独立权限' }))
 
     expect(await within(editor).findByText(/策略已被其他操作更新到修订 3/)).toBeInTheDocument()
     expect(within(editor).getByLabelText('OpenAI Chat Completions')).toBeChecked()
+    expect(within(editor).getByLabelText('允许的 IP / CIDR')).toHaveValue('192.0.2.9\n2001:db8::/48')
     await userEvent.click(within(editor).getByRole('button', { name: '使用最新修订重试' }))
     await waitFor(() => expect(writes).toHaveLength(2))
-    expect(writes[0]).toMatchObject({ expected_revision: 2, protocol_mode: 'selected', protocols: ['openai-chat'] })
-    expect(writes[1]).toMatchObject({ expected_revision: 3, protocol_mode: 'selected', protocols: ['openai-chat'] })
+    expect(writes[0]).toMatchObject({ expected_revision: 2, protocol_mode: 'selected', protocols: ['openai-chat'], source_mode: 'selected', source_cidrs: ['192.0.2.9', '2001:db8::/48'] })
+    expect(writes[1]).toMatchObject({ expected_revision: 3, protocol_mode: 'selected', protocols: ['openai-chat'], source_mode: 'selected', source_cidrs: ['192.0.2.9', '2001:db8::/48'] })
     expect(new Headers(fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/keys/key-1/policy') && (init as RequestInit)?.method === 'PUT')?.[1]?.headers).get('X-CSRF-Token')).toBe('csrf')
   })
 })
