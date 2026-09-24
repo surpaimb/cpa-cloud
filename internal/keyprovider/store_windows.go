@@ -41,16 +41,9 @@ type PreparedVersion struct {
 }
 
 func Open(root string) (*Store, error) {
-	absolute, err := filepath.Abs(root)
-	if err != nil || root == "" {
-		return nil, errors.New("key provider store path is invalid")
-	}
-	absolute = filepath.Clean(absolute)
-	if err := validateLocalFixedVolume(absolute); err != nil {
+	absolute, err := cleanStorePath(root)
+	if err != nil {
 		return nil, err
-	}
-	if filepath.Dir(absolute) == absolute {
-		return nil, errors.New("key provider store cannot be a filesystem root")
 	}
 	if err := ensureProtectedDirectory(absolute); err != nil {
 		return nil, fmt.Errorf("prepare key provider store: %w", err)
@@ -60,6 +53,38 @@ func Open(root string) (*Store, error) {
 		return nil, fmt.Errorf("inspect key provider store: %w", err)
 	}
 	return &Store{root: absolute, rootIdentity: identity}, nil
+}
+
+// OpenExisting opens a provider store without creating it or changing its ACL.
+// It is used by read-only offline export paths.
+func OpenExisting(root string) (*Store, error) {
+	absolute, err := cleanStorePath(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExistingDirectoryChain(absolute); err != nil {
+		return nil, fmt.Errorf("inspect existing key provider store: %w", err)
+	}
+	identity, err := os.Lstat(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("inspect key provider store: %w", err)
+	}
+	return &Store{root: absolute, rootIdentity: identity}, nil
+}
+
+func cleanStorePath(root string) (string, error) {
+	absolute, err := filepath.Abs(root)
+	if err != nil || root == "" {
+		return "", errors.New("key provider store path is invalid")
+	}
+	absolute = filepath.Clean(absolute)
+	if err := validateLocalFixedVolume(absolute); err != nil {
+		return "", err
+	}
+	if filepath.Dir(absolute) == absolute {
+		return "", errors.New("key provider store cannot be a filesystem root")
+	}
+	return absolute, nil
 }
 
 func validateLocalFixedVolume(path string) error {
@@ -99,6 +124,30 @@ func (s *Store) PrepareVersion(ctx context.Context, providerID string, version u
 		return nil, errors.New("generate backup wrapping key")
 	}
 	defer wipe(secret)
+	return s.prepareMaterial(ctx, providerID, version, secret)
+}
+
+// PrepareMaterial re-protects already authenticated recovery key material for
+// the current Windows user. The caller retains ownership of its original
+// material; this method wipes its by-value copy before returning.
+func (s *Store) PrepareMaterial(ctx context.Context, material Material) (*PreparedVersion, error) {
+	defer material.Destroy()
+	if err := validateMaterial(&material); err != nil {
+		return nil, err
+	}
+	return s.prepareMaterial(ctx, material.ProviderID, material.Version, material.Key[:])
+}
+
+func (s *Store) prepareMaterial(ctx context.Context, providerID string, version uint64, secret []byte) (_ *PreparedVersion, returnErr error) {
+	if err := validateReference(providerID, version); err != nil {
+		return nil, err
+	}
+	if err := s.validateRoot(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	protected, err := protect(secret, providerID, version)
 	if err != nil {
 		return nil, err
