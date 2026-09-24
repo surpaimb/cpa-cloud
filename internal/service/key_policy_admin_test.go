@@ -4,6 +4,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,33 @@ import (
 
 	"cpacloud.local/server/internal/keypolicy"
 )
+
+func TestAppRestartFailsClosedWhenAccessKeyPolicyIsMissing(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := Initialize(context.Background(), dataDir, strings.NewReader("a-strong-preview-password\n")); err != nil {
+		t.Fatal(err)
+	}
+	app, err := Open(context.Background(), Config{DataDir: dataDir, Listen: "127.0.0.1:0", Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := utcNow()
+	if _, err := app.store.db.Exec(`INSERT INTO employees(id,name,status,model_mode,revision,created_at) VALUES('employee-missing-policy','Missing policy','active','all',1,?)`, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.db.Exec(`INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,created_at) VALUES('key-missing-policy','employee-missing-policy','Missing policy','selector-missing-policy',X'01',1,'operation-missing-policy',?)`, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if restarted, err := Open(context.Background(), Config{DataDir: dataDir, Listen: "127.0.0.1:0", Version: "test"}); !errors.Is(err, keypolicy.ErrInvalidSchema) {
+		if restarted != nil {
+			restarted.Close()
+		}
+		t.Fatalf("restart err=%v, want invalid key policy schema", err)
+	}
+}
 
 func TestKeyPolicyAdminGetPutCASAndEffectiveView(t *testing.T) {
 	fixture := newKeyPolicyAdminFixture(t)
