@@ -3,6 +3,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -85,6 +86,7 @@ func TestExplicitWireChatToResponsesDispatchesOnceAndAttributesUpstream(t *testi
 		t.Fatalf("response=%#v calls=%d", body, calls.Load())
 	}
 	assertSingleWireAttempt(t, fixture.app, "openai-responses")
+	assertSingleWireUsage(t, fixture.app, nil, int64Ptr(2))
 }
 
 func TestExplicitWireResponsesToChatDispatchesOnceAndAttributesUpstream(t *testing.T) {
@@ -111,6 +113,7 @@ func TestExplicitWireResponsesToChatDispatchesOnceAndAttributesUpstream(t *testi
 		t.Fatalf("response=%#v calls=%d", body, calls.Load())
 	}
 	assertSingleWireAttempt(t, fixture.app, "openai-chat-completions")
+	assertSingleWireUsage(t, fixture.app, nil, int64Ptr(2))
 }
 
 func TestExplicitCrossProtocolStreamRejectsBeforeDispatch(t *testing.T) {
@@ -167,6 +170,7 @@ func TestExplicitWireMessagesToResponsesUsesRuntime(t *testing.T) {
 		t.Fatalf("response=%#v calls=%d", body, calls.Load())
 	}
 	assertSingleWireAttempt(t, fixture.app, "openai-responses")
+	assertSingleWireUsage(t, fixture.app, nil, int64Ptr(2))
 }
 
 func TestExplicitWireGeminiToResponsesUsesRuntime(t *testing.T) {
@@ -189,6 +193,7 @@ func TestExplicitWireGeminiToResponsesUsesRuntime(t *testing.T) {
 		t.Fatalf("response=%#v calls=%d", body, calls.Load())
 	}
 	assertSingleWireAttempt(t, fixture.app, "openai-responses")
+	assertSingleWireUsage(t, fixture.app, nil, int64Ptr(2))
 }
 
 func TestExplicitWireResponsesToMessagesUsesRuntime(t *testing.T) {
@@ -211,6 +216,7 @@ func TestExplicitWireResponsesToMessagesUsesRuntime(t *testing.T) {
 		t.Fatalf("response=%#v calls=%d", body, calls.Load())
 	}
 	assertSingleWireAttempt(t, fixture.app, "anthropic-messages")
+	assertSingleWireUsage(t, fixture.app, int64Ptr(4), int64Ptr(2))
 }
 
 func TestExplicitWireResponsesToGeminiUsesRuntime(t *testing.T) {
@@ -233,6 +239,7 @@ func TestExplicitWireResponsesToGeminiUsesRuntime(t *testing.T) {
 		t.Fatalf("response=%#v calls=%d", body, calls.Load())
 	}
 	assertSingleWireAttempt(t, fixture.app, "gemini-generate-content")
+	assertSingleWireUsage(t, fixture.app, nil, int64Ptr(2))
 }
 
 func assertSingleWireAttempt(t *testing.T, app *App, protocol string) {
@@ -247,6 +254,23 @@ func assertSingleWireAttempt(t *testing.T, app *App, protocol string) {
 	}
 	if requests != 1 || attempts != 1 || stored != protocol {
 		t.Fatalf("requests=%d attempts=%d protocol=%q", requests, attempts, stored)
+	}
+}
+
+func assertSingleWireUsage(t *testing.T, app *App, input, output *int64) {
+	t.Helper()
+	var storedInput, storedOutput sql.NullInt64
+	if err := app.store.db.QueryRow(`SELECT input_tokens,output_tokens FROM accounting_attempts`).Scan(&storedInput, &storedOutput); err != nil {
+		t.Fatal(err)
+	}
+	for name, check := range map[string]struct {
+		actual   sql.NullInt64
+		expected *int64
+	}{"input": {storedInput, input}, "output": {storedOutput, output}} {
+		actual, expected := check.actual, check.expected
+		if expected == nil && actual.Valid || expected != nil && (!actual.Valid || actual.Int64 != *expected) {
+			t.Fatalf("%s tokens=%v want=%v", name, actual, expected)
+		}
 	}
 }
 
