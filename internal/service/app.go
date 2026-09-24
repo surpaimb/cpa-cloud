@@ -131,6 +131,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err := app.initializeGovernance(ctx); err != nil {
 		return nil, err
 	}
+	if err := migrateGeneralBudgets(ctx, s.db); err != nil {
+		return nil, fmt.Errorf("migrate general budgets: %w", err)
+	}
 	trimExpiredSessions(ctx, s.db)
 	if err := recoverCodexOAuthSessions(ctx, s.db); err != nil {
 		return nil, err

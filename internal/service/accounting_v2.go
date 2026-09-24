@@ -21,10 +21,7 @@ const accountingV2MaxExportBytes = 4 << 20
 // selector-aware budget schema. The App owner controls when it runs relative
 // to the existing governance budget migrations.
 func migrateAccountingV2(ctx context.Context, db *sql.DB) error {
-	if err := accounting.NewLedger(db).MigrateV2(ctx); err != nil {
-		return err
-	}
-	return migrateGeneralBudgets(ctx, db)
+	return accounting.NewLedger(db).MigrateV2(ctx)
 }
 
 // registerAccountingV2Handlers is intentionally separate from App.Handler so
