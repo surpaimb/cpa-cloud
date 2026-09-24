@@ -15,9 +15,15 @@ type PreparedVersion struct{}
 
 func Open(string) (*Store, error) { return &Store{}, nil }
 
+func OpenExisting(string) (*Store, error) { return &Store{}, nil }
+
 func (s *Store) Ready() (bool, string) { return false, ReasonUnsupported }
 
 func (s *Store) PrepareVersion(context.Context, string, uint64) (*PreparedVersion, error) {
+	return nil, ErrUnavailable
+}
+
+func (s *Store) PrepareMaterial(context.Context, Material) (*PreparedVersion, error) {
 	return nil, ErrUnavailable
 }
 

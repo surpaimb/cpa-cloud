@@ -217,6 +217,40 @@ func TestWindowsDPAPIRejectsNetworkAndDeviceStores(t *testing.T) {
 	}
 }
 
+func TestWindowsDPAPIPrepareMaterialReprotectsExactKey(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "reprotected"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	material := Material{ProviderID: "bkp_imported", Kind: KindWindowsDPAPIUser, Version: 7}
+	for index := range material.Key {
+		material.Key[index] = byte(index + 41)
+	}
+	prepared, err := store.PrepareMaterial(context.Background(), material)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Commit()
+	resolved, err := store.Resolve(context.Background(), material.ProviderID, material.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Destroy()
+	if resolved.Key != material.Key {
+		t.Fatal("reprotected key does not match imported material")
+	}
+}
+
+func TestWindowsDPAPIOpenExistingDoesNotCreateStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing-store")
+	if _, err := OpenExisting(path); err == nil {
+		t.Fatal("missing store was opened")
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only open created the store: %v", err)
+	}
+}
+
 func TestWindowsDPAPIStoreUsesProtectedDACL(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "protected-store")
 	store, err := Open(root)
