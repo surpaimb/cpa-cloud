@@ -114,9 +114,13 @@ type AdmissionStart struct {
 	Subject          Subject
 	SettingsRevision int64
 	SnapshotComplete bool
-	Scopes           []ScopeSnapshot
-	StartedAt        time.Time
-	ObservedAt       time.Time
+	// BudgetSnapshot records a selector-aware strict budget request even when
+	// no legacy RPM/concurrency scope applies. The service must freeze its
+	// selector rows in the same caller-owned transaction before commit.
+	BudgetSnapshot bool
+	Scopes         []ScopeSnapshot
+	StartedAt      time.Time
+	ObservedAt     time.Time
 }
 
 type Lease struct {
@@ -270,7 +274,7 @@ func (c *Coordinator) AdmitTx(ctx context.Context, tx *sql.Tx, input AdmissionSt
 	if settings.Revision != input.SettingsRevision {
 		return nil, Decision{Code: DecisionPolicyChanged}, nil
 	}
-	if !settings.Enabled || len(scopes) == 0 {
+	if !settings.Enabled || len(scopes) == 0 && !input.BudgetSnapshot {
 		return nil, Decision{Allowed: true, Code: DecisionAllowed}, nil
 	}
 

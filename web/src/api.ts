@@ -509,6 +509,7 @@ export type GovernanceBudgetLimits = {
 }
 export type GovernanceShadowLimits = { tpm: number | null; cost_micro: string | null; currency: string | null; window: 'rolling_24h' | null }
 export type GovernanceScopeKind = 'employee' | 'key' | 'group'
+export type GeneralBudgetProtocol = 'openai-chat-completions' | 'openai-responses' | 'anthropic-messages' | 'gemini-generate-content'
 export type GovernancePolicy = {
   id: string
   scope_kind: GovernanceScopeKind
@@ -524,7 +525,7 @@ export type GovernancePolicy = {
 export type GovernancePage<T> = { items: T[]; next_cursor: string | null }
 export type GovernanceReceipt = {
   operation_id: string
-  resource_kind: 'settings' | 'group' | 'policy'
+  resource_kind: 'settings' | 'group' | 'policy' | 'budget'
   resource_id: string
   revision: number
   created_at: string
@@ -597,6 +598,37 @@ function usageSearch(filters: UsageFilters, cursor?: string) {
   }
   if (cursor) query.set('cursor', cursor)
   return query.toString()
+}
+export type GeneralBudgetPolicy = {
+  id: string
+  scope: { kind: GovernanceScopeKind; id: string; protocol: GeneralBudgetProtocol | null; model: string | null }
+  enabled: boolean
+  enforcement: 'strict'
+  unknown_mode: 'deny_unknown'
+  token: { limit: number | null; window: 'rolling_60s' | null }
+  cost: { limit_micro: string | null; currency: string | null; window: 'rolling_24h' | null }
+  revision: number
+  created_at: string
+  updated_at: string
+}
+export type GeneralBudgetCreate = {
+  operation_id: string
+  scope_kind: GovernanceScopeKind
+  scope_id: string
+  protocol: GeneralBudgetProtocol | null
+  model: string | null
+  enabled: boolean
+  token_limit: number | null
+  cost_limit_micro: string | null
+  currency: string | null
+}
+export type GeneralBudgetUpdate = {
+  operation_id: string
+  expected_revision: number
+  enabled: boolean
+  token_limit: number | null
+  cost_limit_micro: string | null
+  currency: string | null
 }
 
 export function usageExportURL(filters: UsageFilters, limit = 5000) {
@@ -737,6 +769,18 @@ export const api = {
     request<GovernanceReceipt>(`/governance/policies/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body), signal }, csrf),
   governanceOperation: (operationId: string, signal?: AbortSignal) =>
     request<GovernanceReceipt>(`/governance/operations/${encodeURIComponent(operationId)}`, { signal }),
+  generalBudgets: (afterId?: string, limit = 50, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: String(limit) })
+    if (afterId) query.set('after_id', afterId)
+    return request<GovernancePage<GeneralBudgetPolicy>>(`/budgets?${query}`, { signal })
+  },
+  generalBudget: (id: string, signal?: AbortSignal) => request<GeneralBudgetPolicy>(`/budgets/${encodeURIComponent(id)}`, { signal }),
+  createGeneralBudget: (body: GeneralBudgetCreate, csrf: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>('/budgets', { method: 'POST', body: JSON.stringify(body), signal }, csrf),
+  updateGeneralBudget: (id: string, body: GeneralBudgetUpdate, csrf: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>(`/budgets/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body), signal }, csrf),
+  generalBudgetOperation: (operationId: string, signal?: AbortSignal) =>
+    request<GovernanceReceipt>(`/budgets/operations/${encodeURIComponent(operationId)}`, { signal }),
   governanceObservations: (filters: GovernanceObservationFilters, cursor?: string, signal?: AbortSignal) =>
     request<GovernanceObservationsPage>(`/governance/observations?${governanceObservationSearch(filters, cursor)}`, { signal }),
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>

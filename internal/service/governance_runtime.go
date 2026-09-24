@@ -18,6 +18,12 @@ type governancePolicyResolver interface {
 	ResolveScopesTx(context.Context, *sql.Tx, string, string) (governance.Settings, []governance.ScopeSnapshot, error)
 }
 
+type selectorAwareGovernancePolicyResolver interface {
+	ResolveScopesForRequestTx(context.Context, *sql.Tx, string, string, string, accounting.UsageProtocol) (governance.Settings, []governance.ScopeSnapshot, error)
+	MatchGeneralBudgetScopesTx(context.Context, *sql.Tx, string, string, string, string, accounting.UsageProtocol) (bool, error)
+	SnapshotGeneralBudgetScopesTx(context.Context, *sql.Tx, string, string, string, string, accounting.UsageProtocol, int64) (bool, error)
+}
+
 type requestGovernance struct {
 	app        *App
 	core       *governance.Coordinator
@@ -139,10 +145,24 @@ func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model stri
 		if !allowed {
 			return nil, poolAdmissionFailure(accountPoolModelNotAllowed)
 		}
-		settings, scopes, err := g.policies.ResolveScopesTx(admissionCtx, tx, auth.EmployeeID, auth.KeyID)
+		var settings governance.Settings
+		var scopes []governance.ScopeSnapshot
+		if resolver, ok := g.policies.(selectorAwareGovernancePolicyResolver); ok {
+			settings, scopes, err = resolver.ResolveScopesForRequestTx(admissionCtx, tx, auth.EmployeeID, auth.KeyID, model, protocol)
+		} else {
+			settings, scopes, err = g.policies.ResolveScopesTx(admissionCtx, tx, auth.EmployeeID, auth.KeyID)
+		}
 		if err != nil {
 			return nil, governanceAdmissionFailure(err)
 		}
+		selectorMatched := false
+		if resolver, ok := g.policies.(selectorAwareGovernancePolicyResolver); ok {
+			selectorMatched, err = resolver.MatchGeneralBudgetScopesTx(admissionCtx, tx, requestID(r.Context()), auth.EmployeeID, auth.KeyID, model, protocol)
+			if err != nil {
+				return nil, governanceAdmissionFailure(err)
+			}
+		}
+		selectorEnforced := settings.Enabled && settings.BudgetEnabled && selectorMatched
 		if settings.Enabled && settings.BudgetEnabled {
 			for _, scope := range scopes {
 				if scope.UnknownMode == "deny_unknown" && (scope.HardTPM != nil || scope.HardCostMicro != nil) {
@@ -152,7 +172,7 @@ func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model stri
 		}
 		lease, decision, err := g.core.AdmitTx(admissionCtx, tx, governance.AdmissionStart{
 			RequestID: requestID(r.Context()), Subject: governance.Subject{EmployeeID: auth.EmployeeID, KeyID: auth.KeyID, PublicModel: model, Protocol: protocol},
-			SettingsRevision: settings.Revision, SnapshotComplete: true, Scopes: scopes, StartedAt: started, ObservedAt: started,
+			SettingsRevision: settings.Revision, SnapshotComplete: true, BudgetSnapshot: selectorEnforced, Scopes: scopes, StartedAt: started, ObservedAt: started,
 		})
 		if err != nil {
 			return nil, governanceAdmissionFailure(err)
@@ -164,6 +184,13 @@ func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model stri
 			default:
 				return nil, &modelAdmissionError{409, "governance_changed", "Request governance changed; submit a new request."}
 			}
+		}
+		if resolver, ok := g.policies.(selectorAwareGovernancePolicyResolver); ok && selectorEnforced {
+			matched, snapshotErr := resolver.SnapshotGeneralBudgetScopesTx(admissionCtx, tx, requestID(r.Context()), auth.EmployeeID, auth.KeyID, model, protocol, settings.Revision)
+			if snapshotErr != nil {
+				return nil, governanceAdmissionFailure(snapshotErr)
+			}
+			budgetEnabled = budgetEnabled || matched
 		}
 		if err := tx.Commit(); err != nil {
 			return nil, governanceAdmissionFailure(err)

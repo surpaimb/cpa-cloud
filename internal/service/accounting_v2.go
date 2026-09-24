@@ -17,10 +17,14 @@ import (
 
 const accountingV2MaxExportBytes = 4 << 20
 
-// migrateAccountingV2 is the single integration hook for E1 schema. The App
-// owner controls when it runs relative to other component migrations.
+// migrateAccountingV2 is the single integration hook for E accounting and
+// selector-aware budget schema. The App owner controls when it runs relative
+// to the existing governance budget migrations.
 func migrateAccountingV2(ctx context.Context, db *sql.DB) error {
-	return accounting.NewLedger(db).MigrateV2(ctx)
+	if err := accounting.NewLedger(db).MigrateV2(ctx); err != nil {
+		return err
+	}
+	return migrateGeneralBudgets(ctx, db)
 }
 
 // registerAccountingV2Handlers is intentionally separate from App.Handler so
@@ -30,6 +34,7 @@ func (a *App) registerAccountingV2Handlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/api/v1/usage/monthly", a.requireAdmin(a.accountingV2Monthly, false))
 	mux.HandleFunc("GET /admin/api/v1/usage/export", a.requireAdmin(a.accountingV2Export, false))
 	mux.HandleFunc("POST /admin/api/v1/billing/usage-corrections", a.requireAdmin(a.accountingV2Correction, true))
+	a.registerGeneralBudgetHandlers(mux)
 }
 
 type accountingV2ReportView struct {
