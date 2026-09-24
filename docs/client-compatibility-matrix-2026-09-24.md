@@ -34,6 +34,31 @@ PASS 表示本轮固定版本和固定平台上观察到预期结果；FAIL 是�
 - Claude：观察到 2 个不同员工请求，各只有 1 个 attempt，均最终为 `cancelled`，没有残留 TCP 连接。因此这是 Claude Code 在终止边界附近重发员工请求，不是 CPA Cloud 在单个员工请求内重试。当前兼容验收仍按“取消只产生一次逻辑请求”判为 FAIL。
 - Gemini：1 个员工请求、1 个 attempt，状态为 `cancelled`，上游连接关闭，无重放，PASS。
 
+## 显式 Wire 路由专项复测
+
+协议路由集成后在精确提交 `13b3612965629a097ddce014335b99f716db7226` 追加了一轮窄范围复测。Windows 测试二进制 SHA-256 为 `7d0779b029ad71af0b87b5e3254e01f870585fe74a90ce1ad2b5fafb0bc0a69c`；三个客户端版本和哈希与上表相同。该轮仍只使用随机回环端口、临时数据目录、随机员工 Key 和合成上游。
+
+原始协议客户端通过真实 CPA Cloud 进程发出六条显式 `wire_protocol` 非流式路线；每条都分别执行文本、function call 和 function result：
+
+| 员工入口 → 实际 Wire | 实际上游路径 | 文本 | 工具调用 | 工具结果 | parent / attempt |
+| --- | --- | --- | --- | --- | --- |
+| Chat → Responses | `/v1/responses` | PASS | PASS | PASS | 每次 `1 / 1` |
+| Responses → Chat | `/v1/chat/completions` | PASS | PASS | PASS | 每次 `1 / 1` |
+| Messages → Responses | `/v1/responses` | PASS | PASS | PASS | 每次 `1 / 1` |
+| Gemini `generateContent` → Responses | `/v1/responses` | PASS | PASS | PASS | 每次 `1 / 1` |
+| Responses → Messages | `/v1/messages` | PASS | PASS | PASS | 每次 `1 / 1` |
+| Responses → Gemini `generateContent` | `/v1beta/models/{model}:generateContent` | PASS | PASS | PASS | 每次 `1 / 1` |
+
+Gemini 两侧的正向工具回合均省略 `functionCall` / `functionResponse` 的可选 ID；CPA Cloud 生成确定的内部 call ID 并按函数名和顺序关联，未改写任何显式 ID。重复显式 ID 或同名多待处理调用下无法唯一匹配的无 ID 结果仍由集成测试失败关闭，本脚本不把歧义情形当作可用能力。
+
+可靠用量按实际 Wire 记录，不按员工响应格式猜测。上游不返回 usage 时四类 Token 均保持未知；OpenAI Chat/Responses 仅能独立证明 output 时，input/cache 保持未知；Messages 的 input/output 可分别证明；Gemini 在缺 `cachedContentTokenCount` 时 input/cache-read 保持未知、output 已知，而 generateContent 不存在的 cache-write 类别记为已知 `0`。员工 Key 未出现在任何上游请求。
+
+跨协议 SSE 仍未实现。六条原始协议流请求都返回明确 `400`，且上游调用和 attempt 都是 `0`。未经修改的三个 CLI 也分别实测了实际请求形状：Codex `/v1/responses`（含 `function`、`namespace`、`web_search` 工具类型）、Claude `/v1/messages`、Gemini `:streamGenerateContent`；三者均在跨 Wire 路由上非零退出，且仍为 `0` 上游调用、`0` attempt。parent 可能在预检拒绝前创建，也可能不创建，因此验收不把 parent 数固定为非安全边界。
+
+同一最终二进制又运行了实际客户端的 `--scope core` 原生/`legacy-native` 回归：Codex、Claude、Gemini 文本 SSE 全部 PASS；Codex 两请求 `get_goal`、Claude 三请求（含一次辅助请求）MCP `echo`、Gemini 两请求 `read_file` 工具回合全部 PASS。专项过程中曾发现 provider-managed tools 被生命周期校验过早拒绝、导致 Codex 原生流零派发的回归；`13b3612` 将该校验限制到服务拥有的 stateful/background/previous 生命周期，恢复无状态原生透明转发，同时保持跨协议和有状态请求失败关闭。
+
+这轮没有重跑取消、服务重启或 Key 撤销；这些结果仍只属于前述 `b997206` 矩阵，Claude 严格取消仍为 FAIL。它也没有访问真实供应商、会员账号或 CC Switch GUI，因此不能把本节的 PASS 外推为真实 provider 或会员兼容。
+
 ## CC Switch 与真实会员边界
 
 本轮电脑控制通道没有暴露可操作的原生应用表面，无法用实际 CC Switch 3.20.3 完成添加供应商、切换配置和还原配置。因此 CC Switch GUI 项保持 SKIP；没有读取或修改它的私有数据库，也没有用猜测的内部格式代替真实 UI 流程。后续复测必须记录点击流程、最终由哪个 CLI 发请求、原配置备份及恢复结果。
@@ -52,6 +77,18 @@ PASS 表示本轮固定版本和固定平台上观察到预期结果；FAIL 是�
 
 ```text
 node scripts/smoke-real-clients.mjs \
+  --scope core \
+  --server <cpa-cloud-binary> \
+  --codex <codex-executable> \
+  --claude <claude-executable> \
+  --gemini-entry <gemini.js>
+```
+
+显式 Wire 路由专项使用独立脚本，并要求调用方把完整源提交写入输出：
+
+```text
+node scripts/smoke-protocol-routes.mjs \
+  --source-commit <full-source-commit> \
   --server <cpa-cloud-binary> \
   --codex <codex-executable> \
   --claude <claude-executable> \
@@ -60,4 +97,4 @@ node scripts/smoke-real-clients.mjs \
 
 脚本为每次运行创建独立临时 HOME、配置目录、服务数据目录、随机端口、随机员工 Key 和合成上游凭据；不读取用户客户端配置。它只终止自己创建的客户端进程树，结束后校验临时根目录已删除。输出不包含客户端原始 stdout/stderr、提示词、Key 或 Token；服务日志和持久文件还会扫描合成秘密与提示词。员工 Key 未出现在上游请求，撤销后的三个客户端均为零上游派发。
 
-由于当前矩阵仍包含 Claude 取消这一项明确 FAIL，脚本按设计返回非零；不能把其余 PASS 汇总成整体通过。
+不带 `--scope core` 的完整旧矩阵仍包含 Claude 取消这一项明确 FAIL，脚本按设计返回非零；不能把其余 PASS 汇总成整体通过。`--scope core` 只运行本节记录的原生文本与工具回归。

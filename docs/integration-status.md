@@ -16,6 +16,7 @@
 - 上述只是随机临时目录、本地合成 HTTP 上游和组件测试证据，没有访问真实供应商、真实会员账号或既有 8787
   服务，不证明真实 provider 兼容。Linux race 与 CI 以本批 PR 新 HEAD 的实际结果为准；旧 25 分钟 race
   总命令已因 service 套件增长稳定超时，现保留全部覆盖并把 service 与其他有状态包分组执行。
+- 精确提交 `13b3612965629a097ddce014335b99f716db7226` 的 Windows 二进制通过[真实客户端兼容矩阵](client-compatibility-matrix-2026-09-24.md)专项：六个非流式转换方向的文本、工具调用和工具结果均为一 parent/一 attempt；三个真实 CLI 的跨协议流均在零上游、零 attempt 时拒绝；Codex、Claude、Gemini 的原生文本 SSE 与工具回合全部通过。跨协议 SSE、真实供应商/会员、CC Switch GUI 仍未验证；本专项没有重跑取消、重启或撤销，不能覆盖同文档中 Claude 取消 FAIL。
 
 ## 2026-09-24：剩余能力首个可验收截止
 
