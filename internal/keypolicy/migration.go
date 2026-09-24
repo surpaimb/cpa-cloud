@@ -10,12 +10,18 @@ import (
 )
 
 const (
-	policiesTable  = "access_key_policies"
-	protocolsTable = "access_key_policy_protocols"
-	modelsTable    = "access_key_policy_models"
+	policiesTable         = "access_key_policies"
+	protocolsTable        = "access_key_policy_protocols"
+	modelsTable           = "access_key_policy_models"
+	migrationStateTable   = "access_key_policy_migration_state"
+	migrationStateVersion = 1
 )
 
 func Migrate(ctx context.Context, db *sql.DB) error {
+	return migrate(ctx, db, nil)
+}
+
+func migrate(ctx context.Context, db *sql.DB, afterSchema func(*sql.Tx) error) error {
 	if db == nil {
 		return ErrInvalidSchema
 	}
@@ -28,8 +34,35 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := tx.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
 		return fmt.Errorf("%w: foreign keys must be enabled", ErrInvalidSchema)
 	}
+	anyPresent, markerPresent, err := migrationObjectsPresent(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if anyPresent && !markerPresent {
+		return fmt.Errorf("%w: unmarked or partial key policy schema", ErrInvalidSchema)
+	}
+	if markerPresent {
+		if err := verifySchema(ctx, tx); err != nil {
+			return err
+		}
+		if err := verifyMigrationState(ctx, tx); err != nil {
+			return err
+		}
+		if err := verifyCoverage(ctx, tx); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit key policy migration verification: %w", err)
+		}
+		return nil
+	}
 	statements := []string{
-		`CREATE TABLE IF NOT EXISTS access_key_policies (
+		`CREATE TABLE access_key_policy_migration_state (
+			singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
+			version INTEGER NOT NULL CHECK(version=1),
+			completed_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE access_key_policies (
 			key_id TEXT PRIMARY KEY NOT NULL REFERENCES access_keys(id) ON DELETE CASCADE,
 			revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991),
 			protocol_mode TEXT NOT NULL CHECK(protocol_mode IN ('all','selected')),
@@ -37,19 +70,19 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS access_key_policy_protocols (
+		`CREATE TABLE access_key_policy_protocols (
 			key_id TEXT NOT NULL REFERENCES access_key_policies(key_id) ON DELETE CASCADE,
 			protocol TEXT NOT NULL CHECK(protocol IN ('openai-chat','openai-responses','anthropic-messages','gemini-generate-content')),
 			PRIMARY KEY(key_id,protocol)
 		)`,
-		`CREATE TABLE IF NOT EXISTS access_key_policy_models (
+		`CREATE TABLE access_key_policy_models (
 			key_id TEXT NOT NULL REFERENCES access_key_policies(key_id) ON DELETE CASCADE,
 			model_id TEXT NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
 			PRIMARY KEY(key_id,model_id)
 		)`,
-		`CREATE INDEX IF NOT EXISTS access_key_policies_revision_idx ON access_key_policies(key_id,revision)`,
-		`CREATE INDEX IF NOT EXISTS access_key_policy_protocols_protocol_idx ON access_key_policy_protocols(protocol,key_id)`,
-		`CREATE INDEX IF NOT EXISTS access_key_policy_models_model_idx ON access_key_policy_models(model_id,key_id)`,
+		`CREATE INDEX access_key_policies_revision_idx ON access_key_policies(key_id,revision)`,
+		`CREATE INDEX access_key_policy_protocols_protocol_idx ON access_key_policy_protocols(protocol,key_id)`,
+		`CREATE INDEX access_key_policy_models_model_idx ON access_key_policy_models(model_id,key_id)`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -59,20 +92,90 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := verifySchema(ctx, tx); err != nil {
 		return err
 	}
+	if afterSchema != nil {
+		if err := afterSchema(tx); err != nil {
+			return err
+		}
+	}
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO access_key_policies(key_id,revision,protocol_mode,model_mode,created_at,updated_at)
 		SELECT id,1,'all','all',?,? FROM access_keys WHERE NOT EXISTS(SELECT 1 FROM access_key_policies p WHERE p.key_id=access_keys.id)`, stamp, stamp); err != nil {
 		return fmt.Errorf("backfill key policies: %w", err)
 	}
-	var missing int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_keys k LEFT JOIN access_key_policies p ON p.key_id=k.id WHERE p.key_id IS NULL`).Scan(&missing); err != nil || missing != 0 {
-		if err != nil {
-			return fmt.Errorf("verify key policy coverage: %w", err)
-		}
-		return fmt.Errorf("%w: access key without policy", ErrInvalidSchema)
+	if err := verifyCoverage(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO access_key_policy_migration_state(singleton,version,completed_at) VALUES(1,?,?)`, migrationStateVersion, stamp); err != nil {
+		return fmt.Errorf("write key policy migration marker: %w", err)
+	}
+	if err := verifyMigrationState(ctx, tx); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit key policy migration: %w", err)
+	}
+	return nil
+}
+
+func migrationObjectsPresent(ctx context.Context, tx *sql.Tx) (anyPresent bool, markerPresent bool, err error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE name IN (
+		'access_key_policy_migration_state','access_key_policies','access_key_policy_protocols','access_key_policy_models',
+		'access_key_policies_revision_idx','access_key_policy_protocols_protocol_idx','access_key_policy_models_model_idx'
+	)`)
+	if err != nil {
+		return false, false, fmt.Errorf("%w: inspect key policy migration objects", ErrInvalidSchema)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, false, fmt.Errorf("%w: inspect key policy migration objects", ErrInvalidSchema)
+		}
+		anyPresent = true
+		if name == migrationStateTable {
+			markerPresent = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, false, fmt.Errorf("%w: inspect key policy migration objects", ErrInvalidSchema)
+	}
+	return anyPresent, markerPresent, nil
+}
+
+func verifyMigrationState(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT singleton,version,completed_at FROM access_key_policy_migration_state`)
+	if err != nil {
+		return fmt.Errorf("%w: read key policy migration marker", ErrInvalidSchema)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+		var singleton, version int
+		var completedAt string
+		if err := rows.Scan(&singleton, &version, &completedAt); err != nil || singleton != 1 || version != migrationStateVersion {
+			return fmt.Errorf("%w: invalid key policy migration marker", ErrInvalidSchema)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, completedAt); err != nil {
+			return fmt.Errorf("%w: invalid key policy migration timestamp", ErrInvalidSchema)
+		}
+	}
+	if err := rows.Err(); err != nil || count != 1 {
+		return fmt.Errorf("%w: invalid key policy migration marker count", ErrInvalidSchema)
+	}
+	return nil
+}
+
+func verifyCoverage(ctx context.Context, tx *sql.Tx) error {
+	var missing, orphaned int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_keys k LEFT JOIN access_key_policies p ON p.key_id=k.id WHERE p.key_id IS NULL`).Scan(&missing); err != nil {
+		return fmt.Errorf("verify key policy coverage: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_key_policies p LEFT JOIN access_keys k ON k.id=p.key_id WHERE k.id IS NULL`).Scan(&orphaned); err != nil {
+		return fmt.Errorf("verify key policy ownership: %w", err)
+	}
+	if missing != 0 || orphaned != 0 {
+		return fmt.Errorf("%w: incomplete key policy coverage", ErrInvalidSchema)
 	}
 	return nil
 }
@@ -85,6 +188,9 @@ type columnSpec struct {
 
 func verifySchema(ctx context.Context, tx *sql.Tx) error {
 	expectedColumns := map[string]map[string]columnSpec{
+		migrationStateTable: {
+			"singleton": {"INTEGER", true, 1}, "version": {"INTEGER", true, 0}, "completed_at": {"TEXT", true, 0},
+		},
 		policiesTable: {
 			"key_id": {"TEXT", true, 1}, "revision": {"INTEGER", true, 0},
 			"protocol_mode": {"TEXT", true, 0}, "model_mode": {"TEXT", true, 0},
@@ -109,8 +215,9 @@ func verifySchema(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	checks := map[string][]string{
-		policiesTable:  {"check(revisionbetween1and9007199254740991)", "check(protocol_modein('all','selected'))", "check(model_modein('all','selected'))"},
-		protocolsTable: {"check(protocolin('openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))"},
+		migrationStateTable: {"check(singleton=1)", "check(version=1)"},
+		policiesTable:       {"check(revisionbetween1and9007199254740991)", "check(protocol_modein('all','selected'))", "check(model_modein('all','selected'))"},
+		protocolsTable:      {"check(protocolin('openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))"},
 	}
 	for table, fragments := range checks {
 		var raw string
@@ -125,6 +232,9 @@ func verifySchema(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	if err := verifyForeignKeys(ctx, tx, policiesTable, []foreignKeySpec{{"key_id", "access_keys", "id", "CASCADE"}}); err != nil {
+		return err
+	}
+	if err := verifyForeignKeys(ctx, tx, migrationStateTable, []foreignKeySpec{}); err != nil {
 		return err
 	}
 	if err := verifyForeignKeys(ctx, tx, protocolsTable, []foreignKeySpec{{"key_id", policiesTable, "key_id", "CASCADE"}}); err != nil {
