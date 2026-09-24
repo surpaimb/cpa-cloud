@@ -3,7 +3,7 @@
 ## 2026-09-25：`785f649` 基线上的 Messages/IP 源码集成
 
 - PR #7 已在精确 HEAD `abcbb108f2bacea94a0dafe24b9574407712ed93` 合入 Chat↔Responses 文本/function SSE；最终 Linux CI run `36052775287` 的普通 Go、service CGO race、有状态 capability race、vet、两 CLI build 与七项隔离进程 smoke 全部通过。PR #8 已合入每 Key 公共入口协议/公开模型策略、同 revision CAS、管理 API 与页面。合并后 `main` 为 `785f6497cc8873a8223436f1d49bdf9f7c05f485`。
-- 最新源码已接入 Messages↔Responses 文本/function SSE 与真实 socket peer IP/CIDR 第一段，见[共同契约](messages-stream-key-ip-batch-contract-2026-09-25.md)。Messages→Responses 仅在较早 usage 已知时保持生成期间增量；usage 只在终态可知时有界全流延迟，终态仍未知则失败关闭。所有 forwarding header 仍不可信；反向代理部署看到代理 peer，可信代理链是后续独立安全项。
+- 最新源码已接入 Messages↔Responses 文本/function SSE 与真实 socket peer IP/CIDR 第一段，见[共同契约](messages-stream-key-ip-batch-contract-2026-09-25.md)。Client Messages + wire Responses 仅在较早 usage 已知时保持生成期间增量；usage 只在终态可知时有界全流延迟。从创建到终态始终缺少完整 usage 时，会在输出任何目标语义事件前失败关闭；若较早 usage 已知而终态 usage 缺失、为 null 或冲突，则已有流失败关闭且不输出成功 terminal。所有 forwarding header 仍不可信；反向代理部署看到代理 peer，可信代理链是后续独立安全项。
 - 严格多租户、租户域名、员工 SSO、管理员密码重置命令及提示词/响应正文审计保持用户明确排除。现有恢复证据只覆盖同一 Windows 用户下不同 store/新目录，不是异机或真实第二环境恢复。
 
 ## 2026-09-25：主线基线与下一批边界
