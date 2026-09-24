@@ -90,8 +90,17 @@ func (a *App) handleConvertedModelSSE(w http.ResponseWriter, r *http.Request, ru
 	}, func(event protocolconv.SSEEvent) (protocolStreamWriteResult, error) {
 		return writeConvertedProtocolStreamEvent(w, controller, event, protocolStreamWriteTimeout)
 	})
-	if err == nil && result.Completed {
-		_ = a.finishRequestChecked(requestID, "succeeded", result.StatusCode)
+	if err == nil {
+		switch result.TerminalOutcome {
+		case protocolconv.StreamTerminalCompleted:
+			_ = a.finishRequestChecked(requestID, "succeeded", result.StatusCode)
+		case protocolconv.StreamTerminalIncomplete:
+			_ = a.finishRequestChecked(requestID, "interrupted", result.StatusCode)
+		case protocolconv.StreamTerminalFailed:
+			_ = a.finishRequestChecked(requestID, "failed", result.StatusCode)
+		default:
+			_ = a.finishRequestChecked(requestID, "interrupted", result.StatusCode)
+		}
 		return
 	}
 

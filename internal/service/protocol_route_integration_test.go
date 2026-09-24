@@ -2,6 +2,7 @@
 package service
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -236,12 +237,17 @@ func TestExplicitWireCancellationPropagatesAndSettlesSharedLedgers(t *testing.T)
 	var calls atomic.Int32
 	started := make(chan struct{}, 1)
 	cancelled := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
 	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		_, _ = io.Copy(io.Discard, r.Body)
 		started <- struct{}{}
-		<-r.Context().Done()
-		cancelled <- struct{}{}
+		select {
+		case <-r.Context().Done():
+			cancelled <- struct{}{}
+		case <-release:
+		}
 	}))
 	enableGovernanceForExplicitWire(t, fixture.app, fixture.key.ID)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -340,6 +346,210 @@ func TestExplicitResponsesToChatStreamDispatchesOnce(t *testing.T) {
 		t.Fatalf("cross-protocol stream dispatched %d upstream requests", calls.Load())
 	}
 	assertSingleWireAttempt(t, fixture.app, "openai-chat-completions")
+}
+
+func TestExplicitMessagesToResponsesStreamDispatchesOnce(t *testing.T) {
+	var calls atomic.Int32
+	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r\",\"created_at\":1,\"model\":\"actual-model\"}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg\",\"type\":\"message\",\"status\":\"in_progress\",\"role\":\"assistant\",\"content\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"sequence_number\":2,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"sequence_number\":4,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"text\":\"ok\"}\n\n")
+		_, _ = io.WriteString(w, "event: response.content_part.done\ndata: {\"type\":\"response.content_part.done\",\"sequence_number\":5,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":6,\"output_index\":0,\"item\":{\"id\":\"msg\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":7,\"response\":{\"id\":\"r\",\"object\":\"response\",\"created_at\":1,\"model\":\"actual-model\",\"status\":\"completed\",\"output\":[{\"id\":\"msg\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n")
+	}))
+	response := anthropicEmployeeRequest(t, context.Background(), http.MethodPost, fixture.server.URL+"/v1/messages", `{"model":"wire-model","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, fixture.key.Key, "x-api-key")
+	body := readBody(response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "event: message_start") || !strings.Contains(body, `"text":"ok"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("cross-protocol stream dispatched %d upstream requests", calls.Load())
+	}
+	assertSingleWireAttempt(t, fixture.app, "openai-responses")
+}
+
+func TestExplicitMessagesToResponsesEarlyUsageStreamsBeforeTerminal(t *testing.T) {
+	release := make(chan struct{})
+	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r\",\"created_at\":1,\"model\":\"actual-model\",\"usage\":{\"input_tokens\":2,\"output_tokens\":0,\"total_tokens\":2}}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg\",\"type\":\"message\",\"status\":\"in_progress\",\"role\":\"assistant\",\"content\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"sequence_number\":2,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"delta\":\"early\"}\n\n")
+		w.(http.Flusher).Flush()
+		<-release
+		_, _ = io.WriteString(w, "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"sequence_number\":4,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"text\":\"early\"}\n\n")
+		_, _ = io.WriteString(w, "event: response.content_part.done\ndata: {\"type\":\"response.content_part.done\",\"sequence_number\":5,\"item_id\":\"msg\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"early\",\"annotations\":[]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":6,\"output_index\":0,\"item\":{\"id\":\"msg\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"early\",\"annotations\":[]}]}}\n\n")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":7,\"response\":{\"id\":\"r\",\"object\":\"response\",\"created_at\":1,\"model\":\"actual-model\",\"status\":\"completed\",\"output\":[{\"id\":\"msg\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"early\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n")
+	}))
+	closed := false
+	defer func() {
+		if !closed {
+			close(release)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	response := anthropicEmployeeRequest(t, ctx, http.MethodPost, fixture.server.URL+"/v1/messages", `{"model":"wire-model","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, fixture.key.Key, "x-api-key")
+	reader := bufio.NewReader(response.Body)
+	var prefix strings.Builder
+	for !strings.Contains(prefix.String(), `"text":"early"`) {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read early converted stream: %v body=%s", err, prefix.String())
+		}
+		prefix.WriteString(line)
+	}
+	if !strings.Contains(prefix.String(), "event: message_start") {
+		t.Fatalf("early stream omitted message_start: %s", prefix.String())
+	}
+	close(release)
+	closed = true
+	rest, err := io.ReadAll(reader)
+	if err != nil || !strings.Contains(string(rest), "event: message_stop") {
+		t.Fatalf("terminal stream err=%v body=%s", err, rest)
+	}
+}
+
+func TestExplicitMessagesToResponsesCancellationPropagatesWithoutReplay(t *testing.T) {
+	var calls atomic.Int32
+	started := make(chan struct{}, 1)
+	cancelled := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
+	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		started <- struct{}{}
+		select {
+		case <-r.Context().Done():
+			cancelled <- struct{}{}
+		case <-release:
+		}
+	}))
+	enableGovernanceForExplicitWire(t, fixture.app, fixture.key.ID)
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fixture.server.URL+"/v1/messages", strings.NewReader(`{"model":"wire-model","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("x-api-key", fixture.key.Key)
+	request.Header.Set("Anthropic-Version", "2023-06-01")
+	request.Header.Set("Content-Type", "application/json")
+	type requestResult struct {
+		err        error
+		statusCode int
+		body       string
+	}
+	done := make(chan requestResult, 1)
+	go func() {
+		response, requestErr := http.DefaultClient.Do(request)
+		if response != nil {
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			done <- requestResult{err: requestErr, statusCode: response.StatusCode, body: string(body)}
+			return
+		}
+		done <- requestResult{err: requestErr}
+	}()
+	select {
+	case <-started:
+	case result := <-done:
+		t.Fatalf("Messages-to-Responses request returned before dispatch: status=%d err=%v body=%s", result.statusCode, result.err, result.body)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Messages-to-Responses request did not reach upstream")
+	}
+	cancel()
+	select {
+	case <-cancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Messages client cancellation did not reach Responses upstream")
+	}
+	select {
+	case result := <-done:
+		if result.err == nil {
+			t.Fatal("cancelled Messages-to-Responses request unexpectedly succeeded")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled Messages-to-Responses request did not return")
+	}
+	waitUsageHTTPStatus(t, fixture.app, "cancelled")
+	var requestStatus, modelOutcome, governanceStatus, attemptStatus, protocol string
+	if err := fixture.app.store.db.QueryRow(`SELECT a.status,m.outcome,g.status,t.status,c.protocol
+		FROM accounting_requests a
+		JOIN model_requests m ON m.id=a.id
+		JOIN governance_requests g ON g.id=a.id
+		JOIN accounting_attempts t ON t.request_id=a.id
+		JOIN accounting_attempt_contexts c ON c.attempt_id=t.id`).Scan(&requestStatus, &modelOutcome, &governanceStatus, &attemptStatus, &protocol); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != "cancelled" || modelOutcome != "cancelled" || governanceStatus != "cancelled" || attemptStatus != "cancelled" || protocol != "openai-responses" || calls.Load() != 1 {
+		t.Fatalf("request/model/governance/attempt/protocol/calls=%s/%s/%s/%s/%s/%d", requestStatus, modelOutcome, governanceStatus, attemptStatus, protocol, calls.Load())
+	}
+}
+
+func TestExplicitMessagesToResponsesUnknownTerminalUsageFailsBeforeWire(t *testing.T) {
+	var calls atomic.Int32
+	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r\",\"created_at\":1,\"model\":\"actual-model\",\"usage\":null}}\n\n")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"r\",\"object\":\"response\",\"created_at\":1,\"model\":\"actual-model\",\"status\":\"completed\",\"output\":[],\"usage\":null}}\n\n")
+	}))
+	response := anthropicEmployeeRequest(t, context.Background(), http.MethodPost, fixture.server.URL+"/v1/messages", `{"model":"wire-model","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, fixture.key.Key, "x-api-key")
+	body := readBody(response)
+	if response.StatusCode != http.StatusBadGateway || strings.Contains(body, "event: message_start") || !strings.Contains(body, "Upstream request failed") {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("unknown-usage stream dispatched %d upstream requests", calls.Load())
+	}
+	waitUsageHTTPStatus(t, fixture.app, "failed")
+}
+
+func TestExplicitResponsesToMessagesStreamOutcomesSettleLedger(t *testing.T) {
+	for _, test := range []struct {
+		name, stopReason, terminalEvent, ledgerStatus string
+	}{
+		{name: "completed", stopReason: "end_turn", terminalEvent: "response.completed", ledgerStatus: "succeeded"},
+		{name: "incomplete", stopReason: "max_tokens", terminalEvent: "response.incomplete", ledgerStatus: "interrupted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			fixture := newExplicitProviderWireFixture(t, anthropicAPIKeyProvider, string(wireProtocolMessages), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"actual-model\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n")
+				_, _ = io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+				_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+				_, _ = io.WriteString(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+				_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":"+quoteJSON(test.stopReason)+",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n")
+				_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			}))
+			response := employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/responses", `{"model":"wire-model","stream":true,"max_output_tokens":16,"input":"hi"}`, fixture.key.Key, context.Background())
+			body := readBody(response)
+			if response.StatusCode != http.StatusOK || !strings.Contains(body, "response.output_text.delta") || !strings.Contains(body, test.terminalEvent) || !strings.Contains(body, `"input_tokens":2`) || !strings.Contains(body, `"output_tokens":1`) {
+				t.Fatalf("status=%d body=%s", response.StatusCode, body)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("cross-protocol stream dispatched %d upstream requests", calls.Load())
+			}
+			var requestStatus, attemptStatus, protocol string
+			var inputTokens, outputTokens sql.NullInt64
+			if err := fixture.app.store.db.QueryRow(`SELECT r.status,a.status,c.protocol,a.input_tokens,a.output_tokens FROM accounting_requests r JOIN accounting_attempts a ON a.request_id=r.id JOIN accounting_attempt_contexts c ON c.attempt_id=a.id`).Scan(&requestStatus, &attemptStatus, &protocol, &inputTokens, &outputTokens); err != nil {
+				t.Fatal(err)
+			}
+			if requestStatus != test.ledgerStatus || attemptStatus != test.ledgerStatus || protocol != "anthropic-messages" || !inputTokens.Valid || inputTokens.Int64 != 2 || !outputTokens.Valid || outputTokens.Int64 != 1 {
+				t.Fatalf("request/attempt/protocol/usage=%s/%s/%s/%v/%v", requestStatus, attemptStatus, protocol, inputTokens, outputTokens)
+			}
+		})
+	}
 }
 
 func TestExplicitWireRateLimitPreservesRetryAfter(t *testing.T) {

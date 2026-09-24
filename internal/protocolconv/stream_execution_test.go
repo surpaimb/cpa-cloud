@@ -154,7 +154,8 @@ func TestPrepareCrossProtocolStreamRequestIsExplicitAndNarrow(t *testing.T) {
 		t.Fatalf("production JSON path must remain closed, got %v", err)
 	}
 	capability.ClientProtocol = ProtocolAnthropicMessages
-	if _, err := PrepareCrossProtocolStreamRequest(capability, "wire-model", []byte(`{"stream":true}`)); !errors.Is(err, ErrUnsupportedRoute) {
-		t.Fatalf("Messages cross-stream should remain closed, got %v", err)
+	prepared, err = PrepareCrossProtocolStreamRequest(capability, "wire-model", []byte(`{"model":"public","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil || !prepared.Streaming || prepared.Plan.Kind != PlanMessagesToResponses {
+		t.Fatalf("unexpected Messages preparation: %#v, %v", prepared, err)
 	}
 }

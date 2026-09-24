@@ -12,7 +12,7 @@
 | --- | --- |
 | 网页后台、管理员会话、员工启停、模型权限 | 多租户、SSO、管理员密码重置命令 |
 | 一人多个 Key、默认永久有效、可选到期、撤销；源码提供 Codex 网页授权和自动刷新 | Claude/Gemini 会员接入及真实账号验证 |
-| OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路；显式 Chat Completions ↔ Responses 文本 SSE 转换 | 其他跨协议流式方向和未列出的协议字段 |
+| OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路；显式 Chat↔Responses 与 Messages↔Responses 文本/function SSE 转换 | Messages→Responses 在 usage 仅终态可知时有界全流延迟；Gemini SSE 和未列出的协议字段仍不支持 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
 | 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE；默认关闭的加密有状态资源与后台任务 | 托管工具、后台流续传/游标与完整客户端兼容性 |
 | SQLite 持久化、上游凭据加密、多账号路由；可靠用量/通用预算、单实例财务账本、Windows DPAPI 自动备份 | 生产支付渠道、跨机/非 Windows 密钥托管与对象存储 |

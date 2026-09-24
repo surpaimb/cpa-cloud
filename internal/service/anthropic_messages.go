@@ -201,7 +201,11 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		return
 	}
 	if conversion != nil {
-		a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, modelRequestID, anthropicMaxResponse, nil)
+		if stream {
+			a.handleConvertedModelSSE(w, r, conversion, upstreamReq, client, modelRequestID)
+		} else {
+			a.handleConvertedModelJSON(w, r, conversion, upstreamReq, client, modelRequestID, anthropicMaxResponse, nil)
+		}
 		return
 	}
 	response, err := client.Do(upstreamReq)

@@ -6,13 +6,23 @@ import (
 	"sort"
 )
 
+type StreamTerminalOutcome string
+
+const (
+	StreamTerminalNone       StreamTerminalOutcome = ""
+	StreamTerminalCompleted  StreamTerminalOutcome = "completed"
+	StreamTerminalIncomplete StreamTerminalOutcome = "incomplete"
+	StreamTerminalFailed     StreamTerminalOutcome = "failed"
+)
+
 // SSEEvent is one logical event. Data excludes SSE framing. A caller must stop
 // after Terminal and must treat any EOF before a terminal event as interrupted.
 type SSEEvent struct {
-	Name     string
-	Data     json.RawMessage
-	Semantic bool
-	Terminal bool
+	Name            string
+	Data            json.RawMessage
+	Semantic        bool
+	Terminal        bool
+	TerminalOutcome StreamTerminalOutcome
 }
 
 const (
@@ -381,6 +391,7 @@ func (s *ChatToResponsesStream) Finish() ([]SSEEvent, error) {
 	s.terminal = true
 	response := s.responseSnapshot("completed", s.convertedUsage)
 	completed, _ := s.event("response.completed", map[string]any{"response": response}, true)
+	completed.TerminalOutcome = StreamTerminalCompleted
 	result = append(result, completed)
 	return result, nil
 }
@@ -766,7 +777,7 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 			return nil, err
 		}
 		s.terminal = true
-		deltaEvents = append(deltaEvents, SSEEvent{Data: json.RawMessage("[DONE]"), Terminal: true})
+		deltaEvents = append(deltaEvents, SSEEvent{Data: json.RawMessage("[DONE]"), Terminal: true, TerminalOutcome: StreamTerminalCompleted})
 		return deltaEvents, nil
 	case "response.failed", "response.incomplete", "error":
 		return nil, invalidUpstream("type", "upstream returned a terminal failure event")

@@ -12,7 +12,7 @@ A self-hosted AI access platform for internal enterprise use. Administrators man
 | --- | --- |
 | Web console, administrator sessions, employee enable/disable, model permissions | Multi-tenancy, SSO, administrator password-reset command |
 | Multiple keys per employee, no expiration by default, optional expiration, revocation; source adds Codex web authorization and automatic refresh | Claude/Gemini membership integration and real-account validation |
-| OpenAI-compatible API-key upstreams, presets and discovery; source adds native Claude/Gemini API-key routes | Automatic protocol conversion and fields outside the documented subset |
+| OpenAI-compatible API-key upstreams, presets and discovery; source adds native Claude/Gemini API-key routes and explicit Chat↔Responses and Messages↔Responses text/function SSE conversion | Messages→Responses is bounded full-stream delayed when usage is known only at the terminal event; Gemini cross-protocol SSE and fields outside the documented subset remain unsupported |
 | `/v1/models`, non-streaming and SSE Chat Completions | Complete compatibility testing with CC Switch and real AI tools |
 | Latest source: `POST /v1/responses`, function calls/results, non-streaming JSON and SSE; opt-in encrypted state and background tasks | Hosted tools, background stream resume/cursors, and full client compatibility |
 | SQLite persistence, encrypted upstream credentials, account-pool routing; reliable usage/general budgets, a single-instance financial ledger, and Windows DPAPI automated backups | Production payment providers, cross-machine/non-Windows key custody, and object storage |
