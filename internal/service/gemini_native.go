@@ -53,7 +53,7 @@ func (a *App) listGeminiModels(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "Invalid request.")
 		return
 	}
-	auth, err := a.authenticateEmployeeRequest(r)
+	auth, err := a.authenticateGeminiEmployeeRequest(r)
 	if err != nil {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
@@ -139,7 +139,7 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth, err := a.authenticateEmployeeRequest(r)
+	auth, err := a.authenticateGeminiEmployeeRequest(r)
 	if err != nil {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
@@ -233,6 +233,35 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.forwardGeminiJSON(w, response, modelRequestID)
+}
+
+// Gemini clients conventionally send API keys through x-goog-api-key. On the
+// CPA-facing native Gemini routes only, one such header may carry an employee
+// key. It is consumed locally and is never copied to the upstream request.
+func (a *App) authenticateGeminiEmployeeRequest(r *http.Request) (employeeAuth, error) {
+	authorization := r.Header.Values("Authorization")
+	googleKeys := r.Header.Values("X-Goog-Api-Key")
+	if len(authorization)+len(googleKeys) != 1 {
+		return employeeAuth{}, errors.New("invalid employee key")
+	}
+	var key string
+	if len(authorization) == 1 {
+		parts := strings.Fields(authorization[0])
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			return employeeAuth{}, errors.New("invalid employee key")
+		}
+		key = parts[1]
+	} else {
+		key = googleKeys[0]
+		if key == "" || strings.TrimSpace(key) != key || strings.Contains(key, ",") || strings.ContainsAny(key, " \t\r\n") {
+			return employeeAuth{}, errors.New("invalid employee key")
+		}
+	}
+	auth, valid := a.lookupEmployeeKey(r.Context(), key)
+	if !valid {
+		return employeeAuth{}, errors.New("invalid employee key")
+	}
+	return auth, nil
 }
 
 func writeGeminiError(w http.ResponseWriter, code int, status, message string) {
