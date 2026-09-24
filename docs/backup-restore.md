@@ -66,11 +66,21 @@ On Windows, Go/Win32 does not provide a portable guarantee that flushing a direc
 
 Windows 上并非每种文件系统都允许通过 Go/Win32 成功刷新目录句柄。实现始终同步每个完整文件并请求目录刷新；如果仅目录刷新返回 `ERROR_ACCESS_DENIED`、`ERROR_INVALID_HANDLE` 或 `ERROR_INVALID_FUNCTION`，则按已记录的平台限制处理。这不降低无覆盖保护或文件内容同步，但突然断电时最终目录项的持久性仍取决于文件系统。
 
+## Automated source workflow / 源码自动化流程
+
+The latest source can run administrator-configured plans when the service starts with `--automated-backups-enabled`. Its output and key-provider roots come only from startup configuration, not arbitrary web-submitted paths. Each run creates an encrypted package, verifies it, optionally restores it into a restricted temporary directory and opens/closes a worker-disabled application for rehearsal, then applies bounded retention. Plans, key-provider metadata, run status, revision, and failure reason are durable; a restart does not replay an uncertain run.
+
+最新源码在服务使用 `--automated-backups-enabled` 启动后可执行管理员配置的计划。输出根和 key-provider 根只能来自启动配置，网页不能提交任意服务器路径。每次运行创建并校验加密包；计划可选在受限临时目录恢复，再用关闭所有 worker 的配置完整打开/关闭应用做演练，最后执行有界保留。计划、provider 元数据、运行状态、revision 与失败原因持久化；重启不重放结果不确定的运行。
+
+The only ready automated key provider today is `windows-dpapi-user`, bound to the current Windows service identity. Linux/macOS explicitly remain unavailable and never fall back to plaintext, environment variables, command-line secrets, or a key stored beside ciphertext. This automated format is separate from the password+scrypt CLI above.
+
+当前唯一可 ready 的自动 provider 是绑定 Windows 当前服务身份的 `windows-dpapi-user`。Linux/macOS 明确保持 unavailable，不会回退到明文、环境变量、命令行秘密或与密文同放的 key。此自动格式与上面的 password+scrypt 离线 CLI 相互独立。
+
 ## Scope not yet delivered / 尚未交付范围
 
-Scheduled backups, retention, object storage, remote upload, key rotation/re-wrapping, in-place upgrade rollback, and orchestration are not included. This CLI is not completion of OPS-01. Operators remain responsible for protecting package passwords, backup files, host administrator access, and tested off-host copies.
+Cross-machine recovery material, a non-Windows protected provider, object storage, remote upload, production key rotation/re-wrapping, in-place upgrade rollback, and multi-host orchestration are not included. Automated plans and local retention do not complete OPS-01. Operators remain responsible for package passwords, backup files, host-administrator access, and tested off-host copies.
 
-计划备份、保留策略、对象存储、远程上传、密钥轮换/重新封装、原地升级回滚和编排尚未包含。本命令不代表 OPS-01 已完成。运维人员仍需保护包密码、备份文件、主机管理员权限，并维护经过恢复演练的异机副本。
+跨机器恢复材料、非 Windows 受保护 provider、对象存储、远程上传、生产密钥轮换/重新封装、原地升级回滚和多主机编排尚未包含。自动计划和本地保留不代表 OPS-01 已完成。运维人员仍需保护包密码、备份文件、主机管理员权限，并维护经过恢复演练的异机副本。
 
 ## Independent implementation sources / 独立实现来源
 
