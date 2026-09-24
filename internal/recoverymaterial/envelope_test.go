@@ -89,6 +89,17 @@ func TestEnvelopeRejectsInvalidVersionsBeforeSeal(t *testing.T) {
 	}
 }
 
+func TestEnvelopeRejectsZeroInstanceBindingBeforeSealAndAfterDecode(t *testing.T) {
+	bundle := testBundle()
+	bundle.InstanceBinding = [32]byte{}
+	if _, err := Seal([]byte("password"), bundle); err == nil {
+		t.Fatal("zero instance binding was sealed")
+	}
+	if _, err := decodePayload(bundle.Reference, encodePayload(bundle)); !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("decoded zero instance binding error=%v", err)
+	}
+}
+
 func TestEnvelopeRejectsNonDefaultParametersBeforeKDF(t *testing.T) {
 	encoded, err := Seal([]byte("password"), testBundle())
 	if err != nil {

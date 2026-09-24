@@ -268,6 +268,13 @@ func validateBundle(bundle *Bundle) error {
 	if len(bundle.Entries) != len(bundle.Reference.Versions) {
 		return errors.New("recovery material entries do not match versions")
 	}
+	var bindingNonzero byte
+	for _, value := range bundle.InstanceBinding {
+		bindingNonzero |= value
+	}
+	if subtle.ConstantTimeByteEq(bindingNonzero, 0) == 1 {
+		return errors.New("recovery material instance binding is invalid")
+	}
 	for index := range bundle.Entries {
 		if bundle.Entries[index].Version != bundle.Reference.Versions[index] {
 			return errors.New("recovery material entry version mismatch")
