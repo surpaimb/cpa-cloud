@@ -18,13 +18,14 @@ import (
 const (
 	responseStateSchemaVersion = 1
 	responseStateMaxPlaintext  = 4 << 20
+	responseStateMaxItems      = 4096
 )
 
 var errResponseStateUnavailable = errors.New("response state unavailable")
 
 const responseResourcesDDL = `CREATE TABLE response_resources (
 	id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
-	operation_id TEXT NOT NULL UNIQUE CHECK(length(operation_id) BETWEEN 1 AND 128),
+	operation_id TEXT NOT NULL CHECK(length(operation_id) BETWEEN 1 AND 128),
 	input_fingerprint BLOB NOT NULL CHECK(length(input_fingerprint) = 32),
 	employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
 	key_id TEXT NOT NULL REFERENCES access_keys(id) ON DELETE RESTRICT,
@@ -47,7 +48,8 @@ const responseResourcesDDL = `CREATE TABLE response_resources (
 	CHECK((tombstoned_at IS NULL AND dek_wrap_nonce IS NOT NULL) OR (tombstoned_at IS NOT NULL AND dek_wrap_nonce IS NULL)),
 	CHECK((status IN ('completed','failed','cancelled','interrupted') AND terminal_at IS NOT NULL) OR (status NOT IN ('completed','failed','cancelled','interrupted') AND terminal_at IS NULL)),
 	CHECK(background = 1 OR status NOT IN ('queued','dispatch_authorized','in_progress')),
-	CHECK(store_body = 1 OR background = 1)
+	CHECK(store_body = 1 OR background = 1),
+	UNIQUE(employee_id,key_id,operation_id)
 )`
 
 const responseResourceItemsDDL = `CREATE TABLE response_resource_items (

@@ -6,8 +6,11 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"time"
@@ -44,7 +47,6 @@ type responseStateItem struct {
 
 type responseResourceCreateInput struct {
 	OperationID      string
-	InputFingerprint []byte
 	EmployeeID       string
 	KeyID            string
 	PublicModel      string
@@ -54,6 +56,7 @@ type responseResourceCreateInput struct {
 	StoreBody        bool
 	Items            []responseStateItem
 	CreatedAt        time.Time
+	TerminalAt       *time.Time
 }
 
 type responseResourceView struct {
@@ -99,6 +102,17 @@ func (c *responseResourceCoordinator) Create(ctx context.Context, input response
 	if created.IsZero() || created.Location() != time.UTC {
 		return responseResourceView{}, errResponseResourceInvalid
 	}
+	var terminal time.Time
+	if input.TerminalAt != nil {
+		terminal = input.TerminalAt.UTC()
+		if terminal.IsZero() || terminal.Before(created) {
+			return responseResourceView{}, errResponseResourceInvalid
+		}
+	}
+	fingerprint, err := c.inputFingerprint(input)
+	if err != nil {
+		return responseResourceView{}, err
+	}
 	responseID, err := newID("resp")
 	if err != nil {
 		return responseResourceView{}, errResponseResourceUnavailable
@@ -133,10 +147,10 @@ func (c *responseResourceCoordinator) Create(ctx context.Context, input response
 	if err := c.authorizeOwnerTx(ctx, tx, input.EmployeeID, input.KeyID, input.PublicModel, created); err != nil {
 		return responseResourceView{}, err
 	}
-	if existing, fingerprint, found, err := loadResponseResourceByOperationTx(ctx, tx, input.EmployeeID, input.KeyID, input.OperationID); err != nil {
+	if existing, storedFingerprint, found, err := loadResponseResourceByOperationTx(ctx, tx, input.EmployeeID, input.KeyID, input.OperationID); err != nil {
 		return responseResourceView{}, errResponseResourceUnavailable
 	} else if found {
-		if subtle.ConstantTimeCompare(fingerprint, input.InputFingerprint) != 1 {
+		if subtle.ConstantTimeCompare(storedFingerprint, fingerprint) != 1 {
 			return responseResourceView{}, errResponseResourceConflict
 		}
 		return existing, nil
@@ -151,13 +165,13 @@ func (c *responseResourceCoordinator) Create(ctx context.Context, input response
 		}
 	}
 	status := "completed"
-	var terminalAt any = created.Format(time.RFC3339Nano)
-	expires := created.Add(responseResourceTTL)
+	var terminalAt any = terminal.Format(time.RFC3339Nano)
+	expires := terminal.Add(responseResourceTTL)
 	if input.Background {
 		status, terminalAt, expires = "queued", nil, created.Add(backgroundTaskTTL)
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO response_resources(id,operation_id,input_fingerprint,employee_id,key_id,public_model,parent_response_id,background,store_body,status,revision,schema_version,dek_wrap_nonce,wrapped_dek,created_at,updated_at,terminal_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?)`,
-		responseID, input.OperationID, input.InputFingerprint, input.EmployeeID, input.KeyID, input.PublicModel, nullableResponseID(input.ParentResponseID), responseBoolInteger(input.Background), responseBoolInteger(input.StoreBody), status, responseStateSchemaVersion, wrapNonce, wrappedDEK, created.Format(time.RFC3339Nano), created.Format(time.RFC3339Nano), terminalAt, expires.Format(time.RFC3339Nano))
+		responseID, input.OperationID, fingerprint, input.EmployeeID, input.KeyID, input.PublicModel, nullableResponseID(input.ParentResponseID), responseBoolInteger(input.Background), responseBoolInteger(input.StoreBody), status, responseStateSchemaVersion, wrapNonce, wrappedDEK, created.Format(time.RFC3339Nano), created.Format(time.RFC3339Nano), terminalAt, expires.Format(time.RFC3339Nano))
 	if err != nil {
 		return responseResourceView{}, errResponseResourceUnavailable
 	}
@@ -168,7 +182,6 @@ func (c *responseResourceCoordinator) Create(ctx context.Context, input response
 	}
 	view := responseResourceView{ID: responseID, EmployeeID: input.EmployeeID, KeyID: input.KeyID, PublicModel: input.PublicModel, ParentResponseID: input.ParentResponseID, Background: input.Background, StoreBody: input.StoreBody, Status: status, Revision: 1, CreatedAt: created, UpdatedAt: created, ExpiresAt: expires}
 	if !input.Background {
-		terminal := created
 		view.TerminalAt = &terminal
 	} else {
 		taskID, idErr := newID("task")
@@ -295,7 +308,10 @@ func (c *responseResourceCoordinator) Delete(ctx context.Context, auth employeeA
 }
 
 func validResponseResourceCreate(input responseResourceCreateInput) bool {
-	if !validIdentifier(input.OperationID, 128) || len(input.InputFingerprint) != 32 || !validIdentifier(input.EmployeeID, 128) || !validIdentifier(input.KeyID, 128) || !validIdentifier(input.PublicModel, 128) || len(input.Items) == 0 || len(input.Items) > 1000001 || (!input.Background && !input.StoreBody) {
+	if !validIdentifier(input.OperationID, 128) || !validIdentifier(input.EmployeeID, 128) || !validIdentifier(input.KeyID, 128) || !validIdentifier(input.PublicModel, 128) || len(input.Items) == 0 || len(input.Items) > responseStateMaxItems || (!input.Background && !input.StoreBody) {
+		return false
+	}
+	if input.Background == (input.TerminalAt != nil) {
 		return false
 	}
 	if input.ParentResponseID != "" && !validIdentifier(input.ParentResponseID, 128) {
@@ -304,12 +320,50 @@ func validResponseResourceCreate(input responseResourceCreateInput) bool {
 	if input.ProviderKind != "openai-compatible" && input.ProviderKind != codexMembershipProvider {
 		return false
 	}
+	totalPlaintext := 0
 	for _, item := range input.Items {
 		if !json.Valid(item.Payload) || len(item.Payload) == 0 || len(item.Payload) > responseStateMaxPlaintext || !validResponseItemBinding(responseItemBinding{responseDEKBinding: responseDEKBinding{employeeID: input.EmployeeID, keyID: input.KeyID, responseID: "resp_validation"}, itemType: item.Type}) {
 			return false
 		}
+		if len(item.Payload) > responseStateMaxPlaintext-totalPlaintext {
+			return false
+		}
+		totalPlaintext += len(item.Payload)
 	}
-	return input.CreatedAt.IsZero() || input.CreatedAt.Location() == time.UTC
+	if !input.CreatedAt.IsZero() && input.CreatedAt.Location() != time.UTC {
+		return false
+	}
+	return input.TerminalAt == nil || (input.TerminalAt.Location() == time.UTC && (input.CreatedAt.IsZero() || !input.TerminalAt.Before(input.CreatedAt)))
+}
+
+func (c *responseResourceCoordinator) inputFingerprint(input responseResourceCreateInput) ([]byte, error) {
+	if c == nil || c.secrets == nil || len(c.secrets.responseFingerprintKey) != sha256.Size {
+		return nil, errResponseResourceUnavailable
+	}
+	h := hmac.New(sha256.New, c.secrets.responseFingerprintKey)
+	writeFingerprintPart := func(value []byte) {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+		_, _ = h.Write(size[:])
+		_, _ = h.Write(value)
+	}
+	writeFingerprintPart([]byte("cpacloud/response-state-operation/v1"))
+	for _, value := range []string{input.OperationID, input.EmployeeID, input.KeyID, input.PublicModel, input.ParentResponseID, input.ProviderKind} {
+		writeFingerprintPart([]byte(value))
+	}
+	flags := byte(0)
+	if input.Background {
+		flags |= 1
+	}
+	if input.StoreBody {
+		flags |= 2
+	}
+	writeFingerprintPart([]byte{flags})
+	for _, item := range input.Items {
+		writeFingerprintPart([]byte(item.Type))
+		writeFingerprintPart(item.Payload)
+	}
+	return h.Sum(nil), nil
 }
 
 func (c *responseResourceCoordinator) authorizeOwnerTx(ctx context.Context, tx *sql.Tx, employeeID, keyID, model string, at time.Time) error {

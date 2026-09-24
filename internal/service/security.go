@@ -18,9 +18,10 @@ import (
 const rootKeyFilename = "master.key"
 
 type secrets struct {
-	digestKey        []byte
-	aead             cipher.AEAD
-	responseWrapAEAD cipher.AEAD
+	digestKey              []byte
+	aead                   cipher.AEAD
+	responseWrapAEAD       cipher.AEAD
+	responseFingerprintKey []byte
 }
 
 func createRootKey(dataDir string) error {
@@ -72,7 +73,11 @@ func loadSecrets(dataDir string) (*secrets, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialize response state encryption: %w", err)
 	}
-	return &secrets{digestKey: digestKey, aead: aead, responseWrapAEAD: responseWrapAEAD}, nil
+	responseFingerprintKey := deriveKey(root, "cpacloud/response-state-operation-fingerprint/v1")
+	return &secrets{
+		digestKey: digestKey, aead: aead, responseWrapAEAD: responseWrapAEAD,
+		responseFingerprintKey: responseFingerprintKey,
+	}, nil
 }
 
 func deriveKey(root []byte, purpose string) []byte {

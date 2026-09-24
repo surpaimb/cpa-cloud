@@ -148,6 +148,7 @@ func seedResponseResourceParents(t *testing.T, db *sql.DB) {
 		`INSERT INTO employees(id,name,status,model_mode,revision,created_at) VALUES('emp_one','one','active','all',1,'2026-09-24T00:00:00Z')`,
 		`INSERT INTO employees(id,name,status,model_mode,revision,created_at) VALUES('emp_other','other','active','all',1,'2026-09-24T00:00:00Z')`,
 		`INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,created_at) VALUES('key_one','emp_one','key','sel_one',X'01',1,'key_op','2026-09-24T00:00:00Z')`,
+		`INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,created_at) VALUES('key_other','emp_other','key','sel_other',X'02',1,'key_other_op','2026-09-24T00:00:00Z')`,
 		`INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at) VALUES('ups_one','upstream','openai-compatible','https://example.invalid/v1',1,X'01',1,1,'2026-09-24T00:00:00Z')`,
 		`INSERT INTO models(id,upstream_id,upstream_model,enabled,revision,created_at) VALUES('model_one','ups_one','actual',1,1,'2026-09-24T00:00:00Z')`,
 	} {
