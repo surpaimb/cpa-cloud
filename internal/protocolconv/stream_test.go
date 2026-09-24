@@ -77,17 +77,17 @@ func TestResponsesToChatStreamTextToolUsageAndTerminal(t *testing.T) {
 	stream := new(ResponsesToChatStream)
 	events := []string{
 		`{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1700000000,"model":"actual","status":"in_progress","output":[]}}`,
-		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"msg_1","type":"message","status":"in_progress","role":"assistant","content":[]}}`,
+		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"msg_1","type":"message","status":"in_progress","role":"assistant","phase":"final_answer","content":[]}}`,
 		`{"type":"response.content_part.added","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}`,
 		`{"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hi"}`,
 		`{"type":"response.output_text.done","sequence_number":4,"item_id":"msg_1","output_index":0,"content_index":0,"text":"Hi"}`,
 		`{"type":"response.content_part.done","sequence_number":5,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"Hi","annotations":[]}}`,
-		`{"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi","annotations":[]}]}}`,
+		`{"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"id":"msg_1","type":"message","status":"completed","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Hi","annotations":[]}]}}`,
 		`{"type":"response.output_item.added","sequence_number":7,"output_index":1,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"lookup","arguments":""}}`,
 		`{"type":"response.function_call_arguments.delta","sequence_number":8,"item_id":"fc_1","output_index":1,"delta":"{\"q\":1}"}`,
 		`{"type":"response.function_call_arguments.done","sequence_number":9,"item_id":"fc_1","output_index":1,"arguments":"{\"q\":1}"}`,
 		`{"type":"response.output_item.done","sequence_number":10,"output_index":1,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}}`,
-		`{"type":"response.completed","sequence_number":11,"response":{"id":"resp_1","object":"response","created_at":1700000000,"model":"actual","status":"completed","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi","annotations":[]}]},{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}],"usage":{"input_tokens":8,"output_tokens":3,"total_tokens":11}}}`,
+		`{"type":"response.completed","sequence_number":11,"response":{"id":"resp_1","object":"response","created_at":1700000000,"model":"actual","status":"completed","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Hi","annotations":[]}]},{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}],"usage":{"input_tokens":8,"output_tokens":3,"total_tokens":11}}}`,
 	}
 	var output []SSEEvent
 	for _, event := range events {

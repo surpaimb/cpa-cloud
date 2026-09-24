@@ -695,7 +695,10 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 }
 
 func validateAddedMessage(item map[string]json.RawMessage) error {
-	if err := rejectUnknown(item, map[string]bool{"id": true, "type": true, "status": true, "role": true, "content": true}, "item"); err != nil {
+	if err := rejectUnknown(item, map[string]bool{"id": true, "type": true, "status": true, "role": true, "content": true, "phase": true}, "item"); err != nil {
+		return err
+	}
+	if err := validateMessagePhase(item["phase"], "item.phase"); err != nil {
 		return err
 	}
 	role, err := requireString(item["role"], "item.role", true)
@@ -802,7 +805,10 @@ func validateStreamItemObject(streamed *responseStreamItem, object map[string]js
 		return invalidUpstream("item.status", "completed output item must be completed")
 	}
 	if streamed.kind == "message" {
-		if err := rejectUnknown(object, map[string]bool{"id": true, "type": true, "status": true, "role": true, "content": true}, "item"); err != nil {
+		if err := rejectUnknown(object, map[string]bool{"id": true, "type": true, "status": true, "role": true, "content": true, "phase": true}, "item"); err != nil {
+			return err
+		}
+		if err := validateMessagePhase(object["phase"], "item.phase"); err != nil {
 			return err
 		}
 		role, err := requireString(object["role"], "item.role", true)

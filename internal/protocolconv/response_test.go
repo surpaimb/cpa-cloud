@@ -3,6 +3,7 @@ package protocolconv
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -93,8 +94,9 @@ func TestOfficialResponseMetadataDoesNotBlockSupportedOutput(t *testing.T) {
   "parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":"cache","prompt_cache_retention":"24h",
   "reasoning":{"effort":"low"},"safety_identifier":"safe","service_tier":"default","store":false,
   "temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_logprobs":0,
-  "top_p":1,"truncation":"disabled","user":"synthetic","context_management":[],
-  "output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}]
+	"top_p":1,"truncation":"disabled","user":"synthetic","context_management":[],"access_programs":null,
+	"conversation":null,"moderation":null,"prompt":null,"prompt_cache_options":{},"prompt_cache_diagnostics":{},
+	"output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"ok","annotations":[]}]}]
 }`)
 	converted, err := ResponsesResponseToChat(raw)
 	if err != nil {
@@ -104,6 +106,42 @@ func TestOfficialResponseMetadataDoesNotBlockSupportedOutput(t *testing.T) {
 	_ = json.Unmarshal(converted, &root)
 	if root["object"] != "chat.completion" || root["id"].(string)[:9] != "chatcmpl_" {
 		t.Fatalf("unexpected converted envelope: %#v", root)
+	}
+}
+
+func TestResponsesResponseRejectsStatefulMetadataAndInvalidCompletionTime(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		extra string
+	}{
+		{"stored", "store", `,"store":true`},
+		{"background", "background", `,"background":true`},
+		{"previous response", "previous_response_id", `,"previous_response_id":"resp_parent"`},
+		{"conversation", "conversation", `,"conversation":{"id":"conv_1"}`},
+		{"completion precedes creation", "completed_at", `,"completed_at":9`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"id":"r","object":"response","created_at":10,"model":"m","status":"completed","output":[{"id":"msg","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"x","annotations":[]}]}]` + test.extra + `}`
+			_, err := ResponsesResponseToChat([]byte(body))
+			if !errors.Is(err, ErrInvalidUpstream) || Field(err) != test.field {
+				t.Fatalf("got err=%v field=%q", err, Field(err))
+			}
+		})
+	}
+}
+
+func TestResponsesMessagePhaseMustBeRepresentable(t *testing.T) {
+	base := `{"id":"r","object":"response","created_at":1,"model":"m","status":"completed","output":[{"id":"msg","type":"message","status":"completed","role":"assistant","phase":%s,"content":[{"type":"output_text","text":"x","annotations":[]}]}]}`
+	for _, phase := range []string{`null`, `"final_answer"`} {
+		if _, err := ResponsesResponseToChat([]byte(fmt.Sprintf(base, phase))); err != nil {
+			t.Fatalf("phase %s should be accepted: %v", phase, err)
+		}
+	}
+	_, err := ResponsesResponseToChat([]byte(fmt.Sprintf(base, `"commentary"`)))
+	if !errors.Is(err, ErrUnsupportedFeature) || Field(err) != "output[0].phase" {
+		t.Fatalf("got err=%v field=%q", err, Field(err))
 	}
 }
 

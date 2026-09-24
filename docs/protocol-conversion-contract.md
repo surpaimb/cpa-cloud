@@ -96,6 +96,8 @@ Gemini 原生通路仍是同协议透传，不属于跨协议转换。本批根�
 实现与测试没有使用 CLIProxyAPI、Sub2API、归档 CPA、真实凭据或捕获的用户正文。
 
 响应侧的字段策略与请求侧不同：请求字段代表调用方要求的语义，未列字段继续拒绝；响应对象中官方定义、
-但不改变本批文本/function output 的 envelope 元数据（例如 service tier、store、temperature、tools 和
-metadata）允许经过结构校验后省略。`error`/`incomplete_details` 在 completed 响应中必须为 null。
-output item、content、phase、非空 logprobs/refusal/audio 及未知 SSE 事件仍不能省略或降级，必须明确失败。
+但不改变本批文本/function output 的已知 envelope 元数据可省略；其中会改变无状态语义的关键字段仍会
+单独校验：`store`/`background` 只能为 false 或 null，`previous_response_id`/`conversation` 只能为 null，
+`error`/`incomplete_details` 在 completed 响应中必须为 null，`completed_at` 不得早于 `created_at`。
+output item、content、不可映射的 phase、非空 logprobs/refusal/audio 及未知 SSE 事件仍不能省略或降级，
+必须明确失败。

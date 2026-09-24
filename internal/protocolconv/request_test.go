@@ -118,6 +118,7 @@ func TestResponsesRequestGroupsParallelFunctionCalls(t *testing.T) {
 	converted, err := ResponsesRequestToChat([]byte(`{
   "model":"m","parallel_tool_calls":true,
   "input":[
+	{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Checking.","annotations":[]}]},
     {"type":"function_call","call_id":"call_a","name":"a","arguments":"{}"},
     {"type":"function_call","call_id":"call_b","name":"b","arguments":"{}"},
     {"type":"function_call_output","call_id":"call_a","output":"A"},
@@ -134,7 +135,7 @@ func TestResponsesRequestGroupsParallelFunctionCalls(t *testing.T) {
 		t.Fatalf("expected one assistant call round and two results, got %#v", messages)
 	}
 	assistant := messages[0].(map[string]any)
-	if assistant["role"] != "assistant" || len(assistant["tool_calls"].([]any)) != 2 {
+	if assistant["role"] != "assistant" || assistant["content"] != "Checking." || len(assistant["tool_calls"].([]any)) != 2 {
 		t.Fatalf("parallel calls were split: %#v", assistant)
 	}
 	for index, callID := range []string{"call_a", "call_b"} {

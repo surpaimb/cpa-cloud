@@ -156,6 +156,15 @@ func ResponsesResponseToChat(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if rawCompleted, ok := root["completed_at"]; ok {
+		completed, err := requireInteger(rawCompleted, "completed_at", true)
+		if err != nil {
+			return nil, err
+		}
+		if completed < created {
+			return nil, invalidUpstream("completed_at", "must not precede created_at")
+		}
+	}
 	var output []json.RawMessage
 	if json.Unmarshal(root["output"], &output) != nil || len(output) == 0 {
 		return nil, invalidUpstream("output", "a non-empty array is required")
@@ -179,10 +188,13 @@ func ResponsesResponseToChat(raw []byte) ([]byte, error) {
 				return nil, unsupported(joinField(field, "type"))
 			}
 			messageSeen = true
-			if err := rejectUnknown(item, map[string]bool{"id": true, "type": true, "status": true, "role": true, "content": true}, field); err != nil {
+			if err := rejectUnknown(item, map[string]bool{"id": true, "type": true, "status": true, "role": true, "content": true, "phase": true}, field); err != nil {
 				return nil, err
 			}
 			if err := validateCompletedOutputIdentity(item, field); err != nil {
+				return nil, err
+			}
+			if err := validateMessagePhase(item["phase"], joinField(field, "phase")); err != nil {
 				return nil, err
 			}
 			role, err := requireString(item["role"], joinField(field, "role"), true)
@@ -251,7 +263,9 @@ func validateStandardResponseEnvelope(root map[string]json.RawMessage) error {
 		"reasoning": true, "safety_identifier": true, "service_tier": true, "store": true,
 		"temperature": true, "text": true, "tool_choice": true, "tools": true,
 		"top_logprobs": true, "top_p": true, "truncation": true, "user": true,
-		"context_management": true,
+		"context_management": true, "access_programs": true, "conversation": true,
+		"moderation": true, "prompt": true, "prompt_cache_options": true,
+		"prompt_cache_diagnostics": true,
 	}
 	if err := rejectUnknown(root, allowed, ""); err != nil {
 		return err
@@ -260,6 +274,38 @@ func validateStandardResponseEnvelope(root map[string]json.RawMessage) error {
 		if raw, ok := root[field]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			return invalidUpstream(field, "completed response must not contain terminal error details")
 		}
+	}
+	for _, field := range []string{"background", "store"} {
+		raw, ok := root[field]
+		if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
+		var enabled bool
+		if json.Unmarshal(raw, &enabled) != nil {
+			return invalidUpstream(field, "expected false or null for stateless conversion")
+		}
+		if enabled {
+			return invalidUpstream(field, "stateful response cannot be represented by stateless conversion")
+		}
+	}
+	for _, field := range []string{"previous_response_id", "conversation"} {
+		if raw, ok := root[field]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return invalidUpstream(field, "stateful response cannot be represented by stateless conversion")
+		}
+	}
+	return nil
+}
+
+func validateMessagePhase(raw json.RawMessage, field string) error {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	phase, err := requireString(raw, field, true)
+	if err != nil {
+		return err
+	}
+	if phase != "final_answer" {
+		return unsupported(field)
 	}
 	return nil
 }

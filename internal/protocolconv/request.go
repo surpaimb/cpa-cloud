@@ -312,12 +312,21 @@ func responseInputToChatMessages(raw json.RawMessage) ([]any, error) {
 	}
 	messages := make([]any, 0, len(items))
 	pendingCalls := make([]any, 0)
-	flushCalls := func() {
-		if len(pendingCalls) == 0 {
+	var pendingAssistantContent *string
+	flushAssistant := func() {
+		if len(pendingCalls) == 0 && pendingAssistantContent == nil {
 			return
 		}
-		messages = append(messages, map[string]any{"role": "assistant", "content": nil, "tool_calls": pendingCalls})
+		message := map[string]any{"role": "assistant", "content": nil}
+		if pendingAssistantContent != nil {
+			message["content"] = *pendingAssistantContent
+		}
+		if len(pendingCalls) != 0 {
+			message["tool_calls"] = pendingCalls
+		}
+		messages = append(messages, message)
 		pendingCalls = make([]any, 0)
+		pendingAssistantContent = nil
 	}
 	for index, rawItem := range items {
 		field := indexField("input", index)
@@ -331,12 +340,18 @@ func responseInputToChatMessages(raw json.RawMessage) ([]any, error) {
 		}
 		switch kind {
 		case "message":
-			flushCalls()
 			message, err := responseMessageToChat(item, field)
 			if err != nil {
 				return nil, err
 			}
-			messages = append(messages, message)
+			if message["role"] == "assistant" {
+				flushAssistant()
+				content := message["content"].(string)
+				pendingAssistantContent = &content
+			} else {
+				flushAssistant()
+				messages = append(messages, message)
+			}
 		case "function_call":
 			if err := rejectUnknown(item, map[string]bool{"type": true, "id": true, "call_id": true, "name": true, "arguments": true, "status": true}, field); err != nil {
 				return nil, err
@@ -355,7 +370,7 @@ func responseInputToChatMessages(raw json.RawMessage) ([]any, error) {
 			}
 			pendingCalls = append(pendingCalls, map[string]any{"id": callID, "type": "function", "function": map[string]any{"name": name, "arguments": arguments}})
 		case "function_call_output":
-			flushCalls()
+			flushAssistant()
 			if err := rejectUnknown(item, map[string]bool{"type": true, "id": true, "call_id": true, "output": true, "status": true}, field); err != nil {
 				return nil, err
 			}
@@ -372,7 +387,7 @@ func responseInputToChatMessages(raw json.RawMessage) ([]any, error) {
 			return nil, unsupported(joinField(field, "type"))
 		}
 	}
-	flushCalls()
+	flushAssistant()
 	return messages, nil
 }
 
