@@ -313,6 +313,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .usage-table td code, .price-table td code { overflow-wrap: anywhere; }
 .usage-inline-error { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 20px 0; }
 .usage-inline-error button { color: inherit; background: none; border: 0; text-decoration: underline; }
+.usage-settlement { margin-bottom: 22px; }
+.usage-settlement__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 .pagination { display: flex; align-items: center; justify-content: flex-end; gap: 14px; padding: 16px 20px; border-top: 1px solid var(--border); }
 .pagination span { color: var(--muted); font-size: 13px; }
 .attempt-list { display: grid; gap: 12px; }

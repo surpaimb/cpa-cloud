@@ -395,6 +395,28 @@ export type UsageAttempt = {
   cache_write_tokens: string | null
   cost_micro: string | null
 }
+export type UsageSettlementReportItem = {
+  period_start: string
+  period_end: string
+  currency: string
+  requests: string
+  attempts: string
+  corrections: string
+  missing_evidence_attempts: string
+  known_estimated_cost_micro: string
+  unknown_cost_attempts: string
+  input_tokens: UsageCounter
+  output_tokens: UsageCounter
+  cache_read_tokens: UsageCounter
+  cache_write_tokens: UsageCounter
+  reasoning_tokens: UsageCounter
+}
+export type UsageSettlementReport = {
+  from: string
+  to: string
+  granularity: 'day' | 'month'
+  items: UsageSettlementReportItem[]
+}
 export type PriceRate = {
   currency: string
   input_per_million_micro: string
@@ -512,6 +534,10 @@ function usageSearch(filters: UsageFilters, cursor?: string) {
   return query.toString()
 }
 
+export function usageExportURL(filters: UsageFilters, limit = 5000) {
+  return `${API_ROOT}/usage/export?${usageSearch(filters)}&limit=${limit}`
+}
+
 function governanceObservationSearch(filters: GovernanceObservationFilters, cursor?: string) {
   const query = new URLSearchParams({ limit: String(filters.limit ?? 20) })
   if (filters.scope_kind) query.set('scope_kind', filters.scope_kind)
@@ -615,6 +641,10 @@ export const api = {
     request<UsageRequestsPage>(`/usage/requests?${usageSearch(filters, cursor)}`, { signal }),
   usageAttempts: (requestId: string, signal?: AbortSignal) =>
     request<{ items: UsageAttempt[] }>(`/usage/requests/${encodeURIComponent(requestId)}/attempts`, { signal }),
+  usageSettlementDaily: (filters: UsageFilters, signal?: AbortSignal) =>
+    request<UsageSettlementReport>(`/usage/daily?${usageSearch(filters)}`, { signal }),
+  usageSettlementMonthly: (filters: UsageFilters, signal?: AbortSignal) =>
+    request<UsageSettlementReport>(`/usage/monthly?${usageSearch(filters)}`, { signal }),
   upstreamPrices: (upstreamId: string, signal?: AbortSignal) =>
     request<{ items: UpstreamPrice[] }>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { signal }),
   governanceSettings: (signal?: AbortSignal) => request<GovernanceSettings>('/governance/settings', { signal }),

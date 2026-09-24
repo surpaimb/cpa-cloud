@@ -42,6 +42,38 @@ describe('usage and pricing page', () => {
     expect(screen.getByRole('button', { name: '最近 24 小时' })).toBeInTheDocument()
   })
 
+  it('loads reliable daily settlement and exposes a bounded CSV export', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const common = commonRoute(url)
+      if (common) return common
+      if (url.includes('/usage/summary?')) return json(emptySummary)
+      if (url.includes('/usage/requests?')) return json(emptyPage)
+      if (url.includes('/usage/daily?')) return json({
+        from: emptySummary.from, to: emptySummary.to, granularity: 'day', items: [{
+          period_start: '2026-09-22T00:00:00Z', period_end: '2026-09-23T00:00:00Z', currency: 'USD',
+          requests: '1', attempts: '2', corrections: '3', missing_evidence_attempts: '4',
+          known_estimated_cost_micro: '1234567890123456789', unknown_cost_attempts: '5',
+          input_tokens: { known_total: '10', unknown_attempts: '0' }, output_tokens: { known_total: '20', unknown_attempts: '0' },
+          cache_read_tokens: { known_total: '0', unknown_attempts: '1' }, cache_write_tokens: { known_total: '0', unknown_attempts: '1' },
+          reasoning_tokens: { known_total: '9007199254740991001', unknown_attempts: '6' },
+        }],
+      })
+      if (url.endsWith('/upstreams/up-1/prices')) return json({ items: [] })
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<UsagePage csrf="csrf" />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '查看日汇总' }))
+    expect(await screen.findByText('1,234,567,890,123.456789 USD')).toBeInTheDocument()
+    expect(screen.getByText('9,007,199,254,740,991,001')).toBeInTheDocument()
+    expect(screen.getByText('4')).toBeInTheDocument()
+    const exportLink = screen.getByRole('link', { name: '导出 CSV（最多 5000 行）' })
+    expect(exportLink).toHaveAttribute('download', 'usage-settlement.csv')
+    expect(exportLink.getAttribute('href')).toContain('/admin/api/v1/usage/export?')
+    expect(exportLink.getAttribute('href')).toContain('limit=5000')
+  })
+
   it('recovers the initial load, preserves decimal strings, pins pagination, and opens attempt details', async () => {
     let summaryCalls = 0
     let requestCalls = 0

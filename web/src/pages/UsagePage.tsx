@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import {
   api,
   ApiError,
+  usageExportURL,
   type Employee,
   type ModelRoute,
   type PriceRate,
@@ -14,6 +15,7 @@ import {
   type UsageRequestsPage,
   type UsageStatus,
   type UsageSummary,
+  type UsageSettlementReport,
 } from '../api'
 import { messageFor } from '../hooks'
 import { Button, Dialog, EmptyState, Field, FormError, PageState } from '../ui'
@@ -215,6 +217,7 @@ export function UsagePage({ csrf }: { csrf: string }) {
 
     <PageState loading={loading && !summary} error={error && !summary ? error : null} onRetry={() => retryAction.current?.()} />
     {summary ? <UsageSummaryCards summary={summary} /> : null}
+    <SettlementReports filters={active} />
     <section className="content-panel usage-requests" aria-labelledby="usage-requests-title">
       <header className="section-heading"><div><h2 id="usage-requests-title">员工请求</h2><p>{active ? `${dateLabel(active.from)} 至 ${dateLabel(active.to)} · 固定查询窗口` : '正在准备查询窗口…'}</p></div>{loading && summary ? <span className="subtle-loading">正在更新…</span> : null}</header>
       {error && summary ? <div className="inline-error usage-inline-error" role="alert">{error}<button onClick={() => retryAction.current?.()}>重试</button></div> : null}
@@ -226,6 +229,34 @@ export function UsagePage({ csrf }: { csrf: string }) {
     <PriceCatalog csrf={csrf} upstreams={options.upstreams} />
     {selectedRequest ? <AttemptDialog request={selectedRequest} onClose={() => setSelectedRequest(null)} /> : null}
   </>
+}
+
+function SettlementReports({ filters }: { filters: UsageFilters | null }) {
+  const [report, setReport] = useState<UsageSettlementReport | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const sequence = useRef(0)
+  async function load(granularity: 'day' | 'month') {
+    if (!filters) return
+    const current = ++sequence.current
+    const abort = new AbortController()
+    setLoading(true); setError(null)
+    try {
+      const next = granularity === 'day' ? await api.usageSettlementDaily(filters, abort.signal) : await api.usageSettlementMonthly(filters, abort.signal)
+      if (current === sequence.current) setReport(next)
+    } catch (caught) {
+      if (current === sequence.current && !abort.signal.aborted) setError(messageFor(caught))
+    } finally {
+      if (current === sequence.current) setLoading(false)
+    }
+  }
+  return <section className="content-panel usage-settlement" aria-labelledby="usage-settlement-title">
+    <header className="section-heading"><div><h2 id="usage-settlement-title">对账汇总与导出</h2><p>按服务完成时间生成日/月汇总。修正是追加事实；未知证据和未知成本不会显示为零，金额仍是配置价格的内部估算。</p></div><div className="usage-settlement__actions"><Button variant="secondary" disabled={!filters || loading} onClick={() => void load('day')}>查看日汇总</Button><Button variant="secondary" disabled={!filters || loading} onClick={() => void load('month')}>查看月汇总</Button>{filters ? <a className="button button--secondary" href={usageExportURL(filters)} download="usage-settlement.csv">导出 CSV（最多 5000 行）</a> : null}</div></header>
+    {loading ? <div className="subtle-loading">正在读取对账汇总…</div> : null}
+    <FormError error={error} />
+    {!loading && !error && report?.items.length === 0 ? <EmptyState title="没有可汇总的终态尝试" body="这不表示用量为零；可能是筛选窗口为空。" /> : null}
+    {report?.items.length ? <div className="table-scroll"><table className="usage-table"><thead><tr><th>期间</th><th>币种</th><th>请求 / 尝试</th><th>内部估算成本</th><th>未知成本</th><th>缺少证据</th><th>修正</th><th>推理 Token</th></tr></thead><tbody>{report.items.map((item) => <tr key={`${item.period_start}:${item.currency}`}><td>{dateLabel(item.period_start)}<small>至 {dateLabel(item.period_end)}</small></td><td>{item.currency}</td><td>{formatDecimalInteger(item.requests)} / {formatDecimalInteger(item.attempts)}</td><td>{item.currency === 'UNKNOWN' ? '不可估算' : formatMicrocurrency(item.known_estimated_cost_micro, item.currency)}</td><td>{formatDecimalInteger(item.unknown_cost_attempts)}</td><td>{formatDecimalInteger(item.missing_evidence_attempts)}</td><td>{formatDecimalInteger(item.corrections)}</td><td>{formatDecimalInteger(item.reasoning_tokens.known_total)}<small>{formatDecimalInteger(item.reasoning_tokens.unknown_attempts)} 次未知</small></td></tr>)}</tbody></table></div> : null}
+  </section>
 }
 
 function UsageSummaryCards({ summary }: { summary: UsageSummary }) {

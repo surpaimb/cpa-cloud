@@ -73,6 +73,14 @@ type AttemptStart struct {
 	Dispatch  Dispatch
 	StartedAt time.Time
 	Price     *PriceSnapshot
+	// The fields below are optional for legacy callers. Reliable accounting
+	// callers set all required context fields after MigrateV2 has completed.
+	Protocol       UsageProtocol
+	EffectiveModel string
+	Evidence       UsageEvidence
+	ResponseID     *string
+	TaskID         *string
+	ToolRunID      *string
 }
 
 type Usage struct {
@@ -102,10 +110,16 @@ type MutuallyExclusiveInputUpperUsage struct {
 }
 
 type AttemptFinish struct {
-	ID         string
-	Status     Status
-	FinishedAt time.Time
-	Usage      Usage
+	ID              string
+	Status          Status
+	FinishedAt      time.Time
+	Usage           Usage
+	ReasoningTokens *int64
+	SourceEventID   *string
+	ResponseID      *string
+	TaskID          *string
+	ToolRunID       *string
+	ReliableUsage   bool
 }
 
 type RequestFinish struct {
@@ -323,7 +337,7 @@ func beginAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptStart, started
 		return err
 	}
 	if matched {
-		return nil
+		return recordAttemptContextTx(ctx, tx, input)
 	}
 	if !errors.Is(err, ErrNotFound) {
 		return fmt.Errorf("%w: attempt start differs", ErrConflict)
@@ -378,7 +392,7 @@ func beginAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptStart, started
 			return fmt.Errorf("%w: attempt start differs", ErrConflict)
 		}
 	}
-	return nil
+	return recordAttemptContextTx(ctx, tx, input)
 }
 
 func (l *Ledger) FinishAttempt(ctx context.Context, input AttemptFinish) error {
@@ -429,6 +443,9 @@ func finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finis
 		if row.status != input.Status || row.finishedAt.String != finishedAt || !sameUsage(row.usage, input.Usage) || !sameNullableInt(row.cost, cost) {
 			return fmt.Errorf("%w: attempt finish differs", ErrConflict)
 		}
+		if input.ReliableUsage {
+			return recordUsageBaseTx(ctx, tx, input, cost)
+		}
 		return nil
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE accounting_attempts SET
@@ -444,6 +461,9 @@ func finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finis
 	}
 	if updated != 1 {
 		return fmt.Errorf("%w: attempt was already finished", ErrConflict)
+	}
+	if input.ReliableUsage {
+		return recordUsageBaseTx(ctx, tx, input, cost)
 	}
 	return nil
 }
@@ -849,12 +869,23 @@ func validateAttemptStart(input AttemptStart) (string, error) {
 	if !validID(input.ID) || !validID(input.RequestID) || !validID(input.AccountID) || !validProvider(input.Provider) || !validDispatch(input.Dispatch) || !validPrice(input.Price) {
 		return "", ErrInvalid
 	}
+	if hasAttemptContext(input) && !validAttemptContext(input) {
+		return "", ErrInvalid
+	}
 	return canonicalTime(input.StartedAt)
 }
 
 func validateAttemptFinish(input AttemptFinish) (string, error) {
 	if !validID(input.ID) || !terminalStatus(input.Status) || !validUsage(input.Usage) {
 		return "", ErrInvalid
+	}
+	if input.ReasoningTokens != nil && (*input.ReasoningTokens < 0 || input.Usage.OutputTokens != nil && *input.ReasoningTokens > *input.Usage.OutputTokens) || input.SourceEventID != nil && !validID(*input.SourceEventID) {
+		return "", ErrInvalid
+	}
+	for _, value := range []*string{input.ResponseID, input.TaskID, input.ToolRunID} {
+		if value != nil && !validID(*value) {
+			return "", ErrInvalid
+		}
 	}
 	return canonicalTime(input.FinishedAt)
 }
