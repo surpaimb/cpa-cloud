@@ -7,6 +7,8 @@ import (
 
 // Anthropic Messages streaming event order and cumulative usage semantics:
 // https://platform.claude.com/docs/en/build-with-claude/streaming
+// Official Go SDK accumulation semantics for optional cumulative usage fields:
+// https://github.com/anthropics/anthropic-sdk-go/blob/main/messageutil.go
 
 type messagesStreamBlock struct {
 	index     int
@@ -19,25 +21,87 @@ type messagesStreamBlock struct {
 	closed    bool
 }
 
+type streamUsageState struct {
+	input           int64
+	inputKnown      bool
+	output          int64
+	outputKnown     bool
+	cacheRead       int64
+	cacheReadKnown  bool
+	cacheWrite      int64
+	cacheWriteKnown bool
+}
+
+func (s *streamUsageState) apply(update streamUsageState) error {
+	fields := []struct {
+		name         string
+		value        int64
+		known        bool
+		current      *int64
+		currentKnown *bool
+	}{
+		{name: "usage.input_tokens", value: update.input, known: update.inputKnown, current: &s.input, currentKnown: &s.inputKnown},
+		{name: "usage.output_tokens", value: update.output, known: update.outputKnown, current: &s.output, currentKnown: &s.outputKnown},
+		{name: "usage.cache_read_input_tokens", value: update.cacheRead, known: update.cacheReadKnown, current: &s.cacheRead, currentKnown: &s.cacheReadKnown},
+		{name: "usage.cache_creation_input_tokens", value: update.cacheWrite, known: update.cacheWriteKnown, current: &s.cacheWrite, currentKnown: &s.cacheWriteKnown},
+	}
+	for _, field := range fields {
+		if !field.known {
+			continue
+		}
+		if field.value < 0 || *field.currentKnown && field.value < *field.current {
+			return invalidUpstream(field.name, "cumulative token usage decreased")
+		}
+		*field.current = field.value
+		*field.currentKnown = true
+	}
+	return nil
+}
+
+func (s streamUsageState) messagesUsage() map[string]any {
+	usage := map[string]any{}
+	if s.inputKnown {
+		usage["input_tokens"] = s.input
+	}
+	if s.outputKnown {
+		usage["output_tokens"] = s.output
+	}
+	if s.cacheReadKnown {
+		usage["cache_read_input_tokens"] = s.cacheRead
+	}
+	if s.cacheWriteKnown {
+		usage["cache_creation_input_tokens"] = s.cacheWrite
+	}
+	if len(usage) == 0 {
+		return nil
+	}
+	return usage
+}
+
+func (s streamUsageState) responsesUsage() map[string]any {
+	if !s.inputKnown || !s.outputKnown {
+		return nil
+	}
+	return map[string]any{"input_tokens": s.input, "output_tokens": s.output, "total_tokens": s.input + s.output}
+}
+
 // MessagesToResponsesStream converts Anthropic Messages SSE objects into
 // Responses SSE events. It supports only text and client function calls.
 type MessagesToResponsesStream struct {
-	sequence       int64
-	started        bool
-	terminal       bool
-	responseID     string
-	model          string
-	blocks         map[int]*messagesStreamBlock
-	callIDs        map[string]struct{}
-	nextBlock      int
-	openBlock      int
-	outputBytes    int
-	stopReason     string
-	stopSequence   *string
-	inputTokens    int64
-	outputTokens   int64
-	usageFinalized bool
-	messageDelta   bool
+	sequence     int64
+	started      bool
+	terminal     bool
+	responseID   string
+	model        string
+	blocks       map[int]*messagesStreamBlock
+	callIDs      map[string]struct{}
+	nextBlock    int
+	openBlock    int
+	outputBytes  int
+	stopReason   string
+	stopSequence *string
+	usage        streamUsageState
+	messageDelta bool
 }
 
 func (s *MessagesToResponsesStream) responseEvent(name string, payload map[string]any, semantic, terminal bool) (SSEEvent, error) {
@@ -130,8 +194,11 @@ func (s *MessagesToResponsesStream) feedMessageStart(event map[string]json.RawMe
 			return nil, invalidUpstream("message."+field, "message_start field must be null")
 		}
 	}
-	usage, err := parseMessagesStreamStartUsage(message["usage"])
+	usage, _, err := parseMessagesStreamUsage(message["usage"])
 	if err != nil {
+		return nil, err
+	}
+	if err := s.usage.apply(usage); err != nil {
 		return nil, err
 	}
 	s.started = true
@@ -140,8 +207,6 @@ func (s *MessagesToResponsesStream) feedMessageStart(event map[string]json.RawMe
 	s.blocks = make(map[int]*messagesStreamBlock)
 	s.callIDs = make(map[string]struct{})
 	s.openBlock = -1
-	s.inputTokens = usage.Input
-	s.outputTokens = usage.Output
 	response := s.responseSnapshot("in_progress", nil)
 	created, _ := s.responseEvent("response.created", map[string]any{"response": response}, false, false)
 	inProgress, _ := s.responseEvent("response.in_progress", map[string]any{"response": response}, false, false)
@@ -152,8 +217,8 @@ func (s *MessagesToResponsesStream) feedContentBlockStart(event map[string]json.
 	if err := s.requireMessagesStarted(); err != nil {
 		return nil, err
 	}
-	if s.stopReason != "" {
-		return nil, invalidUpstream("type", "content block started after message_delta stop reason")
+	if s.messageDelta {
+		return nil, invalidUpstream("type", "content block started after message_delta")
 	}
 	if s.openBlock >= 0 {
 		return nil, invalidUpstream("index", "content blocks cannot be interleaved")
@@ -329,9 +394,6 @@ func (s *MessagesToResponsesStream) feedMessageDelta(event map[string]json.RawMe
 	if err := s.requireMessagesStarted(); err != nil {
 		return nil, err
 	}
-	if s.messageDelta {
-		return nil, invalidUpstream("type", "message_delta is duplicated")
-	}
 	if err := rejectUnknown(event, map[string]bool{"type": true, "delta": true, "usage": true}, ""); err != nil {
 		return nil, err
 	}
@@ -347,46 +409,41 @@ func (s *MessagesToResponsesStream) feedMessageDelta(event map[string]json.RawMe
 	if err := rejectUnknown(delta, map[string]bool{"stop_reason": true, "stop_sequence": true}, "delta"); err != nil {
 		return nil, err
 	}
-	rawReason, ok := delta["stop_reason"]
-	if !ok || bytes.Equal(bytes.TrimSpace(rawReason), []byte("null")) {
-		return nil, invalidUpstream("delta.stop_reason", "a terminal stop reason is required")
+	if rawReason, ok := delta["stop_reason"]; ok && !bytes.Equal(bytes.TrimSpace(rawReason), []byte("null")) {
+		reason, err := requireString(rawReason, "delta.stop_reason", true)
+		if err != nil {
+			return nil, err
+		}
+		switch reason {
+		case "end_turn", "stop_sequence", "tool_use", "max_tokens":
+		default:
+			return nil, unsupported("delta.stop_reason")
+		}
+		if s.stopReason != "" && reason != s.stopReason {
+			return nil, invalidUpstream("delta.stop_reason", "terminal stop reason changed")
+		}
+		s.stopReason = reason
 	}
-	reason, err := requireString(rawReason, "delta.stop_reason", true)
-	if err != nil {
-		return nil, err
-	}
-	switch reason {
-	case "end_turn", "stop_sequence", "tool_use", "max_tokens":
-	default:
-		return nil, unsupported("delta.stop_reason")
-	}
-	s.stopReason = reason
 	if rawSequence, ok := delta["stop_sequence"]; ok && !bytes.Equal(bytes.TrimSpace(rawSequence), []byte("null")) {
 		sequence, err := requireString(rawSequence, "delta.stop_sequence", true)
 		if err != nil || sequence == "" {
 			return nil, invalidUpstream("delta.stop_sequence", "a non-empty string is required")
 		}
+		if s.stopSequence != nil && sequence != *s.stopSequence {
+			return nil, invalidUpstream("delta.stop_sequence", "terminal stop sequence changed")
+		}
 		s.stopSequence = &sequence
-	}
-	if s.stopReason == "stop_sequence" && s.stopSequence == nil {
-		return nil, invalidUpstream("delta.stop_sequence", "stop sequence is required")
 	}
 	if s.stopReason != "stop_sequence" && s.stopSequence != nil {
 		return nil, invalidUpstream("delta.stop_sequence", "stop sequence does not match stop reason")
 	}
-	usage, err := decodeObject(event["usage"], CodeInvalidUpstream, "usage")
+	usage, _, err := parseMessagesStreamUsage(event["usage"])
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknown(usage, map[string]bool{"output_tokens": true}, "usage"); err != nil {
+	if err := s.usage.apply(usage); err != nil {
 		return nil, err
 	}
-	output, err := requireInteger(usage["output_tokens"], "usage.output_tokens", true)
-	if err != nil || output < 0 || output < s.outputTokens {
-		return nil, invalidUpstream("usage.output_tokens", "cumulative output usage decreased")
-	}
-	s.outputTokens = output
-	s.usageFinalized = true
 	s.messageDelta = true
 	return nil, nil
 }
@@ -398,8 +455,11 @@ func (s *MessagesToResponsesStream) feedMessageStop(event map[string]json.RawMes
 	if err := rejectUnknown(event, map[string]bool{"type": true}, ""); err != nil {
 		return nil, err
 	}
-	if s.stopReason == "" || !s.usageFinalized {
-		return nil, interrupted("Messages stream ended before its final message_delta")
+	if !s.messageDelta || s.stopReason == "" {
+		return nil, interrupted("Messages stream ended before its terminal message_delta")
+	}
+	if s.stopReason == "stop_sequence" && s.stopSequence == nil {
+		return nil, invalidUpstream("delta.stop_sequence", "stop sequence is required")
 	}
 	for _, block := range s.blocks {
 		if !block.closed {
@@ -416,7 +476,7 @@ func (s *MessagesToResponsesStream) feedMessageStop(event map[string]json.RawMes
 		status = "incomplete"
 		name = "response.incomplete"
 	}
-	response := s.responseSnapshot(status, s.responsesUsage())
+	response := s.responseSnapshot(status, s.usage.responsesUsage())
 	if status == "incomplete" {
 		response["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
 	}
@@ -484,10 +544,6 @@ func (s *MessagesToResponsesStream) reserveMessagesOutput(count int) error {
 	return nil
 }
 
-func (s *MessagesToResponsesStream) responsesUsage() map[string]any {
-	return map[string]any{"input_tokens": s.inputTokens, "output_tokens": s.outputTokens, "total_tokens": s.inputTokens + s.outputTokens}
-}
-
 func (s *MessagesToResponsesStream) responseSnapshot(status string, usage map[string]any) map[string]any {
 	output := make([]any, 0, len(s.blocks))
 	for index := 0; index < s.nextBlock; index++ {
@@ -518,27 +574,44 @@ func (s *MessagesToResponsesStream) EOF() error {
 	return interrupted("Messages stream ended before message_stop")
 }
 
-func parseMessagesStreamStartUsage(raw json.RawMessage) (canonicalUsage, error) {
-	mapped, err := messagesUsageToResponses(raw)
+func parseMessagesStreamUsage(raw json.RawMessage) (streamUsageState, bool, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return streamUsageState{}, false, nil
+	}
+	object, err := decodeObject(raw, CodeInvalidUpstream, "usage")
 	if err != nil {
-		return canonicalUsage{}, err
+		return streamUsageState{}, false, err
 	}
-	usage := canonicalUsage{Input: mapped["input_tokens"].(int64), Output: mapped["output_tokens"].(int64), Total: mapped["total_tokens"].(int64)}
-	if usage.Input < 0 || usage.Output < 0 {
-		return canonicalUsage{}, invalidUpstream("message.usage", "token counts must be non-negative")
+	if err := rejectUnknown(object, map[string]bool{
+		"input_tokens": true, "output_tokens": true,
+		"cache_read_input_tokens": true, "cache_creation_input_tokens": true,
+	}, "usage"); err != nil {
+		return streamUsageState{}, false, err
 	}
-	if rawDetails, ok := mapped["input_tokens_details"].(map[string]any); ok {
-		if value, ok := rawDetails["cached_tokens"].(int64); ok {
-			usage.Cached = value
-		}
-		if value, ok := rawDetails["cache_write_tokens"].(int64); ok {
-			usage.CacheWrite = value
-		}
-		if usage.Cached < 0 || usage.CacheWrite < 0 {
-			return canonicalUsage{}, invalidUpstream("message.usage", "cache token counts must be non-negative")
-		}
+	var result streamUsageState
+	fields := []struct {
+		name  string
+		value *int64
+		known *bool
+	}{
+		{name: "input_tokens", value: &result.input, known: &result.inputKnown},
+		{name: "output_tokens", value: &result.output, known: &result.outputKnown},
+		{name: "cache_read_input_tokens", value: &result.cacheRead, known: &result.cacheReadKnown},
+		{name: "cache_creation_input_tokens", value: &result.cacheWrite, known: &result.cacheWriteKnown},
 	}
-	return usage, nil
+	for _, field := range fields {
+		rawValue, ok := object[field.name]
+		if !ok || bytes.Equal(bytes.TrimSpace(rawValue), []byte("null")) {
+			continue
+		}
+		value, err := requireInteger(rawValue, "usage."+field.name, true)
+		if err != nil || value < 0 {
+			return streamUsageState{}, false, invalidUpstream("usage."+field.name, "a non-negative integer is required")
+		}
+		*field.value = value
+		*field.known = true
+	}
+	return result, true, nil
 }
 
 // ResponsesToMessagesStream converts the supported Responses event subset to
@@ -549,6 +622,7 @@ type ResponsesToMessagesStream struct {
 	messageID string
 	pending   map[int]*messagesPendingBlock
 	nextBlock int
+	usage     streamUsageState
 	terminal  bool
 }
 
@@ -583,13 +657,19 @@ func (s *ResponsesToMessagesStream) Feed(raw []byte) ([]SSEEvent, error) {
 	case "response.created":
 		s.messageID = convertedEnvelopeID("msg", s.validator.sourceID)
 		s.pending = make(map[int]*messagesPendingBlock)
-		usage, err := responsesStartMessagesUsage(event["response"])
+		usage, present, err := parseResponsesStreamUsage(event["response"])
 		if err != nil {
+			return nil, err
+		}
+		if err := s.usage.apply(usage); err != nil {
 			return nil, err
 		}
 		message := map[string]any{
 			"id": s.messageID, "type": "message", "role": "assistant", "model": s.validator.model,
-			"content": []any{}, "stop_reason": nil, "stop_sequence": nil, "usage": usage,
+			"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
+		}
+		if present {
+			message["usage"] = s.usage.messagesUsage()
 		}
 		return messagesEvents("message_start", map[string]any{"message": message}, false, false)
 	case "response.in_progress", "response.output_text.done", "response.content_part.done", "response.function_call_arguments.done":
@@ -768,6 +848,13 @@ func (s *ResponsesToMessagesStream) finishResponse(event map[string]json.RawMess
 	if incomplete != (canonical.Status == "incomplete") {
 		return nil, invalidUpstream("response.status", "terminal event does not match response status")
 	}
+	usage, usagePresent, err := parseResponsesStreamUsage(event["response"])
+	if err != nil {
+		return nil, err
+	}
+	if err := s.usage.apply(usage); err != nil {
+		return nil, err
+	}
 	stopReason := "end_turn"
 	for _, part := range canonical.Parts {
 		if part.Call != nil {
@@ -778,17 +865,18 @@ func (s *ResponsesToMessagesStream) finishResponse(event map[string]json.RawMess
 	if incomplete {
 		stopReason = "max_tokens"
 	}
-	outputTokens := int64(0)
 	if canonical.Usage != nil {
 		if canonical.Usage.Reasoning != 0 {
 			return nil, unsupported("response.usage.output_tokens_details.reasoning_tokens")
 		}
-		outputTokens = canonical.Usage.Output
 	}
-	messageDelta, _ := messagesEvent("message_delta", map[string]any{
+	deltaPayload := map[string]any{
 		"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": outputTokens},
-	}, false, false)
+	}
+	if usagePresent {
+		deltaPayload["usage"] = s.usage.messagesUsage()
+	}
+	messageDelta, _ := messagesEvent("message_delta", deltaPayload, false, false)
 	messageStop, _ := messagesEvent("message_stop", map[string]any{}, false, true)
 	if incomplete {
 		messageStop.TerminalOutcome = StreamTerminalIncomplete
@@ -845,32 +933,37 @@ func responseStreamEventItem(event map[string]json.RawMessage, validator *Respon
 	return item, nil
 }
 
-func responsesStartMessagesUsage(rawResponse json.RawMessage) (map[string]any, error) {
+func parseResponsesStreamUsage(rawResponse json.RawMessage) (streamUsageState, bool, error) {
 	response, err := decodeObject(rawResponse, CodeInvalidUpstream, "response")
 	if err != nil {
-		return nil, err
+		return streamUsageState{}, false, err
 	}
-	usage := map[string]any{"input_tokens": int64(0), "output_tokens": int64(0)}
 	raw, ok := response["usage"]
 	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return usage, nil
+		return streamUsageState{}, false, nil
 	}
 	parsed, err := parseResponsesCanonicalUsage(raw)
 	if err != nil {
-		return nil, err
+		return streamUsageState{}, false, err
 	}
 	if parsed.Reasoning != 0 {
-		return nil, unsupported("response.usage.output_tokens_details.reasoning_tokens")
+		return streamUsageState{}, false, unsupported("response.usage.output_tokens_details.reasoning_tokens")
 	}
-	usage["input_tokens"] = parsed.Input
-	usage["output_tokens"] = parsed.Output
-	if parsed.Cached != 0 {
-		usage["cache_read_input_tokens"] = parsed.Cached
+	result := streamUsageState{input: parsed.Input, inputKnown: true, output: parsed.Output, outputKnown: true}
+	usageObject, _ := decodeObject(raw, CodeInvalidUpstream, "usage")
+	if rawDetails, ok := usageObject["input_tokens_details"]; ok {
+		details, err := decodeObject(rawDetails, CodeInvalidUpstream, "usage.input_tokens_details")
+		if err != nil {
+			return streamUsageState{}, false, err
+		}
+		if value, ok := details["cached_tokens"]; ok {
+			result.cacheRead, result.cacheReadKnown = parsed.Cached, !bytes.Equal(bytes.TrimSpace(value), []byte("null"))
+		}
+		if value, ok := details["cache_write_tokens"]; ok {
+			result.cacheWrite, result.cacheWriteKnown = parsed.CacheWrite, !bytes.Equal(bytes.TrimSpace(value), []byte("null"))
+		}
 	}
-	if parsed.CacheWrite != 0 {
-		usage["cache_creation_input_tokens"] = parsed.CacheWrite
-	}
-	return usage, nil
+	return result, true, nil
 }
 
 func messagesEvents(name string, payload map[string]any, semantic, terminal bool) ([]SSEEvent, error) {
