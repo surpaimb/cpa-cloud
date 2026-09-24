@@ -18,7 +18,15 @@ var testTime = time.Date(2026, 9, 25, 1, 2, 3, 0, time.UTC)
 func TestMigrateBackfillsExistingKeysAndIsRetryable(t *testing.T) {
 	db := openTestDB(t)
 	insertKey(t, db, "key-old", "employee-one")
+	insertModel(t, db, "public-a", false)
 	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	restricted, err := Replace(context.Background(), db, "key-old", 1, Replacement{
+		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{},
+		ModelMode: ModeSelected, Models: []string{"public-a"},
+	}, testTime)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := Migrate(context.Background(), db); err != nil {
@@ -33,9 +41,112 @@ func TestMigrateBackfillsExistingKeysAndIsRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if policy.Revision != 1 || policy.ProtocolMode != ModeAll || policy.ModelMode != ModeAll || policy.Protocols == nil || policy.Models == nil || len(policy.Protocols) != 0 || len(policy.Models) != 0 {
-		t.Fatalf("backfilled policy=%#v", policy)
+	if policy.Revision != restricted.Revision || policy.ProtocolMode != ModeSelected || policy.ModelMode != ModeSelected || policy.Protocols == nil || len(policy.Protocols) != 0 || !slices.Equal(policy.Models, []string{"public-a"}) {
+		t.Fatalf("retry changed restricted policy=%#v", policy)
 	}
+}
+
+func TestMigrateFailsClosedWhenMarkedDatabaseLosesPolicy(t *testing.T) {
+	db := openTestDB(t)
+	insertKey(t, db, "key-restricted", "employee-one")
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Replace(context.Background(), db, "key-restricted", 1, Replacement{
+		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{},
+	}, testTime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM access_key_policies WHERE key_id='key-restricted'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(context.Background(), db); !errors.Is(err, ErrInvalidSchema) {
+		t.Fatalf("restart migration error=%v", err)
+	}
+	var policies int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM access_key_policies WHERE key_id='key-restricted'`).Scan(&policies); err != nil {
+		t.Fatal(err)
+	}
+	if policies != 0 {
+		t.Fatalf("restart recreated permissive policy count=%d", policies)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := LoadTx(context.Background(), tx, "key-restricted"); !errors.Is(err, ErrPolicyMissing) {
+		t.Fatalf("missing policy did not fail closed: %v", err)
+	}
+}
+
+func TestMigrateRejectsInvalidPersistentMarkerWithoutChangingPolicy(t *testing.T) {
+	db := openTestDB(t)
+	insertKey(t, db, "key-restricted", "employee-one")
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Replace(context.Background(), db, "key-restricted", 1, Replacement{
+		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{},
+	}, testTime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM access_key_policy_migration_state`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(context.Background(), db); !errors.Is(err, ErrInvalidSchema) {
+		t.Fatalf("empty marker migration error=%v", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	policy, err := LoadTx(context.Background(), tx, "key-restricted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Revision != 2 || policy.ProtocolMode != ModeSelected || policy.ModelMode != ModeSelected || len(policy.Protocols) != 0 || len(policy.Models) != 0 {
+		t.Fatalf("invalid marker changed restricted policy=%#v", policy)
+	}
+}
+
+func TestMigrateRejectsMissingMarkerAndRollsBackInterruptedFirstUpgrade(t *testing.T) {
+	t.Run("missing marker", func(t *testing.T) {
+		db := openTestDB(t)
+		if _, err := db.Exec(`CREATE TABLE access_key_policies(key_id TEXT PRIMARY KEY, revision INTEGER)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := Migrate(context.Background(), db); !errors.Is(err, ErrInvalidSchema) {
+			t.Fatalf("unmarked schema error=%v", err)
+		}
+		var marker int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, migrationStateTable).Scan(&marker); err != nil {
+			t.Fatal(err)
+		}
+		if marker != 0 {
+			t.Fatal("unmarked partial schema gained a migration marker")
+		}
+	})
+
+	t.Run("interrupted first upgrade", func(t *testing.T) {
+		db := openTestDB(t)
+		insertKey(t, db, "key-old", "employee-one")
+		interrupted := errors.New("synthetic migration interruption")
+		if err := migrate(context.Background(), db, func(*sql.Tx) error { return interrupted }); !errors.Is(err, interrupted) {
+			t.Fatalf("interrupted migration error=%v", err)
+		}
+		var leaked int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (?,?,?,?)`, migrationStateTable, policiesTable, protocolsTable, modelsTable).Scan(&leaked); err != nil {
+			t.Fatal(err)
+		}
+		if leaked != 0 {
+			t.Fatalf("interrupted migration leaked objects=%d", leaked)
+		}
+		if err := Migrate(context.Background(), db); err != nil {
+			t.Fatalf("retry after rollback: %v", err)
+		}
+	})
 }
 
 func TestMigrateRejectsMalformedExistingSchemaWithoutPartialBackfill(t *testing.T) {
