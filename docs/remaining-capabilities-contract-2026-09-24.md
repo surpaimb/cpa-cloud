@@ -109,10 +109,14 @@ UsageEvent
 - `?` 表示未知可为 NULL，不是零。原始 provider JSON、SSE 事件、提示或响应正文不进入事件。
 - 一个员工请求只有一个 request 事实；重试、换号、后台恢复和工具调用是独立 attempt，不能重复计算
   员工请求数。
-- `dispatched_at` 只在实际派发屏障后写入。启动恢复把 pending 且已派发/状态不明的 attempt 标为
-  interrupted/unknown，不创建替代 attempt。
-- 价格在最终派发前冻结；结束时以相同 price version 原子结算。没有安全上界的请求不能进入严格硬
-  预算路径，只能按明确策略拒绝或留在非硬限制路径。
+- `dispatched_at` 是**持久化派发意图**的时间，不是提供商已收到请求的证明。派发屏障必须在同一
+  事务内重新核对当前权限、账号 revision、价格版本、严格预算与尝试状态，并先提交
+  `MarkAttemptDispatched`；只有提交成功后才允许网络 I/O。该提交失败时不得出站。
+- 进程可能在提交派发意图后、网络 I/O 前后任一点崩溃。因此恢复时把这类未终结 attempt 标为
+  `interrupted`，用量证据保持未知并占用相应未知预算，不自动重放，也不把它计作已确认消费；尚未
+  提交派发意图的 pending attempt 则可确定没有经过此路径出站。
+- 价格在持久化派发意图的事务内冻结；结束时以相同 price version 原子结算。没有安全上界的请求
+  不能进入严格硬预算路径，只能按明确策略拒绝或留在非硬限制路径。
 
 在 E1 合入前，D 可以依赖测试 fake 接口，但不得新增平行账本或把占位值写入现有成本列。
 
@@ -129,7 +133,8 @@ type EventRecorder interface {
 }
 ```
 
-`AttemptDispatch` 只含 attempt ID 与派发时间。`Correction` 是追加事实，至少含 correction ID、目标
+`AttemptDispatch` 只含 attempt ID 与派发意图时间；字段名保留为 `dispatched_at`，其语义始终是
+“已持久化且允许出站，网络结果可能未知”。`Correction` 是追加事实，至少含 correction ID、目标
 attempt/event ID、operation ID、管理员 actor、固定 reason code、币种、各 token/cost 的有符号定点差额
 和 UTC 时间；不得原地改历史 attempt，也不得跨币种抵消。相同 operation ID 重试必须幂等，冲突内容
 返回稳定 conflict。日/月汇总和导出由 base event 加 corrections 派生，保留未知计数；导出有时间窗、
