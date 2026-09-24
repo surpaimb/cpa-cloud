@@ -120,6 +120,64 @@ func TestLedgerRejectsOverflowInvalidSignsAndLookalikeSchema(t *testing.T) {
 	}
 }
 
+func TestLedgerListEntriesFiltersAndStableCursor(t *testing.T) {
+	db := openFinancialTestDB(t)
+	defer db.Close()
+	ledger := NewLedger(db)
+	if err := ledger.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	owner := Owner{Kind: OwnerKey, EmployeeID: "employee-one", KeyID: "key-one"}
+	first, err := ledger.Post(context.Background(), Post{
+		OperationID: "list-credit", Action: "adjustment", ActorAdminID: "admin-one",
+		ResourceKind: "adjustment", ResourceID: "list-credit", ObservedAt: financialTestTime,
+		Entries: []EntryInput{{Owner: owner, Currency: "USD", Kind: EntryAdjustmentCredit, AmountMicro: 100, ResourceKind: "adjustment", ResourceID: "list-credit"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ledger.Post(context.Background(), Post{
+		OperationID: "list-debit", Action: "adjustment", ActorAdminID: "admin-one",
+		ResourceKind: "adjustment", ResourceID: "list-debit", ObservedAt: financialTestTime.Add(time.Second), RequireNonNegative: true,
+		Entries: []EntryInput{{Owner: owner, Currency: "USD", Kind: EntryAdjustmentDebit, AmountMicro: -25, ResourceKind: "adjustment", ResourceID: "list-debit"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resourceOwner := Owner{Kind: OwnerResource, EmployeeID: "employee-one", ResourceKind: "response", ResourceID: "response-one"}
+	third, err := ledger.Post(context.Background(), Post{
+		OperationID: "list-resource", Action: "adjustment", ActorAdminID: "admin-one",
+		ResourceKind: "response", ResourceID: "response-one", ObservedAt: financialTestTime.Add(2 * time.Second),
+		Entries: []EntryInput{{Owner: resourceOwner, Currency: "EUR", Kind: EntryAdjustmentCredit, AmountMicro: 7, ResourceKind: "response", ResourceID: "response-one"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	filter := EntryFilter{OwnerKind: OwnerKey, EmployeeID: "employee-one", KeyID: "key-one", Currency: "USD", Limit: 1}
+	page, err := ledger.ListEntries(context.Background(), filter)
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != first[0].ID || page.NextCursor != first[0].ID {
+		t.Fatalf("first page=%+v err=%v", page, err)
+	}
+	filter.AfterID = page.NextCursor
+	page, err = ledger.ListEntries(context.Background(), filter)
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != second[0].ID || page.NextCursor != "" {
+		t.Fatalf("second page=%+v err=%v", page, err)
+	}
+	page, err = ledger.ListEntries(context.Background(), EntryFilter{ResourceKind: "response", ResourceID: "response-one", AccountID: third[0].AccountID, Limit: 10})
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != third[0].ID || page.Items[0].Owner != resourceOwner {
+		t.Fatalf("resource page=%+v err=%v", page, err)
+	}
+	if _, err := ledger.ListEntries(context.Background(), EntryFilter{OwnerKind: OwnerKey, AfterID: third[0].ID, Limit: 10}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("cursor outside filter err=%v", err)
+	}
+	for _, invalid := range []EntryFilter{{Limit: 0}, {Limit: 101}, {Currency: "usd", Limit: 10}, {OwnerKind: "unknown", Limit: 10}} {
+		if _, err := ledger.ListEntries(context.Background(), invalid); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid filter %+v err=%v", invalid, err)
+		}
+	}
+}
+
 func openFinancialTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "financial.db")
