@@ -182,6 +182,29 @@ func TestWindowsDPAPIRollbackRefusesChangedPreparedFile(t *testing.T) {
 	}
 }
 
+func TestWindowsDPAPIDiscardExactAuthenticatedVersion(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "protected-store")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := store.PrepareVersion(context.Background(), "bkp_orphan", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Commit()
+	path := filepath.Join(root, versionFilename("bkp_orphan", 2))
+	if err := store.DiscardVersion(context.Background(), "bkp_orphan", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("discard left exact version: %v", err)
+	}
+	if _, err := store.Resolve(context.Background(), "bkp_orphan", 2); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("discarded version resolved: %v", err)
+	}
+}
+
 func TestWindowsDPAPIRejectsNetworkAndDeviceStores(t *testing.T) {
 	for _, path := range []string{
 		`\\server\share\cpa-cloud-keys`,

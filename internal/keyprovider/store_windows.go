@@ -163,6 +163,43 @@ func (s *Store) Resolve(ctx context.Context, providerID string, version uint64) 
 	return material, nil
 }
 
+// DiscardVersion removes one exact, successfully authenticated provider
+// version. Callers must prove separately that persistent metadata does not
+// reference it; this method never enumerates or guesses provider files.
+func (s *Store) DiscardVersion(ctx context.Context, providerID string, version uint64) error {
+	if err := validateReference(providerID, version); err != nil {
+		return err
+	}
+	material, err := s.Resolve(ctx, providerID, version)
+	if err != nil {
+		return err
+	}
+	material.Destroy()
+	path := filepath.Join(s.root, versionFilename(providerID, version))
+	encoded, err := readProtectedFile(path)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(encoded)
+	wipe(encoded)
+	if err := s.validateRoot(); err != nil {
+		return err
+	}
+	current, err := readProtectedFile(path)
+	if err != nil {
+		return err
+	}
+	currentDigest := sha256.Sum256(current)
+	wipe(current)
+	if subtle.ConstantTimeCompare(digest[:], currentDigest[:]) != 1 {
+		return errors.New("protected key-provider file changed; refusing removal")
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove protected key-provider version: %w", err)
+	}
+	return syncDirectory(s.root)
+}
+
 func (p *PreparedVersion) Commit() {
 	if p != nil {
 		p.committed = true

@@ -142,18 +142,20 @@ parser 同样先校验共同 magic 与 version=2，再解析 v2 layout。公共 
 ## 5. provider 状态与版本迁移
 
 provider 状态为 `ready | unavailable | degraded`。`reason_code` 是稳定非秘密值，例如
-`unsupported_platform`、`protected_store_missing`、`protected_store_invalid`、`os_protection_failed`。
+`unsupported_platform`、`protected_store_invalid`、`provisioning_interrupted`、`rotation_interrupted`。
 
-创建 provider 时生成 version 1 的随机 32 字节 key，先把 DPAPI blob 原子发布到 provider store，之后才在
-SQLite 事务中插入 provider 元数据。若数据库提交失败，只允许删除本次调用创建且名称、目录身份和 nonce
-均匹配的孤立文件。
+创建 provider 时先持久化 `provisioning_interrupted` 元数据，再生成 version 1 的随机 32 字节 key 并原子
+发布 DPAPI blob，最后把元数据切换为 ready。进程崩溃后只按这条精确元数据验证并清理对应版本；不得扫描
+目录或猜测文件。若安全删除失败则保留 degraded 元数据供下次启动重试。
 
 轮换采用 prepare/commit：
 
-1. 生成 `active_version+1` 的 key 和 DPAPI blob，原子发布为不可覆盖的新文件。
-2. 读回并 unprotect，常量时间比较随机 key，失败则删除该精确新文件，数据库不变。
-3. SQLite CAS 更新 `active_version` 与 provider revision；旧版本文件保留用于历史恢复。
-4. CAS/提交失败删除精确新文件；成功后清零临时 key。
+1. 以 CAS 把 provider 标为 `rotation_interrupted`，但暂不推进 active version 或 revision。
+2. 生成 `active_version+1` 的 key 和 DPAPI blob，原子发布为不可覆盖的新文件。
+3. 读回并 unprotect，常量时间比较随机 key，失败则删除该精确新文件并恢复 ready。
+4. SQLite CAS 更新 `active_version` 与 provider revision 并恢复 ready；旧版本文件保留用于历史恢复。
+5. CAS/提交失败删除精确新文件；若删除失败保留 interrupted 状态。启动恢复只处理显式 interrupted 的精确
+   version，绝不把 ready provider 的 `active_version+1` 当作孤儿，因为那可能是管理员回退后仍有效的版本。
 
 回滚只允许激活数据库已知且可成功 unprotect 的旧版本。先验证旧版本，再 CAS 切换 active version；不删除
 新版本。这样轮换失败和人工 rollback 都不破坏历史包。F1/F2 不提供版本销毁接口。
@@ -175,6 +177,8 @@ backup_key_providers(
   reason_code TEXT,
   active_version INTEGER NOT NULL CHECK(active_version BETWEEN 1 AND 9007199254740991),
   revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991),
+  created_by_admin_id TEXT NOT NULL REFERENCES admins(id),
+  updated_by_admin_id TEXT NOT NULL REFERENCES admins(id),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 )
@@ -189,6 +193,8 @@ backup_plans(
   enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
   next_run_at TEXT,
   revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991),
+  created_by_admin_id TEXT NOT NULL REFERENCES admins(id),
+  updated_by_admin_id TEXT NOT NULL REFERENCES admins(id),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 )
@@ -200,12 +206,16 @@ backup_runs(
   key_provider_id TEXT NOT NULL REFERENCES backup_key_providers(id),
   key_provider_kind TEXT NOT NULL,
   key_provider_version INTEGER NOT NULL CHECK(key_provider_version BETWEEN 1 AND 9007199254740991),
+  trigger_kind TEXT NOT NULL CHECK(trigger_kind IN ('scheduled','manual')),
+  requested_by_admin_id TEXT REFERENCES admins(id),
   scheduled_for TEXT NOT NULL,
   started_at TEXT NOT NULL,
   finished_at TEXT,
   status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','cancelled','interrupted')),
   package_name TEXT NOT NULL,
   package_size INTEGER CHECK(package_size >= 0),
+  package_retained INTEGER NOT NULL CHECK(package_retained IN (0,1)),
+  package_deleted_at TEXT,
   verified_at TEXT,
   rehearsal_status TEXT NOT NULL CHECK(rehearsal_status IN ('pending','succeeded','failed','skipped')),
   rehearsed_at TEXT,
@@ -214,8 +224,8 @@ backup_runs(
 )
 ```
 
-必要索引：`backup_plans(enabled,next_run_at,id)`、`backup_runs(plan_id,started_at DESC,id DESC)`、
-`backup_runs(status,started_at,id)`，以及仅允许一个 `status='running'` 的 partial unique index。运行历史有界：
+必要索引：`backup_plans(enabled,next_run_at,id)`、`backup_runs(plan_id,started_at DESC,id DESC)`，以及仅允许一个
+`status='running'` 的 partial unique index。运行历史有界：
 每计划保留最近 1000 条记录；删除更老历史前先执行该计划的文件保留规则，无法安全判定归属的记录和文件
 都保留并报告错误。
 
@@ -234,13 +244,19 @@ cpa-cloud-<plan-id>-<UTC basic timestamp>-<run-id>.cpacb
 
 计划 ID 与 run ID 必须通过内部 ID validator；不得把 plan name 用作路径。执行顺序固定为：resolve exact
 key version → create → cryptographic verify → optional rehearsal restore → 用关闭所有 worker 的临时配置完整
-`Open`/迁移/`Close` → 删除 rehearsal 精确文件/目录 → finalize → retention。`CheckInitialized` 可作为更早的
+`Open`/迁移/`Close` → 删除 rehearsal 精确文件/目录 → retention → finalize。`CheckInitialized` 可作为更早的
 浅层检查，但不能替代完整 rehearsal。取消在 snapshot、seal、verify、restore 和检查之间传播；已原子发布的
 有效包不因晚到取消而被模糊删除，运行结果以实际持久事实终结。
 
 F1 只要求所有包通过 cryptographic verify，允许计划将 rehearsal 明确记为 `skipped`。F2 的“恢复就绪”
 声明要求计划启用 rehearsal 且最近运行通过完整临时 App 打开/迁移/关闭；没有该证据时能力仍只是已验证的
 加密备份生成，不是恢复就绪。
+
+未通过 cryptographic verify 的包必须按 plan/run/name 精确归属后删除，且不得标为 retained。通过 verify 但
+rehearsal 失败的包仍是有效加密包，记录为 failed + retained，并明确 rehearsal failed。保留清理先把旧记录
+提交为 `package_retained=0, package_deleted_at=NULL`，再删除精确文件，成功后填写 `package_deleted_at`；崩溃
+恢复仅重试这些数据库点名的文件，从不枚举或删除未知文件。新包 finalize 提交失败时立即清理精确新文件；
+若进程同时崩溃，下一次启动在 interrupted 转换后完成同样的数据库驱动清理。
 
 启动恢复在 worker 启动前把所有遗留 `running` 原子改为 `interrupted`、`finished_at=now`、
 `error_code='process_interrupted'`。不创建替代 run，不回退已经推进的 `next_run_at`。若恢复事务失败，App

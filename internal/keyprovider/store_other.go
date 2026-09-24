@@ -25,6 +25,8 @@ func (s *Store) Resolve(context.Context, string, uint64) (*Material, error) {
 	return nil, ErrUnavailable
 }
 
+func (s *Store) DiscardVersion(context.Context, string, uint64) error { return ErrUnavailable }
+
 func (p *PreparedVersion) Commit() {}
 
 func (p *PreparedVersion) Rollback() error { return errors.New("no key-provider version was prepared") }
