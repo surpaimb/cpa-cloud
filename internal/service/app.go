@@ -121,6 +121,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err := app.usage.ledger.Migrate(ctx); err != nil {
 		return nil, err
 	}
+	if err := migrateAccountingV2(ctx, s.db); err != nil {
+		return nil, errUsageLedgerUnavailable
+	}
 	if err := app.initializeGovernance(ctx); err != nil {
 		return nil, err
 	}
@@ -233,6 +236,7 @@ func (a *App) Handler() http.Handler {
 	a.registerGovernanceObservationHandlers(mux)
 	a.registerPricingHandlers(mux)
 	a.registerUsageHandlers(mux)
+	a.registerAccountingV2Handlers(mux)
 	a.registerSystemProbeHandlers(mux)
 	a.registerAccountRecoveryHandlers(mux)
 	a.registerScheduledTestHandlers(mux)
