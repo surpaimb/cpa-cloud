@@ -70,6 +70,7 @@ const backgroundTasksDDL = `CREATE TABLE background_tasks (
 	employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
 	key_id TEXT NOT NULL REFERENCES access_keys(id) ON DELETE RESTRICT,
 	public_model TEXT NOT NULL REFERENCES models(id) ON DELETE RESTRICT CHECK(length(public_model) BETWEEN 1 AND 128),
+	provider_kind TEXT NOT NULL CHECK(provider_kind IN ('openai-compatible','codex-membership')),
 	account_id TEXT REFERENCES upstreams(id) ON DELETE RESTRICT,
 	account_revision INTEGER CHECK(account_revision IS NULL OR account_revision BETWEEN 1 AND 9007199254740991),
 	status TEXT NOT NULL CHECK(status IN ('queued','dispatch_authorized','in_progress','completed','failed','cancelled','interrupted')),
