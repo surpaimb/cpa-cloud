@@ -11,8 +11,14 @@ import (
 type SSEEvent struct {
 	Name     string
 	Data     json.RawMessage
+	Semantic bool
 	Terminal bool
 }
+
+const (
+	maxConvertedStreamBytes = 16 << 20
+	maxConvertedStreamItems = 1024
+)
 
 type chatToolStream struct {
 	index       int
@@ -41,6 +47,8 @@ type ChatToResponsesStream struct {
 	textAdded      bool
 	text           bytes.Buffer
 	tools          map[int]*chatToolStream
+	toolIDs        map[string]int
+	outputBytes    int
 	finishReason   string
 	convertedUsage map[string]any
 }
@@ -76,9 +84,16 @@ func (s *ChatToResponsesStream) Feed(raw []byte) ([]SSEEvent, error) {
 	}
 	if err := rejectUnknown(root, map[string]bool{
 		"id": true, "object": true, "created": true, "model": true,
-		"choices": true, "usage": true, "system_fingerprint": true, "service_tier": true,
+		"choices": true, "usage": true, "system_fingerprint": true, "service_tier": true, "obfuscation": true,
 	}, ""); err != nil {
 		return nil, err
+	}
+	// Chat completion chunks define obfuscation only as top-level string
+	// metadata: https://developers.openai.com/api/reference/resources/chat
+	if raw, ok := root["obfuscation"]; ok {
+		if _, err := requireString(raw, "obfuscation", true); err != nil {
+			return nil, err
+		}
 	}
 	id, err := requireString(root["id"], "id", true)
 	if err != nil || id == "" {
@@ -101,6 +116,7 @@ func (s *ChatToResponsesStream) Feed(raw []byte) ([]SSEEvent, error) {
 		s.started, s.sourceID, s.responseID, s.model, s.created = true, id, convertedEnvelopeID("resp", id), model, created
 		s.textIndex = -1
 		s.tools = make(map[int]*chatToolStream)
+		s.toolIDs = make(map[string]int)
 		response := s.responseSnapshot("in_progress", nil)
 		createdEvent, _ := s.event("response.created", map[string]any{"response": response}, false)
 		progressEvent, _ := s.event("response.in_progress", map[string]any{"response": response}, false)
@@ -160,6 +176,9 @@ func (s *ChatToResponsesStream) Feed(raw []byte) ([]SSEEvent, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := s.reserveOutputBytes(len(text)); err != nil {
+			return nil, err
+		}
 		added, err := s.ensureTextItem()
 		if err != nil {
 			return nil, err
@@ -170,6 +189,7 @@ func (s *ChatToResponsesStream) Feed(raw []byte) ([]SSEEvent, error) {
 			"response_id": s.responseID, "item_id": s.textItemID, "output_index": s.textIndex,
 			"content_index": 0, "delta": text,
 		}, false)
+		event.Semantic = text != ""
 		result = append(result, event)
 	}
 	if rawCalls, ok := delta["tool_calls"]; ok {
@@ -197,6 +217,9 @@ func (s *ChatToResponsesStream) ensureTextItem() ([]SSEEvent, error) {
 		return nil, nil
 	}
 	s.textAdded = true
+	if s.nextOutput >= maxConvertedStreamItems {
+		return nil, invalidUpstream("choices[0].delta.content", "too many stream output items")
+	}
 	s.textIndex = s.nextOutput
 	s.nextOutput++
 	s.textItemID = convertedItemID("msg", s.responseID, s.textIndex)
@@ -213,6 +236,7 @@ func (s *ChatToResponsesStream) feedToolDeltas(raw json.RawMessage) ([]SSEEvent,
 		return nil, invalidUpstream("choices[0].delta.tool_calls", "a non-empty array is required")
 	}
 	result := make([]SSEEvent, 0, len(deltas)*2)
+	seenIndexes := make(map[int]struct{}, len(deltas))
 	for position, rawDelta := range deltas {
 		field := indexField("choices[0].delta.tool_calls", position)
 		delta, err := decodeObject(rawDelta, CodeInvalidUpstream, field)
@@ -223,15 +247,28 @@ func (s *ChatToResponsesStream) feedToolDeltas(raw json.RawMessage) ([]SSEEvent,
 			return nil, err
 		}
 		toolIndex64, err := requireInteger(delta["index"], joinField(field, "index"), true)
-		if err != nil || toolIndex64 > 1024 {
+		if err != nil || toolIndex64 >= maxConvertedStreamItems {
 			return nil, invalidUpstream(joinField(field, "index"), "invalid tool index")
 		}
 		toolIndex := int(toolIndex64)
+		if _, exists := seenIndexes[toolIndex]; exists {
+			return nil, invalidUpstream(joinField(field, "index"), "tool index is duplicated in one chunk")
+		}
+		seenIndexes[toolIndex] = struct{}{}
 		tool := s.tools[toolIndex]
 		if tool == nil {
+			if toolIndex != len(s.tools) {
+				return nil, invalidUpstream(joinField(field, "index"), "tool indexes must be introduced in contiguous order")
+			}
+			if s.nextOutput >= maxConvertedStreamItems {
+				return nil, invalidUpstream(joinField(field, "index"), "too many stream output items")
+			}
 			callID, err := requireString(delta["id"], joinField(field, "id"), true)
 			if err != nil || callID == "" {
 				return nil, invalidUpstream(joinField(field, "id"), "the first delta needs a call id")
+			}
+			if _, exists := s.toolIDs[callID]; exists {
+				return nil, invalidUpstream(joinField(field, "id"), "tool call ids must be unique")
 			}
 			kind, err := requireString(delta["type"], joinField(field, "type"), true)
 			if err != nil || kind != "function" {
@@ -251,10 +288,18 @@ func (s *ChatToResponsesStream) feedToolDeltas(raw json.RawMessage) ([]SSEEvent,
 			tool = &chatToolStream{index: toolIndex, outputIndex: s.nextOutput, itemID: convertedItemID("fc", s.responseID, s.nextOutput), callID: callID, name: name, added: true}
 			s.nextOutput++
 			s.tools[toolIndex] = tool
+			s.toolIDs[callID] = toolIndex
 			item := map[string]any{"id": tool.itemID, "type": "function_call", "status": "in_progress", "call_id": callID, "name": name, "arguments": ""}
 			added, _ := s.event("response.output_item.added", map[string]any{"response_id": s.responseID, "output_index": tool.outputIndex, "item": item}, false)
+			added.Semantic = true
 			result = append(result, added)
 		} else {
+			if rawType, ok := delta["type"]; ok {
+				kind, err := requireString(rawType, joinField(field, "type"), true)
+				if err != nil || kind != "function" {
+					return nil, invalidUpstream(joinField(field, "type"), "tool call type changed")
+				}
+			}
 			if rawID, ok := delta["id"]; ok {
 				id, err := requireString(rawID, joinField(field, "id"), true)
 				if err != nil || id != tool.callID {
@@ -281,8 +326,12 @@ func (s *ChatToResponsesStream) feedToolDeltas(raw json.RawMessage) ([]SSEEvent,
 				if err != nil {
 					return nil, err
 				}
+				if err := s.reserveOutputBytes(len(arguments)); err != nil {
+					return nil, err
+				}
 				tool.arguments.WriteString(arguments)
 				event, _ := s.event("response.function_call_arguments.delta", map[string]any{"response_id": s.responseID, "item_id": tool.itemID, "output_index": tool.outputIndex, "delta": arguments}, false)
+				event.Semantic = arguments != ""
 				result = append(result, event)
 			}
 		}
@@ -321,6 +370,9 @@ func (s *ChatToResponsesStream) Finish() ([]SSEEvent, error) {
 		}
 		tool := output.tool
 		arguments := tool.arguments.String()
+		if _, err := compactJSONObject(json.RawMessage(arguments), "choices[0].delta.tool_calls.function.arguments", true); err != nil {
+			return nil, err
+		}
 		argsDone, _ := s.event("response.function_call_arguments.done", map[string]any{"response_id": s.responseID, "item_id": tool.itemID, "output_index": tool.outputIndex, "arguments": arguments}, false)
 		item := map[string]any{"id": tool.itemID, "type": "function_call", "status": "completed", "call_id": tool.callID, "name": tool.name, "arguments": arguments}
 		itemDone, _ := s.event("response.output_item.done", map[string]any{"response_id": s.responseID, "output_index": tool.outputIndex, "item": item}, false)
@@ -331,6 +383,14 @@ func (s *ChatToResponsesStream) Finish() ([]SSEEvent, error) {
 	completed, _ := s.event("response.completed", map[string]any{"response": response}, true)
 	result = append(result, completed)
 	return result, nil
+}
+
+func (s *ChatToResponsesStream) reserveOutputBytes(count int) error {
+	if count < 0 || s.outputBytes > maxConvertedStreamBytes-count {
+		return invalidUpstream("stream", "converted stream output exceeded the configured byte limit")
+	}
+	s.outputBytes += count
+	return nil
 }
 
 // EOF reports transport EOF without an explicit [DONE].
@@ -392,18 +452,20 @@ type responseStreamItem struct {
 // ResponsesToChatStream converts complete Responses event objects into Chat
 // Completions chunks and a final [DONE].
 type ResponsesToChatStream struct {
-	started    bool
-	terminal   bool
-	sourceID   string
-	responseID string
-	model      string
-	created    int64
-	roleSent   bool
-	items      map[string]*responseStreamItem
-	outputs    map[int]*responseStreamItem
-	nextTool   int
-	nextSeq    int64
-	seqStarted bool
+	started     bool
+	terminal    bool
+	sourceID    string
+	responseID  string
+	model       string
+	created     int64
+	roleSent    bool
+	items       map[string]*responseStreamItem
+	outputs     map[int]*responseStreamItem
+	callIDs     map[string]struct{}
+	outputBytes int
+	nextTool    int
+	nextSeq     int64
+	seqStarted  bool
 }
 
 // Feed accepts one complete Responses event data object.
@@ -434,6 +496,11 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 	}
 	if err := validateResponsesEventFields(kind, event); err != nil {
 		return nil, err
+	}
+	if raw, ok := event["obfuscation"]; ok {
+		if _, err := requireString(raw, "obfuscation", true); err != nil {
+			return nil, err
+		}
 	}
 	switch kind {
 	case "response.created":
@@ -475,8 +542,11 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		if !item.partAdded || item.textDone {
 			return nil, invalidUpstream("type", "text delta is out of order")
 		}
+		if err := s.reserveOutputBytes(len(delta)); err != nil {
+			return nil, err
+		}
 		item.text.WriteString(delta)
-		return s.chatDelta(map[string]any{"content": delta})
+		return s.semanticChatDelta(map[string]any{"content": delta}, delta != "")
 	case "response.output_item.added":
 		if err := s.requireStarted(); err != nil {
 			return nil, err
@@ -509,12 +579,13 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 			return nil, invalidUpstream("item.status", "added output item must be in progress")
 		}
 		outputIndex, err := requireInteger(event["output_index"], "output_index", true)
-		if err != nil || outputIndex > 1024 {
+		if err != nil || outputIndex >= maxConvertedStreamItems {
 			return nil, invalidUpstream("output_index", "invalid output index")
 		}
 		if s.items == nil {
 			s.items = make(map[string]*responseStreamItem)
 			s.outputs = make(map[int]*responseStreamItem)
+			s.callIDs = make(map[string]struct{})
 		}
 		if _, exists := s.items[itemID]; exists {
 			return nil, invalidUpstream("item.id", "duplicate output item")
@@ -534,6 +605,9 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		if err != nil || callID == "" {
 			return nil, invalidUpstream("item.call_id", "a non-empty string is required")
 		}
+		if _, exists := s.callIDs[callID]; exists {
+			return nil, invalidUpstream("item.call_id", "function call ids must be unique")
+		}
 		name, err := requireString(item["name"], "item.name", true)
 		if err != nil || name == "" {
 			return nil, invalidUpstream("item.name", "a non-empty string is required")
@@ -545,7 +619,8 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		streamItem.chatIndex, streamItem.callID, streamItem.name = s.nextTool, callID, name
 		s.nextTool++
 		s.items[itemID], s.outputs[int(outputIndex)] = streamItem, streamItem
-		return s.chatDelta(map[string]any{"tool_calls": []any{map[string]any{"index": streamItem.chatIndex, "id": callID, "type": "function", "function": map[string]any{"name": name, "arguments": ""}}}})
+		s.callIDs[callID] = struct{}{}
+		return s.semanticChatDelta(map[string]any{"tool_calls": []any{map[string]any{"index": streamItem.chatIndex, "id": callID, "type": "function", "function": map[string]any{"name": name, "arguments": ""}}}}, true)
 	case "response.function_call_arguments.delta":
 		if err := s.requireStarted(); err != nil {
 			return nil, err
@@ -561,8 +636,11 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := s.reserveOutputBytes(len(delta)); err != nil {
+			return nil, err
+		}
 		tool.arguments.WriteString(delta)
-		return s.chatDelta(map[string]any{"tool_calls": []any{map[string]any{"index": tool.chatIndex, "function": map[string]any{"arguments": delta}}}})
+		return s.semanticChatDelta(map[string]any{"tool_calls": []any{map[string]any{"index": tool.chatIndex, "function": map[string]any{"arguments": delta}}}}, delta != "")
 	case "response.output_text.done":
 		item, err := s.eventItem(event, "message", true)
 		if err != nil {
@@ -588,6 +666,9 @@ func (s *ResponsesToChatStream) Feed(raw []byte) ([]SSEEvent, error) {
 		}
 		if item.argsDone {
 			return nil, invalidUpstream("type", "function arguments done is duplicated")
+		}
+		if _, err := compactJSONObject(json.RawMessage(arguments), "arguments", true); err != nil {
+			return nil, err
 		}
 		item.argsDone = true
 		return nil, nil
@@ -729,13 +810,16 @@ func validateResponsesEventFields(kind string, event map[string]json.RawMessage)
 	case "response.output_item.added", "response.output_item.done":
 		add("response_id", "output_index", "item")
 	case "response.output_text.delta":
-		add("response_id", "item_id", "output_index", "content_index", "delta")
+		// The official Responses stream schema places optional obfuscation at
+		// the top level of delta events, never inside the semantic delta value:
+		// https://platform.openai.com/docs/api-reference/responses-streaming
+		add("response_id", "item_id", "output_index", "content_index", "delta", "obfuscation")
 	case "response.output_text.done":
 		add("response_id", "item_id", "output_index", "content_index", "text")
 	case "response.content_part.added", "response.content_part.done":
 		add("response_id", "item_id", "output_index", "content_index", "part")
 	case "response.function_call_arguments.delta":
-		add("response_id", "item_id", "output_index", "delta")
+		add("response_id", "item_id", "output_index", "delta", "obfuscation")
 	case "response.function_call_arguments.done":
 		add("response_id", "item_id", "output_index", "arguments")
 	case "error":
@@ -909,6 +993,24 @@ func (s *ResponsesToChatStream) requireStarted() error {
 
 func (s *ResponsesToChatStream) chatDelta(delta map[string]any) ([]SSEEvent, error) {
 	return s.chatDeltaWithUsage(delta, "", nil)
+}
+
+func (s *ResponsesToChatStream) semanticChatDelta(delta map[string]any, semantic bool) ([]SSEEvent, error) {
+	events, err := s.chatDelta(delta)
+	if err == nil && semantic {
+		for index := range events {
+			events[index].Semantic = true
+		}
+	}
+	return events, err
+}
+
+func (s *ResponsesToChatStream) reserveOutputBytes(count int) error {
+	if count < 0 || s.outputBytes > maxConvertedStreamBytes-count {
+		return invalidUpstream("stream", "converted stream output exceeded the configured byte limit")
+	}
+	s.outputBytes += count
+	return nil
 }
 
 func (s *ResponsesToChatStream) chatDeltaWithUsage(delta map[string]any, finish string, usage json.RawMessage) ([]SSEEvent, error) {
