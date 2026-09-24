@@ -90,6 +90,8 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 	items := make([]any, 0, len(contents))
 	features := FeatureSet(0)
 	pendingCalls := map[string]string{}
+	pendingOrder := make([]canonicalCall, 0)
+	callIndex := 0
 	for contentIndex, rawContent := range contents {
 		field := indexField("contents", contentIndex)
 		content, err := decodeObject(rawContent, CodeInvalidRequest, field)
@@ -139,7 +141,7 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 				if err := rejectUnknown(call, map[string]bool{"id": true, "name": true, "args": true}, joinField(partField, "functionCall")); err != nil {
 					return nil, 0, err
 				}
-				id, err := nonEmptyString(call["id"], joinField(partField, "functionCall.id"), false)
+				id, present, err := optionalNonEmptyString(call["id"], joinField(partField, "functionCall.id"), false)
 				if err != nil {
 					return nil, 0, err
 				}
@@ -147,12 +149,20 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 				if err != nil {
 					return nil, 0, err
 				}
-				args, err := compactJSONObject(call["args"], joinField(partField, "functionCall.args"), false)
-				if err != nil {
-					return nil, 0, err
+				if !present {
+					id = convertedItemID("call", "gemini-request", callIndex)
+				}
+				args := "{}"
+				if len(call["args"]) != 0 {
+					args, err = compactJSONObject(call["args"], joinField(partField, "functionCall.args"), false)
+					if err != nil {
+						return nil, 0, err
+					}
 				}
 				items = append(items, map[string]any{"type": "function_call", "call_id": id, "name": name, "arguments": args})
 				pendingCalls[id] = name
+				pendingOrder = append(pendingOrder, canonicalCall{ID: id, Name: name})
+				callIndex++
 				features |= Features(FeatureFunctionCalls)
 			case part["functionResponse"] != nil:
 				if role != "user" {
@@ -168,7 +178,7 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 				if err := rejectUnknown(response, map[string]bool{"id": true, "name": true, "response": true}, joinField(partField, "functionResponse")); err != nil {
 					return nil, 0, err
 				}
-				id, err := nonEmptyString(response["id"], joinField(partField, "functionResponse.id"), false)
+				id, present, err := optionalNonEmptyString(response["id"], joinField(partField, "functionResponse.id"), false)
 				if err != nil {
 					return nil, 0, err
 				}
@@ -176,7 +186,15 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 				if err != nil {
 					return nil, 0, err
 				}
-				if pendingCalls[id] != name {
+				if !present {
+					for _, pending := range pendingOrder {
+						if pendingCalls[pending.ID] == name {
+							id = pending.ID
+							break
+						}
+					}
+				}
+				if id == "" || pendingCalls[id] != name {
 					return nil, 0, invalid(joinField(partField, "functionResponse.name"), "does not match the preceding functionCall")
 				}
 				delete(pendingCalls, id)
@@ -192,6 +210,14 @@ func geminiContentsToResponseItems(raw json.RawMessage) ([]any, FeatureSet, erro
 		}
 	}
 	return items, features, nil
+}
+
+func optionalNonEmptyString(raw json.RawMessage, field string, upstream bool) (string, bool, error) {
+	if len(raw) == 0 {
+		return "", false, nil
+	}
+	value, err := nonEmptyString(raw, field, upstream)
+	return value, true, err
 }
 
 func geminiTextParts(raw json.RawMessage, field string) (string, error) {

@@ -88,7 +88,7 @@ func GeminiResponseToResponses(raw []byte) ([]byte, error) {
 			if err := rejectUnknown(call, map[string]bool{"id": true, "name": true, "args": true}, joinField(field, "functionCall")); err != nil {
 				return nil, err
 			}
-			id, err := nonEmptyString(call["id"], joinField(field, "functionCall.id"), true)
+			id, present, err := optionalNonEmptyString(call["id"], joinField(field, "functionCall.id"), true)
 			if err != nil {
 				return nil, err
 			}
@@ -96,9 +96,15 @@ func GeminiResponseToResponses(raw []byte) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			arguments, err := compactJSONObject(call["args"], joinField(field, "functionCall.args"), true)
-			if err != nil {
-				return nil, err
+			if !present {
+				id = convertedItemID("call", responseID, callIndex)
+			}
+			arguments := "{}"
+			if len(call["args"]) != 0 {
+				arguments, err = compactJSONObject(call["args"], joinField(field, "functionCall.args"), true)
+				if err != nil {
+					return nil, err
+				}
 			}
 			output = append(output, map[string]any{"id": convertedItemID("fc", responseID, callIndex), "type": "function_call", "status": "completed", "call_id": id, "name": name, "arguments": arguments})
 			callIndex++

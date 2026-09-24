@@ -124,6 +124,38 @@ func TestGeminiAndResponsesRequestGolden(t *testing.T) {
 	}
 }
 
+func TestGeminiOptionalCallIDsAreStableWithinToolRound(t *testing.T) {
+	converted, err := GeminiRequestToResponses("m", []byte(`{
+  "contents":[
+    {"role":"model","parts":[{"functionCall":{"name":"echo","args":{"value":"x"}}}]},
+    {"role":"user","parts":[{"functionResponse":{"name":"echo","response":{"output":"ok"}}}]}
+  ]
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	_ = json.Unmarshal(converted, &root)
+	items := root["input"].([]any)
+	callID := items[0].(map[string]any)["call_id"]
+	if callID == "" || items[1].(map[string]any)["call_id"] != callID {
+		t.Fatalf("optional Gemini IDs were not associated: %#v", items)
+	}
+
+	response, err := GeminiResponseToResponses([]byte(`{
+  "responseId":"g_optional","modelVersion":"m",
+  "candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"echo"}}]},"finishReason":"STOP"}]
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = json.Unmarshal(response, &root)
+	output := root["output"].([]any)[0].(map[string]any)
+	if output["call_id"] == "" || output["arguments"] != "{}" {
+		t.Fatalf("optional upstream Gemini fields were not represented: %#v", output)
+	}
+}
+
 func TestMessagesResponseConversionsPreserveFinishAndUsage(t *testing.T) {
 	upstream := []byte(`{
   "id":"msg_1","type":"message","role":"assistant","model":"actual",
