@@ -40,9 +40,10 @@ CLIProxyAPI、Sub2API 或其他实现代码。
   成功 terminal。malformed/unknown/duplicate 记为 `failed`，missing/hang 记为 `interrupted`；terminal 后不关闭在 2 秒
   drain 上限后释放资源。
 - 客户端主动关闭会取消唯一上游调用并将请求/attempt 记为 `cancelled`，没有重放。
-- 原始 TCP 客户端停止读取时，30 秒逐事件写 deadline 生效；本次观测为 `30293 ms`，随后上游 context 被取消，
+- 原始 TCP 客户端停止读取时，30 秒逐事件写 deadline 生效；收紧证据断言后的复验观测为 `30242 ms`，随后上游 context 被取消，
   请求/attempt 均为 `cancelled`，仍只有一次 dispatch。
-- 每个合成场景都检查员工 key 不在上游 URL、任一 header、原始 body 或服务日志中；提示和工具结果标记也不在日志中。
+- 每个合成场景都检查员工 key 不在上游 URL、任一 header、原始 body 或服务日志中；员工 key、两类上游 key、管理员
+  密码、提示和工具结果标记均不在服务日志中。
 
 组件层另外通过：
 

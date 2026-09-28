@@ -418,6 +418,7 @@ async function send(route, options = {}) {
   let text = '';
   try {
     text = await readBody(response, current => {
+      if (options.observeText) options.observeText(current);
       if (options.abort && (current.includes('SYNTHETIC_') || current.includes('output_text.delta'))) controller.abort();
       if (options.releaseOnEvent && !firstEventBeforeRelease && current.includes(options.releaseOnEvent)) {
         firstEventBeforeRelease = true; controls.get(route.id)?.release();
@@ -502,12 +503,12 @@ async function actualClaude(route) {
     return { status: 'PASS', exit_code: result.code, request_shapes: captured, upstream_calls: 1,
       ...(await ledger(route.id, before, 'succeeded', route.wireName)) };
   }
-  if (upstreamCalls === 0 && captured.length >= 1 && captured.every(item => item.http_status === 400)) {
+  if (upstreamCalls === 0 && captured.length === 2 && captured.every(item => item.http_status === 400)) {
     const prior = new Set(before.map(row => row.id));
     const added = (await usageRows(route.id)).filter(row => !prior.has(row.id));
-    assert.ok(added.every(row => Number(row.attempt_count) === 0));
+    assert.equal(added.length, 0, 'unsupported Claude request unexpectedly created a CPA parent');
     return { status: 'UNSUPPORTED', exit_code: result.code, request_shapes: captured,
-      parent_requests: added.length, attempts: 0, upstream_calls: 0, reason: 'actual_claude_request_not_representable' };
+      parent_requests: 0, attempts: 0, upstream_calls: 0, reason: 'actual_claude_request_not_representable' };
   }
   return { status: 'FAIL', exit_code: result.code, request_shapes: captured, upstream_calls: upstreamCalls,
     reason_code: 'actual_claude_unexpected_result' };
@@ -546,8 +547,12 @@ try {
 
   {
     const id = 'm2r-delayed', route = byModel.get(`up-${id}`), gate = control(id);
-    let settled = false; const pending = send(route).then(value => { settled = true; return value; });
+    let settled = false, observedBeforeRelease = '';
+    const pending = send(route, { observeText: current => { observedBeforeRelease = current; } })
+      .then(value => { settled = true; return value; });
     await gate.hit; await delay(250); assert.equal(settled, false, 'terminal-only usage leaked target events before EOF');
+    assert.equal(/event: (?:message_start|content_block_start|content_block_delta|content_block_stop|message_delta|message_stop)\b/
+      .test(observedBeforeRelease), false, 'terminal-only usage emitted target semantic bytes before EOF');
     gate.release(); const sent = await pending; controls.delete(id); assertSuccessTerminal(route, sent.text);
     results.push({ scenario: id, status: 'PASS', streaming: 'DELAYED', leaked_before_clean_eof: false,
       bounded_full_stream_release: true, upstream_calls: 1,
@@ -622,8 +627,10 @@ try {
     const route = byModel.get('up-m2r-known-terminal-null'), sent = await send(route);
     assert.equal(sent.response.status, 200); assert.ok(sent.text.includes('event: message_start'));
     assertNoSuccess(route, sent.text);
+    const facts = await ledger(route.id, sent.before, 'failed', route.wireName);
+    assert.deepEqual(facts.usage, { input: null, output: null, cache_read: null, cache_write: null });
     results.push({ scenario: route.id, status: 'PASS', prior_target_events: true, success_terminal: false,
-      upstream_calls: 1, ...(await ledger(route.id, sent.before, 'failed', route.wireName)) });
+      upstream_calls: 1, ...facts });
   }
 
   for (const id of ['m2r-malformed', 'r2m-malformed', 'r2m-unknown-event', 'm2r-duplicate', 'r2m-duplicate']) {
@@ -651,8 +658,10 @@ try {
     ...(await actualClaude(byModel.get('up-m2r-claude'))) });
 
   assert.deepEqual(fixtureErrors, []);
-  assert.equal(serviceLogs.includes(employeeKey), false); assert.equal(serviceLogs.includes(promptMarker), false);
-  assert.equal(serviceLogs.includes(resultMarker), false); assert.equal(JSON.stringify(calls).includes(employeeKey), false);
+  for (const secret of [employeeKey, openAISecret, anthropicSecret, password, promptMarker, resultMarker]) {
+    assert.equal(serviceLogs.includes(secret), false, 'sensitive value appeared in service logs');
+  }
+  assert.equal(JSON.stringify(calls).includes(employeeKey), false);
   const status = results.some(result => result.status === 'FAIL') ? 'FAIL' : 'PASS';
   const claude = args.has('claude') ? { version: (await runProcess(args.get('claude'), ['--version'], process.env)).stdout.trim(),
     sha256: await sha256(args.get('claude')) } : undefined;
