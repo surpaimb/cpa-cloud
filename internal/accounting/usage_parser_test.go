@@ -88,6 +88,15 @@ func TestAnthropicStreamingMergesCumulativeSnapshots(t *testing.T) {
 	assertUsageEqual(t, acc.Usage(), usageValues(25, 15, 100, 50))
 }
 
+func TestAnthropicStreamingNullOptionalFieldsRetainCumulativeSnapshot(t *testing.T) {
+	acc := mustAccumulator(t, ProtocolAnthropicMessages)
+	observe(t, acc, `{"type":"message_start","message":{"content":[],"usage":{"input_tokens":12,"output_tokens":0,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}}`)
+	observe(t, acc, `{"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":1}}`)
+	observe(t, acc, `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":null,"output_tokens":5,"cache_read_input_tokens":null}}`)
+	observe(t, acc, `{"type":"message_stop"}`)
+	assertUsageEqual(t, acc.Usage(), usageValues(12, 5, 3, 2))
+}
+
 func TestGeminiStreamingSnapshotsOverwrite(t *testing.T) {
 	acc := mustAccumulator(t, ProtocolGeminiGenerateContent)
 	observe(t, acc, `{"candidates":[{"content":{"parts":[{"text":"marker-secret"}]}}]}`)
@@ -191,6 +200,24 @@ func TestInvalidAnthropicDeltaDiscardsEarlierUsage(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 	assertUsageEqual(t, acc.Usage(), Usage{})
+}
+
+func TestAnthropicStreamingRejectsDecreasingCumulativeUsage(t *testing.T) {
+	for name, delta := range map[string]string{
+		"input":       `{"input_tokens":9,"output_tokens":4}`,
+		"output":      `{"output_tokens":3}`,
+		"cache read":  `{"output_tokens":4,"cache_read_input_tokens":1}`,
+		"cache write": `{"output_tokens":4,"cache_creation_input_tokens":2}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			acc := mustAccumulator(t, ProtocolAnthropicMessages)
+			observe(t, acc, `{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":4,"cache_read_input_tokens":2,"cache_creation_input_tokens":3}}}`)
+			if err := acc.Observe([]byte(`{"type":"message_delta","usage":` + delta + `}`)); !errors.Is(err, ErrInvalidUsage) {
+				t.Fatalf("got %v", err)
+			}
+			assertUsageEqual(t, acc.Usage(), Usage{})
+		})
+	}
 }
 
 func TestAccumulatorDoesNotRetainBodyAndReturnsDefensiveCopy(t *testing.T) {

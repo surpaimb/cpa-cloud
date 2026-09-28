@@ -413,20 +413,24 @@ func normalizeAnthropic(usage jsonObject) (Usage, error) {
 
 func mergeAnthropicUsage(current *Usage, usage jsonObject) error {
 	fields := []struct {
-		name string
-		dest **int64
+		name       string
+		dest       **int64
+		retainNull bool
 	}{
-		{"input_tokens", &current.InputTokens},
-		{"output_tokens", &current.OutputTokens},
-		{"cache_read_input_tokens", &current.CacheReadTokens},
-		{"cache_creation_input_tokens", &current.CacheWriteTokens},
+		{"input_tokens", &current.InputTokens, true},
+		{"output_tokens", &current.OutputTokens, false},
+		{"cache_read_input_tokens", &current.CacheReadTokens, true},
+		{"cache_creation_input_tokens", &current.CacheWriteTokens, true},
 	}
 	for _, field := range fields {
 		value, present, err := integerField(usage, field.name)
 		if err != nil {
 			return err
 		}
-		if present {
+		if present && (value != nil || !field.retainNull) {
+			if value != nil && *field.dest != nil && *value < **field.dest {
+				return ErrInvalidUsage
+			}
 			*field.dest = cloneInt64(value)
 		}
 	}

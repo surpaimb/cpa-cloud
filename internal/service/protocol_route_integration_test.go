@@ -552,6 +552,38 @@ func TestExplicitResponsesToMessagesStreamOutcomesSettleLedger(t *testing.T) {
 	}
 }
 
+func TestExplicitResponsesToMessagesNullOptionalUsageRetainsLedger(t *testing.T) {
+	var calls atomic.Int32
+	fixture := newExplicitProviderWireFixture(t, anthropicAPIKeyProvider, string(wireProtocolMessages), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"actual-model\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":12,\"output_tokens\":0,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null,\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n")
+		_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":null,\"output_tokens\":5,\"cache_read_input_tokens\":null}}\n\n")
+		_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	response := employeeRequest(t, http.MethodPost, fixture.server.URL+"/v1/responses", `{"model":"wire-model","stream":true,"max_output_tokens":16,"input":"hi"}`, fixture.key.Key, context.Background())
+	body := readBody(response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "response.completed") || !strings.Contains(body, `"input_tokens":12`) || !strings.Contains(body, `"output_tokens":5`) {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	assertSingleWireAttempt(t, fixture.app, "anthropic-messages")
+	if calls.Load() != 1 {
+		t.Fatalf("cross-protocol stream dispatched %d upstream requests", calls.Load())
+	}
+	var status string
+	var inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens sql.NullInt64
+	if err := fixture.app.store.db.QueryRow(`SELECT status,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens FROM accounting_attempts`).Scan(&status, &inputTokens, &outputTokens, &cacheReadTokens, &cacheWriteTokens); err != nil {
+		t.Fatal(err)
+	}
+	if status != "succeeded" || !inputTokens.Valid || inputTokens.Int64 != 12 || !outputTokens.Valid || outputTokens.Int64 != 5 || !cacheReadTokens.Valid || cacheReadTokens.Int64 != 3 || !cacheWriteTokens.Valid || cacheWriteTokens.Int64 != 2 {
+		t.Fatalf("status/usage=%s/%v/%v/%v/%v", status, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens)
+	}
+}
+
 func TestExplicitWireRateLimitPreservesRetryAfter(t *testing.T) {
 	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "17")
