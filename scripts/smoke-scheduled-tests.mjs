@@ -40,8 +40,15 @@ try {
   let admin = adminClient(serviceProcess.origin); await admin.login();
   const account = await admin.request('/upstreams', 'POST', { name: 'Scheduled synthetic', provider_kind: 'openai-compatible', endpoint: `http://127.0.0.1:${upstream.address().port}`, api_key: 'synthetic-scheduled-key' }, 201);
   const plan = await admin.request('/scheduled-tests', 'POST', { name: 'Synthetic catalog', upstream_id: account.id, scope: 'catalog', interval_seconds: 300, enabled: true }, 201);
+  assert.equal(plan.schedule_mode, 'interval');
+  const daily = await admin.request('/scheduled-tests', 'POST', { name: 'Synthetic daily catalog', upstream_id: account.id, scope: 'catalog', schedule_mode: 'daily_local', time_zone: 'Etc/UTC', local_time: '00:00', enabled: true }, 201);
+  assert.equal(daily.schedule_mode, 'daily_local');
+  assert.equal(daily.time_zone, 'Etc/UTC');
+  assert.equal(daily.local_time, '00:00');
+  assert.ok(Date.parse(daily.next_run_at) > Date.now() && Date.parse(daily.next_run_at) <= Date.now() + 86_400_000);
   await stopServer(serviceProcess); serviceProcess = undefined;
   await makeDue(plan.id);
+  await makeDue(daily.id);
 
   serviceProcess = await startServer(server, dataDir, webDir);
   await new Promise(resolve => setTimeout(resolve, 300));
@@ -54,14 +61,18 @@ try {
     const page = await admin.request(`/scheduled-tests/${plan.id}/runs?limit=10`);
     return page.items.length === 1 && page.items[0].state === 'completed' && page.items[0].result_code === 'catalog_ok';
   }, 'Scheduled catalog run did not complete');
-  assert.equal(catalogCalls, 1); assert.equal(generationCalls, 0);
+  await waitFor(async () => {
+    const page = await admin.request(`/scheduled-tests/${daily.id}/runs?limit=10`);
+    return page.items.length === 1 && page.items[0].state === 'completed' && page.items[0].result_code === 'catalog_ok';
+  }, 'Scheduled daily catalog run did not complete');
+  assert.equal(catalogCalls, 2); assert.equal(generationCalls, 0);
   await stopServer(serviceProcess); serviceProcess = undefined;
 
   serviceProcess = await startServer(server, dataDir, webDir, ['--scheduled-tests-enabled']);
   await new Promise(resolve => setTimeout(resolve, 300));
-  assert.equal(catalogCalls, 1, 'Restart replayed a completed scheduled operation');
+  assert.equal(catalogCalls, 2, 'Restart replayed a completed scheduled operation');
   await stopServer(serviceProcess); serviceProcess = undefined;
-  console.log('PASS: process scheduler default-off, one due catalog call, no generation, and restart no-replay');
+  console.log('PASS: process scheduler default-off, interval and daily due catalog calls, no generation, and restart no-replay');
 } finally {
   await stopServer(serviceProcess);
   upstream.closeAllConnections();

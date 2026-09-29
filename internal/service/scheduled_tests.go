@@ -63,6 +63,9 @@ type scheduledTestPlan struct {
 	UpstreamID      string            `json:"upstream_id"`
 	Scope           string            `json:"scope"`
 	IntervalSeconds int64             `json:"interval_seconds"`
+	ScheduleMode    string            `json:"schedule_mode"`
+	TimeZone        *string           `json:"time_zone"`
+	LocalTime       *string           `json:"local_time"`
 	Enabled         bool              `json:"enabled"`
 	Revision        int64             `json:"revision"`
 	NextRunAt       *string           `json:"next_run_at"`
@@ -158,7 +161,10 @@ func migrateScheduledTests(ctx context.Context, db *sql.DB, now time.Time) error
 			return fmt.Errorf("migrate scheduled tests: %w", err)
 		}
 	}
-	if err := verifyScheduledTestColumns(ctx, tx, "scheduled_test_plans", []string{"id", "name", "upstream_id", "scope", "interval_seconds", "enabled", "revision", "next_run_at", "created_by_admin_id", "updated_by_admin_id", "created_at", "updated_at", "archived_at"}); err != nil {
+	if err := migrateScheduledDailyColumns(ctx, tx); err != nil {
+		return err
+	}
+	if err := verifyScheduledTestColumns(ctx, tx, "scheduled_test_plans", []string{"id", "name", "upstream_id", "scope", "interval_seconds", "enabled", "revision", "next_run_at", "created_by_admin_id", "updated_by_admin_id", "created_at", "updated_at", "archived_at", "schedule_mode", "time_zone", "local_time"}); err != nil {
 		return err
 	}
 	if err := verifyScheduledTestColumns(ctx, tx, "scheduled_test_runs", []string{"sequence", "plan_id", "plan_revision", "upstream_id", "operation_id", "scope", "state", "result_code", "started_at", "finished_at", "latency_ms", "actor"}); err != nil {
@@ -229,6 +235,11 @@ func verifyScheduledTestColumns(ctx context.Context, tx *sql.Tx, table string, e
 		},
 	}
 	specs := expectedSpecs[table]
+	if table == "scheduled_test_plans" && len(expected) == 16 {
+		specs["schedule_mode"] = upstreamHealthColumnSpec{"TEXT", 1, 0}
+		specs["time_zone"] = upstreamHealthColumnSpec{"TEXT", 0, 0}
+		specs["local_time"] = upstreamHealthColumnSpec{"TEXT", 0, 0}
+	}
 	if len(specs) != len(expected) {
 		return errors.New("scheduled test schema verifier configuration is invalid")
 	}
@@ -246,7 +257,7 @@ func verifyScheduledTestColumns(ctx context.Context, tx *sql.Tx, table string, e
 			return err
 		}
 		spec, ok := specs[name]
-		if !ok || strings.ToUpper(kind) != spec.kind || notNull != spec.notNull || primary != spec.primary || defaultValue != nil {
+		if !ok || strings.ToUpper(kind) != spec.kind || notNull != spec.notNull || primary != spec.primary || (name == "schedule_mode" && defaultValue != "'interval'") || (name != "schedule_mode" && defaultValue != nil) {
 			rows.Close()
 			return errors.New("existing " + table + " table has an incompatible schema")
 		}
@@ -278,6 +289,8 @@ func verifyScheduledTestColumns(ctx context.Context, tx *sql.Tx, table string, e
 	want := scheduledTestPlanDDL
 	if table == "scheduled_test_runs" {
 		want = scheduledTestRunDDL
+	} else if len(expected) == 16 {
+		want = scheduledTestPlanFinalDDL()
 	}
 	normalized := normalizeHealthDDL(schema)
 	expectedDDL := normalizeHealthDDL(strings.Replace(want, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1))
@@ -287,7 +300,7 @@ func verifyScheduledTestColumns(ctx context.Context, tx *sql.Tx, table string, e
 	if err := verifyScheduledTestForeignKeys(ctx, tx, table); err != nil {
 		return err
 	}
-	return verifyScheduledTestRows(ctx, tx, table)
+	return verifyScheduledTestRows(ctx, tx, table, len(expected) == 13)
 }
 
 func verifyScheduledTestForeignKeys(ctx context.Context, tx *sql.Tx, table string) error {
@@ -338,7 +351,7 @@ func verifyScheduledTestForeignKeys(ctx context.Context, tx *sql.Tx, table strin
 	return nil
 }
 
-func verifyScheduledTestRows(ctx context.Context, tx *sql.Tx, table string) error {
+func verifyScheduledTestRows(ctx context.Context, tx *sql.Tx, table string, legacy bool) error {
 	query := `SELECT COUNT(*) FROM scheduled_test_plans WHERE
 		typeof(name)<>'text' OR length(name)<1 OR length(name)>120 OR
 		typeof(interval_seconds)<>'integer' OR interval_seconds<300 OR interval_seconds>86400 OR
@@ -346,6 +359,10 @@ func verifyScheduledTestRows(ctx context.Context, tx *sql.Tx, table string) erro
 		scope NOT IN ('local_credential','catalog') OR
 		NOT ((enabled=0 AND next_run_at IS NULL) OR (enabled=1 AND next_run_at IS NOT NULL)) OR
 		(archived_at IS NOT NULL AND (enabled<>0 OR next_run_at IS NOT NULL))`
+	if table == "scheduled_test_plans" && !legacy {
+		query += ` OR NOT ((schedule_mode='interval' AND time_zone IS NULL AND local_time IS NULL)
+			OR (schedule_mode='daily_local' AND interval_seconds=86400 AND typeof(time_zone)='text' AND typeof(local_time)='text'))`
+	}
 	if table == "scheduled_test_runs" {
 		query = `SELECT COUNT(*) FROM scheduled_test_runs WHERE
 			typeof(sequence)<>'integer' OR sequence<1 OR typeof(plan_revision)<>'integer' OR plan_revision<1 OR
@@ -361,6 +378,9 @@ func verifyScheduledTestRows(ctx context.Context, tx *sql.Tx, table string) erro
 	}
 	if invalid != 0 {
 		return errors.New("existing " + table + " table contains invalid rows")
+	}
+	if table == "scheduled_test_plans" && !legacy {
+		return verifyScheduledDailyPlanRows(ctx, tx)
 	}
 	return nil
 }
@@ -386,8 +406,11 @@ func verifyScheduledTestIndexes(ctx context.Context, tx *sql.Tx) error {
 func scanScheduledTestPlan(scanner interface{ Scan(...any) error }) (scheduledTestPlan, error) {
 	var plan scheduledTestPlan
 	var enabled int
-	var next, archived sql.NullString
-	err := scanner.Scan(&plan.ID, &plan.Name, &plan.UpstreamID, &plan.Scope, &plan.IntervalSeconds, &enabled, &plan.Revision, &next, &plan.CreatedAt, &plan.UpdatedAt, &archived)
+	var next, archived, zone, local sql.NullString
+	err := scanner.Scan(&plan.ID, &plan.Name, &plan.UpstreamID, &plan.Scope, &plan.IntervalSeconds, &enabled, &plan.Revision, &next, &plan.CreatedAt, &plan.UpdatedAt, &archived, &plan.ScheduleMode, &zone, &local)
+	if err != nil {
+		return scheduledTestPlan{}, err
+	}
 	plan.Enabled = enabled == 1
 	if next.Valid {
 		plan.NextRunAt = &next.String
@@ -395,10 +418,41 @@ func scanScheduledTestPlan(scanner interface{ Scan(...any) error }) (scheduledTe
 	if archived.Valid {
 		plan.ArchivedAt = &archived.String
 	}
-	return plan, err
+	if zone.Valid {
+		plan.TimeZone = &zone.String
+	}
+	if local.Valid {
+		plan.LocalTime = &local.String
+	}
+	if enabled != 0 && enabled != 1 || plan.Revision < 1 || plan.IntervalSeconds < scheduledTestMinInterval || plan.IntervalSeconds > scheduledTestMaxInterval || !validScheduledTestScope(plan.Scope) || plan.Enabled != (plan.NextRunAt != nil) {
+		return scheduledTestPlan{}, errors.New("invalid scheduled test plan metadata")
+	}
+	if plan.ScheduleMode == "interval" {
+		if plan.TimeZone != nil || plan.LocalTime != nil {
+			return scheduledTestPlan{}, errors.New("invalid interval schedule metadata")
+		}
+	} else if plan.ScheduleMode == "daily_local" {
+		if plan.IntervalSeconds != 86400 || plan.TimeZone == nil || plan.LocalTime == nil {
+			return scheduledTestPlan{}, errors.New("invalid daily schedule metadata")
+		}
+		if _, _, err := parseScheduledLocalTime(*plan.LocalTime); err != nil {
+			return scheduledTestPlan{}, err
+		}
+		if _, err := loadScheduledTimeZone(*plan.TimeZone); err != nil {
+			return scheduledTestPlan{}, err
+		}
+	} else {
+		return scheduledTestPlan{}, errors.New("invalid schedule mode")
+	}
+	if plan.NextRunAt != nil {
+		if _, err := parseTime(*plan.NextRunAt); err != nil {
+			return scheduledTestPlan{}, err
+		}
+	}
+	return plan, nil
 }
 
-const scheduledTestPlanSelect = `SELECT id,name,upstream_id,scope,interval_seconds,enabled,revision,next_run_at,created_at,updated_at,archived_at FROM scheduled_test_plans`
+const scheduledTestPlanSelect = `SELECT id,name,upstream_id,scope,interval_seconds,enabled,revision,next_run_at,created_at,updated_at,archived_at,schedule_mode,time_zone,local_time FROM scheduled_test_plans`
 
 func loadScheduledTestPlan(ctx context.Context, query queryRower, id string, includeArchived bool) (scheduledTestPlan, error) {
 	sqlText := scheduledTestPlanSelect + ` WHERE id=?`

@@ -63,6 +63,7 @@ describe('scheduled tests page', () => {
     render(<ScheduledTestsPage csrf="csrf-token" />)
     await userEvent.click(await screen.findByRole('button', { name: '创建计划' }))
     const dialog = screen.getByRole('dialog')
+    expect(within(dialog).queryByLabelText('计划方式')).not.toBeInTheDocument()
     await userEvent.type(within(dialog).getByLabelText('计划名称'), '凭据轮询')
     await userEvent.clear(within(dialog).getByLabelText('固定间隔（秒）'))
     await userEvent.type(within(dialog).getByLabelText('固定间隔（秒）'), '600')
@@ -71,6 +72,42 @@ describe('scheduled tests page', () => {
     const call = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/scheduled-tests') && (init as RequestInit)?.method === 'POST')
     expect(JSON.parse(String((call?.[1] as RequestInit).body))).toEqual({ name: '凭据轮询', upstream_id: 'ups-1', scope: 'local_credential', interval_seconds: 600, enabled: false })
     expect(new Headers((call?.[1] as RequestInit).headers).get('X-CSRF-Token')).toBe('csrf-token')
+  })
+
+  it('gates named-time-zone daily creation and shows the server UTC schedule', async () => {
+    let plans: unknown[] = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response({ version: 'daily', ready: true, storage: 'sqlite-wal', limitations: [], features: { scheduled_tests_configuration: true, scheduled_tests_running: false, scheduled_tests_daily_local: true } })
+      if (url.endsWith('/upstreams')) return response({ items: [upstream] })
+      if (url.endsWith('/scheduled-tests') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body))
+        plans = [{ ...plan, ...body, id: 'sch-daily', revision: 1, latest_result: null, next_run_at: '2026-11-01T05:30:00Z' }]
+        return response(plans[0], 201)
+      }
+      if (url.endsWith('/scheduled-tests')) return response({ items: plans })
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ScheduledTestsPage csrf="daily-csrf" />)
+    await userEvent.click(await screen.findByRole('button', { name: '创建计划' }))
+    const dialog = screen.getByRole('dialog')
+    await userEvent.type(within(dialog).getByLabelText('计划名称'), '纽约每日检查')
+    await userEvent.selectOptions(within(dialog).getByLabelText('计划方式'), 'daily_local')
+    expect(within(dialog).queryByLabelText('固定间隔（秒）')).not.toBeInTheDocument()
+    await userEvent.clear(within(dialog).getByLabelText('IANA 命名时区'))
+    await userEvent.type(within(dialog).getByLabelText('IANA 命名时区'), 'America/New_York')
+    await userEvent.clear(within(dialog).getByLabelText('当地时间（HH:mm）'))
+    await userEvent.type(within(dialog).getByLabelText('当地时间（HH:mm）'), '01:30')
+    await userEvent.click(within(dialog).getByRole('checkbox'))
+    await userEvent.click(within(dialog).getByRole('button', { name: '保存计划' }))
+    expect(await screen.findByText('每天 01:30 · America/New_York')).toBeInTheDocument()
+    expect(screen.getByText('下次 UTC：2026-11-01T05:30:00Z')).toBeInTheDocument()
+    const call = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/scheduled-tests') && (init as RequestInit)?.method === 'POST')
+    const body = JSON.parse(String((call?.[1] as RequestInit).body))
+    expect(body).toEqual({ name: '纽约每日检查', upstream_id: 'ups-1', scope: 'local_credential', schedule_mode: 'daily_local', time_zone: 'America/New_York', local_time: '01:30', enabled: true })
+    expect(body).not.toHaveProperty('interval_seconds')
+    expect(new Headers((call?.[1] as RequestInit).headers).get('X-CSRF-Token')).toBe('daily-csrf')
   })
 
   it('loads bounded history and uses an explicit irreversible archive confirmation', async () => {
