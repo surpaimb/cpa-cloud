@@ -646,9 +646,14 @@ func assertMigratedLegacyRoute(t *testing.T, migrated *store, secretStore *secre
 	if err := keypolicy.Migrate(context.Background(), migrated.db); err != nil {
 		t.Fatal(err)
 	}
+	trustedProxies, err := keypolicy.NewTrustedProxySet(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	app := &App{
 		cfg: Config{AllowLoopbackUpstream: true}, store: migrated, secrets: secretStore,
 		http: newUpstreamClient(true), codex: newProductionCodexExecutor(), logins: make(map[string]*loginAttempt),
+		trustedProxies: trustedProxies,
 	}
 	// This migration-only fixture constructs App directly, so initialize the
 	// same egress and authorization coordinators that Open now requires. The
@@ -657,7 +662,6 @@ func assertMigratedLegacyRoute(t *testing.T, migrated *store, secretStore *secre
 	if err := app.outboundProxies.Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	var err error
 	app.proxyClients, err = egress.NewClientCache(4)
 	if err != nil {
 		t.Fatal(err)
