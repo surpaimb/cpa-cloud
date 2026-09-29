@@ -19,7 +19,7 @@ func (a *App) getResponseResource(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	auth, sourceFailure := a.authorizeKeySource(auth, r)
 	if sourceFailure != nil {
 		writeModelError(w, sourceFailure.status, sourceFailure.code, sourceFailure.message, requestID(r.Context()))
 		return
@@ -41,6 +41,11 @@ func (a *App) cancelResponseResource(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	auth, sourceFailure := a.resolveKeySource(auth, r, false)
+	if sourceFailure != nil {
+		writeModelError(w, sourceFailure.status, sourceFailure.code, sourceFailure.message, requestID(r.Context()))
+		return
+	}
 	view, err := a.responseResources.Cancel(r.Context(), auth, r.PathValue("id"))
 	if err != nil {
 		writeResponseResourceError(w, r, err)
@@ -56,6 +61,11 @@ func (a *App) deleteResponseResource(w http.ResponseWriter, r *http.Request) {
 	}
 	auth, ok := a.authenticateEmployee(w, r)
 	if !ok {
+		return
+	}
+	auth, sourceFailure := a.resolveKeySource(auth, r, false)
+	if sourceFailure != nil {
+		writeModelError(w, sourceFailure.status, sourceFailure.code, sourceFailure.message, requestID(r.Context()))
 		return
 	}
 	responseID := r.PathValue("id")

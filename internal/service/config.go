@@ -23,6 +23,7 @@ type Config struct {
 	WebDir                      string
 	TLSCert                     string
 	TLSKey                      string
+	TrustedProxyCIDRs           []string
 	AllowLoopbackUpstream       bool
 	AccountRecoveryEnabled      bool
 	ScheduledTestsEnabled       bool

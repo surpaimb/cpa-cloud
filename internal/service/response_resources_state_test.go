@@ -50,6 +50,38 @@ func TestMigrateResponseResourcesIsExactRetryableAndAtomic(t *testing.T) {
 			t.Fatalf("migration was not atomic for %s: count=%d err=%v", name, count, err)
 		}
 	}
+
+	legacy, err := openStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = legacy.close() })
+	for _, ddl := range []string{
+		responseResourcesDDL,
+		responseResourceItemsDDL,
+		backgroundTasksDDL,
+		legacyBackgroundTaskPolicyContextsDDL,
+		managedToolRunsDDL,
+		responseResourcesOwnerIndexDDL,
+		responseResourcesExpiryIndexDDL,
+		backgroundTasksQueueIndexDDL,
+		managedToolRunsResponseIndexDDL,
+	} {
+		if _, err := legacy.db.Exec(ddl); err != nil {
+			t.Fatalf("create legacy response schema: %v", err)
+		}
+	}
+	if err := migrateResponseResources(ctx, legacy.db); err != nil {
+		t.Fatalf("upgrade legacy response schema: %v", err)
+	}
+	var markerVersion, markerCount int
+	if err := legacy.db.QueryRow(`SELECT COUNT(*),COALESCE(MIN(version),0) FROM response_resource_trust_migration_state`).Scan(&markerCount, &markerVersion); err != nil || markerCount != 1 || markerVersion != 1 {
+		t.Fatalf("legacy trust marker count=%d version=%d err=%v", markerCount, markerVersion, err)
+	}
+	var upgradedSQL string
+	if err := legacy.db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='background_task_policy_contexts'`).Scan(&upgradedSQL); err != nil || normalizeResponseResourceSQL(upgradedSQL) != normalizeResponseResourceSQL(backgroundTaskPolicyContextsDDL) {
+		t.Fatalf("legacy policy context was not upgraded exactly: %v", err)
+	}
 }
 
 func TestResponseStateEncryptionBindsPurposeOwnerSequenceAndType(t *testing.T) {

@@ -97,7 +97,8 @@ func (w *backgroundResponseWorker) claimOne() (*backgroundResponseClaim, error) 
 	var responseID string
 	var sourceAddr sql.NullString
 	var policyRevision sql.NullInt64
-	err = tx.QueryRowContext(w.ctx, `SELECT t.id,t.response_id,t.request_id,t.employee_id,t.key_id,t.public_model,t.provider_kind,pc.source_addr,pc.key_policy_revision FROM background_tasks t LEFT JOIN background_task_policy_contexts pc ON pc.task_id=t.id WHERE t.status='queued' AND t.claim_token IS NULL AND t.expires_at>? ORDER BY t.created_at,t.id LIMIT 1`, now.Format(time.RFC3339Nano)).Scan(&claim.view.TaskID, &responseID, &claim.view.RequestID, &claim.auth.EmployeeID, &claim.auth.KeyID, &claim.view.PublicModel, &claim.providerKind, &sourceAddr, &policyRevision)
+	var sourceTrustRevision sql.NullString
+	err = tx.QueryRowContext(w.ctx, `SELECT t.id,t.response_id,t.request_id,t.employee_id,t.key_id,t.public_model,t.provider_kind,pc.source_addr,pc.key_policy_revision,pc.source_trust_revision FROM background_tasks t LEFT JOIN background_task_policy_contexts pc ON pc.task_id=t.id WHERE t.status='queued' AND t.claim_token IS NULL AND t.expires_at>? ORDER BY t.created_at,t.id LIMIT 1`, now.Format(time.RFC3339Nano)).Scan(&claim.view.TaskID, &responseID, &claim.view.RequestID, &claim.auth.EmployeeID, &claim.auth.KeyID, &claim.view.PublicModel, &claim.providerKind, &sourceAddr, &policyRevision, &sourceTrustRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -120,11 +121,12 @@ func (w *backgroundResponseWorker) claimOne() (*backgroundResponseClaim, error) 
 		return nil, err
 	}
 	peer, peerErr := netip.ParseAddr(sourceAddr.String)
-	if !sourceAddr.Valid || !policyRevision.Valid || policyRevision.Int64 < 1 || peerErr != nil || peer.Zone() != "" || peer != peer.Unmap() {
+	if !sourceAddr.Valid || !policyRevision.Valid || !sourceTrustRevision.Valid || policyRevision.Int64 < 1 || !validTrustRevision(sourceTrustRevision.String) || sourceTrustRevision.String != w.app.trustedProxies.Revision() || peerErr != nil || peer.Zone() != "" || peer != peer.Unmap() {
 		_ = c.InterruptQueuedClaim(context.Background(), claim.view.TaskID, responseID, claim.view.RequestID, claim.claimToken)
 		return nil, errResponseResourceForbidden
 	}
 	claim.auth.SourceAddr = peer
+	claim.auth.SourceTrustRevision = sourceTrustRevision.String
 	claim.auth.Policy, err = w.app.loadKeyPolicySnapshot(w.ctx, claim.auth.KeyID, keypolicy.ProtocolOpenAIResponses, claim.view.PublicModel, peer, policyRevision.Int64)
 	if err != nil {
 		_ = c.InterruptQueuedClaim(context.Background(), claim.view.TaskID, responseID, claim.view.RequestID, claim.claimToken)

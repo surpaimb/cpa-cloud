@@ -55,6 +55,7 @@ type App struct {
 	budget              *governance.Budget
 	budgetCommit        func(string, *sql.Tx) error
 	usageRequests       sync.Map
+	trustedProxies      keypolicy.TrustedProxySet
 	loginMu             sync.Mutex
 	logins              map[string]*loginAttempt
 	catalogMu           sync.Mutex
@@ -74,6 +75,10 @@ type loginAttempt struct {
 }
 
 func Open(ctx context.Context, cfg Config) (*App, error) {
+	trustedProxies, err := keypolicy.NewTrustedProxySet(cfg.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, err
+	}
 	if cfg.ResponsesBackgroundTasks && !cfg.ResponsesStatefulResources {
 		return nil, errors.New("background Responses require stateful Responses resources")
 	}
@@ -103,7 +108,7 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	app := &App{
 		cfg: cfg, store: s, secrets: sec, http: client,
 		oauthHTTP: newCodexOAuthHTTPClient(), codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(),
-		logins: make(map[string]*loginAttempt),
+		logins: make(map[string]*loginAttempt), trustedProxies: trustedProxies,
 	}
 	opened := false
 	defer func() {
@@ -435,6 +440,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"account_lifecycle_management":    true,
 			"key_access_policy":               true,
 			"key_source_policy":               true,
+			"trusted_proxy_source":            a.trustedProxies.Enabled(),
 		},
 		"limitations": limitations,
 	})

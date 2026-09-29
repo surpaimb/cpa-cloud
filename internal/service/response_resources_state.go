@@ -92,10 +92,25 @@ const backgroundTasksDDL = `CREATE TABLE background_tasks (
 	CHECK((account_id IS NULL) = (account_revision IS NULL))
 )`
 
-const backgroundTaskPolicyContextsDDL = `CREATE TABLE background_task_policy_contexts (
+const legacyBackgroundTaskPolicyContextsDDL = `CREATE TABLE background_task_policy_contexts (
 	task_id TEXT PRIMARY KEY NOT NULL REFERENCES background_tasks(id) ON DELETE CASCADE,
 	source_addr TEXT NOT NULL CHECK(length(source_addr) BETWEEN 1 AND 64),
 	key_policy_revision INTEGER NOT NULL CHECK(key_policy_revision BETWEEN 1 AND 9007199254740991)
+)`
+
+const legacySourceTrustRevision = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+const backgroundTaskPolicyContextsDDL = `CREATE TABLE background_task_policy_contexts (
+	task_id TEXT PRIMARY KEY NOT NULL REFERENCES background_tasks(id) ON DELETE CASCADE,
+	source_addr TEXT NOT NULL CHECK(length(source_addr) BETWEEN 1 AND 64),
+	key_policy_revision INTEGER NOT NULL CHECK(key_policy_revision BETWEEN 1 AND 9007199254740991),
+	source_trust_revision TEXT NOT NULL DEFAULT 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' CHECK(length(source_trust_revision) = 64)
+)`
+
+const responseResourceTrustMigrationDDL = `CREATE TABLE response_resource_trust_migration_state (
+	singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+	version INTEGER NOT NULL CHECK(version = 1),
+	completed_at TEXT NOT NULL
 )`
 
 const managedToolRunsDDL = `CREATE TABLE managed_tool_runs (
@@ -125,15 +140,16 @@ const backgroundTasksQueueIndexDDL = `CREATE INDEX background_tasks_queue_idx ON
 const managedToolRunsResponseIndexDDL = `CREATE INDEX managed_tool_runs_response_idx ON managed_tool_runs(response_id,created_at,id)`
 
 var responseResourceSchemaObjects = map[string]string{
-	"response_resources":              responseResourcesDDL,
-	"response_resource_items":         responseResourceItemsDDL,
-	"background_tasks":                backgroundTasksDDL,
-	"background_task_policy_contexts": backgroundTaskPolicyContextsDDL,
-	"managed_tool_runs":               managedToolRunsDDL,
-	"response_resources_owner_idx":    responseResourcesOwnerIndexDDL,
-	"response_resources_expiry_idx":   responseResourcesExpiryIndexDDL,
-	"background_tasks_queue_idx":      backgroundTasksQueueIndexDDL,
-	"managed_tool_runs_response_idx":  managedToolRunsResponseIndexDDL,
+	"response_resources":                      responseResourcesDDL,
+	"response_resource_items":                 responseResourceItemsDDL,
+	"background_tasks":                        backgroundTasksDDL,
+	"background_task_policy_contexts":         backgroundTaskPolicyContextsDDL,
+	"response_resource_trust_migration_state": responseResourceTrustMigrationDDL,
+	"managed_tool_runs":                       managedToolRunsDDL,
+	"response_resources_owner_idx":            responseResourcesOwnerIndexDDL,
+	"response_resources_expiry_idx":           responseResourcesExpiryIndexDDL,
+	"background_tasks_queue_idx":              backgroundTasksQueueIndexDDL,
+	"managed_tool_runs_response_idx":          managedToolRunsResponseIndexDDL,
 }
 
 func migrateResponseResources(ctx context.Context, db *sql.DB) error {
@@ -145,11 +161,15 @@ func migrateResponseResources(ctx context.Context, db *sql.DB) error {
 		return errResponseStateUnavailable
 	}
 	defer tx.Rollback()
+	if err := migrateResponseResourceTrustRevision(ctx, tx); err != nil {
+		return err
+	}
 	for _, ddl := range []string{
 		responseResourcesDDL,
 		responseResourceItemsDDL,
 		backgroundTasksDDL,
 		backgroundTaskPolicyContextsDDL,
+		responseResourceTrustMigrationDDL,
 		managedToolRunsDDL,
 		responseResourcesOwnerIndexDDL,
 		responseResourcesExpiryIndexDDL,
@@ -166,10 +186,70 @@ func migrateResponseResources(ctx context.Context, db *sql.DB) error {
 			return errResponseStateUnavailable
 		}
 	}
+	var trustMarkerCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM response_resource_trust_migration_state`).Scan(&trustMarkerCount); err != nil {
+		return errResponseStateUnavailable
+	}
+	if trustMarkerCount == 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO response_resource_trust_migration_state(singleton,version,completed_at) VALUES(1,1,?)`, utcNow()); err != nil {
+			return errResponseStateUnavailable
+		}
+	}
+	if err := validateResponseResourceTrustMigration(ctx, tx); err != nil {
+		return err
+	}
 	if err := validateResponseResourceSchema(ctx, tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
+		return errResponseStateUnavailable
+	}
+	return nil
+}
+
+func migrateResponseResourceTrustRevision(ctx context.Context, tx *sql.Tx) error {
+	var rootSQL, contextSQL, markerSQL sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='response_resources'`).Scan(&rootSQL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return errResponseStateUnavailable
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='background_task_policy_contexts'`).Scan(&contextSQL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return errResponseStateUnavailable
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='response_resource_trust_migration_state'`).Scan(&markerSQL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return errResponseStateUnavailable
+	}
+
+	switch {
+	case !rootSQL.Valid && !contextSQL.Valid && !markerSQL.Valid:
+		return nil
+	case rootSQL.Valid && contextSQL.Valid && !markerSQL.Valid && normalizeResponseResourceSQL(contextSQL.String) == normalizeResponseResourceSQL(legacyBackgroundTaskPolicyContextsDDL):
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE background_task_policy_contexts ADD COLUMN source_trust_revision TEXT NOT NULL DEFAULT '`+legacySourceTrustRevision+`' CHECK(length(source_trust_revision) = 64)`); err != nil {
+			return errResponseStateUnavailable
+		}
+		if _, err := tx.ExecContext(ctx, responseResourceTrustMigrationDDL); err != nil {
+			return errResponseStateUnavailable
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO response_resource_trust_migration_state(singleton,version,completed_at) VALUES(1,1,?)`, utcNow()); err != nil {
+			return errResponseStateUnavailable
+		}
+		return nil
+	case rootSQL.Valid && contextSQL.Valid && markerSQL.Valid && normalizeResponseResourceSQL(contextSQL.String) == normalizeResponseResourceSQL(backgroundTaskPolicyContextsDDL) && normalizeResponseResourceSQL(markerSQL.String) == normalizeResponseResourceSQL(responseResourceTrustMigrationDDL):
+		return validateResponseResourceTrustMigration(ctx, tx)
+	default:
+		return errResponseStateUnavailable
+	}
+}
+
+func validateResponseResourceTrustMigration(ctx context.Context, tx *sql.Tx) error {
+	var count, singleton, version int
+	var completedAt string
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MIN(singleton),0),COALESCE(MIN(version),0),COALESCE(MIN(completed_at),'') FROM response_resource_trust_migration_state`).Scan(&count, &singleton, &version, &completedAt); err != nil {
+		return errResponseStateUnavailable
+	}
+	if count != 1 || singleton != 1 || version != 1 {
+		return errResponseStateUnavailable
+	}
+	if _, err := parseTime(completedAt); err != nil {
 		return errResponseStateUnavailable
 	}
 	return nil
@@ -190,11 +270,12 @@ func validateResponseResourceSchema(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	for table, indexes := range map[string]map[string]bool{
-		"response_resources":              {"response_resources_owner_idx": true, "response_resources_expiry_idx": true},
-		"response_resource_items":         {},
-		"background_tasks":                {"background_tasks_queue_idx": true},
-		"background_task_policy_contexts": {},
-		"managed_tool_runs":               {"managed_tool_runs_response_idx": true},
+		"response_resources":                      {"response_resources_owner_idx": true, "response_resources_expiry_idx": true},
+		"response_resource_items":                 {},
+		"background_tasks":                        {"background_tasks_queue_idx": true},
+		"background_task_policy_contexts":         {},
+		"response_resource_trust_migration_state": {},
+		"managed_tool_runs":                       {"managed_tool_runs_response_idx": true},
 	} {
 		rows, err := tx.QueryContext(ctx, `PRAGMA index_list(`+table+`)`)
 		if err != nil {

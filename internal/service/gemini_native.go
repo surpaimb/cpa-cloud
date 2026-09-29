@@ -60,7 +60,7 @@ func (a *App) listGeminiModels(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
 	}
-	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	auth, sourceFailure := a.authorizeKeySource(auth, r)
 	if sourceFailure != nil {
 		writeGeminiError(w, sourceFailure.status, "PERMISSION_DENIED", sourceFailure.message)
 		return
@@ -160,7 +160,7 @@ func (a *App) geminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API key.")
 		return
 	}
-	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	auth, sourceFailure := a.authorizeKeySource(auth, r)
 	if sourceFailure != nil {
 		writeGeminiError(w, sourceFailure.status, "PERMISSION_DENIED", sourceFailure.message)
 		return

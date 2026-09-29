@@ -1,7 +1,7 @@
 # 开发预览接口契约 v1
 
 Go module: cpacloud.local/server；Go 服务入口 cmd/cpa-cloud；网页目录 web。
-入口参数约定 --data-dir、--listen（默认 127.0.0.1:8787）、--web-dir、可选 --tls-cert/--tls-key。
+入口参数约定 --data-dir、--listen（默认 127.0.0.1:8787）、--web-dir、可选 --tls-cert/--tls-key，以及可重复的 --trusted-proxy-cidr。
 全新 data-dir 支持 --init，仅初始化并退出：管理员密码通过 stdin 交付（不写日志），初始用户名 admin。
 服务启动不得向日志输出秘密。数据加密根密钥单独保存在受限文件，明确主机管理员信任边界。
 
@@ -36,13 +36,15 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 最终模型集合取员工策略、Key 策略和当前有效路由的交集。`GET /v1/models` 只有 Key 允许至少一种 OpenAI 客户端协议时才返回过滤目录，否则返回已鉴权空列表；`GET /v1beta/models` 要求 Gemini 客户端协议，否则同样返回已鉴权空列表。四种前台入口必须在治理、预算、租约、尝试和网络派发之前检查客户端协议与公开模型，并在最终派发事务中重查冻结的策略 revision。
 
-### 每 Key socket peer 来源策略（2026-09-25 源码增量）
+### 每 Key 来源策略与显式可信代理（2026-09-29 源码增量）
 
 完整边界见[Messages↔Responses SSE 与 Key 来源 IP/CIDR 契约](messages-stream-key-ip-batch-contract-2026-09-25.md)。策略对象增加 `source_mode` 与 `source_cidrs`，并与协议/模型共用同一个 revision/CAS。`source_mode=all` 必须配空数组；`selected` 的空数组拒绝所有来源。成员接受裸 IP 或 CIDR，服务端保存规范 masked prefix；重复、zone、无效或超限输入均拒绝。
 
-创建 policy 的旧四字段客户端省略来源字段时默认 `all/[]`。PUT 中来源两字段同时省略表示保留当前限制；只出现一个无效；显式 `source_mode:"all",source_cidrs:[]` 才清除限制。来源只取 `Request.RemoteAddr` 的真实 `host:port` socket peer；`Forwarded`、`X-Forwarded-For`、`X-Real-IP` 一律忽略。反向代理后的本段策略看到代理地址，不表示支持可信代理链或终端用户真实 IP。
+创建 policy 的旧四字段客户端省略来源字段时默认 `all/[]`。PUT 中来源两字段同时省略表示保留当前限制；只出现一个无效；显式 `source_mode:"all",source_cidrs:[]` 才清除限制。默认来源只取 `Request.RemoteAddr` 的真实 `host:port` socket peer，所有转发头均忽略。管理员可用可重复的 `--trusted-proxy-cidr` 显式配置数值 IP/CIDR；不会因 loopback、私网或地址类型自动建立信任，非法、重复或超限配置在启动写入状态前拒绝。
 
-目录与四模型入口在治理、预算、parent/attempt 和上游网络前检查来源；最终派发事务用初始捕获的规范 peer 和 policy revision 重核。尚未派发的后台任务持久化并复用创建来源，不能把 worker loopback 当员工来源。资源读取/继续要求当前来源仍获权；仍有效且精确拥有资源的 Key 即使策略收紧，仍可 cancel/delete 自有任务。
+实际 socket peer 未命中可信集合时，即使 `X-Forwarded-For` 恶意或畸形也完全忽略，来源仍是 peer。peer 命中时必须恰有一个物理 `X-Forwarded-For` 值，包含 1–64 个逗号分隔的纯数值 IP，整值不超过 4096 UTF-8 字节；从右向左跳过显式可信 hop，第一个不可信 hop 才是来源。缺失、多物理行、空/非法/超限成员或全链可信均失败关闭，不回退到代理地址。`Forwarded` 与 `X-Real-IP` 始终忽略；`0.0.0.0/0` 或 `::/0` 只按管理员原样显式信任整个地址族，不是安全默认值。
+
+目录与四模型入口在治理、预算、parent/attempt 和上游网络前检查解析后的来源；最终派发事务用初始捕获的来源、policy revision 和规范可信集合的 SHA-256 revision 重核。尚未派发的后台任务持久化并复用创建来源及信任 revision，不能把 worker loopback 当员工来源；重启时改变可信集合会让旧排队任务在零 attempt、零上游请求下中断。资源读取/继续要求当前来源仍获权；仍有效且精确拥有资源的 Key 即使策略收紧，仍可 cancel/delete 自有任务，但可信 peer 的畸形转发链仍会在进入资源操作前拒绝。
 
 ### Messages↔Responses SSE（2026-09-25 源码增量）
 

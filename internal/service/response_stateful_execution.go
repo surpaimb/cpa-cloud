@@ -271,7 +271,7 @@ func (p *responsePersistencePlan) persistCompleted(ctx context.Context, provider
 	view, err := p.coordinator.Create(ctx, responseResourceCreateInput{
 		OperationID: p.operationID, EmployeeID: p.auth.EmployeeID, KeyID: p.auth.KeyID,
 		PublicModel: p.model, ParentResponseID: p.parentID, ProviderKind: providerKind,
-		SourceAddr: p.auth.SourceAddr, PolicyRevision: p.auth.Policy.Revision,
+		SourceAddr: p.auth.SourceAddr, SourceTrustRevision: p.auth.SourceTrustRevision, PolicyRevision: p.auth.Policy.Revision,
 		StoreBody: true, Items: items, CreatedAt: p.createdAt, TerminalAt: &terminal,
 	})
 	if err != nil {

@@ -71,7 +71,7 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 	if !ok {
 		return
 	}
-	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	auth, sourceFailure := a.authorizeKeySource(auth, r)
 	if sourceFailure != nil {
 		writeAnthropicError(w, sourceFailure.status, anthropicAdmissionType(sourceFailure.status), sourceFailure.message, requestID(r.Context()))
 		return

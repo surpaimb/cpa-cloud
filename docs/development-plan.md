@@ -1,6 +1,6 @@
 # 开发计划
 
-状态：2026-09-25 已从首轮预览进入持续功能对齐。以 [功能矩阵](feature-parity-plan.md) 分批交付符合 CPA Cloud 产品边界的能力，不以打包数量或最小文本请求替代产品验收。
+状态：2026-09-29 已从首轮预览进入持续功能对齐。以 [功能矩阵](feature-parity-plan.md) 分批交付符合 CPA Cloud 产品边界的能力，不以打包数量或最小文本请求替代产品验收。
 
 ## 当前执行批次
 
@@ -14,7 +14,7 @@ Responses 首批、Claude/Gemini API Key 原生协议、Codex 网页 OAuth 与�
 
 普通自助注册、Key 策略、套餐、订阅、充值、兑换、支付、员工门户、代理池、治理和运维扩展继续按 [功能矩阵](feature-parity-plan.md) 推进。默认内部企业模式仍关闭对外注册和商业化入口；启用商业流程前必须完成身份、金额账本、回调安全及恢复验收。严格多租户、租户域名、SSO、管理员密码重置命令和提示词/响应正文审计不在实现范围内。
 
-当前 `main` 已依次合入 Chat↔Responses、Messages↔Responses 文本/function SSE、每 Key 客户端协议/公开模型策略，以及同 revision/CAS 的真实 socket peer 来源限制；Messages→Responses 在 usage 只于终态可知时有界全流延迟，不能描述为全程实时。当前增量由[Gemini SSE 与可信代理批次契约](gemini-stream-trusted-proxy-batch-contract-2026-09-29.md)约束，先交付 Gemini v1beta `streamGenerateContent`↔Responses 的严格文本/function SSE 子集；thinking/cache/media/citations、托管工具、跨协议有状态/后台转换、可信代理接线、组策略、通用 TPM 上界、自助门户和真实支付不随该流转换完成。
+当前 `main` 已依次合入 Chat↔Responses、Messages↔Responses、Gemini v1beta `streamGenerateContent`↔Responses 的严格文本/function SSE、每 Key 客户端协议/公开模型策略，以及同 revision/CAS 的真实 socket peer 来源限制；Messages→Responses 在 usage 只于终态可知时有界全流延迟，Gemini 身份不齐时有界暂存，均不能描述为一般供应商兼容。当前增量按[Gemini SSE 与可信代理批次契约](gemini-stream-trusted-proxy-batch-contract-2026-09-29.md)接入显式可信代理：默认仍只认 socket peer，只有管理员 CIDR 命中的入口才从单一 X-Forwarded-For 右向左取首个不可信 hop，畸形链失败关闭，来源与信任 revision 进入后台恢复及最终派发重核。thinking/cache/media/citations、托管工具、跨协议有状态/后台转换、通用反向代理部署、组策略、通用 TPM 上界、自助门户和真实支付仍不在本批。
 
 账号换号已按[安全换号契约](account-pool-failover-contract.md)接入源码：仅允许已证明未派发的账号预检失败切换一次，进入模型执行器后禁止自动重放。公共协调器与四协议隔离进程验收已覆盖失败分类、权限/池版本重查、一条父请求、实际账号费用、429 不重放和重启撤销；完整 Go/CI 结果在[集成状态](integration-status.md)持续记录。
 

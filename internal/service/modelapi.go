@@ -19,12 +19,13 @@ import (
 )
 
 type employeeAuth struct {
-	EmployeeID     string
-	KeyID          string
-	Mode           string
-	Policy         keypolicy.Policy
-	ClientProtocol keypolicy.ClientProtocol
-	SourceAddr     netip.Addr
+	EmployeeID          string
+	KeyID               string
+	Mode                string
+	Policy              keypolicy.Policy
+	ClientProtocol      keypolicy.ClientProtocol
+	SourceAddr          netip.Addr
+	SourceTrustRevision string
 }
 type route struct {
 	egress          *routeEgress
@@ -45,7 +46,7 @@ func (a *App) listModels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	auth, sourceFailure := a.authorizeKeySource(auth, r)
 	if sourceFailure != nil {
 		writeModelError(w, sourceFailure.status, sourceFailure.code, sourceFailure.message, requestID(r.Context()))
 		return
@@ -185,7 +186,7 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	auth, sourceFailure := a.authorizeKeySource(auth, r)
 	if sourceFailure != nil {
 		writeModelError(w, sourceFailure.status, sourceFailure.code, sourceFailure.message, requestID(r.Context()))
 		return
