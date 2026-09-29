@@ -7,7 +7,7 @@ import type { ModelRoute } from '../api'
 
 type Route = { status?: number; body?: unknown }
 const response = (route: Route) => Promise.resolve(new Response(JSON.stringify(route.body ?? {}), { status: route.status ?? 200, headers: { 'Content-Type': 'application/json' } }))
-const model = (id = 'public-model'): ModelRoute => ({ id, upstream_id: 'up-1', upstream_model: 'provider-model', enabled: true })
+const model = (id = 'public-model'): ModelRoute => ({ id, model_kind: 'generation', upstream_id: 'up-1', upstream_model: 'provider-model', enabled: true })
 const upstreams = [
   { id: 'up-1', name: '主账号', provider_kind: 'openai-compatible', endpoint: 'https://one.example/v1', enabled: true, revision: 1, credential_state: null, verified_at: null },
   { id: 'up-2', name: '备用账号', provider_kind: 'openai-compatible', endpoint: 'https://two.example/v1', enabled: true, revision: 1, credential_state: null, verified_at: null },

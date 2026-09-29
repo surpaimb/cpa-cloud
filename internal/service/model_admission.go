@@ -80,6 +80,9 @@ func (a *App) selectModelRoute(r *http.Request, auth employeeAuth, model string,
 		}
 	}
 	if legacy {
+		if clientProtocol == accounting.ProtocolOpenAIEmbeddings {
+			return route{}, nil, poolAdmissionFailure(accountPoolNoCompatible)
+		}
 		if auth.Policy.AccountGroupMode == keypolicy.ModeSelected {
 			return route{}, nil, poolAdmissionFailure(accountPoolNoCompatible)
 		}
@@ -91,7 +94,35 @@ func (a *App) selectModelRoute(r *http.Request, auth employeeAuth, model string,
 			return route{}, nil, failure
 		}
 	}
+	if clientProtocol == accounting.ProtocolOpenAIEmbeddings {
+		if lease == nil || selected.ModelKind != "embedding" || selected.ProviderKind != "openai-compatible" || selected.WireProtocol != wireProtocolEmbeddings {
+			if lease != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				lease.Release(ctx, scheduling.ReleaseResult{Failure: scheduling.FailureNone, Phase: scheduling.DispatchNotStarted})
+			}
+			return route{}, nil, poolAdmissionFailure(accountPoolNoCompatible)
+		}
+	} else if selected.ModelKind != "generation" || selected.WireProtocol == wireProtocolEmbeddings {
+		if lease != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			lease.Release(ctx, scheduling.ReleaseResult{Failure: scheduling.FailureNone, Phase: scheduling.DispatchNotStarted})
+		}
+		return route{}, nil, poolAdmissionFailure(accountPoolNoCompatible)
+	}
 	if record {
+		if clientProtocol == accounting.ProtocolOpenAIEmbeddings {
+			if a.beginRequestUsage(r, auth, model, selected, accounting.ProtocolOpenAIEmbeddings) != nil {
+				if lease != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					defer cancel()
+					lease.Release(ctx, scheduling.ReleaseResult{Failure: scheduling.FailureNone, Phase: scheduling.DispatchNotStarted})
+				}
+				return route{}, nil, poolAdmissionFailure(accountPoolStorageUnavailable)
+			}
+			return selected, lease, nil
+		}
 		upstream, err := routeUpstreamProtocol(selected, clientProtocol)
 		if err != nil {
 			if lease != nil {
@@ -141,8 +172,8 @@ func (a *App) legacyEmployeeRoute(ctx context.Context, auth employeeAuth, model 
 		}
 	}
 	var selected route
-	err = a.store.db.QueryRowContext(ctx, `SELECT u.id,u.endpoint,m.upstream_model,m.wire_protocol,m.revision,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND u.enabled=1 AND u.archived=0
-		AND NOT EXISTS(SELECT 1 FROM account_recovery_states recovery WHERE recovery.account_id=u.id)`, model).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.WireProtocol, &selected.ModelRevision, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion)
+	err = a.store.db.QueryRowContext(ctx, `SELECT u.id,u.endpoint,m.upstream_model,m.wire_protocol,m.model_kind,m.revision,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND u.enabled=1 AND u.archived=0
+		AND NOT EXISTS(SELECT 1 FROM account_recovery_states recovery WHERE recovery.account_id=u.id)`, model).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.WireProtocol, &selected.ModelKind, &selected.ModelRevision, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return route{}, poolAdmissionFailure(accountPoolNoCompatible)
 	}

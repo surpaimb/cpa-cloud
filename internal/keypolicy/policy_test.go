@@ -46,6 +46,41 @@ func TestMigrateBackfillsExistingKeysAndIsRetryable(t *testing.T) {
 	}
 }
 
+func TestEmbeddingsMigrationPreservesLegacyAllWithoutRevisionOrNewPermission(t *testing.T) {
+	db := openTestDB(t)
+	insertKey(t, db, "key-legacy-all", "employee-one")
+	insertModel(t, db, "public-a", false)
+	migratePolicyAndInstallSourceSchema(t, db)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	policy, err := LoadTx(context.Background(), tx, "key-legacy-all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Revision != 1 || policy.ProtocolMode != ModeSelected || !slices.Equal(policy.Protocols, LegacyClientProtocols) {
+		t.Fatalf("migrated policy=%#v", policy)
+	}
+	if Allows(policy, ProtocolOpenAIEmbeddings, "public-a") {
+		t.Fatal("legacy all policy gained embeddings permission")
+	}
+}
+
+func TestEmbeddingsMigrationRejectsAlteredMarkerSchema(t *testing.T) {
+	db := openTestDB(t)
+	insertKey(t, db, "key-marker", "employee-one")
+	insertModel(t, db, "public-a", false)
+	migratePolicyAndInstallSourceSchema(t, db)
+	if _, err := db.Exec(`ALTER TABLE access_key_policy_embeddings_migration_state ADD COLUMN unexpected TEXT`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(context.Background(), db); !errors.Is(err, ErrInvalidSchema) {
+		t.Fatalf("altered embeddings marker error=%v", err)
+	}
+}
+
 func TestMigrateFailsClosedWhenMarkedDatabaseLosesPolicy(t *testing.T) {
 	db := openTestDB(t)
 	insertKey(t, db, "key-restricted", "employee-one")

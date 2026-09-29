@@ -362,7 +362,7 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request, session adminSes
 		return
 	}
 	replacement := keypolicy.Replacement{
-		ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
+		ProtocolMode: keypolicy.ModeSelected, Protocols: append([]keypolicy.ClientProtocol(nil), keypolicy.LegacyClientProtocols...),
 		ModelMode: keypolicy.ModeAll, Models: []string{},
 		SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
 		AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{},

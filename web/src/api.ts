@@ -49,7 +49,7 @@ export type Employee = {
   models: string[]
   revision: number
 }
-export type ClientProtocol = 'openai-chat' | 'openai-responses' | 'anthropic-messages' | 'gemini-generate-content'
+export type ClientProtocol = 'openai-chat' | 'openai-responses' | 'openai-embeddings' | 'anthropic-messages' | 'gemini-generate-content'
 export type KeyAccessPolicy = {
   revision: number
   protocol_mode: 'all' | 'selected'
@@ -259,6 +259,7 @@ export type UpstreamBatchResult = {
 }
 export type ModelRoute = {
   id: string
+  model_kind?: 'generation' | 'embedding'
   upstream_id: string
   upstream_model: string
   wire_protocol?: WireProtocol
@@ -270,7 +271,7 @@ export type ModelRoute = {
 }
 export type AccountGroup = { id: string; name: string; revision: number }
 export type AccountChannel = { id: string; name: string; group_id?: string | null; revision: number }
-export type WireProtocol = 'legacy-native' | 'openai-chat' | 'openai-responses' | 'anthropic-messages' | 'gemini-generate-content'
+export type WireProtocol = 'legacy-native' | 'openai-chat' | 'openai-responses' | 'openai-embeddings' | 'anthropic-messages' | 'gemini-generate-content'
 export type ModelAccount = {
   upstream_id: string
   upstream_model: string
@@ -313,6 +314,7 @@ export type SystemStatus = {
     gemini_native_api?: boolean
     account_pool_configuration?: boolean
     account_pool_routing?: boolean
+    openai_embeddings?: boolean
     account_lifecycle_management?: boolean
     single_instance_billing?: boolean
     key_access_policy?: boolean
@@ -554,7 +556,7 @@ export type GovernanceBudgetLimits = {
 }
 export type GovernanceShadowLimits = { tpm: number | null; cost_micro: string | null; currency: string | null; window: 'rolling_24h' | null }
 export type GovernanceScopeKind = 'employee' | 'key' | 'group'
-export type GeneralBudgetProtocol = 'openai-chat-completions' | 'openai-responses' | 'anthropic-messages' | 'gemini-generate-content'
+export type GeneralBudgetProtocol = 'openai-chat-completions' | 'openai-responses' | 'openai-embeddings' | 'anthropic-messages' | 'gemini-generate-content'
 export type GovernancePolicy = {
   id: string
   scope_kind: GovernanceScopeKind

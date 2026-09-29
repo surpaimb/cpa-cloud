@@ -18,6 +18,7 @@ type UsageProtocol string
 const (
 	ProtocolOpenAIChatCompletions UsageProtocol = "openai-chat-completions"
 	ProtocolOpenAIResponses       UsageProtocol = "openai-responses"
+	ProtocolOpenAIEmbeddings      UsageProtocol = "openai-embeddings"
 	ProtocolAnthropicMessages     UsageProtocol = "anthropic-messages"
 	ProtocolGeminiGenerateContent UsageProtocol = "gemini-generate-content"
 )
@@ -44,7 +45,7 @@ func NewGPT41SnapshotUsageAccumulator() *UsageAccumulator {
 
 func NewUsageAccumulator(protocol UsageProtocol) (*UsageAccumulator, error) {
 	switch protocol {
-	case ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolAnthropicMessages, ProtocolGeminiGenerateContent:
+	case ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolOpenAIEmbeddings, ProtocolAnthropicMessages, ProtocolGeminiGenerateContent:
 		return &UsageAccumulator{protocol: protocol}, nil
 	default:
 		return nil, ErrInvalidUsage
@@ -85,6 +86,8 @@ func (a *UsageAccumulator) Observe(dataJSON []byte) error {
 		}
 	case ProtocolOpenAIResponses:
 		observed, err = parseOpenAIResponses(root)
+	case ProtocolOpenAIEmbeddings:
+		observed, err = parseOpenAIEmbeddings(root)
 	case ProtocolAnthropicMessages:
 		err = a.observeAnthropic(root)
 	case ProtocolGeminiGenerateContent:
@@ -270,6 +273,25 @@ func parseOpenAIResponses(root jsonObject) (*Usage, error) {
 		return nil, err
 	}
 	return normalizeOpenAI(usage, "input_tokens", "output_tokens", "input_tokens_details", "output_tokens_details")
+}
+
+func parseOpenAIEmbeddings(root jsonObject) (*Usage, error) {
+	if isErrorObject(root) {
+		return nil, nil
+	}
+	usage, present, err := objectField(root, "usage")
+	if err != nil || !present {
+		return nil, err
+	}
+	prompt, promptPresent, err := integerField(usage, "prompt_tokens")
+	if err != nil || !promptPresent || prompt == nil {
+		return nil, ErrInvalidUsage
+	}
+	total, totalPresent, err := integerField(usage, "total_tokens")
+	if err != nil || !totalPresent || total == nil || *total < *prompt {
+		return nil, ErrInvalidUsage
+	}
+	return &Usage{InputTokens: cloneInt64(prompt)}, nil
 }
 
 func normalizeOpenAI(usage jsonObject, inputKey, outputKey, inputDetailsKey, outputDetailsKey string) (*Usage, error) {

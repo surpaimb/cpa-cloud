@@ -29,8 +29,8 @@ const legacyPolicy = {
   effective_models: ['public-model'],
 }
 
-function systemStatus(keyPolicy: boolean | undefined, sourcePolicy?: boolean, trustedProxySource?: boolean, accountGroupPolicy?: boolean) {
-  return { version: 'test', ready: true, storage: 'sqlite-wal', limitations: [], features: keyPolicy === undefined ? {} : { key_access_policy: keyPolicy, ...(sourcePolicy === undefined ? {} : { key_source_policy: sourcePolicy }), ...(trustedProxySource === undefined ? {} : { trusted_proxy_source: trustedProxySource }), ...(accountGroupPolicy === undefined ? {} : { key_account_group_policy: accountGroupPolicy }) } }
+function systemStatus(keyPolicy: boolean | undefined, sourcePolicy?: boolean, trustedProxySource?: boolean, accountGroupPolicy?: boolean, embeddings?: boolean) {
+  return { version: 'test', ready: true, storage: 'sqlite-wal', limitations: [], features: keyPolicy === undefined ? {} : { key_access_policy: keyPolicy, ...(sourcePolicy === undefined ? {} : { key_source_policy: sourcePolicy }), ...(trustedProxySource === undefined ? {} : { trusted_proxy_source: trustedProxySource }), ...(accountGroupPolicy === undefined ? {} : { key_account_group_policy: accountGroupPolicy }), ...(embeddings === undefined ? {} : { openai_embeddings: embeddings }) } }
 }
 
 describe('access-key policy administration', () => {
@@ -89,6 +89,33 @@ describe('access-key policy administration', () => {
     expect(dialog).toHaveTextContent('沿用员工权限')
     expect(within(dialog).queryByRole('button', { name: '编辑独立权限' })).not.toBeInTheDocument()
     expect(within(dialog).queryByRole('button', { name: '保存独立权限' })).not.toBeInTheDocument()
+  })
+
+  it('offers and sends Embeddings permission only when the service advertises it', async () => {
+    const writes: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response(systemStatus(true, false, false, false, true))
+      if (url.endsWith('/employees') && !init?.method) return response({ items: [employee] })
+      if (url.endsWith('/models')) return response({ items: [model] })
+      if (url.endsWith('/employees/emp-1/keys') && init?.method === 'POST') {
+        writes.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return response({ ...key, key: 'cpa_embedding_once' }, 201)
+      }
+      if (url.endsWith('/employees/emp-1/keys')) return response({ items: [] })
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    }))
+    render(<EmployeesPage csrf="csrf" />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '管理 Key' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('全部协议（含 Embeddings）')
+    await userEvent.click(within(dialog).getByLabelText('仅指定协议'))
+    await userEvent.click(within(dialog).getByLabelText('OpenAI Embeddings（文本 / float）'))
+    await userEvent.click(within(dialog).getByRole('button', { name: '生成永久 Key' }))
+
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0]).toMatchObject({ policy: { protocol_mode: 'selected', protocols: ['openai-embeddings'] } })
   })
 
   it('keeps old-service Key editing but never sends unsupported account-group fields', async () => {
@@ -231,6 +258,7 @@ describe('access-key policy administration', () => {
     const dialogs = await screen.findAllByRole('dialog')
     const editor = dialogs[dialogs.length - 1]
     expect(await within(editor).findByText('当前服务不支持 Key 来源限制')).toBeInTheDocument()
+    expect(within(editor).queryByLabelText('OpenAI Embeddings（文本 / float）')).not.toBeInTheDocument()
     await userEvent.click(within(editor).getByLabelText('仅指定协议'))
     await userEvent.click(within(editor).getByLabelText('OpenAI Chat Completions'))
     await userEvent.click(within(editor).getByRole('button', { name: '保存独立权限' }))

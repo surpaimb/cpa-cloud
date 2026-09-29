@@ -210,10 +210,33 @@ func (l *Ledger) MigrateV2Tx(ctx context.Context, tx *sql.Tx) error {
 	if l == nil || l.db == nil || ctx == nil || tx == nil {
 		return ErrInvalid
 	}
+	var contextDDL sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='accounting_attempt_contexts'`).Scan(&contextDDL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if contextDDL.Valid && !strings.Contains(strings.ToLower(contextDDL.String), "openai-embeddings") {
+		for _, statement := range []string{
+			`ALTER TABLE accounting_attempt_contexts RENAME TO accounting_attempt_contexts_pre_embeddings`,
+			`CREATE TABLE accounting_attempt_contexts (
+				attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id),
+				protocol TEXT NOT NULL CHECK(protocol IN ('openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
+				effective_model TEXT NOT NULL,
+				evidence TEXT NOT NULL CHECK(evidence IN ('provider_response','provider_stream','background_result','system_terminal')),
+				response_id TEXT, task_id TEXT, tool_run_id TEXT
+			)`,
+			`INSERT INTO accounting_attempt_contexts(attempt_id,protocol,effective_model,evidence,response_id,task_id,tool_run_id)
+			 SELECT attempt_id,protocol,effective_model,evidence,response_id,task_id,tool_run_id FROM accounting_attempt_contexts_pre_embeddings`,
+			`DROP TABLE accounting_attempt_contexts_pre_embeddings`,
+		} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS accounting_attempt_contexts (
 			attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id),
-			protocol TEXT NOT NULL CHECK(protocol IN ('openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content')),
+			protocol TEXT NOT NULL CHECK(protocol IN ('openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
 			effective_model TEXT NOT NULL,
 			evidence TEXT NOT NULL CHECK(evidence IN ('provider_response','provider_stream','background_result','system_terminal')),
 			response_id TEXT,
@@ -1046,7 +1069,7 @@ func validCorrection(c Correction) bool {
 func protocolAllowedForProvider(provider Provider, protocol UsageProtocol) bool {
 	switch provider {
 	case ProviderOpenAI, ProviderOpenAICompatible, ProviderCodex:
-		return protocol == ProtocolOpenAIChatCompletions || protocol == ProtocolOpenAIResponses
+		return protocol == ProtocolOpenAIChatCompletions || protocol == ProtocolOpenAIResponses || provider != ProviderCodex && protocol == ProtocolOpenAIEmbeddings
 	case ProviderAnthropic:
 		return protocol == ProtocolAnthropicMessages
 	case ProviderGemini:
@@ -1223,7 +1246,7 @@ func validateAccountingV2Schema(ctx context.Context, tx *sql.Tx) error {
 	}{
 		{"accounting_attempt_contexts", []ledgerColumn{
 			{name: "attempt_id", kind: "TEXT", primary: true}, {name: "protocol", kind: "TEXT", notNull: true}, {name: "effective_model", kind: "TEXT", notNull: true}, {name: "evidence", kind: "TEXT", notNull: true}, {name: "response_id", kind: "TEXT"}, {name: "task_id", kind: "TEXT"}, {name: "tool_run_id", kind: "TEXT"},
-		}, []string{"referencesaccounting_attempts(id)", "check(protocolin('openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content'))", "check(evidencein('provider_response','provider_stream','background_result','system_terminal'))"}},
+		}, []string{"referencesaccounting_attempts(id)", "check(protocolin('openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings'))", "check(evidencein('provider_response','provider_stream','background_result','system_terminal'))"}},
 		{"accounting_attempt_dispatches", []ledgerColumn{
 			{name: "attempt_id", kind: "TEXT", primary: true}, {name: "operation_id", kind: "TEXT", notNull: true}, {name: "dispatched_at", kind: "TEXT", notNull: true},
 		}, []string{"referencesaccounting_attempts(id)", "operation_idtextnotnullunique"}},

@@ -113,6 +113,14 @@ func governanceAdmissionFailure(err error) *modelAdmissionError {
 }
 
 func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model string, protocol accounting.UsageProtocol) (*http.Request, *governedRequest, *modelAdmissionError) {
+	return g.admitWithSelector(r, auth, model, protocol, protocol)
+}
+
+// admitWithSelector permits a newly introduced client wire to use an older
+// core lease protocol while general-budget selection remains exact. The core
+// protocol is only a durable RPM/concurrency lease label; selectorProtocol is
+// the actual wire used for protocol/model budget matching.
+func (g *requestGovernance) admitWithSelector(r *http.Request, auth employeeAuth, model string, coreProtocol, selectorProtocol accounting.UsageProtocol) (*http.Request, *governedRequest, *modelAdmissionError) {
 	admissionCtx, cancelAdmission := context.WithCancel(r.Context())
 	stopAdmission := context.AfterFunc(g.ctx, cancelAdmission)
 	cleanupAdmission := func() { stopAdmission(); cancelAdmission() }
@@ -148,7 +156,7 @@ func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model stri
 		var settings governance.Settings
 		var scopes []governance.ScopeSnapshot
 		if resolver, ok := g.policies.(selectorAwareGovernancePolicyResolver); ok {
-			settings, scopes, err = resolver.ResolveScopesForRequestTx(admissionCtx, tx, auth.EmployeeID, auth.KeyID, model, protocol)
+			settings, scopes, err = resolver.ResolveScopesForRequestTx(admissionCtx, tx, auth.EmployeeID, auth.KeyID, model, selectorProtocol)
 		} else {
 			settings, scopes, err = g.policies.ResolveScopesTx(admissionCtx, tx, auth.EmployeeID, auth.KeyID)
 		}
@@ -157,7 +165,7 @@ func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model stri
 		}
 		selectorMatched := false
 		if resolver, ok := g.policies.(selectorAwareGovernancePolicyResolver); ok {
-			selectorMatched, err = resolver.MatchGeneralBudgetScopesTx(admissionCtx, tx, requestID(r.Context()), auth.EmployeeID, auth.KeyID, model, protocol)
+			selectorMatched, err = resolver.MatchGeneralBudgetScopesTx(admissionCtx, tx, requestID(r.Context()), auth.EmployeeID, auth.KeyID, model, selectorProtocol)
 			if err != nil {
 				return nil, governanceAdmissionFailure(err)
 			}
@@ -171,7 +179,7 @@ func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model stri
 			}
 		}
 		lease, decision, err := g.core.AdmitTx(admissionCtx, tx, governance.AdmissionStart{
-			RequestID: requestID(r.Context()), Subject: governance.Subject{EmployeeID: auth.EmployeeID, KeyID: auth.KeyID, PublicModel: model, Protocol: protocol},
+			RequestID: requestID(r.Context()), Subject: governance.Subject{EmployeeID: auth.EmployeeID, KeyID: auth.KeyID, PublicModel: model, Protocol: coreProtocol},
 			SettingsRevision: settings.Revision, SnapshotComplete: true, BudgetSnapshot: selectorEnforced, Scopes: scopes, StartedAt: started, ObservedAt: started,
 		})
 		if err != nil {
@@ -186,7 +194,7 @@ func (g *requestGovernance) Admit(r *http.Request, auth employeeAuth, model stri
 			}
 		}
 		if resolver, ok := g.policies.(selectorAwareGovernancePolicyResolver); ok && selectorEnforced {
-			matched, snapshotErr := resolver.SnapshotGeneralBudgetScopesTx(admissionCtx, tx, requestID(r.Context()), auth.EmployeeID, auth.KeyID, model, protocol, settings.Revision)
+			matched, snapshotErr := resolver.SnapshotGeneralBudgetScopesTx(admissionCtx, tx, requestID(r.Context()), auth.EmployeeID, auth.KeyID, model, selectorProtocol, settings.Revision)
 			if snapshotErr != nil {
 				return nil, governanceAdmissionFailure(snapshotErr)
 			}
@@ -470,4 +478,11 @@ func (a *App) admitGovernedModel(r *http.Request, auth employeeAuth, model strin
 		return r, nil, nil
 	}
 	return a.governance.Admit(r, auth, model, protocol)
+}
+
+func (a *App) admitGovernedModelWithSelector(r *http.Request, auth employeeAuth, model string, coreProtocol, selectorProtocol accounting.UsageProtocol) (*http.Request, *governedRequest, *modelAdmissionError) {
+	if a.governance == nil {
+		return r, nil, nil
+	}
+	return a.governance.admitWithSelector(r, auth, model, coreProtocol, selectorProtocol)
 }

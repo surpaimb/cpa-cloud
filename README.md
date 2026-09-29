@@ -15,6 +15,7 @@
 | OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路；显式 Chat↔Responses、Messages↔Responses 与 Gemini↔Responses 文本/function SSE 转换 | Messages→Responses 的终态 usage 延迟、Gemini identity-bearing 子集及未列出的协议字段限制仍存在 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
 | 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE；默认关闭的加密有状态资源与后台任务 | 托管工具、后台流续传/游标与完整客户端兼容性 |
+| 最新源码：OpenAI-compatible API Key 的 `POST /v1/embeddings` 文本/float 非流式子集、独立模型类型和 Key 授权 | token 数组、base64、dimensions、user、真实 provider/CLI/会员验证及通用 Embeddings 预算上界 |
 | SQLite 持久化、上游凭据加密、多账号路由；可靠用量/通用预算、单实例财务账本、Windows DPAPI 自动备份 | 生产支付渠道、跨机/非 Windows 密钥托管与对象存储 |
 
 员工 Key 正常重启后仍有效；撤销、员工停用、可选到期时间及权限限制仍会生效。员工无需知道上游供应商 Key。
@@ -67,6 +68,12 @@
 
 这不等于已经通过真实 Codex CLI 或会员账号验收。完整功能的阶段与待办见[功能对齐计划](docs/feature-parity-plan.md)。
 
+## OpenAI Embeddings 文本子集（仅最新源码）
+
+`POST /v1/embeddings` 第一段只支持 `openai-compatible` API Key 上游、非空文本或文本数组，以及 `encoding_format: "float"`。管理员必须显式创建 `embedding` 模型、配置账号池的 `openai-embeddings` wire，并为员工 Key 显式开放 Embeddings；旧 Key 和省略策略创建的新 Key 仍固定为原四种协议，不会因升级自动扩权。响应会在返回前有界读取并校验 index、向量维数、有限数、实际上游模型和必需 usage，账本按实际账号、模型和 wire 记录，未知价格保持未知。
+
+本子集不支持 token 数组、base64、`dimensions`、`user`、流式、多模态、跨协议转换或会员凭据。由于没有受信 tokenizer 和输入 Token 上界，命中 strict token/cost 预算时会在派发前返回 `budget_bound_unavailable`；这不是完整 Embeddings 或通用预算支持。自动验证只使用合成上游和凭据，尚未访问真实 provider 或客户端。详细边界见 [OpenAI Embeddings 契约](docs/openai-embeddings-contract.md)。
+
 ## Claude / Gemini 原生 API 与批量导入（仅最新源码）
 
 这些功能**不在 preview.3 下载包中**：
@@ -88,7 +95,7 @@ Claude/Gemini 订阅会员不属于上述 API Key 能力；各自接入条件仍
 
 在网页“模型路由”选择“编辑账号池”，配置同一提供商的多个账号及模型映射、优先级、权重和并发容量；“分组与渠道”管理对应目录。已有单路由保持原行为，只有点击“保存账号池”才启用调度；版本冲突会保留编辑并要求重新加载。接口见 [账号池管理 API](docs/account-pool-service-contract.md)。
 
-Chat、Responses、Messages（含 count_tokens）和 Gemini 共用调度。排队结束会重新检查 Key、员工权限和配置 revision。同一账号跨池共享容量，配置不同时取所有启用模型池中的最小值。
+Chat、Responses、Messages（含 count_tokens）、Gemini 和显式 Embeddings 池共用调度。排队结束会重新检查 Key、员工权限和配置 revision。同一账号跨池共享容量，配置不同时取所有启用模型池中的最小值；Embeddings 不允许退回旧的单路由直连。
 
 最新源码可在“员工与 Key”把单个 Key 收窄到既有账号池分组。`all` 保留旧单路由和未分组路由；`selected` 只允许显式账号池里通过“路由 → 渠道 → 分组”命中的候选，空选择会明确拒绝全部账号候选。该策略与协议、公开模型和来源共用同一 policy revision/CAS，只能进一步收窄员工授权；模型目录、后台任务、资源继续执行和最终派发都会重新核验，策略或映射收紧不会向其他组回退。此能力只在最新源码中，**不包含于 preview.3 下载包**；自动验收使用合成账号和本地上游，不代表真实供应商或会员账号验证。契约见 [Key 与账号池分组绑定](docs/key-account-group-policy-contract.md)。
 

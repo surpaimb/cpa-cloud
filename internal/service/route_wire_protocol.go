@@ -17,11 +17,12 @@ const (
 	wireProtocolResponses    routeWireProtocol = "openai-responses"
 	wireProtocolMessages     routeWireProtocol = "anthropic-messages"
 	wireProtocolGemini       routeWireProtocol = "gemini-generate-content"
+	wireProtocolEmbeddings   routeWireProtocol = "openai-embeddings"
 )
 
 func validRouteWireProtocol(value string) bool {
 	switch routeWireProtocol(value) {
-	case wireProtocolLegacyNative, wireProtocolOpenAIChat, wireProtocolResponses, wireProtocolMessages, wireProtocolGemini:
+	case wireProtocolLegacyNative, wireProtocolOpenAIChat, wireProtocolResponses, wireProtocolMessages, wireProtocolGemini, wireProtocolEmbeddings:
 		return true
 	default:
 		return false
@@ -34,7 +35,7 @@ func providerSupportsWire(provider, value string) bool {
 	}
 	switch provider {
 	case "openai-compatible":
-		return value == string(wireProtocolOpenAIChat) || value == string(wireProtocolResponses)
+		return value == string(wireProtocolOpenAIChat) || value == string(wireProtocolResponses) || value == string(wireProtocolEmbeddings)
 	case codexMembershipProvider:
 		return value == string(wireProtocolResponses)
 	case anthropicAPIKeyProvider:

@@ -44,11 +44,11 @@ React 网页构建产物由服务通过 --web-dir 提供；SQLite 用于预览�
 
 ## API 兼容目标
 
-逐项依据官方文档设计并验证 `/v1/models`、`/v1/responses`、`/v1/chat/completions`、`/v1/messages` 与 Gemini `v1beta`。
+逐项依据官方文档设计并验证 `/v1/models`、`/v1/responses`、`/v1/chat/completions`、`/v1/embeddings`、`/v1/messages` 与 Gemini `v1beta`。
 不是一次宣称全部兼容：每种协议需单独覆盖流式、工具调用、错误、取消和模型支持范围。
 优先同协议上游转发；跨协议转换须有独立规格和测试，不静默丢弃不能表达的能力。
 
-当前 `main` 已包含六个非流式显式 wire 方向、Chat/Responses、Messages/Responses 与 Gemini v1beta `streamGenerateContent`/Responses 三组文本/function SSE、每 Key 公共入口协议/公开模型策略、真实 socket peer IP/CIDR 与显式可信代理来源解析；其中 Messages→Responses 在 usage 仅终态可知时有界全流延迟，Gemini 身份字段晚到时有界暂存且终态仍缺身份会失败关闭。本批把 Key 进一步绑定到既有账号池分组：旧 Key 默认 `all`，`selected` 只匹配显式池的完整路由/渠道/分组链，并在目录、后台/资源和最终派发事务中重核。媒体、托管工具、通用反向代理/TLS 终止部署编排仍需独立实现及验收。
+当前 `main` 已包含六个非流式显式 wire 方向、Chat/Responses、Messages/Responses 与 Gemini v1beta `streamGenerateContent`/Responses 三组文本/function SSE、每 Key 公共入口协议/公开模型策略、真实 socket peer IP/CIDR 与显式可信代理来源解析；其中 Messages→Responses 在 usage 仅终态可知时有界全流延迟，Gemini 身份字段晚到时有界暂存且终态仍缺身份会失败关闭。当前增量实现 [PROTO-08 第一段](openai-embeddings-contract.md)：只针对 OpenAI-compatible API Key 的文本/float 非流式 Embeddings，要求独立模型类型、显式池 wire 和 Key 授权，旧 Key 不自动扩权。token 数组、base64、dimensions、user、其他 provider/会员、真实客户端及通用预算上界仍待实现和验证；媒体、托管工具、通用反向代理/TLS 终止部署编排也仍需独立验收。
 
 ## 首轮详细设计
 

@@ -24,15 +24,24 @@ type ClientProtocol string
 const (
 	ProtocolOpenAIChat        ClientProtocol = "openai-chat"
 	ProtocolOpenAIResponses   ClientProtocol = "openai-responses"
+	ProtocolOpenAIEmbeddings  ClientProtocol = "openai-embeddings"
 	ProtocolAnthropicMessages ClientProtocol = "anthropic-messages"
 	ProtocolGeminiGenerate    ClientProtocol = "gemini-generate-content"
 )
+
+var LegacyClientProtocols = []ClientProtocol{
+	ProtocolOpenAIChat,
+	ProtocolOpenAIResponses,
+	ProtocolAnthropicMessages,
+	ProtocolGeminiGenerate,
+}
 
 var AllClientProtocols = []ClientProtocol{
 	ProtocolOpenAIChat,
 	ProtocolOpenAIResponses,
 	ProtocolAnthropicMessages,
 	ProtocolGeminiGenerate,
+	ProtocolOpenAIEmbeddings,
 }
 
 var (
@@ -74,7 +83,7 @@ func Normalize(input Replacement) (Replacement, error) {
 
 func CreateDefaultTx(ctx context.Context, tx *sql.Tx, keyID string, at time.Time) error {
 	_, err := CreateTx(ctx, tx, keyID, Replacement{
-		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
+		ProtocolMode: ModeSelected, Protocols: append([]ClientProtocol(nil), LegacyClientProtocols...), ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeAll, SourceCIDRs: []string{},
 		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, at)
@@ -329,7 +338,7 @@ func validateModelsExist(ctx context.Context, tx *sql.Tx, models []string) error
 }
 
 func loadProtocols(ctx context.Context, tx *sql.Tx, keyID string) ([]ClientProtocol, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT protocol FROM access_key_policy_protocols WHERE key_id=? ORDER BY CASE protocol WHEN 'openai-chat' THEN 1 WHEN 'openai-responses' THEN 2 WHEN 'anthropic-messages' THEN 3 WHEN 'gemini-generate-content' THEN 4 ELSE 5 END`, keyID)
+	rows, err := tx.QueryContext(ctx, `SELECT protocol FROM access_key_policy_protocols WHERE key_id=? ORDER BY CASE protocol WHEN 'openai-chat' THEN 1 WHEN 'openai-responses' THEN 2 WHEN 'anthropic-messages' THEN 3 WHEN 'gemini-generate-content' THEN 4 WHEN 'openai-embeddings' THEN 5 ELSE 6 END`, keyID)
 	if err != nil {
 		return nil, fmt.Errorf("load key policy protocols: %w", err)
 	}
@@ -372,7 +381,7 @@ func validMode(mode Mode) bool { return mode == ModeAll || mode == ModeSelected 
 
 func knownProtocol(protocol ClientProtocol) bool {
 	switch protocol {
-	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages, ProtocolGeminiGenerate:
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolOpenAIEmbeddings, ProtocolAnthropicMessages, ProtocolGeminiGenerate:
 		return true
 	default:
 		return false

@@ -35,6 +35,7 @@ type route struct {
 	Ciphertext      []byte
 	ProviderKind    string
 	WireProtocol    routeWireProtocol
+	ModelKind       string
 	ModelRevision   int64
 	Revision        int64
 	CredentialState sql.NullString
@@ -51,12 +52,17 @@ func (a *App) listModels(w http.ResponseWriter, r *http.Request) {
 		writeModelError(w, sourceFailure.status, sourceFailure.code, sourceFailure.message, requestID(r.Context()))
 		return
 	}
-	if !keyPolicyAllowsProtocol(auth.Policy, keypolicy.ProtocolOpenAIChat) && !keyPolicyAllowsProtocol(auth.Policy, keypolicy.ProtocolOpenAIResponses) {
+	allowGeneration := keyPolicyAllowsProtocol(auth.Policy, keypolicy.ProtocolOpenAIChat) || keyPolicyAllowsProtocol(auth.Policy, keypolicy.ProtocolOpenAIResponses)
+	allowEmbeddings := keyPolicyAllowsProtocol(auth.Policy, keypolicy.ProtocolOpenAIEmbeddings)
+	if !allowGeneration && !allowEmbeddings {
 		writeJSON(w, 200, map[string]any{"object": "list", "data": []any{}})
 		return
 	}
-	query := `SELECT m.id,m.created_at FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND m.archived=0 AND ` + a.availableModelRouteSQL(false)
-	args := []any{}
+	query := `SELECT m.id,m.created_at FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND m.archived=0 AND ` + a.availableModelRouteSQL(false) + `
+		AND ((m.model_kind='generation' AND ?=1) OR (m.model_kind='embedding' AND ?=1 AND EXISTS(
+			SELECT 1 FROM model_account_pool_routes er JOIN upstreams eu ON eu.id=er.upstream_id
+			WHERE er.model_id=m.id AND er.wire_protocol='openai-embeddings' AND eu.provider_kind='openai-compatible' AND eu.enabled=1 AND eu.archived=0)))`
+	args := []any{boolInt(allowGeneration), boolInt(allowEmbeddings)}
 	if auth.Mode == "selected" {
 		query += ` AND EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id)`
 		args = append(args, auth.EmployeeID)

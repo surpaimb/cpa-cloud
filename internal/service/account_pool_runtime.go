@@ -552,7 +552,8 @@ func (rt *accountPoolRuntime) authorizationCurrent(ctx context.Context, tx *sql.
 
 func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, policy keypolicy.Policy, allowedProviders []string) (poolSnapshot, bool, accountPoolRuntimeCode) {
 	var revision int64
-	err := rt.app.store.db.QueryRowContext(ctx, `SELECT revision FROM model_account_pool_configs WHERE model_id=?`, model).Scan(&revision)
+	var modelKind string
+	err := rt.app.store.db.QueryRowContext(ctx, `SELECT c.revision,m.model_kind FROM model_account_pool_configs c JOIN models m ON m.id=c.model_id WHERE c.model_id=?`, model).Scan(&revision, &modelKind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return poolSnapshot{}, true, ""
 	}
@@ -595,6 +596,9 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, policy
 			return poolSnapshot{}, false, accountPoolConfigurationChanged
 		}
 		if !providerSupportsWire(item.provider, wire) {
+			return poolSnapshot{}, false, accountPoolConfigurationChanged
+		}
+		if modelKind == "embedding" && (item.provider != "openai-compatible" || wire != string(wireProtocolEmbeddings)) || modelKind == "generation" && wire == string(wireProtocolEmbeddings) {
 			return poolSnapshot{}, false, accountPoolConfigurationChanged
 		}
 		if policy.AccountGroupMode == keypolicy.ModeSelected && (!item.groupID.Valid || !keypolicy.AllowsAccountGroup(policy, item.groupID.String)) {
@@ -670,10 +674,10 @@ func (rt *accountPoolRuntime) persistRevalidatedLease(ctx context.Context, model
 	var enabled int
 	var effectiveCapacity int
 	var cooldownEvent, cooldownUntil sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT u.id,u.endpoint,r.upstream_model,r.wire_protocol,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version,u.enabled,c.event_id,c.cooldown_until,
+	err = tx.QueryRowContext(ctx, `SELECT u.id,u.endpoint,r.upstream_model,r.wire_protocol,m.model_kind,u.credential_ciphertext,u.provider_kind,u.revision,u.credential_state,u.key_version,u.enabled,c.event_id,c.cooldown_until,
 		(SELECT MIN(global_route.max_concurrency) FROM model_account_pool_routes global_route JOIN models global_model ON global_model.id=global_route.model_id WHERE global_route.upstream_id=r.upstream_id AND global_model.enabled=1)
-		FROM model_account_pool_routes r JOIN upstreams u ON u.id=r.upstream_id LEFT JOIN account_pool_runtime_cooldowns c ON c.account_id=u.id
-		WHERE r.model_id=? AND r.upstream_id=? AND NOT EXISTS(SELECT 1 FROM account_recovery_states rs WHERE rs.account_id=u.id)`, model, inner.AccountID()).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.WireProtocol, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion, &enabled, &cooldownEvent, &cooldownUntil, &effectiveCapacity)
+		FROM model_account_pool_routes r JOIN models m ON m.id=r.model_id JOIN upstreams u ON u.id=r.upstream_id LEFT JOIN account_pool_runtime_cooldowns c ON c.account_id=u.id
+		WHERE r.model_id=? AND r.upstream_id=? AND NOT EXISTS(SELECT 1 FROM account_recovery_states rs WHERE rs.account_id=u.id)`, model, inner.AccountID()).Scan(&selected.AccountID, &selected.Endpoint, &selected.UpstreamModel, &selected.WireProtocol, &selected.ModelKind, &selected.Ciphertext, &selected.ProviderKind, &selected.Revision, &selected.CredentialState, &selected.KeyVersion, &enabled, &cooldownEvent, &cooldownUntil, &effectiveCapacity)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return route{}, accountPoolAccountChanged

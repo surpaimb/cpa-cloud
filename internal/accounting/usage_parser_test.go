@@ -52,6 +52,21 @@ func TestParseUsageCompleteJSON(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIEmbeddingsUsageKeepsUnreportedBucketsUnknown(t *testing.T) {
+	usage, err := ParseUsage(ProtocolOpenAIEmbeddings, []byte(`{"object":"list","data":[],"model":"embedding-model","usage":{"prompt_tokens":7,"total_tokens":7}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.InputTokens == nil || *usage.InputTokens != 7 || usage.OutputTokens != nil || usage.CacheReadTokens != nil || usage.CacheWriteTokens != nil {
+		t.Fatalf("embedding usage=%+v", usage)
+	}
+	for _, body := range []string{`{"usage":{"total_tokens":7}}`, `{"usage":{"prompt_tokens":8,"total_tokens":7}}`} {
+		if _, err := ParseUsage(ProtocolOpenAIEmbeddings, []byte(body)); !errors.Is(err, ErrInvalidUsage) {
+			t.Fatalf("body %s error=%v", body, err)
+		}
+	}
+}
+
 func TestOpenAIStreamingSnapshotsOverwriteAndRepeat(t *testing.T) {
 	acc := mustAccumulator(t, ProtocolOpenAIChatCompletions)
 	observe(t, acc, `{"id":"chat","choices":[{"delta":{"content":"marker-secret"}}]}`)

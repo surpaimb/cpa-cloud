@@ -1,10 +1,12 @@
 # 协议来源记录
 
-查阅日期：2026-09-24。只记录官方文档，不纳入参考产品实现。
+查阅日期：2026-09-29。只记录官方文档，不纳入参考产品实现。
 
 | 来源 | 用途 | 本轮核实情况 |
 | --- | --- | --- |
 | https://developers.openai.com/api/reference/resources/chat | Chat Completions 协议入口 | 可读取；实现前需逐项冻结请求、流事件与用量字段 |
+| https://developers.openai.com/api/reference/resources/embeddings/methods/create | Embeddings 创建端点、请求/响应字段与 usage | 2026-09-29 已核实；首段只实现文本/string batch、float、非流式子集 |
+| https://developers.openai.com/api/docs/guides/embeddings | Embeddings 使用与向量语义 | 2026-09-29 已核实用于首段范围；不据此推断 tokenizer 上界或第三方兼容 |
 | https://platform.openai.com/docs/api-reference/responses | Responses 协议入口 | 本轮工具读取因页面过大失败，不视为协议已核实 |
 | https://platform.claude.com/docs/en/api/overview | Messages 与 Token Counting 端点 | 2026-09-23 已核实 `POST /v1/messages` 和 `POST /v1/messages/count_tokens` |
 | https://platform.claude.com/docs/en/manage-claude/authentication | Anthropic API Key 认证 | 2026-09-23 已核实 Bearer 为当前推荐，`x-api-key` 为兼容方式 |
