@@ -320,11 +320,45 @@ export type SystemStatus = {
     openai_embeddings?: boolean
     account_lifecycle_management?: boolean
     single_instance_billing?: boolean
+    admin_audit_overview?: boolean
     key_access_policy?: boolean
     key_source_policy?: boolean
     key_account_group_policy?: boolean
     trusted_proxy_source?: boolean
   }
+}
+
+export const adminAuditSources = ['account_pool', 'account_lifecycle', 'governance_management', 'governance_general_budget'] as const
+export type AdminAuditSource = typeof adminAuditSources[number]
+export type AdminAuditEvent = {
+  source: AdminAuditSource
+  event_id: string
+  actor_id: string
+  action: string
+  target_type: string
+  target_id: string
+  result: 'succeeded'
+  revision: number | null
+  occurred_at: string
+}
+export type AdminAuditPage = {
+  from: string
+  to: string
+  snapshot_at: string
+  sources: AdminAuditSource[]
+  items: AdminAuditEvent[]
+  next_cursor: string | null
+}
+export type AdminAuditFilters = {
+  sources?: AdminAuditSource[]
+  actor_id?: string
+  action?: string
+  target_type?: string
+  target_id?: string
+  result?: 'succeeded'
+  from?: string
+  to?: string
+  limit?: number
 }
 
 export type BillingOwner = {
@@ -708,6 +742,127 @@ function billingList<T>(path: string, afterId?: string, limit = 50, signal?: Abo
   return request<BillingPage<T>>(`${path}?${query}`, { signal })
 }
 
+const adminAuditSourceRanks = new Map<AdminAuditSource, number>(adminAuditSources.map((source, index) => [source, index]))
+const adminAuditPageKeys = ['from', 'to', 'snapshot_at', 'sources', 'items', 'next_cursor']
+const adminAuditEventKeys = ['source', 'event_id', 'actor_id', 'action', 'target_type', 'target_id', 'result', 'revision', 'occurred_at']
+
+function auditRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: string[]) {
+  const actual = Object.keys(value).sort()
+  const expected = [...keys].sort()
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index])
+}
+
+function auditMetadata(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.trim() === value && new TextEncoder().encode(value).length <= 256 && !/[\x00-\x1f\x7f-\x9f]/u.test(value)
+}
+
+function auditTimeKey(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/.exec(value)
+  if (!match || (match[7]?.endsWith('0') ?? false)) return null
+  const parsed = new Date(value)
+  if (!Number.isFinite(parsed.getTime())) return null
+  const numbers = match.slice(1, 7).map(Number)
+  const millis = Number((match[7] ?? '').padEnd(3, '0').slice(0, 3))
+  if (parsed.getUTCFullYear() !== numbers[0] || parsed.getUTCMonth() + 1 !== numbers[1] || parsed.getUTCDate() !== numbers[2]
+    || parsed.getUTCHours() !== numbers[3] || parsed.getUTCMinutes() !== numbers[4] || parsed.getUTCSeconds() !== numbers[5]
+    || parsed.getUTCMilliseconds() !== millis) return null
+  return `${value.slice(0, 19)}.${(match[7] ?? '').padEnd(9, '0')}Z`
+}
+
+function compareUTF8(left: string, right: string) {
+  const leftBytes = new TextEncoder().encode(left)
+  const rightBytes = new TextEncoder().encode(right)
+  for (let index = 0; index < Math.min(leftBytes.length, rightBytes.length); index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index]
+  }
+  return leftBytes.length - rightBytes.length
+}
+
+function invalidAdminAuditResponse(): never {
+  throw new ApiError(502, 'invalid_response', '审计响应格式无效，未显示任何结果。')
+}
+
+function parseAdminAuditPage(value: unknown): AdminAuditPage {
+  if (!auditRecord(value) || !hasExactKeys(value, adminAuditPageKeys)) invalidAdminAuditResponse()
+  const fromKey = auditTimeKey(value.from)
+  const toKey = auditTimeKey(value.to)
+  const snapshotKey = auditTimeKey(value.snapshot_at)
+  if (!fromKey || !toKey || !snapshotKey || fromKey >= toKey
+    || new Date(value.to as string).getTime() - new Date(value.from as string).getTime() > 31 * 24 * 60 * 60 * 1000) invalidAdminAuditResponse()
+  if (!Array.isArray(value.sources) || value.sources.length < 1 || value.sources.length > adminAuditSources.length) invalidAdminAuditResponse()
+  const sources: AdminAuditSource[] = []
+  let previousRank = -1
+  for (const source of value.sources) {
+    if (typeof source !== 'string' || !adminAuditSourceRanks.has(source as AdminAuditSource)) invalidAdminAuditResponse()
+    const typed = source as AdminAuditSource
+    const rank = adminAuditSourceRanks.get(typed)!
+    if (rank <= previousRank) invalidAdminAuditResponse()
+    previousRank = rank
+    sources.push(typed)
+  }
+  if (!Array.isArray(value.items) || value.items.length > 100) invalidAdminAuditResponse()
+  const items: AdminAuditEvent[] = []
+  const seen = new Set<string>()
+  let previous: { time: string; rank: number; id: string } | null = null
+  for (const raw of value.items) {
+    if (!auditRecord(raw) || !hasExactKeys(raw, adminAuditEventKeys)) invalidAdminAuditResponse()
+    if (typeof raw.source !== 'string' || !sources.includes(raw.source as AdminAuditSource)) invalidAdminAuditResponse()
+    const source = raw.source as AdminAuditSource
+    const strings = [raw.event_id, raw.actor_id, raw.action, raw.target_type, raw.target_id]
+    if (!strings.every(auditMetadata) || raw.result !== 'succeeded') invalidAdminAuditResponse()
+    if (raw.revision !== null && (!Number.isSafeInteger(raw.revision) || (raw.revision as number) < 1)) invalidAdminAuditResponse()
+    const occurredKey = auditTimeKey(raw.occurred_at)
+    if (!occurredKey || occurredKey < fromKey || occurredKey >= toKey) invalidAdminAuditResponse()
+    const identity = `${source}\u0000${raw.event_id as string}`
+    if (seen.has(identity)) invalidAdminAuditResponse()
+    seen.add(identity)
+    const current = { time: occurredKey, rank: adminAuditSourceRanks.get(source)!, id: raw.event_id as string }
+    if (previous && (previous.time < current.time
+      || (previous.time === current.time && previous.rank > current.rank)
+      || (previous.time === current.time && previous.rank === current.rank && compareUTF8(previous.id, current.id) <= 0))) invalidAdminAuditResponse()
+    previous = current
+    items.push({
+      source,
+      event_id: raw.event_id as string,
+      actor_id: raw.actor_id as string,
+      action: raw.action as string,
+      target_type: raw.target_type as string,
+      target_id: raw.target_id as string,
+      result: 'succeeded',
+      revision: raw.revision as number | null,
+      occurred_at: raw.occurred_at as string,
+    })
+  }
+  if (value.next_cursor !== null && (typeof value.next_cursor !== 'string' || value.next_cursor.length < 1 || value.next_cursor.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(value.next_cursor))) invalidAdminAuditResponse()
+  return {
+    from: value.from as string,
+    to: value.to as string,
+    snapshot_at: value.snapshot_at as string,
+    sources,
+    items,
+    next_cursor: value.next_cursor as string | null,
+  }
+}
+
+function adminAuditSearch(filters: AdminAuditFilters, cursor?: string) {
+  if (cursor) return new URLSearchParams({ cursor }).toString()
+  const query = new URLSearchParams({ limit: String(filters.limit ?? 50) })
+  if (filters.sources && filters.sources.length !== adminAuditSources.length) query.set('sources', filters.sources.join(','))
+  if (filters.from) query.set('from', filters.from)
+  if (filters.to) query.set('to', filters.to)
+  if (filters.actor_id) query.set('actor_id', filters.actor_id)
+  if (filters.action) query.set('action', filters.action)
+  if (filters.target_type) query.set('target_type', filters.target_type)
+  if (filters.target_id) query.set('target_id', filters.target_id)
+  if (filters.result) query.set('result', filters.result)
+  return query.toString()
+}
+
 export const api = {
   session: () => request<Session>('/session'),
   login: (username: string, password: string) =>
@@ -853,6 +1008,8 @@ export const api = {
     request<GovernanceReceipt>(`/budgets/operations/${encodeURIComponent(operationId)}`, { signal }),
   governanceObservations: (filters: GovernanceObservationFilters, cursor?: string, signal?: AbortSignal) =>
     request<GovernanceObservationsPage>(`/governance/observations?${governanceObservationSearch(filters, cursor)}`, { signal }),
+  auditEvents: async (filters: AdminAuditFilters, cursor?: string, signal?: AbortSignal) =>
+    parseAdminAuditPage(await request<unknown>(`/audit/events?${adminAuditSearch(filters, cursor)}`, { signal })),
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
     request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   billingSettings: (signal?: AbortSignal) => request<BillingSettings>('/billing/settings', { signal }),
