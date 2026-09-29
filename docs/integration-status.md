@@ -6,8 +6,8 @@
 - 目录、四入口、Messages count-tokens、候选/预检换号、租约、后台 claim、资源读取/继续和最终派发均只接受当前完整 route→channel→group 映射；`all` 保留旧单路由行为。最终派发事务与 Key/员工/模型/池/账号/预算屏障共同重核精确映射，策略或映射收紧不向其他组回退。资源 owner 在收紧后仍可 cancel/delete，但不能读取正文或继续执行。
 - 服务专项覆盖允许组、跨组与空选择、四入口、count-tokens、目录、PUT 兼容/校验、最小审计、最终事务映射收紧、资源停止操作和后台映射收紧，拒绝路径断言 0 attempt/0 上游。首轮完整非缓存 service 回归 PASS（678.308s）；随后加入四入口、资源、后台及 count-tokens 明确断言，专项分别 PASS。首轮全仓串行非缓存回归也 PASS（service 699.183s）；最终新增断言后的精确 HEAD 回归将在下方最终证据中另记，不能用这轮替代。
 - 网页用独立 `key_account_group_policy` capability 与旧服务协商：旧服务仍可编辑协议/模型/来源且不发送组字段；新服务畸形组字段失败关闭。TypeScript、19 文件/140 项测试和生产构建 PASS。真实 Windows 临时服务的桌面与 390×844 Playwright 流程完成分组创建、selected 空集警告、Key 一次性创建、现有 Key 编辑及显式清回 `all`（revision 1→2）；登录后的业务操作无新增 console error，只有登录前 session 探测的预期 401。
-- 两个既有固定程序 smoke PASS：Key 四协议拒绝/目录/CAS/重启，以及初始化/网页/永久 Key/同步与 SSE/凭据隔离/撤销重启。独立[固定程序验证报告](key-account-group-policy-validation.md)及仓库 runner 另覆盖允许组四协议、双目录、禁止跨组回退、排队期间映射收紧、重启持久化和敏感值扫描。全部使用临时目录、动态非 8787 回环端口与合成凭据/上游；未访问真实 provider/会员账号，未部署、打包或发布。
-- 全仓 vet、252 个相对文档链接、6 项 CI 路径计划测试及 diff 检查 PASS。本机没有可用 CGO race 环境；最终精确 HEAD 的普通 Go、Linux race、web 与进程 runner 结果以本批 PR 自身 CI/最终记录为准，不能借用旧 SHA。
+- 两个既有固定程序 smoke PASS：Key 四协议拒绝/目录/CAS/重启，以及初始化/网页/永久 Key/同步与 SSE/凭据隔离/撤销重启。生产集成提交 `419035e964ab569af20380c1c6661e6fee70c717` 从临时干净克隆构建，`go version -m` 核实相同 revision 且 `vcs.modified=false`；程序 SHA-256 为 `bff4854b9b7cac7b2e957668a67431684b01418b2f1c8c7813cd77cf4e791c47`。独立[固定程序验证报告](key-account-group-policy-validation.md)及仓库 runner 连续两次 PASS，并覆盖允许组四协议、双目录、禁止跨组回退、排队期间映射收紧、重启持久化和敏感值扫描。全部使用临时目录、动态非 8787 回环端口与合成凭据/上游；未访问真实 provider/会员账号，未部署、打包或发布。
+- 生产集成提交 `419035e964ab569af20380c1c6661e6fee70c717` 的临时干净克隆完成全仓串行非缓存 Go 回归（`internal/service` 672.630s）和 `go vet -p 1 ./...`，均 PASS。另有 252 个相对文档链接、6 项 CI 路径计划测试及 diff 检查 PASS。本机没有可用 CGO race 环境；证据文档提交后的最终 PR HEAD 仍以本批 PR 自身 CI（含 Linux race）及最终程序 runner 记录为准，不能借用旧 SHA。
 
 ## 2026-09-25：`785f649` 基线上的 Messages/IP 源码集成
 
