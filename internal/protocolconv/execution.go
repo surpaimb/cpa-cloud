@@ -67,9 +67,9 @@ func PrepareRequest(capability RouteCapability, model string, raw []byte) (Prepa
 }
 
 // PrepareCrossProtocolStreamRequest prepares the exact upstream request body
-// for the independently reviewed Chat/Responses and Messages/Responses
-// streaming bridges. The
-// production JSON runtime deliberately does not call this function: callers
+// for the independently reviewed Chat/Responses, Messages/Responses, and
+// Gemini/Responses streaming bridges. The production JSON runtime deliberately
+// does not call this function: callers
 // must provide the bounded stream executor and durable dispatch barrier before
 // opting into this path.
 func PrepareCrossProtocolStreamRequest(capability RouteCapability, model string, raw []byte) (PreparedRequest, error) {
@@ -89,18 +89,22 @@ func PrepareCrossProtocolStreamRequest(capability RouteCapability, model string,
 		plan.Kind = PlanMessagesToResponses
 	case capability.ClientProtocol == ProtocolOpenAIResponses && capability.UpstreamProtocol == ProtocolAnthropicMessages:
 		plan.Kind = PlanResponsesToMessages
+	case capability.ClientProtocol == ProtocolGeminiGenerate && capability.UpstreamProtocol == ProtocolOpenAIResponses:
+		plan.Kind = PlanGeminiToResponses
+	case capability.ClientProtocol == ProtocolOpenAIResponses && capability.UpstreamProtocol == ProtocolGeminiGenerate:
+		plan.Kind = PlanResponsesToGemini
 	default:
 		return PreparedRequest{}, &UnsupportedRouteError{
 			ClientProtocol: capability.ClientProtocol, UpstreamProtocol: capability.UpstreamProtocol,
 			Reason: "cross-protocol streaming is not enabled for this route",
 		}
 	}
-	if !bodyRequestsStreaming(raw, capability.ClientProtocol) {
+	if capability.ClientProtocol != ProtocolGeminiGenerate && !bodyRequestsStreaming(raw, capability.ClientProtocol) {
 		return PreparedRequest{}, invalid("stream", "true is required for cross-protocol streaming")
 	}
 	conversionInput := raw
 	var err error
-	if model != "" {
+	if model != "" && capability.ClientProtocol != ProtocolGeminiGenerate {
 		conversionInput, err = replaceRequestModel(raw, model)
 		if err != nil {
 			return PreparedRequest{}, err
@@ -118,6 +122,13 @@ func PrepareCrossProtocolStreamRequest(capability RouteCapability, model string,
 		prepared.Body, prepared.Features, err = messagesRequestToResponses(conversionInput)
 	case PlanResponsesToMessages:
 		prepared.Body, prepared.Features, err = responsesRequestToMessages(conversionInput)
+	case PlanGeminiToResponses:
+		prepared.Body, prepared.Features, err = geminiRequestToResponses(model, raw)
+		if err == nil {
+			prepared.Body, err = setRequestStreaming(prepared.Body)
+		}
+	case PlanResponsesToGemini:
+		prepared.Model, prepared.Body, prepared.Features, err = responsesRequestToGemini(conversionInput)
 	}
 	if err != nil {
 		return PreparedRequest{}, err
@@ -127,6 +138,15 @@ func PrepareCrossProtocolStreamRequest(capability RouteCapability, model string,
 		return PreparedRequest{}, err
 	}
 	return prepared, nil
+}
+
+func setRequestStreaming(raw []byte) ([]byte, error) {
+	root, err := decodeObject(raw, CodeInvalidRequest, "")
+	if err != nil {
+		return nil, err
+	}
+	root["stream"] = json.RawMessage("true")
+	return json.Marshal(root)
 }
 
 func bodyRequestsStreaming(raw []byte, protocol Protocol) bool {
