@@ -21,6 +21,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"cpacloud.local/server/internal/financial"
 )
 
 const (
@@ -29,8 +31,8 @@ const (
 	adminAuditMaxLimit      = 100
 	adminAuditMaxWindow     = 31 * 24 * time.Hour
 	adminAuditCursorLimit   = 4096
-	adminAuditCursorVersion = 1
-	adminAuditCursorPurpose = "admin-audit-cursor/v1"
+	adminAuditCursorVersion = 2
+	adminAuditCursorPurpose = "admin-audit-cursor/v2"
 	adminAuditTimeKeyLayout = "2006-01-02T15:04:05.000000000Z"
 )
 
@@ -46,13 +48,15 @@ type adminAuditSourceSpec struct {
 	revisionExpr   string
 	timeColumn     string
 	rank           int
+	actorNullable  bool
 }
 
 var adminAuditSources = []adminAuditSourceSpec{
-	{"account_pool", "account_pool_audit", "id", "actor_id", "action", "target_type", "target_id", "result", "NULL", "occurred_at", 0},
-	{"account_lifecycle", "account_lifecycle_audit", "id", "actor_id", "action", "target_type", "target_id", "result", "NULL", "occurred_at", 1},
-	{"governance_management", "governance_management_audit", "operation_id", "actor_id", "action", "resource_kind", "resource_id", "'succeeded'", "revision", "created_at", 2},
-	{"governance_general_budget", "governance_general_budget_audit", "operation_id", "actor_id", "action", "'budget'", "policy_id", "'succeeded'", "revision", "created_at", 3},
+	{"account_pool", "account_pool_audit", "id", "actor_id", "action", "target_type", "target_id", "result", "NULL", "occurred_at", 0, false},
+	{"account_lifecycle", "account_lifecycle_audit", "id", "actor_id", "action", "target_type", "target_id", "result", "NULL", "occurred_at", 1, false},
+	{"governance_management", "governance_management_audit", "operation_id", "actor_id", "action", "resource_kind", "resource_id", "'succeeded'", "revision", "created_at", 2, false},
+	{"governance_general_budget", "governance_general_budget_audit", "operation_id", "actor_id", "action", "'budget'", "policy_id", "'succeeded'", "revision", "created_at", 3, false},
+	{"financial_commercial", "financial_commercial_operations", "operation_id", "actor_admin_id", "action", "resource_kind", "resource_id", "'succeeded'", "revision", "created_at", 4, true},
 }
 
 type adminAuditQuery struct {
@@ -86,15 +90,15 @@ type adminAuditCursor struct {
 }
 
 type adminAuditEventView struct {
-	Source     string `json:"source"`
-	EventID    string `json:"event_id"`
-	ActorID    string `json:"actor_id"`
-	Action     string `json:"action"`
-	TargetType string `json:"target_type"`
-	TargetID   string `json:"target_id"`
-	Result     string `json:"result"`
-	Revision   *int64 `json:"revision"`
-	OccurredAt string `json:"occurred_at"`
+	Source     string  `json:"source"`
+	EventID    string  `json:"event_id"`
+	ActorID    *string `json:"actor_id"`
+	Action     string  `json:"action"`
+	TargetType string  `json:"target_type"`
+	TargetID   string  `json:"target_id"`
+	Result     string  `json:"result"`
+	Revision   *int64  `json:"revision"`
+	OccurredAt string  `json:"occurred_at"`
 
 	occurred time.Time
 	rank     int
@@ -497,14 +501,19 @@ func queryAdminAuditSource(ctx context.Context, tx *sql.Tx, source adminAuditSou
 	items := make([]adminAuditEventView, 0, query.Limit+1)
 	for rows.Next() {
 		var item adminAuditEventView
+		var actor sql.NullString
 		var revision sql.NullInt64
 		var timestamp string
 		var rowID int64
-		if err := rows.Scan(&item.EventID, &item.ActorID, &item.Action, &item.TargetType, &item.TargetID, &item.Result, &revision, &timestamp, &rowID); err != nil {
+		if err := rows.Scan(&item.EventID, &actor, &item.Action, &item.TargetType, &item.TargetID, &item.Result, &revision, &timestamp, &rowID); err != nil {
 			return nil, err
 		}
-		if rowID < 1 || !validAdminAuditMetadata(item.EventID, 256) || !validAdminAuditMetadata(item.ActorID, 256) || !validAdminAuditMetadata(item.Action, 256) || !validAdminAuditMetadata(item.TargetType, 256) || !validAdminAuditMetadata(item.TargetID, 256) || item.Result != "succeeded" {
+		if rowID < 1 || !validAdminAuditMetadata(item.EventID, 256) || (!actor.Valid && !source.actorNullable) || (actor.Valid && !validAdminAuditMetadata(actor.String, 256)) || !validAdminAuditMetadata(item.Action, 256) || !validAdminAuditMetadata(item.TargetType, 256) || !validAdminAuditMetadata(item.TargetID, 256) || item.Result != "succeeded" {
 			return nil, errors.New("invalid audit metadata")
+		}
+		if actor.Valid {
+			value := actor.String
+			item.ActorID = &value
 		}
 		occurred, err := time.Parse(time.RFC3339Nano, timestamp)
 		if err != nil {
@@ -575,7 +584,7 @@ func validateAdminAuditSources(ctx context.Context, tx *sql.Tx) error {
 			return errors.New("governance audit schema mismatch")
 		}
 	}
-	return nil
+	return financial.ValidateCommercialAuditSource(ctx, tx)
 }
 
 func validateAdminAuditColumns(ctx context.Context, tx *sql.Tx, table string, expected map[string]schemaColumn) error {

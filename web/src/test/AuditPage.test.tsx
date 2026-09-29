@@ -47,7 +47,7 @@ describe('AuditPage', () => {
     expect(screen.getByText('r7')).toBeInTheDocument()
     expect(screen.getAllByText('无 revision')).toHaveLength(2)
     expect(screen.getByText(/不是完整历史/)).toBeInTheDocument()
-    expect(calls[0].endsWith('/admin/api/v1/audit/events?limit=20')).toBe(true)
+    expect(calls[0]).toContain('/admin/api/v1/audit/events?limit=20&sources=account_pool%2Caccount_lifecycle%2Cgovernance_management%2Cgovernance_general_budget')
 
     await userEvent.click(screen.getByRole('button', { name: '下一页' }))
     expect(await screen.findByText('当前窗口没有匹配事实')).toBeInTheDocument()
@@ -95,6 +95,7 @@ describe('AuditPage', () => {
     ['unknown result', (page: Record<string, any>) => { page.items[0].result = 'failed' }],
     ['non-UTC time', (page: Record<string, any>) => { page.items[0].occurred_at = '2026-09-29T16:00:00+08:00' }],
     ['unsafe revision', (page: Record<string, any>) => { page.items[2].revision = 9_007_199_254_740_992 }],
+    ['null actor in old source', (page: Record<string, any>) => { page.items[0].actor_id = null }],
     ['malformed cursor', (page: Record<string, any>) => { page.next_cursor = 'bad cursor' }],
   ])('fails closed for %s', async (_name, mutate) => {
     const malformed = structuredClone(auditPage()) as unknown as Record<string, any>
@@ -123,6 +124,32 @@ describe('AuditPage', () => {
     expect(calls[1]).toContain('actor_id=new-admin')
     expect(calls[2]).toContain('actor_id=new-admin')
     expect(calls[2]).not.toContain('cursor=')
+  })
+})
+
+describe('financial commercial audit source', () => {
+  it('shows a committed financial fact with no linked administrator only when the new capability is enabled', async () => {
+    const calls: string[] = []
+    const page = auditPage()
+    page.sources = [...page.sources, 'financial_commercial']
+    page.items.push({ source: 'financial_commercial', event_id: 'financial-1', actor_id: null, action: 'redemption.redeem', target_type: 'redemption', target_id: 'redemption-1', result: 'succeeded', revision: 1, occurred_at: '2026-09-29T05:00:00Z' })
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => { calls.push(String(input)); return response(page) }))
+    render(<AuditPage financialSource />)
+    expect(await screen.findByText('redemption.redeem')).toBeInTheDocument()
+    expect(screen.getAllByText('财务商业操作').length).toBeGreaterThan(0)
+    expect(screen.getByText('未关联管理员')).toBeInTheDocument()
+    expect(screen.getByText('事务已提交')).toBeInTheDocument()
+    expect(screen.getByText(/不代表外部支付完成/)).toBeInTheDocument()
+    expect(calls[0].endsWith('/admin/api/v1/audit/events?limit=20')).toBe(true)
+  })
+
+  it('fails closed if an old-capability page unexpectedly contains the fifth source', async () => {
+    const page = auditPage()
+    page.sources = [...page.sources, 'financial_commercial']
+    vi.stubGlobal('fetch', vi.fn(() => response(page)))
+    render(<AuditPage />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('审计响应格式无效')
+    expect(screen.queryByText('account_group.update')).not.toBeInTheDocument()
   })
 })
 
