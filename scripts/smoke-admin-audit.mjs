@@ -1,4 +1,5 @@
-// Independently authored real-process AUDIT-01 acceptance using disposable data and synthetic metadata only.
+// Independently authored real-process AUDIT-01 acceptance for docs/admin-audit-export-contract.md
+// using disposable data and synthetic metadata only.
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -43,6 +44,19 @@ try {
   const status = await admin.request('/system/status');
   assert.equal(status.features.admin_audit_overview, true, 'Audit capability was not advertised');
   assert.equal(status.features.admin_audit_financial_source, true, 'Financial audit source capability was not advertised');
+  assert.equal(status.features.admin_audit_csv_export, true, 'Audit CSV export capability was not advertised');
+
+  const exportPath = '/admin/api/v1/audit/events/export.csv';
+  response = await fetch(serviceProcess.origin + exportPath);
+  assert.equal(response.status, 401, 'Anonymous audit export was not rejected');
+  await response.text();
+  response = await fetch(serviceProcess.origin + exportPath, { headers: { Cookie: admin.cookie(), Origin: 'http://wrong-origin.invalid' } });
+  assert.equal(response.status, 403, 'Cross-site audit export was not rejected');
+  await response.text();
+  response = await fetch(serviceProcess.origin + exportPath + '?cursor=x', { headers: { Cookie: admin.cookie() } });
+  assert.equal(response.status, 400, 'Audit export accepted a page cursor');
+  assert.equal(response.headers.get('content-disposition'), null, 'Error response had a CSV attachment');
+  await response.text();
 
   response = await fetch(serviceProcess.origin + '/admin/api/v1/audit/events', { headers: { Cookie: admin.cookie(), Origin: 'http://wrong-origin.invalid' } });
   assert.equal(response.status, 403, 'Cross-site audit read was not rejected');
@@ -86,6 +100,23 @@ try {
   assert.ok(!items.some(item => item.target_id === afterWatermark.id), 'Post-watermark fact entered the cursor chain');
   assert.equal(new Set(items.map(item => `${item.source}:${item.event_id}`)).size, items.length, 'Cursor chain duplicated an event');
 
+  response = await fetch(serviceProcess.origin + exportPath + '?from=' + encodeURIComponent(first.from) + '&to=' + encodeURIComponent(first.to), { headers: { Cookie: admin.cookie(), Origin: serviceProcess.origin } });
+  assert.equal(response.status, 200, 'Five-source audit CSV export failed');
+  assert.equal(response.headers.get('content-type'), 'text/csv; charset=utf-8');
+  assert.equal(response.headers.get('content-disposition'), 'attachment; filename="cpa-cloud-admin-audit.csv"');
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  const exported = await response.text();
+  assert.ok(exported.startsWith('source,event_id,actor_id,action,target_type,target_id,result,revision,occurred_at\r\n'));
+  for (const source of ['account_pool', 'account_lifecycle', 'governance_management', 'governance_general_budget', 'financial_commercial']) {
+    assert.ok(exported.includes(source + ','), `CSV omitted ${source}`);
+  }
+  assert.ok(exported.includes(financial.resource_id), 'CSV omitted synthetic financial fact');
+  for (const secret of [...forbidden, login.csrf_token]) assert.ok(!exported.includes(secret), `CSV leaked ${secret}`);
+  response = await fetch(serviceProcess.origin + exportPath + '?sources=financial_commercial&target_id=' + encodeURIComponent(financial.resource_id), { headers: { Cookie: admin.cookie() } });
+  assert.equal(response.status, 200, 'Filtered financial CSV failed');
+  const financialCSV = await response.text();
+  assert.equal(financialCSV.trimEnd().split(/\r?\n/).length, 2, 'Filtered financial CSV was not exact');
+
   const exact = await admin.request('/audit/events?sources=governance_general_budget&target_id=' + encodeURIComponent(budget.resource_id) + '&result=succeeded');
   assertAuditPage(exact);
   assert.equal(exact.items.length, 1);
@@ -118,7 +149,7 @@ try {
   captureLogs(serviceProcess);
   await stopServer(serviceProcess); serviceProcess = undefined;
   for (const value of [upstreamSecret, login.csrf_token]) assert.ok(!combinedLogs.includes(value), 'Sensitive value appeared in service logs');
-  console.log('PASS admin audit: auth/origin/no-CSRF/five-source/filter/cursor-watermark/restart/metadata-only/secret-scan');
+  console.log('PASS admin audit: auth/origin/no-CSRF/five-source/filter/cursor-watermark/CSV-export/restart/metadata-only/secret-scan');
 } finally {
   captureLogs(serviceProcess);
   await stopServer(serviceProcess);

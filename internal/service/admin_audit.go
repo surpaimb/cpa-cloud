@@ -118,6 +118,7 @@ func (a *App) registerAdminAuditHandlers(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("GET "+adminAuditPath, a.requireAdmin(a.getAdminAuditEvents, false))
+	mux.HandleFunc("GET "+adminAuditExportPath, a.requireAdmin(a.getAdminAuditExport, false))
 }
 
 func (a *App) getAdminAuditEvents(w http.ResponseWriter, r *http.Request, _ adminSession) {
@@ -427,15 +428,7 @@ func (a *App) queryAdminAudit(ctx context.Context, query adminAuditQuery, cursor
 		}
 		items = append(items, page...)
 	}
-	sort.Slice(items, func(left, right int) bool {
-		if !items[left].occurred.Equal(items[right].occurred) {
-			return items[left].occurred.After(items[right].occurred)
-		}
-		if items[left].rank != items[right].rank {
-			return items[left].rank < items[right].rank
-		}
-		return items[left].EventID > items[right].EventID
-	})
+	sortAdminAuditItems(items)
 	hasMore := len(items) > query.Limit
 	if hasMore {
 		items = items[:query.Limit]
@@ -460,6 +453,18 @@ func (a *App) queryAdminAudit(ctx context.Context, query adminAuditQuery, cursor
 		return adminAuditPageView{}, err
 	}
 	return view, nil
+}
+
+func sortAdminAuditItems(items []adminAuditEventView) {
+	sort.Slice(items, func(left, right int) bool {
+		if !items[left].occurred.Equal(items[right].occurred) {
+			return items[left].occurred.After(items[right].occurred)
+		}
+		if items[left].rank != items[right].rank {
+			return items[left].rank < items[right].rank
+		}
+		return items[left].EventID > items[right].EventID
+	})
 }
 
 func queryAdminAuditSource(ctx context.Context, tx *sql.Tx, source adminAuditSourceSpec, watermark int64, query adminAuditQuery, cursor *adminAuditCursor) ([]adminAuditEventView, error) {

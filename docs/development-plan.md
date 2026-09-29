@@ -4,7 +4,7 @@
 
 ## 当前执行批次
 
-`AUDIT-01` 第一段按[管理员只读审计总览第一段契约](admin-audit-overview-contract.md)已纳入四类现存同事务事实。当前第二段按[财务商业事实源契约](admin-audit-financial-source-contract.md)只读增加已有不可变 `financial_commercial_operations`：五源有界页面、签名 v2 水位游标、nullable actor 明示和独立网页能力门控；不读取金额、payload digest 或凭据，不改商业写路径。本段仍不改写或统一保留原事实，不宣称完整财务或统一审计覆盖；其他 mutator、导出、防篡改、可配置保留和二次认证留待后续。
+`AUDIT-01` 第一、二段按[管理员只读总览契约](admin-audit-overview-contract.md)与[财务第五源契约](admin-audit-financial-source-contract.md)纳入五类现存同事务事实。当前第三段按[CSV 导出契约](admin-audit-export-contract.md)提供独立管理员只读下载：同五源/筛选/31 天边界、单一只读事务和 1000 行/2 MiB 上限，超限不静默截断；网页单独能力门控。它不读取金额、payload digest、正文或凭据，不改写商业或其它事实，不宣称完整财务或统一审计覆盖；其他 mutator 的统一写审计、防篡改、可配置保留和二次认证仍待后续。
 
 当前增量按 [账号组内部成本分摊倍率契约](account-group-cost-allocation-contract.md)实施 `ACCT-02/BILL-02` 第一段：既有账号池组获得有界 ppm 倍率、不可变版本、共享 revision/CAS、最终派发事务快照，以及与可靠用量、更正、日/月报表、CSV 和管理网页分离的“内部调整后分摊成本”。原供应商估算成本、价格版本、预算、余额和员工钱包保持原义；本段不是员工售价、供应商账单、多币兑换或员工身份组费率。
 

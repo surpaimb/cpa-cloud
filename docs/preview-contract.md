@@ -30,6 +30,8 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 `GET /admin/api/v1/audit/events` 只读投影五类现存事务事实；完整范围、参数、游标升级与失败关闭规则见[第一段契约](admin-audit-overview-contract.md)和[第五源增量契约](admin-audit-financial-source-contract.md)。新增 `financial_commercial` 对应现有不可变 `financial_commercial_operations`；其 `actor_admin_id IS NULL` 映射为响应 `actor_id:null`，不伪称管理员操作。`features.admin_audit_overview=true` 门控入口；`features.admin_audit_financial_source=true` 单独门控第五源，旧服务仅有前一能力时网页仍只请求四源。旧四水位 v1 游标在新服务上需重新从首页查询。本接口不返回金额、operation digest、凭据或正文，也不宣称完整财务/统一审计或外部支付成功。
 
+`GET /admin/api/v1/audit/events/export.csv` 独立导出同一五源现存元数据，接受首页的时间、来源和精确字段筛选，不接受 `cursor`/`limit`；使用单一只读事务、1000 行及 2 MiB 上限，超限 413 而非截断。成功返回固定 UTF-8 CSV 类型和附件文件名；失败在任何 CSV 响应头/首字节前返回脱敏 JSON。网页另由 `features.admin_audit_csv_export=true` 与总览能力共同门控。空 actor/revision、公式注入转义、权限/Origin 和不完整覆盖边界见[导出契约](admin-audit-export-contract.md)。
+
 ### 每 Key 协议与模型策略（2026-09-25 批次契约）
 
 只有 `features.key_access_policy=true` 才表示服务器已实现协议/模型策略；来源编辑另要求只读能力 `features.key_source_policy=true`。完整迁移、事务屏障、后台资源语义和验收要求见[流式与 Key 策略批次契约](stream-key-policy-batch-contract-2026-09-25.md)。

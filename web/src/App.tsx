@@ -84,6 +84,7 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
   const [billingCapability, setBillingCapability] = useState(false)
   const [auditCapability, setAuditCapability] = useState(false)
   const [auditFinancialSource, setAuditFinancialSource] = useState(false)
+  const [auditCSVExport, setAuditCSVExport] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -92,7 +93,8 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
       if (active) setBillingCapability(status.features?.single_instance_billing === true)
       if (active) setAuditCapability(status.features?.admin_audit_overview === true)
       if (active) setAuditFinancialSource(status.features?.admin_audit_overview === true && status.features?.admin_audit_financial_source === true)
-    }).catch(() => { if (active) { setBackupConfiguration(false); setBillingCapability(false); setAuditCapability(false); setAuditFinancialSource(false) } })
+      if (active) setAuditCSVExport(status.features?.admin_audit_overview === true && status.features?.admin_audit_csv_export === true)
+    }).catch(() => { if (active) { setBackupConfiguration(false); setBillingCapability(false); setAuditCapability(false); setAuditFinancialSource(false); setAuditCSVExport(false) } })
     return () => { active = false }
   }, [])
 
@@ -110,7 +112,7 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
     backups: <BackupsPage csrf={session.csrf_token} />,
     governance: <GovernancePage csrf={session.csrf_token} />,
     usage: <UsagePage csrf={session.csrf_token} />,
-    audit: <AuditPage financialSource={auditFinancialSource} />,
+    audit: <AuditPage financialSource={auditFinancialSource} csvExport={auditCSVExport} />,
     billing: <Suspense fallback={<div className="loading" role="status"><span />正在加载商业管理…</div>}><BillingPage csrf={session.csrf_token} /></Suspense>,
     status: <StatusPage csrf={session.csrf_token} />,
   }[page]
