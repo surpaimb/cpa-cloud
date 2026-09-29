@@ -11,7 +11,7 @@
 | 已实现 | 尚未实现或验证 |
 | --- | --- |
 | 网页后台、管理员会话、员工启停、模型权限 | 明确排除：多租户、员工 SSO、管理员密码重置命令 |
-| 一人多个 Key、默认永久有效、可选到期、撤销、独立协议/公开模型/IP/CIDR 策略；源码支持显式可信代理的严格 X-Forwarded-For 来源解析及 Codex 网页授权/刷新 | 通用反向代理/TLS 终止部署、Claude/Gemini 会员接入及真实账号验证 |
+| 一人多个 Key、默认永久有效、可选到期、撤销、独立协议/公开模型/IP/CIDR/账号池分组策略；源码支持显式可信代理的严格 X-Forwarded-For 来源解析及 Codex 网页授权/刷新 | 通用反向代理/TLS 终止部署、Claude/Gemini 会员接入及真实账号验证 |
 | OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路；显式 Chat↔Responses、Messages↔Responses 与 Gemini↔Responses 文本/function SSE 转换 | Messages→Responses 的终态 usage 延迟、Gemini identity-bearing 子集及未列出的协议字段限制仍存在 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
 | 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE；默认关闭的加密有状态资源与后台任务 | 托管工具、后台流续传/游标与完整客户端兼容性 |
@@ -89,6 +89,8 @@ Claude/Gemini 订阅会员不属于上述 API Key 能力；各自接入条件仍
 在网页“模型路由”选择“编辑账号池”，配置同一提供商的多个账号及模型映射、优先级、权重和并发容量；“分组与渠道”管理对应目录。已有单路由保持原行为，只有点击“保存账号池”才启用调度；版本冲突会保留编辑并要求重新加载。接口见 [账号池管理 API](docs/account-pool-service-contract.md)。
 
 Chat、Responses、Messages（含 count_tokens）和 Gemini 共用调度。排队结束会重新检查 Key、员工权限和配置 revision。同一账号跨池共享容量，配置不同时取所有启用模型池中的最小值。
+
+最新源码可在“员工与 Key”把单个 Key 收窄到既有账号池分组。`all` 保留旧单路由和未分组路由；`selected` 只允许显式账号池里通过“路由 → 渠道 → 分组”命中的候选，空选择会明确拒绝全部账号候选。该策略与协议、公开模型和来源共用同一 policy revision/CAS，只能进一步收窄员工授权；模型目录、后台任务、资源继续执行和最终派发都会重新核验，策略或映射收紧不会向其他组回退。此能力只在最新源码中，**不包含于 preview.3 下载包**；自动验收使用合成账号和本地上游，不代表真实供应商或会员账号验证。契约见 [Key 与账号池分组绑定](docs/key-account-group-policy-contract.md)。
 
 可选请求头 `X-CPA-Session` 接受 1–256 字节会话标识；仅使用绑定员工、Key、模型和协议的 HMAC 做短时粘滞，不保存或转发原值。租约会续期、释放并在重启后保守恢复。显式账号池中，凭据解密等账号预检失败且模型请求尚未派发时，最多切换一个不同账号，并重新检查权限和池版本；账本使用实际发送账号及模型的价格。**进入上游 HTTP 调用或 Codex 执行器后不自动重放**，包括连接错误、429 和流式错误。429、认证或暂时故障的冷却影响后续独立请求。默认关闭的恢复探测见下文；出站代理首批见下文；供应商配额采集仍待实现；selector-aware 通用预算与固定模型硬预算见下文。见 [运行时契约](docs/account-pool-runtime-contract.md)和[安全换号契约](docs/account-pool-failover-contract.md)。以上为源码功能，不包含在 preview.3 下载包中。
 

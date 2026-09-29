@@ -17,6 +17,7 @@ func TestNormalizeSourceCIDRsCanonicalizesAndSorts(t *testing.T) {
 		SourceMode: ModeSelected, SourceCIDRs: []string{
 			"2001:0db8:1::9/48", "192.0.2.99/24", "2001:db8::1", "192.0.2.7", "::ffff:198.51.100.7", "::ffff:203.0.113.99/120",
 		},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -30,6 +31,7 @@ func TestNormalizeSourceCIDRsCanonicalizesAndSorts(t *testing.T) {
 func TestNormalizeSourceCIDRsRejectsInvalidDuplicateAndOversizedValues(t *testing.T) {
 	validBase := Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeSelected,
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}
 	cases := []struct {
 		name   string
@@ -61,6 +63,7 @@ func TestNormalizeSourceCIDRsRejectsInvalidDuplicateAndOversizedValues(t *testin
 	if _, err := Normalize(Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeAll, SourceCIDRs: []string{"192.0.2.0/24"},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}); !errors.Is(err, ErrInvalidPolicy) {
 		t.Fatalf("all with members error=%v", err)
 	}
@@ -90,6 +93,7 @@ func TestParseSocketPeerAndAllowsSource(t *testing.T) {
 	policy := Policy{
 		Revision: 1, ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeSelected, SourceCIDRs: []string{"192.0.2.0/24", "2001:db8::/48"},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}
 	for _, allowed := range []string{"192.0.2.0", "192.0.2.255", "::ffff:192.0.2.8", "2001:db8::", "2001:db8:0:ffff:ffff:ffff:ffff:ffff"} {
 		if !AllowsSource(policy, netip.MustParseAddr(allowed)) {
@@ -129,6 +133,7 @@ func TestAllowsSourcePrefixBoundaries(t *testing.T) {
 		policy := Policy{
 			Revision: 1, ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 			SourceMode: ModeSelected, SourceCIDRs: []string{test.cidr},
+			AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 		}
 		if !AllowsSource(policy, netip.MustParseAddr(test.allowed)) {
 			t.Errorf("%s did not allow %s", test.cidr, test.allowed)
@@ -141,6 +146,7 @@ func TestAllowsSourcePrefixBoundaries(t *testing.T) {
 	normalized, err := Normalize(Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeSelected, SourceCIDRs: []string{"::ffff:192.0.2.1/96"},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	})
 	if err != nil || !slices.Equal(normalized.SourceCIDRs, []string{"0.0.0.0/0"}) {
 		t.Fatalf("mapped /96 normalization=%v error=%v", normalized.SourceCIDRs, err)
@@ -159,6 +165,7 @@ func TestSourcePolicyPersistenceSharesPolicyCAS(t *testing.T) {
 	created, err := CreateTx(context.Background(), tx, "key-source", Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeSelected, SourceCIDRs: []string{"2001:db8::1", "192.0.2.9/24"},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime)
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +179,7 @@ func TestSourcePolicyPersistenceSharesPolicyCAS(t *testing.T) {
 	updated, err := Replace(context.Background(), db, "key-source", 1, Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeSelected, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime.Add(1))
 	if err != nil {
 		t.Fatal(err)
@@ -182,6 +190,7 @@ func TestSourcePolicyPersistenceSharesPolicyCAS(t *testing.T) {
 	restored, err := Replace(context.Background(), db, "key-source", 2, Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeSelected, SourceCIDRs: []string{"2001:db8::1", "192.0.2.9/24"},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime.Add(2))
 	if err != nil {
 		t.Fatal(err)
@@ -192,6 +201,7 @@ func TestSourcePolicyPersistenceSharesPolicyCAS(t *testing.T) {
 	if _, err := Replace(context.Background(), db, "key-source", 1, Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime.Add(3)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale source replacement error=%v", err)
 	}

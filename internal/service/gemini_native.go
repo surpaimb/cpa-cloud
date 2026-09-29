@@ -79,6 +79,10 @@ func (a *App) listGeminiModels(w http.ResponseWriter, r *http.Request) {
 		query += ` AND EXISTS(SELECT 1 FROM access_key_policy_models kpm WHERE kpm.key_id=? AND kpm.model_id=m.id)`
 		args = append(args, auth.KeyID)
 	}
+	if auth.Policy.AccountGroupMode == keypolicy.ModeSelected {
+		query += ` AND ` + a.keyAccountGroupModelFilterSQL("m", true)
+		args = append(args, auth.KeyID)
+	}
 	query += ` ORDER BY m.id LIMIT ? OFFSET ?`
 	args = append(args, pageSize+1, offset)
 	rows, err := a.store.db.QueryContext(r.Context(), query, args...)

@@ -29,8 +29,8 @@ const legacyPolicy = {
   effective_models: ['public-model'],
 }
 
-function systemStatus(keyPolicy: boolean | undefined, sourcePolicy?: boolean, trustedProxySource?: boolean) {
-  return { version: 'test', ready: true, storage: 'sqlite-wal', limitations: [], features: keyPolicy === undefined ? {} : { key_access_policy: keyPolicy, ...(sourcePolicy === undefined ? {} : { key_source_policy: sourcePolicy }), ...(trustedProxySource === undefined ? {} : { trusted_proxy_source: trustedProxySource }) } }
+function systemStatus(keyPolicy: boolean | undefined, sourcePolicy?: boolean, trustedProxySource?: boolean, accountGroupPolicy?: boolean) {
+  return { version: 'test', ready: true, storage: 'sqlite-wal', limitations: [], features: keyPolicy === undefined ? {} : { key_access_policy: keyPolicy, ...(sourcePolicy === undefined ? {} : { key_source_policy: sourcePolicy }), ...(trustedProxySource === undefined ? {} : { trusted_proxy_source: trustedProxySource }), ...(accountGroupPolicy === undefined ? {} : { key_account_group_policy: accountGroupPolicy }) } }
 }
 
 describe('access-key policy administration', () => {
@@ -89,6 +89,96 @@ describe('access-key policy administration', () => {
     expect(dialog).toHaveTextContent('沿用员工权限')
     expect(within(dialog).queryByRole('button', { name: '编辑独立权限' })).not.toBeInTheDocument()
     expect(within(dialog).queryByRole('button', { name: '保存独立权限' })).not.toBeInTheDocument()
+  })
+
+  it('keeps old-service Key editing but never sends unsupported account-group fields', async () => {
+    const writes: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response(systemStatus(true, true, false, false))
+      if (url.endsWith('/employees') && !init?.method) return response({ items: [employee] })
+      if (url.endsWith('/models')) return response({ items: [model] })
+      if (url.endsWith('/employees/emp-1/keys')) return response({ items: [key] })
+      if (url.endsWith('/keys/key-1/policy') && init?.method === 'PUT') { writes.push(JSON.parse(String(init.body))); return response({ ...allPolicy, revision: 2 }) }
+      if (url.endsWith('/keys/key-1/policy')) return response(allPolicy)
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    }))
+    render(<EmployeesPage csrf="csrf" />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '管理 Key' }))
+    const keyDialog = await screen.findByRole('dialog')
+    expect(keyDialog).toHaveTextContent('当前服务不支持 Key 账号池分组限制')
+    expect(within(keyDialog).queryByText('账号池分组', { selector: 'legend' })).not.toBeInTheDocument()
+    await userEvent.click(within(keyDialog).getByRole('button', { name: '编辑独立权限' }))
+    const dialogs = await screen.findAllByRole('dialog')
+    const editor = dialogs.at(-1)!
+    await userEvent.click(within(editor).getByRole('button', { name: '保存独立权限' }))
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0]).not.toHaveProperty('account_group_mode')
+    expect(writes[0]).not.toHaveProperty('account_group_ids')
+  })
+
+  it('edits a selected account-group policy and preserves the explicit selected-empty deny-all state', async () => {
+    const groupPolicy = { ...allPolicy, account_group_mode: 'all', account_group_ids: [] }
+    const writes: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response(systemStatus(true, true, false, true))
+      if (url.endsWith('/employees') && !init?.method) return response({ items: [employee] })
+      if (url.endsWith('/models')) return response({ items: [model] })
+      if (url.endsWith('/account-groups')) return response({ items: [{ id: 'grp-a', name: '核心账号', revision: 1 }] })
+      if (url.endsWith('/employees/emp-1/keys')) return response({ items: [{ ...key, policy: groupPolicy }] })
+      if (url.endsWith('/keys/key-1/policy') && init?.method === 'PUT') { writes.push(JSON.parse(String(init.body))); return response({ ...groupPolicy, revision: 2 }) }
+      if (url.endsWith('/keys/key-1/policy')) return response(groupPolicy)
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    }))
+    render(<EmployeesPage csrf="csrf" />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '管理 Key' }))
+    await userEvent.click(await screen.findByRole('button', { name: '编辑独立权限' }))
+    const dialogs = await screen.findAllByRole('dialog')
+    const editor = dialogs.at(-1)!
+    await userEvent.click(await within(editor).findByLabelText('仅指定账号池分组'))
+    expect(editor).toHaveTextContent('显式 deny-all')
+    await userEvent.click(within(editor).getByLabelText('核心账号'))
+    await userEvent.click(within(editor).getByRole('button', { name: '保存独立权限' }))
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0]).toMatchObject({ account_group_mode: 'selected', account_group_ids: ['grp-a'] })
+  })
+
+  it('fails closed for malformed account-group fields in both the Key list and policy GET', async () => {
+    const valid = { ...allPolicy, account_group_mode: 'all', account_group_ids: [] }
+    const malformed = { ...allPolicy, account_group_mode: 'selected' }
+    let listMalformed = true
+    let writes = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response(systemStatus(true, true, false, true))
+      if (url.endsWith('/employees') && !init?.method) return response({ items: [employee] })
+      if (url.endsWith('/models')) return response({ items: [model] })
+      if (url.endsWith('/account-groups')) return response({ items: [] })
+      if (url.endsWith('/employees/emp-1/keys')) return response({ items: [{ ...key, policy: listMalformed ? malformed : valid }] })
+      if (url.endsWith('/keys/key-1/policy') && init?.method === 'PUT') { writes += 1; return response(valid) }
+      if (url.endsWith('/keys/key-1/policy')) return response(malformed)
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    }))
+    render(<EmployeesPage csrf="csrf" />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '管理 Key' }))
+    let dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('账号组策略响应无效')
+    expect(within(dialog).queryByRole('button', { name: '编辑独立权限' })).not.toBeInTheDocument()
+    listMalformed = false
+    cleanup()
+    render(<EmployeesPage csrf="csrf" />)
+    await userEvent.click(await screen.findByRole('button', { name: '管理 Key' }))
+    dialog = await screen.findByRole('dialog')
+    await userEvent.click(within(dialog).getByRole('button', { name: '编辑独立权限' }))
+    const dialogs = await screen.findAllByRole('dialog')
+    const editor = dialogs.at(-1)!
+    expect(await within(editor).findByText(/账号池分组策略无效/)).toBeInTheDocument()
+    expect(within(editor).getByRole('button', { name: '保存独立权限' })).toBeDisabled()
+    expect(writes).toBe(0)
   })
 
   it('explains trusted proxy source resolution without adding a Key authorization toggle', async () => {

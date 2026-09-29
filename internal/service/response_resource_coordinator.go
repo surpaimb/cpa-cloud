@@ -623,11 +623,18 @@ func (c *responseResourceCoordinator) authorizeOwnerTx(ctx context.Context, tx *
 		return errResponseResourceForbidden
 	}
 	var allowed int
-	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND u.enabled=1 AND u.archived=0 AND (?='all' OR EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id))`, model, mode, employeeID).Scan(&allowed)
+	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND `+c.app.availableModelRouteSQL(false)+` AND (?='all' OR EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id))`, model, mode, employeeID).Scan(&allowed)
 	if err != nil {
 		return errResponseResourceUnavailable
 	}
 	if allowed != 1 {
+		return errResponseResourceForbidden
+	}
+	groupEligible, err := c.app.keyAccountGroupModelEligibleTx(ctx, tx, policy, keyID, model, false)
+	if err != nil {
+		return errResponseResourceUnavailable
+	}
+	if !groupEligible {
 		return errResponseResourceForbidden
 	}
 	return nil

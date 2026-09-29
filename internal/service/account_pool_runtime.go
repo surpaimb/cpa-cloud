@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"cpacloud.local/server/internal/keypolicy"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -103,6 +104,7 @@ type accountPoolAcquireOptions struct {
 
 type poolCandidate struct {
 	configured    modelAccountView
+	groupID       sql.NullString
 	provider      string
 	revision      int64
 	capacity      int
@@ -402,7 +404,7 @@ func (rt *accountPoolRuntime) AcquireWithOptions(ctx context.Context, publicMode
 		var legacy bool
 		var code accountPoolRuntimeCode
 		if err == nil && authorized && modelAvailable && modelAllowed {
-			pool, legacy, code = rt.loadPool(opContext, publicModel, allowedProviders)
+			pool, legacy, code = rt.loadPool(opContext, publicModel, auth.Policy, allowedProviders)
 		}
 		rt.app.admission.RUnlock()
 
@@ -548,7 +550,7 @@ func (rt *accountPoolRuntime) authorizationCurrent(ctx context.Context, tx *sql.
 	return true, true, err == nil, err
 }
 
-func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowedProviders []string) (poolSnapshot, bool, accountPoolRuntimeCode) {
+func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, policy keypolicy.Policy, allowedProviders []string) (poolSnapshot, bool, accountPoolRuntimeCode) {
 	var revision int64
 	err := rt.app.store.db.QueryRowContext(ctx, `SELECT revision FROM model_account_pool_configs WHERE model_id=?`, model).Scan(&revision)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -561,9 +563,10 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 	for _, provider := range allowedProviders {
 		allowed[provider] = true
 	}
-	rows, err := rt.app.store.db.QueryContext(ctx, `SELECT r.upstream_id,r.upstream_model,r.wire_protocol,r.priority,r.weight,r.max_concurrency,u.provider_kind,u.enabled,u.revision,u.credential_state,c.event_id,c.cooldown_until,rs.account_id,
+	rows, err := rt.app.store.db.QueryContext(ctx, `SELECT r.upstream_id,r.upstream_model,r.wire_protocol,r.priority,r.weight,r.max_concurrency,ch.group_id,u.provider_kind,u.enabled,u.revision,u.credential_state,c.event_id,c.cooldown_until,rs.account_id,
 		(SELECT MIN(global_route.max_concurrency) FROM model_account_pool_routes global_route JOIN models global_model ON global_model.id=global_route.model_id WHERE global_route.upstream_id=r.upstream_id AND global_model.enabled=1)
 		FROM model_account_pool_routes r JOIN upstreams u ON u.id=r.upstream_id
+		LEFT JOIN account_channels ch ON ch.id=r.channel_id
 		LEFT JOIN account_pool_runtime_cooldowns c ON c.account_id=u.id
 		LEFT JOIN account_recovery_states rs ON rs.account_id=u.id
 		WHERE r.model_id=? AND u.archived=0 ORDER BY r.position LIMIT ?`, model, maxModelAccounts+1)
@@ -577,7 +580,7 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 		var enabled int
 		var state, cooldownEvent, cooldown, recoveryAccount sql.NullString
 		var wire string
-		if err := rows.Scan(&item.configured.UpstreamID, &item.configured.UpstreamModel, &wire, &item.configured.Priority, &item.configured.Weight, &item.configured.MaxConcurrency, &item.provider, &enabled, &item.revision, &state, &cooldownEvent, &cooldown, &recoveryAccount, &item.capacity); err != nil {
+		if err := rows.Scan(&item.configured.UpstreamID, &item.configured.UpstreamModel, &wire, &item.configured.Priority, &item.configured.Weight, &item.configured.MaxConcurrency, &item.groupID, &item.provider, &enabled, &item.revision, &state, &cooldownEvent, &cooldown, &recoveryAccount, &item.capacity); err != nil {
 			return poolSnapshot{}, false, accountPoolStorageUnavailable
 		}
 		item.configured.WireProtocol = &wire
@@ -593,6 +596,9 @@ func (rt *accountPoolRuntime) loadPool(ctx context.Context, model string, allowe
 		}
 		if !providerSupportsWire(item.provider, wire) {
 			return poolSnapshot{}, false, accountPoolConfigurationChanged
+		}
+		if policy.AccountGroupMode == keypolicy.ModeSelected && (!item.groupID.Valid || !keypolicy.AllowsAccountGroup(policy, item.groupID.String)) {
+			continue
 		}
 		if recoveryAccount.Valid || !allowed[item.provider] || enabled == 0 || item.provider == codexMembershipProvider && (!rt.app.cfg.ExperimentalCodexMembership || state.String == codexStateReauth) {
 			continue
@@ -639,6 +645,13 @@ func (rt *accountPoolRuntime) persistRevalidatedLease(ctx context.Context, model
 	if !modelAllowed {
 		return route{}, accountPoolModelNotAllowed
 	}
+	policyCurrent, err := rt.app.keyPolicyCurrentTx(ctx, tx, auth, model)
+	if err != nil {
+		return route{}, accountPoolStorageUnavailable
+	}
+	if !policyCurrent {
+		return route{}, accountPoolAuthorizationChanged
+	}
 	var revision int64
 	if err := tx.QueryRowContext(ctx, `SELECT revision FROM model_account_pool_configs WHERE model_id=?`, model).Scan(&revision); err != nil || revision != pool.revision {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -684,6 +697,13 @@ func (rt *accountPoolRuntime) persistRevalidatedLease(ctx context.Context, model
 	}
 	if enabled == 0 || selected.Revision != expected.revision || selected.ProviderKind != expected.provider || selected.UpstreamModel != expected.configured.UpstreamModel || expected.configured.WireProtocol == nil || string(selected.WireProtocol) != *expected.configured.WireProtocol || !providerSupportsWire(selected.ProviderKind, string(selected.WireProtocol)) || !providerAllowed(selected.ProviderKind, allowedProviders) || selected.ProviderKind == codexMembershipProvider && (!rt.app.cfg.ExperimentalCodexMembership || selected.CredentialState.String == codexStateReauth) {
 		return route{}, accountPoolAccountChanged
+	}
+	groupAllowed, err := keyAccountGroupRouteAllowedTx(ctx, tx, auth.Policy, auth.KeyID, model, selected.AccountID)
+	if err != nil {
+		return route{}, accountPoolStorageUnavailable
+	}
+	if !groupAllowed {
+		return route{}, accountPoolAuthorizationChanged
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO account_pool_runtime_leases(lease_id,account_id,public_model,employee_id,key_id,pool_revision,account_revision,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, inner.ID(), selected.AccountID, model, auth.EmployeeID, auth.KeyID, pool.revision, selected.Revision, formatAccountPoolTime(inner.ExpiresAt()), formatAccountPoolTime(rt.clock.Now()))
 	if err != nil {

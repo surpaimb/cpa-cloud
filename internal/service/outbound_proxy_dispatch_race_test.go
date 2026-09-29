@@ -308,6 +308,7 @@ func TestCrossProtocolStreamDispatchRejectsStaleKeyPolicyRevisionAndABA(t *testi
 					ProtocolMode: protocolMode, Protocols: []keypolicy.ClientProtocol{},
 					ModelMode: keypolicy.ModeAll, Models: []string{},
 					SourceMode: sourceMode, SourceCIDRs: sourceCIDRs,
+					AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{},
 				}, now)
 				if replaceErr != nil {
 					t.Fatal(replaceErr)
@@ -319,6 +320,7 @@ func TestCrossProtocolStreamDispatchRejectsStaleKeyPolicyRevisionAndABA(t *testi
 					ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
 					ModelMode: keypolicy.ModeAll, Models: []string{},
 					SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
+					AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{},
 				}, now.Add(time.Nanosecond))
 				if replaceErr != nil {
 					t.Fatal(replaceErr)

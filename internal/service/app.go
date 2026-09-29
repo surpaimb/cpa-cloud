@@ -440,6 +440,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"account_lifecycle_management":    true,
 			"key_access_policy":               true,
 			"key_source_policy":               true,
+			"key_account_group_policy":        true,
 			"trusted_proxy_source":            a.trustedProxies.Enabled(),
 		},
 		"limitations": limitations,

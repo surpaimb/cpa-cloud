@@ -127,7 +127,7 @@ func newRuntimeFixtureWithBase(t *testing.T, base *accountPoolFixture, random sc
 	fixture.auth2.SourceTrustRevision = base.app.trustedProxies.Revision()
 	fixture.insertEmployee(t, fixture.auth1)
 	fixture.insertEmployee(t, fixture.auth2)
-	fixture.auth1.Policy = keypolicy.Policy{Revision: 1, ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{}, ModelMode: keypolicy.ModeAll, Models: []string{}, SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{}}
+	fixture.auth1.Policy = keypolicy.Policy{Revision: 1, ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{}, ModelMode: keypolicy.ModeAll, Models: []string{}, SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{}, AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{}}
 	fixture.auth2.Policy = fixture.auth1.Policy
 	return fixture
 }

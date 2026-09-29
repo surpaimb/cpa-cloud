@@ -147,6 +147,13 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 	if !policyCurrent {
 		return nil, poolAdmissionFailure(accountPoolAuthorizationChanged)
 	}
+	groupAllowed, err := keyAccountGroupRouteAllowedTx(r.Context(), tx, auth.Policy, auth.KeyID, model, selected.AccountID)
+	if err != nil {
+		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)
+	}
+	if !groupAllowed {
+		return nil, poolAdmissionFailure(accountPoolAuthorizationChanged)
+	}
 	authorized, available, allowed, err := a.accountPool.authorizationCurrent(r.Context(), tx, model, auth)
 	if err != nil {
 		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)

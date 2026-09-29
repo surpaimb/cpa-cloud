@@ -21,6 +21,8 @@ type keyPolicyView struct {
 	Models             []string                   `json:"models"`
 	SourceMode         keypolicy.Mode             `json:"source_mode"`
 	SourceCIDRs        []string                   `json:"source_cidrs"`
+	AccountGroupMode   keypolicy.Mode             `json:"account_group_mode"`
+	AccountGroupIDs    []string                   `json:"account_group_ids"`
 	EffectiveProtocols []keypolicy.ClientProtocol `json:"effective_protocols"`
 	EffectiveModels    []string                   `json:"effective_models"`
 }
@@ -33,6 +35,8 @@ type replaceKeyPolicyRequest struct {
 	Models           *[]string                   `json:"models"`
 	SourceMode       *keypolicy.Mode             `json:"source_mode"`
 	SourceCIDRs      *[]string                   `json:"source_cidrs"`
+	AccountGroupMode *keypolicy.Mode             `json:"account_group_mode"`
+	AccountGroupIDs  *[]string                   `json:"account_group_ids"`
 }
 
 type keyPolicyOwner struct {
@@ -52,7 +56,7 @@ func (a *App) getKeyPolicy(w http.ResponseWriter, r *http.Request, _ adminSessio
 	writeJSON(w, http.StatusOK, view)
 }
 
-func (a *App) putKeyPolicy(w http.ResponseWriter, r *http.Request, _ adminSession) {
+func (a *App) putKeyPolicy(w http.ResponseWriter, r *http.Request, session adminSession) {
 	var input replaceKeyPolicyRequest
 	if !decodeJSON(w, r, adminMaxBody, &input) {
 		return
@@ -62,6 +66,10 @@ func (a *App) putKeyPolicy(w http.ResponseWriter, r *http.Request, _ adminSessio
 		return
 	}
 	if (input.SourceMode == nil) != (input.SourceCIDRs == nil) {
+		writeAdminError(w, http.StatusBadRequest, "invalid_key_policy", "Invalid key policy.")
+		return
+	}
+	if (input.AccountGroupMode == nil) != (input.AccountGroupIDs == nil) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_key_policy", "Invalid key policy.")
 		return
 	}
@@ -81,6 +89,12 @@ func (a *App) putKeyPolicy(w http.ResponseWriter, r *http.Request, _ adminSessio
 		replacement.SourceMode = *input.SourceMode
 		replacement.SourceCIDRs = sourceCIDRs
 	}
+	if input.AccountGroupMode != nil {
+		accountGroupIDs := make([]string, len(*input.AccountGroupIDs))
+		copy(accountGroupIDs, *input.AccountGroupIDs)
+		replacement.AccountGroupMode = *input.AccountGroupMode
+		replacement.AccountGroupIDs = accountGroupIDs
+	}
 
 	// Employee grants, model lifecycle, and policy CAS must share one database
 	// snapshot. The admission lock also serializes the existing employee policy
@@ -98,20 +112,30 @@ func (a *App) putKeyPolicy(w http.ResponseWriter, r *http.Request, _ adminSessio
 		writeKeyPolicyAdminError(w, err)
 		return
 	}
-	if input.SourceMode == nil {
+	if input.SourceMode == nil || input.AccountGroupMode == nil {
 		current, err := keypolicy.LoadTx(r.Context(), tx, r.PathValue("id"))
 		if err != nil {
 			writeKeyPolicyAdminError(w, err)
 			return
 		}
-		replacement.SourceMode = current.SourceMode
-		replacement.SourceCIDRs = append([]string{}, current.SourceCIDRs...)
+		if input.SourceMode == nil {
+			replacement.SourceMode = current.SourceMode
+			replacement.SourceCIDRs = append([]string{}, current.SourceCIDRs...)
+		}
+		if input.AccountGroupMode == nil {
+			replacement.AccountGroupMode = current.AccountGroupMode
+			replacement.AccountGroupIDs = append([]string{}, current.AccountGroupIDs...)
+		}
 	}
 	if err := a.validateKeyPolicyModelsTx(r.Context(), tx, owner, replacement); err != nil {
 		writeKeyPolicyAdminError(w, err)
 		return
 	}
 	if _, err := keypolicy.ReplaceTx(r.Context(), tx, r.PathValue("id"), input.ExpectedRevision, replacement, time.Now().UTC()); err != nil {
+		writeKeyPolicyAdminError(w, err)
+		return
+	}
+	if err := recordAccountPoolAudit(r.Context(), tx, session.AdminID, "key_policy.update", "access_key", r.PathValue("id")); err != nil {
 		writeKeyPolicyAdminError(w, err)
 		return
 	}
@@ -161,6 +185,7 @@ func readKeyPolicyViewTxWithPolicy(ctx context.Context, tx *sql.Tx, a *App, keyI
 	view := keyPolicyView{
 		Revision: policy.Revision, ProtocolMode: policy.ProtocolMode, Protocols: policy.Protocols,
 		ModelMode: policy.ModelMode, Models: policy.Models, SourceMode: policy.SourceMode, SourceCIDRs: policy.SourceCIDRs,
+		AccountGroupMode: policy.AccountGroupMode, AccountGroupIDs: policy.AccountGroupIDs,
 		EffectiveProtocols: []keypolicy.ClientProtocol{}, EffectiveModels: []string{},
 	}
 	if !keyPolicyOwnerActive(owner, time.Now().UTC()) {
@@ -179,6 +204,10 @@ func readKeyPolicyViewTxWithPolicy(ctx context.Context, tx *sql.Tx, a *App, keyI
 	}
 	if policy.ModelMode == keypolicy.ModeSelected {
 		query += ` AND EXISTS(SELECT 1 FROM access_key_policy_models kpm WHERE kpm.key_id=? AND kpm.model_id=m.id)`
+		args = append(args, keyID)
+	}
+	if policy.AccountGroupMode == keypolicy.ModeSelected {
+		query += ` AND ` + a.keyAccountGroupModelFilterSQL("m", false)
 		args = append(args, keyID)
 	}
 	query += ` ORDER BY m.id`
