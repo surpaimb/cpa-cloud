@@ -11,6 +11,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
   const [policy, setPolicy] = useState<Employee | null>(null)
   const [keyPolicyCapability, setKeyPolicyCapability] = useState<boolean | null>(null)
   const [keySourcePolicyCapability, setKeySourcePolicyCapability] = useState<boolean | null>(null)
+  const [trustedProxySource, setTrustedProxySource] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -18,11 +19,13 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
       if (active) {
         setKeyPolicyCapability(status.features?.key_access_policy === true)
         setKeySourcePolicyCapability(status.features?.key_source_policy === true)
+        setTrustedProxySource(status.features?.trusted_proxy_source === true)
       }
     }).catch(() => {
       if (active) {
         setKeyPolicyCapability(false)
         setKeySourcePolicyCapability(false)
+        setTrustedProxySource(false)
       }
     })
     return () => { active = false }
@@ -46,7 +49,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
       </table></div> : null}
     </div>
     {creating ? <CreateEmployee csrf={csrf} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void reload() }} /> : null}
-    {selected ? <KeysDialog employee={selected} csrf={csrf} keyPolicyCapability={keyPolicyCapability} sourcePolicyCapability={keySourcePolicyCapability} onClose={() => setSelected(null)} /> : null}
+    {selected ? <KeysDialog employee={selected} csrf={csrf} keyPolicyCapability={keyPolicyCapability} sourcePolicyCapability={keySourcePolicyCapability} trustedProxySource={trustedProxySource} onClose={() => setSelected(null)} /> : null}
     {policy ? <PolicyDialog employee={policy} csrf={csrf} onClose={() => setPolicy(null)} onSaved={() => { setPolicy(null); void reload() }} /> : null}
   </>
 }
@@ -113,7 +116,7 @@ function normalizedPolicy(draft: KeyPolicyInput, includeSource: boolean): KeyPol
   return normalized
 }
 
-function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapability, onClose }: { employee: Employee; csrf: string; keyPolicyCapability: boolean | null; sourcePolicyCapability: boolean | null; onClose: () => void }) {
+function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapability, trustedProxySource, onClose }: { employee: Employee; csrf: string; keyPolicyCapability: boolean | null; sourcePolicyCapability: boolean | null; trustedProxySource: boolean; onClose: () => void }) {
   const load = useCallback(() => api.keys(employee.id), [employee.id])
   const { data, loading, error, reload } = useResource(load)
   const loadModels = useCallback(() => keyPolicyCapability === true ? api.models() : Promise.resolve({ items: [] as ModelRoute[] }), [keyPolicyCapability])
@@ -131,11 +134,11 @@ function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapabilit
       .map((model) => model.id))].sort()
   }, [employee.model_mode, employee.models, modelData])
   if (created?.key) return <KeyReveal created={created} onClose={() => { setCreated(null); onClose() }} />
-  if (editing) return <EditKeyPolicyDialog employee={employee} keyItem={editing} csrf={csrf} sourcePolicyCapability={sourcePolicyCapability === true} modelIds={modelIds} modelsLoading={modelsLoading} modelsError={modelsError} onRetryModels={() => void reloadModels()} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void reload() }} />
+  if (editing) return <EditKeyPolicyDialog employee={employee} keyItem={editing} csrf={csrf} sourcePolicyCapability={sourcePolicyCapability === true} trustedProxySource={trustedProxySource} modelIds={modelIds} modelsLoading={modelsLoading} modelsError={modelsError} onRetryModels={() => void reloadModels()} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void reload() }} />
   return <Dialog title={`${employee.name} 的 Key`} description="Key 默认永久有效；可为不同设备或用途分别创建。" onClose={onClose} wide>
     {keyPolicyCapability === null ? <div className="key-policy-compat">正在确认服务是否支持独立 Key 权限…</div> : null}
     {keyPolicyCapability === false ? <div className="key-policy-compat"><strong>当前服务不支持独立 Key 策略</strong><span>新 Key 将沿用员工权限；此页面不会提供无效的策略保存操作。</span></div> : null}
-    {keyPolicyCapability === true ? <KeyPolicyEditor draft={draft} onChange={setDraft} sourcePolicyCapability={sourcePolicyCapability === true} modelIds={modelIds} loading={modelsLoading} error={modelsError} onRetry={() => void reloadModels()} context="创建 Key 的独立权限" /> : null}
+    {keyPolicyCapability === true ? <KeyPolicyEditor draft={draft} onChange={setDraft} sourcePolicyCapability={sourcePolicyCapability === true} trustedProxySource={trustedProxySource} modelIds={modelIds} loading={modelsLoading} error={modelsError} onRetry={() => void reloadModels()} context="创建 Key 的独立权限" /> : null}
     <div className="key-create"><Field label="Key 名称"><input value={name} onChange={(e) => setName(e.target.value)} /></Field><Button disabled={busy || !name.trim() || keyPolicyCapability === null || (keyPolicyCapability === true && sourcePolicyCapability === null)} onClick={async () => {
       setBusy(true); setActionError(null)
       try { setCreated(await api.createKey(employee.id, name.trim(), csrf, keyPolicyCapability === true ? normalizedPolicy(draft, sourcePolicyCapability === true) : undefined)); await reload() }
@@ -150,7 +153,7 @@ function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapabilit
   </Dialog>
 }
 
-function KeyPolicyEditor({ draft, onChange, sourcePolicyCapability, modelIds, loading, error, onRetry, context }: { draft: KeyPolicyInput; onChange: (next: KeyPolicyInput) => void; sourcePolicyCapability: boolean; modelIds: string[]; loading: boolean; error: string | null; onRetry: () => void; context: string }) {
+function KeyPolicyEditor({ draft, onChange, sourcePolicyCapability, trustedProxySource, modelIds, loading, error, onRetry, context }: { draft: KeyPolicyInput; onChange: (next: KeyPolicyInput) => void; sourcePolicyCapability: boolean; trustedProxySource: boolean; modelIds: string[]; loading: boolean; error: string | null; onRetry: () => void; context: string }) {
   const selectedProtocols = new Set(draft.protocols)
   const selectedModels = new Set(draft.models)
   const source = sourcePolicyFields(draft)
@@ -174,7 +177,7 @@ function KeyPolicyEditor({ draft, onChange, sourcePolicyCapability, modelIds, lo
         {source.source_mode === 'selected' ? <div className="key-policy-source-input"><label htmlFor={sourceInputId}>允许的 IP / CIDR，每行一项</label><textarea id={sourceInputId} aria-label="允许的 IP / CIDR" rows={5} value={source.source_cidrs.join('\n')} onChange={(event) => onChange({ ...draft, source_cidrs: event.target.value === '' ? [] : event.target.value.split(/\r?\n/) })} placeholder={'192.0.2.10\n10.20.0.0/16\n2001:db8::/48'} /><small>{source.source_cidrs.length} / 64 项</small></div> : null}
       </fieldset> : null}
     </div>
-    {sourcePolicyCapability ? <div className="key-policy-peer-note"><strong>按真实 socket peer 判断</strong><span>服务不会读取 Forwarded、X-Forwarded-For 或 X-Real-IP。使用反向代理时，此处通常匹配代理地址，而不是最终用户地址。</span></div> : <div className="key-policy-compat"><strong>当前服务不支持 Key 来源限制</strong><span>仍可配置协议和模型；保存时不会发送来源字段。</span></div>}
+    {sourcePolicyCapability ? <div className="key-policy-peer-note">{trustedProxySource ? <><strong>仅显式可信代理可转交来源</strong><span>只有真实 socket peer 命中管理员显式配置的可信代理 CIDR 时，服务才使用一条 X-Forwarded-For 链，并将从右向左的第一个不可信 hop 作为来源。Forwarded 和 X-Real-IP 仍会忽略；该传输能力不会授予 Key 访问权限。</span></> : <><strong>按真实 socket peer 判断</strong><span>服务不会读取 Forwarded、X-Forwarded-For 或 X-Real-IP。使用反向代理时，此处通常匹配代理地址，而不是最终用户地址。</span></>}</div> : <div className="key-policy-compat"><strong>当前服务不支持 Key 来源限制</strong><span>仍可配置协议和模型；保存时不会发送来源字段。</span></div>}
     {(draft.protocol_mode === 'selected' && draft.protocols.length === 0) || (draft.model_mode === 'selected' && draft.models.length === 0) || (sourcePolicyCapability && source?.source_mode === 'selected' && source.source_cidrs.length === 0) ? <div className="key-policy-deny" role="status">空的“仅指定”列表是显式 deny-all：该 Key 将不能使用对应入口、模型或来源。</div> : null}
   </section>
 }
@@ -187,7 +190,7 @@ function KeyPolicySummary({ policy, sourcePolicyCapability }: { policy: KeyAcces
   return <div className="key-policy-summary"><span>配置：{configuredProtocols} · {configuredModels} · {configuredSources}</span><small>当前生效：{policy.effective_protocols.length} 个协议 · {policy.effective_models.length} 个模型 · 修订 {policy.revision}</small></div>
 }
 
-function EditKeyPolicyDialog({ employee, keyItem, csrf, sourcePolicyCapability, modelIds, modelsLoading, modelsError, onRetryModels, onClose, onSaved }: { employee: Employee; keyItem: EmployeeKey; csrf: string; sourcePolicyCapability: boolean; modelIds: string[]; modelsLoading: boolean; modelsError: string | null; onRetryModels: () => void; onClose: () => void; onSaved: () => void }) {
+function EditKeyPolicyDialog({ employee, keyItem, csrf, sourcePolicyCapability, trustedProxySource, modelIds, modelsLoading, modelsError, onRetryModels, onClose, onSaved }: { employee: Employee; keyItem: EmployeeKey; csrf: string; sourcePolicyCapability: boolean; trustedProxySource: boolean; modelIds: string[]; modelsLoading: boolean; modelsError: string | null; onRetryModels: () => void; onClose: () => void; onSaved: () => void }) {
   const [loaded, setLoaded] = useState<KeyAccessPolicy | null>(null)
   const [draft, setDraft] = useState<KeyPolicyInput | null>(null)
   const [loading, setLoading] = useState(true)
@@ -210,7 +213,7 @@ function EditKeyPolicyDialog({ employee, keyItem, csrf, sourcePolicyCapability, 
   useEffect(() => { void load() }, [load])
   return <Dialog title={`${keyItem.name} 的独立权限`} description={`权限只会进一步限制 ${employee.name} 的员工权限，不能扩大权限。`} onClose={onClose} wide>
     <PageState loading={loading} error={error} onRetry={() => void load()} />
-    {draft ? <KeyPolicyEditor draft={draft} onChange={(next) => { setDraft(next); setConflict(null) }} sourcePolicyCapability={sourcePolicyCapability} modelIds={modelIds} loading={modelsLoading} error={modelsError} onRetry={onRetryModels} context="编辑 Key 独立权限" /> : null}
+    {draft ? <KeyPolicyEditor draft={draft} onChange={(next) => { setDraft(next); setConflict(null) }} sourcePolicyCapability={sourcePolicyCapability} trustedProxySource={trustedProxySource} modelIds={modelIds} loading={modelsLoading} error={modelsError} onRetry={onRetryModels} context="编辑 Key 独立权限" /> : null}
     {conflict ? <div className="key-policy-conflict" role="alert">{conflict}</div> : null}
     {loaded ? <KeyPolicySummary policy={loaded} sourcePolicyCapability={sourcePolicyCapability} /> : null}
     <div className="dialog__actions"><Button variant="secondary" onClick={onClose}>取消</Button><Button disabled={!draft || !loaded || saving || loading || Boolean(error)} onClick={async () => {
