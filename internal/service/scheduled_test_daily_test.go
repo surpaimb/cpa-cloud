@@ -150,6 +150,80 @@ func TestScheduledDailyClaimCatchUpClockRollbackAndRestart(t *testing.T) {
 	}
 }
 
+func TestScheduledDailyDisableCancelsAndArchiveClearsNextRun(t *testing.T) {
+	app, server, cookie, csrf := newModelAdmissionApp(t, false)
+	upstream := createModelAdmissionUpstream(t, server.URL, cookie, csrf, "Daily cancellation", "openai-compatible", "http://127.0.0.1:1", "synthetic-daily-cancellation")
+	now := scheduledInstant(t, "2026-11-05T12:00:00Z")
+	app.scheduledTests.now = func() time.Time { return now }
+	response := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/scheduled-tests", scheduledDailyBody(upstream.ID, true), cookie, csrf, server.URL)
+	var plan scheduledTestPlan
+	decodeResponse(t, response, &plan)
+	if _, err := app.store.db.Exec(`UPDATE scheduled_test_plans SET next_run_at=? WHERE id=?`, formatAccountPoolTime(now.Add(-time.Second)), plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := app.scheduledTests.claimDue(context.Background())
+	if err != nil || claim == nil {
+		t.Fatalf("daily claim=%+v err=%v", claim, err)
+	}
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	app.scheduledTests.execute = func(ctx context.Context, upstreamID, operationID string, revision int64, scope string) (upstreamTestOperationView, int, string, error) {
+		close(started)
+		<-ctx.Done()
+		code := "cancelled"
+		close(finished)
+		return upstreamTestOperationView{ResultCode: &code}, http.StatusOK, "", nil
+	}
+	app.scheduledTests.start(*claim)
+	<-started
+	disabled := requestJSON(t, http.MethodPatch, server.URL+"/admin/api/v1/scheduled-tests/"+plan.ID, `{"expected_revision":1,"enabled":false}`, cookie, csrf, server.URL)
+	if disabled.StatusCode != http.StatusOK {
+		t.Fatalf("disable daily status=%d body=%s", disabled.StatusCode, readBody(disabled))
+	}
+	disabled.Body.Close()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("daily disable did not cancel the active operation")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		var state, result string
+		if err := app.store.db.QueryRow(`SELECT state,result_code FROM scheduled_test_runs WHERE operation_id=?`, claim.OperationID).Scan(&state, &result); err == nil && state == "completed" && result == "cancelled" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cancelled daily operation was not finalized")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var adminID string
+	if err := app.store.db.QueryRow(`SELECT id FROM admins LIMIT 1`).Scan(&adminID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := app.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := archiveScheduledTestsForUpstreamTx(context.Background(), tx, upstream.ID, adminID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != plan.ID {
+		t.Fatalf("daily archive hook ids=%v", ids)
+	}
+	loaded, err := loadScheduledTestPlan(context.Background(), app.store.db, plan.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ScheduleMode != "daily_local" || loaded.Enabled || loaded.NextRunAt != nil || loaded.Revision != 3 {
+		t.Fatalf("archive changed daily plan unexpectedly: %+v", loaded)
+	}
+}
+
 func TestScheduledDailyLegacyMigrationPreservesPlanAndHistory(t *testing.T) {
 	app, server, cookie, csrf := newModelAdmissionApp(t, false)
 	upstream := createModelAdmissionUpstream(t, server.URL, cookie, csrf, "Legacy migration", "openai-compatible", "http://127.0.0.1:1", "synthetic-legacy")

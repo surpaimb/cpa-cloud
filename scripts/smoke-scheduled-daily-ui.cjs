@@ -104,7 +104,12 @@ async function freeOrigin() {
     assert.equal(await dialog.getByLabel('IANA 命名时区').inputValue(), 'America/New_York');
     assert.match(await dialog.innerText(), /已保存的下次运行（UTC）/);
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator('.dialog-backdrop').evaluate(async element => {
+      await Promise.all(element.getAnimations({ subtree: true }).map(animation => animation.finished));
+    });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, 'Mobile page overflow');
+    const mobileDialog = await dialog.boundingBox();
+    assert.ok(mobileDialog && mobileDialog.x >= 0 && mobileDialog.x + mobileDialog.width <= 390, 'Mobile dialog overflow');
     await page.screenshot({ path: path.join(output, 'scheduled-daily-mobile.png') });
     assert.deepEqual(pageErrors, []);
     assert.equal(providerCalls, 0, 'Default-off daily schedule touched the synthetic provider');

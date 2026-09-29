@@ -87,6 +87,8 @@
 6. 进程 smoke 必须先在默认关闭状态把任务置为已到期并证明零调用，再启用 CLI 开关证明只发生一次
    合成目录调用；浏览器覆盖桌面/窄屏 CRUD、历史、错误恢复及零非预期 console/page error。
 
+命名时区每日模式是后续独立增量，不把上面的 interval 300–86400 秒约束误用到每日行。增量阻断项见[每日契约](scheduled-tests-daily-timezone-contract.md)：旧 JSON/旧库原值、模式切换、捆绑时区版本、DST 缺时/重复分钟、单次 catch-up、CAS/取消/归档、默认关闭零出站，以及真实服务和 390px 浏览器验收。此增量不改本计划的原始 B 批验收结论。
+
 ## C：加密备份与恢复阻断项
 
 1. `create` 不调用 `service.Open`，不触发迁移、恢复或 worker。它从 live WAL 数据库取得 SQLite 一致快照，
