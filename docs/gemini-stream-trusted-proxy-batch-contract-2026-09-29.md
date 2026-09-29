@@ -103,7 +103,7 @@ All stream state uses the repository's existing converted-stream limits: bounded
 
 ### Service integration and acceptance
 
-The existing `protocolRuntime.executeStream` remains the single converted SSE bridge. It observes raw JSON before `FeedFrame`, applies downstream backpressure, buffers the terminal batch, drains to clean EOF within the bounded timeout, and writes the terminal only after the accounting success settlement succeeds. The handler must call it for the two new cross-protocol routes; it must not route converted streaming through JSON conversion or native forwarding.
+The existing `protocolRuntime.executeStream` remains the single converted SSE bridge. It observes raw JSON before `FeedFrame`, applies downstream backpressure, buffers the terminal batch, drains to clean EOF within the bounded timeout, and only then writes and flushes the terminal. Successful accounting settlement happens only after that terminal write and flush succeed. The handler must call the bridge for the two new cross-protocol routes; it must not route converted streaming through JSON conversion or native forwarding.
 
 Acceptance tests cover, in both directions:
 
@@ -203,4 +203,3 @@ The integrator is the sole owner of final branches, conflict resolution, combine
 Each pull request must run `gofmt`, focused package tests, `go test ./...`, `go vet ./...`, `npm test`, `npm run build`, `git diff --check`, documentation link checks, and the repository CI equivalent. The untracked research note `docs/research/membership-next-step.md` is out of scope and must retain SHA-256 `650B116157AC4E5328EA79AC4DDEEDE71159F786132B5D87B531B0AB57F3CCC9`.
 
 After the relevant exact PR head is fixed, workflow G verifies the built binary in a real temporary process using loopback ephemeral ports only. G covers converted Gemini/Responses text and function SSE, clean EOF/failure/cancellation/no-replay/accounting boundaries, and trusted-proxy direct/trusted/malformed/tightening/restart cases. G also runs the smallest actually representable CLI path for experimental Codex credential routing when feasible and labels it precisely as experimental CLI coverage, never as “real membership”. Any unavailable external credential or provider path is reported as untested, not inferred.
-
