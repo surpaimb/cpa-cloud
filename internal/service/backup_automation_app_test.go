@@ -60,6 +60,9 @@ func TestSystemStatusReportsBackupCapabilities(t *testing.T) {
 	if response.Features["managed_tools"] || response.Features["responses_stateful_resources"] || response.Features["responses_background_tasks"] {
 		t.Fatalf("unexpected default Responses features: %+v", response.Features)
 	}
+	if response.Features["trusted_proxy_source"] {
+		t.Fatalf("trusted proxy source unexpectedly enabled by default: %+v", response.Features)
+	}
 }
 
 func TestPrepareBackupRehearsalConfigDisablesBackgroundAndNetworkFeatures(t *testing.T) {
