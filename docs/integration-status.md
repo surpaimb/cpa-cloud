@@ -1,5 +1,11 @@
 # 集成状态
 
+## 2026-09-25：Messages↔Responses SSE 源码增量
+
+- 在 `785f6497cc8873a8223436f1d49bdf9f7c05f485` 基线上，最新源码已接入 Messages↔Responses 的严格文本/function SSE 子集。completed/incomplete/failed 分别结算为成功/中断/失败；原始上游 usage 与实际 wire 协议进入共享账本。
+- Responses 上游较早提供完整 usage 时，Messages 客户端可在生成期间收到增量；usage 只在终态可知时会在既有上限内有界暂存并于物理 EOF 后整体释放。从创建到终态始终缺少完整 usage 时，会在输出任何目标语义事件前失败关闭；若较早 usage 已知而终态 usage 缺失、为 null 或冲突，则已有流失败关闭且不输出成功 terminal。取消传播到上游且不重放。
+- Gemini 跨协议 SSE、thinking、cache-control、媒体、引用、托管工具、有状态/后台跨协议转换仍拒绝；合成进程验收不等于真实 Anthropic SDK/CLI 或供应商账号兼容验收。
+
 ## 2026-09-25：主线基线与下一批边界
 
 - `main` 基线 `481f8b788aba2b2f159808b2ddabe8f09eaa526a` 已包含 PR #4 的恢复材料、双版本恢复路径与同一 Windows 用户下不同 store/新目录的可移植合成恢复，PR #5 的管理员余额/日月结算/CSV 与计费网页，以及 PR #6 的 Chat↔Responses、Messages↔Responses、Gemini↔Responses 六个非流式显式 wire 方向。它们不代表跨 profile 或真实第二环境灾备、员工自助门户、生产支付或真实供应商兼容性已经验收。

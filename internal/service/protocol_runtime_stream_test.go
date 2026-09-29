@@ -89,7 +89,7 @@ func TestProtocolRuntimeStreamDispatchesOnceObservesBeforeWritingAndDrainsTermin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doer.calls.Load() != 1 || !result.Completed || !result.DownstreamCommitted || !result.SemanticCommitted || terminalWrites != 1 {
+	if doer.calls.Load() != 1 || !result.Completed || result.TerminalOutcome != protocolconv.StreamTerminalCompleted || !result.DownstreamCommitted || !result.SemanticCommitted || terminalWrites != 1 {
 		t.Fatalf("unexpected result: calls=%d result=%#v terminal=%d", doer.calls.Load(), result, terminalWrites)
 	}
 	if len(order) == 0 || order[0] != "observe" {
@@ -119,8 +119,59 @@ func TestProtocolRuntimeStreamResponsesWireConvertsFunctions(t *testing.T) {
 		}
 		return protocolStreamWriteResult{DownstreamCommitted: true, SemanticCommitted: event.Semantic}, nil
 	})
-	if err != nil || !result.Completed || observed != 6 || semantic != 2 || terminal != 1 {
+	if err != nil || !result.Completed || result.TerminalOutcome != protocolconv.StreamTerminalCompleted || observed != 6 || semantic != 2 || terminal != 1 {
 		t.Fatalf("result=%#v observed=%d semantic=%d terminal=%d err=%v", result, observed, semantic, terminal, err)
+	}
+}
+
+func TestProtocolRuntimeStreamPropagatesMessagesNonSuccessOutcomes(t *testing.T) {
+	runtime := testProtocolStreamRuntime(protocolconv.PlanResponsesToMessages, protocolconv.ProtocolOpenAIResponses, protocolconv.ProtocolAnthropicMessages)
+	request, _ := http.NewRequest(http.MethodPost, "https://synthetic.invalid/v1/messages", nil)
+	tests := []struct {
+		name    string
+		body    string
+		outcome protocolconv.StreamTerminalOutcome
+	}{
+		{
+			name: "incomplete",
+			body: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n" +
+				"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"cut\"}}\n\n" +
+				"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n" +
+				"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+			outcome: protocolconv.StreamTerminalIncomplete,
+		},
+		{
+			name:    "failed",
+			body:    "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"private-secret\"}}\n\n",
+			outcome: protocolconv.StreamTerminalFailed,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			doer := &protocolStreamDoer{response: streamResponse(http.StatusOK, "text/event-stream", test.body)}
+			var terminal []protocolconv.SSEEvent
+			observed := 0
+			result, err := runtime.executeStream(context.Background(), doer, request, testProtocolStreamLimits(), func(protocol protocolconv.Protocol, raw []byte) error {
+				if protocol != protocolconv.ProtocolAnthropicMessages || len(raw) == 0 {
+					t.Fatalf("unexpected raw observation: protocol=%q raw=%q", protocol, raw)
+				}
+				observed++
+				return nil
+			}, func(event protocolconv.SSEEvent) (protocolStreamWriteResult, error) {
+				if event.Terminal {
+					terminal = append(terminal, event)
+				}
+				return protocolStreamWriteResult{DownstreamCommitted: true, SemanticCommitted: event.Semantic}, nil
+			})
+			if err != nil || result.Completed || result.TerminalOutcome != test.outcome || len(terminal) != 1 || terminal[0].TerminalOutcome != test.outcome || observed == 0 {
+				t.Fatalf("result=%#v terminal=%#v observed=%d err=%v", result, terminal, observed, err)
+			}
+			if bytes.Contains(terminal[0].Data, []byte("private-secret")) {
+				t.Fatalf("terminal leaked upstream error: %s", terminal[0].Data)
+			}
+		})
 	}
 }
 
@@ -181,7 +232,7 @@ func TestProtocolRuntimeStreamPreservesPartialCommitOnWriteErrors(t *testing.T) 
 				}
 				return protocolStreamWriteResult{DownstreamCommitted: true, SemanticCommitted: event.Semantic}, nil
 			})
-			if !errors.Is(err, errProtocolStreamDownstream) || !result.DownstreamCommitted || !result.SemanticCommitted || result.Completed {
+			if !errors.Is(err, errProtocolStreamDownstream) || !result.DownstreamCommitted || !result.SemanticCommitted || result.Completed || terminalOnly && result.TerminalOutcome != protocolconv.StreamTerminalCompleted {
 				t.Fatalf("result=%#v err=%v", result, err)
 			}
 		})

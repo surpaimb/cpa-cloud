@@ -63,7 +63,7 @@ Claude、Gemini 会员的具体接入条件和官方来源见 [会员接入阻�
 | PROTO-04 | `POST /v1/messages`、count_tokens、Anthropic 原生流式与工具回合 | API Key 原生子集已集成并通过隔离进程验收；会员接入及真实供应商未验证 | MEM-03, KEY-01 | M1 | 官方协议字段矩阵；工具、thinking、缓存用量、错误、取消逐项测试 |
 | PROTO-05 | Gemini `v1beta` models/generateContent/streamGenerateContent、工具与多模态 | API Key 原生子集、分页发现及有界 SSE 已集成并通过隔离进程验收；会员接入及真实供应商未验证 | MEM-04, KEY-01 | M1 | REST/SSE、function call/response、图片输入、用量和安全错误 |
 | PROTO-06 | WebSocket/Realtime 与会话侧带控制 | 待实现 | ACCT-04, LIMIT-01 | M4 | 握手鉴权、双向帧、断线取消、会话计费、并发释放、秘密头隔离 |
-| PROTO-07 | 协议转换与能力协商，不可表达字段明确拒绝 | 部分实现：显式 wire 已接通 Chat↔Responses、Messages↔Responses、Gemini↔Responses 六方向非流式；Chat↔Responses 纯 SSE 状态机存在但真实执行 bridge 正按 2026-09-25 契约接线。其他跨协议 SSE、媒体和托管工具仍拒绝 | PROTO-02..06 | M4 | 黄金契约、一次 durable dispatch、有界拆包、原始 usage、终态/取消/背压与无静默丢失 |
+| PROTO-07 | 协议转换与能力协商，不可表达字段明确拒绝 | 部分实现：显式 wire 已接通六方向非流式，并接通 Chat↔Responses 与 Messages↔Responses 的严格文本/function SSE；Gemini 跨协议 SSE、媒体和托管工具仍拒绝 | PROTO-02..06 | M4 | 黄金契约、一次 durable dispatch、有界拆包、原始 usage、终态/取消/背压与无静默丢失 |
 | PROTO-08 | Embeddings 标准接口、模型授权、向量响应与计量 | 待实现；本次从参考网关补列 | PROTO-01, BILL-01 | M2-M4 | 输入类型/批量上限、维度与编码、模型权限、取消、用量未知及脱敏 |
 | PROTO-09 | 可配置协议兼容与错误处理规则 | 部分实现：固定字段拒绝和脱敏错误已存在，管理规则、版本及运行时变更待实现 | PROTO-02..05, AUDIT-01 | M2-M4 | 配置版本一致、错误映射稳定；不记录正文、不泄露上游秘密或放宽不安全重试 |
 | MEDIA-01 | 图片生成/编辑、异步任务、批量任务与对象内容 | 待实现 | PROTO-01, STORE-01 | M4 | 上传大小/类型、轮询/取消、授权下载、生命周期与费用 |

@@ -44,7 +44,7 @@ func TestChatToResponsesStreamTextToolUsageAndTerminal(t *testing.T) {
 		}
 	}
 	last := terminal[len(terminal)-1]
-	if !last.Terminal || last.Name != "response.completed" {
+	if !last.Terminal || last.Name != "response.completed" || last.TerminalOutcome != StreamTerminalCompleted {
 		t.Fatalf("unexpected terminal: %#v", last)
 	}
 	var envelope struct {
@@ -97,7 +97,7 @@ func TestResponsesToChatStreamTextToolUsageAndTerminal(t *testing.T) {
 		}
 		output = append(output, converted...)
 	}
-	if len(output) != 5 || string(output[len(output)-1].Data) != "[DONE]" || !output[len(output)-1].Terminal {
+	if len(output) != 5 || string(output[len(output)-1].Data) != "[DONE]" || !output[len(output)-1].Terminal || output[len(output)-1].TerminalOutcome != StreamTerminalCompleted {
 		t.Fatalf("unexpected output events: %#v", output)
 	}
 	var final map[string]any

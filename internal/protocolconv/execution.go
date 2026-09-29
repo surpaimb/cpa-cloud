@@ -67,7 +67,8 @@ func PrepareRequest(capability RouteCapability, model string, raw []byte) (Prepa
 }
 
 // PrepareCrossProtocolStreamRequest prepares the exact upstream request body
-// for the independently reviewed Chat <-> Responses streaming bridge. The
+// for the independently reviewed Chat/Responses and Messages/Responses
+// streaming bridges. The
 // production JSON runtime deliberately does not call this function: callers
 // must provide the bounded stream executor and durable dispatch barrier before
 // opting into this path.
@@ -84,6 +85,10 @@ func PrepareCrossProtocolStreamRequest(capability RouteCapability, model string,
 		plan.Kind = PlanChatToResponses
 	case capability.ClientProtocol == ProtocolOpenAIResponses && capability.UpstreamProtocol == ProtocolOpenAIChat:
 		plan.Kind = PlanResponsesToChat
+	case capability.ClientProtocol == ProtocolAnthropicMessages && capability.UpstreamProtocol == ProtocolOpenAIResponses:
+		plan.Kind = PlanMessagesToResponses
+	case capability.ClientProtocol == ProtocolOpenAIResponses && capability.UpstreamProtocol == ProtocolAnthropicMessages:
+		plan.Kind = PlanResponsesToMessages
 	default:
 		return PreparedRequest{}, &UnsupportedRouteError{
 			ClientProtocol: capability.ClientProtocol, UpstreamProtocol: capability.UpstreamProtocol,
@@ -105,13 +110,19 @@ func PrepareCrossProtocolStreamRequest(capability RouteCapability, model string,
 	switch plan.Kind {
 	case PlanChatToResponses:
 		prepared.Body, err = ChatRequestToResponses(conversionInput)
+		prepared.Features = requestFeatures(conversionInput)
 	case PlanResponsesToChat:
 		prepared.Body, err = ResponsesRequestToChat(conversionInput)
+		prepared.Features = requestFeatures(conversionInput)
+	case PlanMessagesToResponses:
+		prepared.Body, prepared.Features, err = messagesRequestToResponses(conversionInput)
+	case PlanResponsesToMessages:
+		prepared.Body, prepared.Features, err = responsesRequestToMessages(conversionInput)
 	}
 	if err != nil {
 		return PreparedRequest{}, err
 	}
-	prepared.Features = requestFeatures(conversionInput) | Features(FeatureUsage, FeatureFinishReason)
+	prepared.Features |= Features(FeatureUsage, FeatureFinishReason)
 	if err := requireFeatures(capability, prepared.Features); err != nil {
 		return PreparedRequest{}, err
 	}

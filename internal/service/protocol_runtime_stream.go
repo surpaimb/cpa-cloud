@@ -33,6 +33,7 @@ type protocolStreamResult struct {
 	DownstreamCommitted bool
 	SemanticCommitted   bool
 	Completed           bool
+	TerminalOutcome     protocolconv.StreamTerminalOutcome
 }
 
 var errProtocolStreamDownstream = errors.New("protocol stream downstream write failed")
@@ -91,6 +92,7 @@ func (p *protocolRuntime) executeStream(
 		MaxLineBytes: limits.MaxLineBytes, MaxEventBytes: limits.MaxEventBytes, MaxStreamBytes: limits.MaxStreamBytes,
 	})
 	var terminalBatch []protocolconv.SSEEvent
+	var terminalOutcome protocolconv.StreamTerminalOutcome
 	var drainDeadline time.Time
 	for {
 		frame, readErr := nextProtocolStreamFrame(streamCtx, decoder, response.Body, drainDeadline)
@@ -107,6 +109,10 @@ func (p *protocolRuntime) executeStream(
 				if err := converter.EOF(); err != nil {
 					return result, err
 				}
+				if len(terminalBatch) == 0 {
+					return result, fmt.Errorf("%w: upstream stream ended without a terminal event", protocolconv.ErrInterrupted)
+				}
+				result.TerminalOutcome = terminalOutcome
 				for _, event := range terminalBatch {
 					if err := writeProtocolStreamEvent(&result, writeClient, event); err != nil {
 						cancel()
@@ -114,10 +120,7 @@ func (p *protocolRuntime) executeStream(
 						return result, err
 					}
 				}
-				if len(terminalBatch) == 0 {
-					return result, fmt.Errorf("%w: upstream stream ended without a terminal event", protocolconv.ErrInterrupted)
-				}
-				result.Completed = true
+				result.Completed = terminalOutcome == protocolconv.StreamTerminalCompleted
 				return result, nil
 			}
 			if errors.Is(readErr, io.ErrUnexpectedEOF) {
@@ -149,6 +152,14 @@ func (p *protocolRuntime) executeStream(
 		}
 		terminalIndex := -1
 		for index, event := range events {
+			if event.Terminal != (event.TerminalOutcome != protocolconv.StreamTerminalNone) {
+				return result, fmt.Errorf("%w: inconsistent converted terminal outcome", protocolconv.ErrInvalidUpstream)
+			}
+			if event.Terminal && event.TerminalOutcome != protocolconv.StreamTerminalCompleted &&
+				event.TerminalOutcome != protocolconv.StreamTerminalIncomplete &&
+				event.TerminalOutcome != protocolconv.StreamTerminalFailed {
+				return result, fmt.Errorf("%w: unknown converted terminal outcome", protocolconv.ErrInvalidUpstream)
+			}
 			if event.Terminal {
 				if terminalIndex >= 0 || index != len(events)-1 {
 					return result, fmt.Errorf("%w: invalid converted terminal batch", protocolconv.ErrInvalidUpstream)
@@ -161,6 +172,7 @@ func (p *protocolRuntime) executeStream(
 				return result, fmt.Errorf("%w: duplicate converted terminal batch", protocolconv.ErrInvalidUpstream)
 			}
 			terminalBatch = append(terminalBatch, events...)
+			terminalOutcome = events[terminalIndex].TerminalOutcome
 			drainDeadline = time.Now().Add(limits.TerminalDrainTimeout)
 			continue
 		}
