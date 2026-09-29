@@ -117,7 +117,7 @@ Key policy GET/PUT、创建幂等指纹、revision/CAS、审计和网页编辑�
 
 parent 使用公共模型；attempt 固化实际账号、`ProviderOpenAICompatible`、实际 upstream model 与 `ProtocolOpenAIEmbeddings`。raw usage 在任何客户端改写前从已验证的实际 wire 响应读取：`prompt_tokens` 记为 input token，`total_tokens` 仅用于一致性；output/cache/reasoning 未提供时保持未知，不伪造 0。
 
-价格在最终派发事务中按实际账号与 upstream model 读取不可变快照，Embeddings 只使用 input rate。没有价格时成本保持未知；不能记为 0。价格变化、删除或币种变化按既有 snapshot/CAS 失败关闭或锁定原快照。
+价格在最终派发事务中按实际账号与 upstream model 读取不可变快照，Embeddings 只使用 input rate。output/cache/reasoning 没有上游事实时继续保存为 NULL，但不阻止已知 input 成本；例如 input=2、每百万 input token 价格为 3,000,000 micro 时原始成本为 6 micro。没有价格或 input 未知时成本保持未知；不能记为 0。价格变化、删除或币种变化按既有 snapshot/CAS 失败关闭或锁定原快照。四种生成协议仍按其各自规则要求完整 bucket，不能因 Embeddings 的 input-only 规则而放宽计算。
 
 本段没有受信 tokenizer，也没有证明 input token 上界。任何命中 strict token 或 strict cost 预算的 Embeddings 请求必须在 durable dispatch 前返回 `budget_bound_unavailable`，并断言 0 attempt、0 网络；不能根据请求字节、字符数、官方营销 token 上限或上游事后 usage 预留。无 strict 命中时可执行，完成后用 raw usage/价格结算；shadow/未知事实保持未知。
 
@@ -190,7 +190,7 @@ func MarshalResponse(Response, publicModel string) ([]byte, error)
 - generation/embedding 模型和目录隔离，四个旧入口回归，旧 Key 对新模型零可见/零派发；
 - Key 协议/模型/IP/可信代理/账号组收紧、revision/CAS/ABA，route/pool/account/proxy/price/budget ABA；所有 durable 前拒绝断言 0 attempt、0 上游；
 - 多账号优先级/权重/容量、排队取消、预检换号仅限未派发、网络后绝不重放；
-- raw usage、实际 wire/account/model 价格、未知价格、strict budget 无上界拒绝、并发结算、重启恢复；
+- raw usage、实际 wire/account/model 价格、input-only 已知成本且未报告 bucket 仍为 NULL、未知价格、strict budget 无上界拒绝、并发结算、重启恢复；
 - 上游 4xx/5xx、非 JSON、压缩、超限、取消、TLS/SSRF/DNS/redirect 和日志/DB/WAL 脱敏扫描；
 - 真实临时进程仅使用合成上游和动态非 8787 回环端口；浏览器覆盖桌面与 390px；不访问真实 provider；
 - 最终精确 HEAD 的普通 Go、service 与有状态包 race、vet、两个 Go CLI build、Web typecheck/test/build、既有七项 smoke 与独立固定二进制 runner。

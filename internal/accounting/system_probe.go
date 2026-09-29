@@ -333,7 +333,7 @@ func (l *SystemProbeLedger) FinishTx(ctx context.Context, tx *sql.Tx, input Syst
 	if stored.MayHaveSentAt == nil && (input.Status == SystemProbeSucceeded || !sameUsage(input.Usage, Usage{})) {
 		return SystemProbeAttempt{}, ErrInvalid
 	}
-	cost, err := calculateCost(input.Usage, stored.Price)
+	cost, err := calculateCost("", input.Usage, stored.Price)
 	if err != nil {
 		return SystemProbeAttempt{}, err
 	}
@@ -861,7 +861,7 @@ func validStoredSystemProbe(attempt SystemProbeAttempt) bool {
 	if !validSystemProbeFinish(finish) {
 		return false
 	}
-	cost, err := calculateCost(attempt.Usage, attempt.Price)
+	cost, err := calculateCost("", attempt.Usage, attempt.Price)
 	return err == nil && sameNullableIntValue(attempt.CostMicro, cost)
 }
 

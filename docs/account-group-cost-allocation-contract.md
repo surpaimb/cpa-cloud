@@ -156,6 +156,13 @@ UPDATE/DELETE 的触发器；同一 attempt 不能同时拥有历史标记和倍
 缺失覆盖或任意 SQL 失败都使启动失败并完整回滚；修复冲突后可重试。正常重启不得重建版本
 或改写历史。旧 attempt 不回填猜测的组或成本，相关新字段在查询中保持 NULL。
 
+为保留 Embeddings 的 input-only 原始成本，旧版 `accounting_attempts` 与
+`accounting_usage_events` 中“只有四类 token 全部已知才允许非 NULL 成本”的约束必须在启动时
+升级。升级先按旧约束严格核验源表，在固定连接的原子事务中保留全部行、索引和引用关系，执行
+全库 `foreign_key_check`，并在提交或回滚后恢复外键检查；保留对象名冲突、坏 schema、孤儿或
+恢复外键失败都拒绝启动。新约束只允许“有价格且 input token 已知”的非 NULL 成本，具体哪些
+bucket 为协议必需仍由协议感知的账本计算和回归测试强制；不能借此把生成协议缺失 bucket 计为 0。
+
 新建账号组时，组、默认倍率版本、current 指针和审计同事务提交。任何一步失败都不留下可见
 账号组。回滚应用版本时这些附加表可由旧程序忽略；在未明确授权的迁移回退方案前不得删除
 表或重写历史。
@@ -191,7 +198,9 @@ public model + selected upstream
 attempt 终结仍先以冻结 `PriceSnapshot` 和原始 usage 生成原始估算成本。随后在同一个终结事务
 读取 attempt 倍率快照并生成调整后金额；可靠 base usage event 与其 allocation event 原子提交。
 
-- 无价格、任一必需 usage 未知、系统中断或其他原始成本未知时，调整后成本也为 NULL。
+- 无价格、任一协议必需 usage 未知、系统中断或其他原始成本未知时，调整后成本也为 NULL。四种
+  生成协议仍要求四类 token bucket 全部已知；Embeddings 按其既有契约只要求 input token，
+  output/cache/reasoning 保持 NULL 也能按 input rate 形成已知原始成本。
 - 原始成本为已知 0 时，调整后成本必须为已知 0。
 - 完整 App 启动成功后把 allocation schema 视为必需组合；运行中全部或部分表消失、非历史
   attempt 缺少快照、可靠原始事件缺少 allocation event，或原始更正缺少 allocation correction
@@ -247,9 +256,11 @@ durable dispatch 和一个 attempt，不能重复分摊。
    冲突、审计脱敏和安全整数边界；
 4. 候选后渠道改组、倍率更新、Key 组权限收紧、池切换和派发前 failover 的最终事务重核；
 5. 四生成协议与 Embeddings 的 known/unknown/known-zero 成本、预算启停两条 dispatch 路径、
-   price version 与 multiplier version 各自冻结、混合币种不合并；
+   price version 与 multiplier version 各自冻结、混合币种不合并；至少包含 input=2、input rate
+   3 micro/token、1.5x 时原始 6/调整后 9，且 output/cache 仍为 NULL 的 Embeddings 回归；
 6. 流式取消、持久化失败、运行时全部表丢失、非历史快照丢失、SQLite 整数/求和溢出、并发
-   终结、重启 interrupted 和更正重放，均无部分提交或已派发重放；
+   终结、重启 interrupted 和更正重放，均无部分提交或已派发重放；重启必须在同一事务补
+   `system_terminal` base event 与 NULL allocation event，任一写入失败时 attempt 仍保持 pending；
 7. 目录、count_tokens、测试/探针/恢复探测和派发前取消不产生 allocation attempt；
 8. 管理 API、日志、数据库、WAL、导出和浏览器响应不含 Key、Authorization、Cookie、上游
    token、prompt、模型响应或任意 SQL 错误。

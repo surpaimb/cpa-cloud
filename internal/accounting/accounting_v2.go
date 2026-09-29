@@ -195,66 +195,7 @@ type AccountingV2Report struct {
 	ReasoningTokens                   KnownValueSummary
 }
 
-func (l *Ledger) MigrateV2(ctx context.Context) error {
-	if l == nil || l.db == nil || ctx == nil {
-		return ErrInvalid
-	}
-	tx, err := l.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err := l.MigrateV2Tx(ctx, tx); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-// MigrateV2Tx is the accounting component's caller-owned migration hook. The
-// integration layer owns ordering and the surrounding commit.
-func (l *Ledger) MigrateV2Tx(ctx context.Context, tx *sql.Tx) error {
-	if l == nil || l.db == nil || ctx == nil || tx == nil {
-		return ErrInvalid
-	}
-	var contextDDL sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='accounting_attempt_contexts'`).Scan(&contextDDL); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if contextDDL.Valid && !strings.Contains(strings.ToLower(contextDDL.String), "openai-embeddings") {
-		for _, statement := range []string{
-			`ALTER TABLE accounting_attempt_contexts RENAME TO accounting_attempt_contexts_pre_embeddings`,
-			`CREATE TABLE accounting_attempt_contexts (
-				attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id),
-				protocol TEXT NOT NULL CHECK(protocol IN ('openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
-				effective_model TEXT NOT NULL,
-				evidence TEXT NOT NULL CHECK(evidence IN ('provider_response','provider_stream','background_result','system_terminal')),
-				response_id TEXT, task_id TEXT, tool_run_id TEXT
-			)`,
-			`INSERT INTO accounting_attempt_contexts(attempt_id,protocol,effective_model,evidence,response_id,task_id,tool_run_id)
-			 SELECT attempt_id,protocol,effective_model,evidence,response_id,task_id,tool_run_id FROM accounting_attempt_contexts_pre_embeddings`,
-			`DROP TABLE accounting_attempt_contexts_pre_embeddings`,
-		} {
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return err
-			}
-		}
-	}
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS accounting_attempt_contexts (
-			attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id),
-			protocol TEXT NOT NULL CHECK(protocol IN ('openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
-			effective_model TEXT NOT NULL,
-			evidence TEXT NOT NULL CHECK(evidence IN ('provider_response','provider_stream','background_result','system_terminal')),
-			response_id TEXT,
-			task_id TEXT,
-			tool_run_id TEXT
-		)`,
-		`CREATE TABLE IF NOT EXISTS accounting_attempt_dispatches (
-			attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id),
-			operation_id TEXT NOT NULL UNIQUE,
-			dispatched_at TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS accounting_usage_events (
+const accountingUsageEventsColumnsDDL = `(
 			id TEXT PRIMARY KEY,
 			attempt_id TEXT NOT NULL UNIQUE REFERENCES accounting_attempts(id),
 			request_id TEXT NOT NULL REFERENCES accounting_requests(id),
@@ -275,8 +216,59 @@ func (l *Ledger) MigrateV2Tx(ctx context.Context, tx *sql.Tx) error {
 			estimated_cost_micro INTEGER CHECK(estimated_cost_micro IS NULL OR estimated_cost_micro>=0),
 			CHECK(reasoning_tokens IS NULL OR output_tokens IS NULL OR reasoning_tokens<=output_tokens),
 			CHECK((price_version IS NULL AND currency IS NULL AND estimated_cost_micro IS NULL) OR (price_version IS NOT NULL AND currency IS NOT NULL)),
-			CHECK(estimated_cost_micro IS NULL OR (input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL AND cache_write_tokens IS NOT NULL))
+			CHECK(estimated_cost_micro IS NULL OR input_tokens IS NOT NULL)
+		)`
+
+const (
+	accountingUsageEventLegacyCostCheck  = "check(estimated_cost_microisnullor(input_tokensisnotnullandoutput_tokensisnotnullandcache_read_tokensisnotnullandcache_write_tokensisnotnull))"
+	accountingUsageEventCurrentCostCheck = "check(estimated_cost_microisnullorinput_tokensisnotnull)"
+)
+
+func (l *Ledger) MigrateV2(ctx context.Context) error {
+	if l == nil || l.db == nil || ctx == nil {
+		return ErrInvalid
+	}
+	if err := l.migrateAccountingUsageEventCostConstraint(ctx); err != nil {
+		return err
+	}
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := l.MigrateV2Tx(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// MigrateV2Tx is the accounting component's caller-owned migration hook. The
+// integration layer owns ordering and the surrounding commit. Legacy usage
+// event cost constraints are rebuilt by MigrateV2 first because SQLite's
+// foreign-key mode is connection-local and cannot be changed inside this tx.
+func (l *Ledger) MigrateV2Tx(ctx context.Context, tx *sql.Tx) error {
+	if l == nil || l.db == nil || ctx == nil || tx == nil {
+		return ErrInvalid
+	}
+	if err := migrateAccountingAttemptContextProtocolTx(ctx, tx); err != nil {
+		return err
+	}
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS accounting_attempt_contexts (
+			attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id),
+			protocol TEXT NOT NULL CHECK(protocol IN ('openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
+			effective_model TEXT NOT NULL,
+			evidence TEXT NOT NULL CHECK(evidence IN ('provider_response','provider_stream','background_result','system_terminal')),
+			response_id TEXT,
+			task_id TEXT,
+			tool_run_id TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS accounting_attempt_dispatches (
+			attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id),
+			operation_id TEXT NOT NULL UNIQUE,
+			dispatched_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS accounting_usage_events ` + accountingUsageEventsColumnsDDL,
 		`CREATE TABLE IF NOT EXISTS accounting_usage_corrections (
 			id TEXT PRIMARY KEY,
 			attempt_id TEXT NOT NULL REFERENCES accounting_attempts(id),
@@ -319,6 +311,36 @@ func (l *Ledger) MigrateV2Tx(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	return validateAccountingV2Schema(ctx, tx)
+}
+
+func migrateAccountingAttemptContextProtocolTx(ctx context.Context, tx *sql.Tx) error {
+	var contextDDL sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='accounting_attempt_contexts'`).Scan(&contextDDL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if !contextDDL.Valid || strings.Contains(strings.ToLower(contextDDL.String), "openai-embeddings") {
+		return nil
+	}
+	for _, statement := range []string{
+		`ALTER TABLE accounting_attempt_contexts RENAME TO accounting_attempt_contexts_pre_embeddings`,
+		`CREATE TABLE accounting_attempt_contexts (
+			attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id),
+			protocol TEXT NOT NULL CHECK(protocol IN ('openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
+			effective_model TEXT NOT NULL,
+			evidence TEXT NOT NULL CHECK(evidence IN ('provider_response','provider_stream','background_result','system_terminal')),
+			response_id TEXT, task_id TEXT, tool_run_id TEXT
+		)`,
+		`INSERT INTO accounting_attempt_contexts(attempt_id,protocol,effective_model,evidence,response_id,task_id,tool_run_id)
+		 SELECT attempt_id,protocol,effective_model,evidence,response_id,task_id,tool_run_id FROM accounting_attempt_contexts_pre_embeddings`,
+		`DROP TABLE accounting_attempt_contexts_pre_embeddings`,
+		`CREATE TRIGGER accounting_attempt_contexts_no_update BEFORE UPDATE ON accounting_attempt_contexts BEGIN SELECT RAISE(ABORT,'accounting v2 facts are immutable'); END`,
+		`CREATE TRIGGER accounting_attempt_contexts_no_delete BEFORE DELETE ON accounting_attempt_contexts BEGIN SELECT RAISE(ABORT,'accounting v2 facts are immutable'); END`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func hasAttemptContext(input AttemptStart) bool {
@@ -614,11 +636,11 @@ func (l *Ledger) AppendCorrectionTx(ctx context.Context, tx *sql.Tx, correction 
 	if err != nil {
 		return err
 	}
-	oldCost, err := calculateCost(current.usage(), price)
+	oldCost, err := calculateCost(base.Protocol, current.usage(), price)
 	if err != nil {
 		return err
 	}
-	newCost, err := calculateCost(updated.usage(), price)
+	newCost, err := calculateCost(base.Protocol, updated.usage(), price)
 	if err != nil {
 		return err
 	}
@@ -796,7 +818,11 @@ func (l *Ledger) accountingV2ExportPage(ctx context.Context, filters AccountingV
 				raw.item.CorrectionCount = int64(len(corrections[raw.item.AttemptID]))
 				raw.item.InputTokens, raw.item.OutputTokens = current.input, current.output
 				raw.item.CacheReadTokens, raw.item.CacheWriteTokens, raw.item.ReasoningTokens = current.cacheRead, current.cacheWrite, current.reasoning
-				raw.item.EstimatedCostMicro, err = calculateCost(current.usage(), raw.price)
+				protocol := UsageProtocol("")
+				if raw.item.Protocol != nil {
+					protocol = *raw.item.Protocol
+				}
+				raw.item.EstimatedCostMicro, err = calculateCost(protocol, current.usage(), raw.price)
 				if err != nil {
 					return nil, "", "", err
 				}
@@ -975,8 +1001,9 @@ func loadBaseEvent(ctx context.Context, query baseEventScanner, attemptID string
 	var source, version, currency sql.NullString
 	var input, output, cacheRead, cacheWrite, reasoning, cost sql.NullInt64
 	var responseID, taskID, toolRunID sql.NullString
-	err := query.QueryRowContext(ctx, `SELECT id,attempt_id,request_id,status,evidence,finished_at,source_event_id,response_id,task_id,tool_run_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,price_version,currency,estimated_cost_micro FROM accounting_usage_events WHERE attempt_id=?`, attemptID).
-		Scan(&event.ID, &event.AttemptID, &event.RequestID, &event.Status, &event.Evidence, &finished, &source, &responseID, &taskID, &toolRunID, &input, &output, &cacheRead, &cacheWrite, &reasoning, &version, &currency, &cost)
+	err := query.QueryRowContext(ctx, `SELECT e.id,e.attempt_id,e.request_id,c.protocol,e.status,e.evidence,e.finished_at,e.source_event_id,e.response_id,e.task_id,e.tool_run_id,e.input_tokens,e.output_tokens,e.cache_read_tokens,e.cache_write_tokens,e.reasoning_tokens,e.price_version,e.currency,e.estimated_cost_micro
+		FROM accounting_usage_events e JOIN accounting_attempt_contexts c ON c.attempt_id=e.attempt_id WHERE e.attempt_id=?`, attemptID).
+		Scan(&event.ID, &event.AttemptID, &event.RequestID, &event.Protocol, &event.Status, &event.Evidence, &finished, &source, &responseID, &taskID, &toolRunID, &input, &output, &cacheRead, &cacheWrite, &reasoning, &version, &currency, &cost)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UsageEvent{}, ErrNotFound
 	}
@@ -1284,6 +1311,10 @@ func sameCorrectionValue(a, b CorrectionValue) bool {
 }
 
 func validateAccountingV2Schema(ctx context.Context, tx *sql.Tx) error {
+	return validateAccountingV2SchemaWithUsageCostCheck(ctx, tx, accountingUsageEventCurrentCostCheck)
+}
+
+func validateAccountingV2SchemaWithUsageCostCheck(ctx context.Context, tx *sql.Tx, usageCostCheck string) error {
 	tables := []struct {
 		name        string
 		columns     []ledgerColumn
@@ -1297,7 +1328,7 @@ func validateAccountingV2Schema(ctx context.Context, tx *sql.Tx) error {
 		}, []string{"referencesaccounting_attempts(id)", "operation_idtextnotnullunique"}},
 		{"accounting_usage_events", []ledgerColumn{
 			{name: "id", kind: "TEXT", primary: true}, {name: "attempt_id", kind: "TEXT", notNull: true}, {name: "request_id", kind: "TEXT", notNull: true}, {name: "status", kind: "TEXT", notNull: true}, {name: "evidence", kind: "TEXT", notNull: true}, {name: "finished_at", kind: "TEXT", notNull: true}, {name: "source_event_id", kind: "TEXT"}, {name: "response_id", kind: "TEXT"}, {name: "task_id", kind: "TEXT"}, {name: "tool_run_id", kind: "TEXT"}, {name: "input_tokens", kind: "INTEGER"}, {name: "output_tokens", kind: "INTEGER"}, {name: "cache_read_tokens", kind: "INTEGER"}, {name: "cache_write_tokens", kind: "INTEGER"}, {name: "reasoning_tokens", kind: "INTEGER"}, {name: "price_version", kind: "TEXT"}, {name: "currency", kind: "TEXT"}, {name: "estimated_cost_micro", kind: "INTEGER"},
-		}, []string{"attempt_idtextnotnullunique", "referencesaccounting_attempts(id)", "referencesaccounting_requests(id)", "check(statusin('succeeded','failed','cancelled','interrupted'))", "check(evidencein('provider_response','provider_stream','background_result','system_terminal'))", "check(input_tokensisnullorinput_tokens>=0)", "check(output_tokensisnulloroutput_tokens>=0)", "check(cache_read_tokensisnullorcache_read_tokens>=0)", "check(cache_write_tokensisnullorcache_write_tokens>=0)", "check(reasoning_tokensisnullorreasoning_tokens>=0)", "check(estimated_cost_microisnullorestimated_cost_micro>=0)", "check(reasoning_tokensisnulloroutput_tokensisnullorreasoning_tokens<=output_tokens)", "check((price_versionisnullandcurrencyisnullandestimated_cost_microisnull)or(price_versionisnotnullandcurrencyisnotnull))", "check(currencyisnullor(length(currency)=3andcurrency=upper(currency)andcurrencynotglob'*[^a-z]*'))", "check(estimated_cost_microisnullor(input_tokensisnotnullandoutput_tokensisnotnullandcache_read_tokensisnotnullandcache_write_tokensisnotnull))"}},
+		}, []string{"attempt_idtextnotnullunique", "referencesaccounting_attempts(id)", "referencesaccounting_requests(id)", "check(statusin('succeeded','failed','cancelled','interrupted'))", "check(evidencein('provider_response','provider_stream','background_result','system_terminal'))", "check(input_tokensisnullorinput_tokens>=0)", "check(output_tokensisnulloroutput_tokens>=0)", "check(cache_read_tokensisnullorcache_read_tokens>=0)", "check(cache_write_tokensisnullorcache_write_tokens>=0)", "check(reasoning_tokensisnullorreasoning_tokens>=0)", "check(estimated_cost_microisnullorestimated_cost_micro>=0)", "check(reasoning_tokensisnulloroutput_tokensisnullorreasoning_tokens<=output_tokens)", "check((price_versionisnullandcurrencyisnullandestimated_cost_microisnull)or(price_versionisnotnullandcurrencyisnotnull))", "check(currencyisnullor(length(currency)=3andcurrency=upper(currency)andcurrencynotglob'*[^a-z]*'))", usageCostCheck}},
 		{"accounting_usage_corrections", []ledgerColumn{
 			{name: "id", kind: "TEXT", primary: true}, {name: "attempt_id", kind: "TEXT", notNull: true}, {name: "target_event_id", kind: "TEXT", notNull: true}, {name: "operation_id", kind: "TEXT", notNull: true}, {name: "sequence", kind: "INTEGER", notNull: true}, {name: "actor", kind: "TEXT", notNull: true}, {name: "reason", kind: "TEXT", notNull: true}, {name: "corrected_at", kind: "TEXT", notNull: true}, {name: "currency", kind: "TEXT"}, {name: "input_delta", kind: "INTEGER"}, {name: "input_set", kind: "INTEGER"}, {name: "output_delta", kind: "INTEGER"}, {name: "output_set", kind: "INTEGER"}, {name: "cache_read_delta", kind: "INTEGER"}, {name: "cache_read_set", kind: "INTEGER"}, {name: "cache_write_delta", kind: "INTEGER"}, {name: "cache_write_set", kind: "INTEGER"}, {name: "reasoning_delta", kind: "INTEGER"}, {name: "reasoning_set", kind: "INTEGER"}, {name: "estimated_cost_delta_micro", kind: "INTEGER"},
 		}, []string{"operation_idtextnotnullunique", "unique(attempt_id,sequence)", "check(sequencebetween1and9007199254740991)", "referencesaccounting_attempts(id)", "referencesaccounting_usage_events(id)", "check(reasonin('late_provider_usage','admin_reconciliation'))", "check(input_setisnullorinput_set>=0)", "check(output_setisnulloroutput_set>=0)", "check(cache_read_setisnullorcache_read_set>=0)", "check(cache_write_setisnullorcache_write_set>=0)", "check(reasoning_setisnullorreasoning_set>=0)", "check(input_deltaisnullorinput_setisnull)", "check(output_deltaisnulloroutput_setisnull)", "check(cache_read_deltaisnullorcache_read_setisnull)", "check(cache_write_deltaisnullorcache_write_setisnull)", "check(reasoning_deltaisnullorreasoning_setisnull)"}},
@@ -1350,4 +1381,108 @@ func validateAccountingV2Schema(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+func accountingUsageEventNeedsCostMigration(ctx context.Context, query baseEventScanner) (bool, error) {
+	var definition string
+	if err := query.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='accounting_usage_events'`).Scan(&definition); errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	return strings.Contains(normalizePriceSQL(definition), accountingUsageEventLegacyCostCheck), nil
+}
+
+func (l *Ledger) migrateAccountingUsageEventCostConstraint(ctx context.Context) error {
+	needsMigration, err := accountingUsageEventNeedsCostMigration(ctx, l.db)
+	if err != nil || !needsMigration {
+		return err
+	}
+	conn, err := l.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	foreignKeysRestored := false
+	defer func() {
+		if !foreignKeysRestored {
+			_ = restoreAccountingForeignKeys(conn)
+		}
+	}()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		if restoreErr := restoreAccountingForeignKeys(conn); restoreErr != nil {
+			return fmt.Errorf("%v; restore accounting v2 foreign keys: %w", err, restoreErr)
+		}
+		foreignKeysRestored = true
+		return err
+	}
+	fail := func(cause error) error {
+		_ = tx.Rollback()
+		if restoreErr := restoreAccountingForeignKeys(conn); restoreErr != nil {
+			return fmt.Errorf("%v; restore accounting v2 foreign keys: %w", cause, restoreErr)
+		}
+		foreignKeysRestored = true
+		return cause
+	}
+	if err := migrateAccountingAttemptContextProtocolTx(ctx, tx); err != nil {
+		return fail(err)
+	}
+	if err := validateAccountingV2SchemaWithUsageCostCheck(ctx, tx, accountingUsageEventLegacyCostCheck); err != nil {
+		return fail(err)
+	}
+	if err := migrateAccountingUsageEventCostConstraintTx(ctx, tx); err != nil {
+		return fail(err)
+	}
+	if err := validateAccountingV2Schema(ctx, tx); err != nil {
+		return fail(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fail(err)
+	}
+	if err := restoreAccountingForeignKeys(conn); err != nil {
+		return err
+	}
+	foreignKeysRestored = true
+	return nil
+}
+
+func migrateAccountingUsageEventCostConstraintTx(ctx context.Context, tx *sql.Tx) error {
+	const temporary = "accounting_usage_events_cost_migration"
+	var conflicts int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name=?`, temporary).Scan(&conflicts); err != nil {
+		return err
+	}
+	if conflicts != 0 {
+		return errors.New("accounting usage event cost migration object exists")
+	}
+	statements := []string{
+		`DROP TRIGGER accounting_usage_events_no_update`,
+		`DROP TRIGGER accounting_usage_events_no_delete`,
+		`CREATE TABLE ` + temporary + ` ` + accountingUsageEventsColumnsDDL,
+		`INSERT INTO ` + temporary + `(id,attempt_id,request_id,status,evidence,finished_at,source_event_id,response_id,task_id,tool_run_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,price_version,currency,estimated_cost_micro)
+			SELECT id,attempt_id,request_id,status,evidence,finished_at,source_event_id,response_id,task_id,tool_run_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,price_version,currency,estimated_cost_micro FROM accounting_usage_events`,
+		`DROP TABLE accounting_usage_events`,
+		`ALTER TABLE ` + temporary + ` RENAME TO accounting_usage_events`,
+		`CREATE INDEX accounting_usage_events_finished_idx ON accounting_usage_events(finished_at,id)`,
+		`CREATE TRIGGER accounting_usage_events_no_update BEFORE UPDATE ON accounting_usage_events BEGIN SELECT RAISE(ABORT,'accounting v2 facts are immutable'); END`,
+		`CREATE TRIGGER accounting_usage_events_no_delete BEFORE DELETE ON accounting_usage_events BEGIN SELECT RAISE(ABORT,'accounting v2 facts are immutable'); END`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate accounting usage event cost constraint: %w", err)
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("accounting usage event cost migration foreign key violation")
+	}
+	return rows.Err()
 }
