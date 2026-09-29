@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 	"unicode"
+
+	"cpacloud.local/server/internal/accounting"
 )
 
 const (
@@ -26,9 +29,10 @@ const (
 )
 
 type accountGroupView struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Revision int64  `json:"revision"`
+	ID         string                     `json:"id"`
+	Name       string                     `json:"name"`
+	Revision   int64                      `json:"revision"`
+	Allocation accountGroupAllocationView `json:"allocation"`
 }
 
 type accountChannelView struct {
@@ -80,6 +84,7 @@ func (a *App) registerAccountPoolHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/api/v1/account-groups", a.requireAdmin(a.listAccountGroups, false))
 	mux.HandleFunc("POST /admin/api/v1/account-groups", a.requireAdmin(a.createAccountGroup, true))
 	mux.HandleFunc("PUT /admin/api/v1/account-groups/{id}", a.requireAdmin(a.updateAccountGroup, true))
+	mux.HandleFunc("POST /admin/api/v1/account-groups/{id}/allocation", a.requireAdmin(a.updateAccountGroupAllocation, true))
 	mux.HandleFunc("GET /admin/api/v1/channels", a.requireAdmin(a.listAccountChannels, false))
 	mux.HandleFunc("POST /admin/api/v1/channels", a.requireAdmin(a.createAccountChannel, true))
 	mux.HandleFunc("GET /admin/api/v1/models/{id}/accounts", a.requireAdmin(a.getModelAccounts, false))
@@ -280,7 +285,25 @@ func verifyAccountPoolTable(ctx context.Context, tx *sql.Tx, table string, requi
 }
 
 func (a *App) listAccountGroups(w http.ResponseWriter, r *http.Request, _ adminSession) {
-	rows, err := a.store.db.QueryContext(r.Context(), `SELECT id,name,revision FROM account_groups ORDER BY created_at,id LIMIT ?`, maxAccountGroups+1)
+	tx, err := a.store.db.BeginTx(r.Context(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		writeAccountPoolStorageError(w)
+		return
+	}
+	defer tx.Rollback()
+	var expectedCount int
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM account_groups`).Scan(&expectedCount); err != nil {
+		writeAccountPoolStorageError(w)
+		return
+	}
+	if expectedCount > maxAccountGroups {
+		writeAdminError(w, http.StatusConflict, "read_limit_exceeded", "Too many account groups to return.")
+		return
+	}
+	rows, err := tx.QueryContext(r.Context(), `SELECT g.id,g.name,g.revision,v.version,v.multiplier_ppm,v.created_at
+		FROM account_groups g JOIN account_group_allocation_current c ON c.group_id=g.id
+		JOIN account_group_allocation_versions v ON v.version=c.version AND v.group_id=c.group_id AND v.group_revision=c.group_revision
+		ORDER BY g.created_at,g.id LIMIT ?`, maxAccountGroups+1)
 	if err != nil {
 		writeAccountPoolStorageError(w)
 		return
@@ -293,13 +316,36 @@ func (a *App) listAccountGroups(w http.ResponseWriter, r *http.Request, _ adminS
 			return
 		}
 		var item accountGroupView
-		if err := rows.Scan(&item.ID, &item.Name, &item.Revision); err != nil {
+		var ppm int64
+		if err := rows.Scan(&item.ID, &item.Name, &item.Revision, &item.Allocation.Version, &ppm, &item.Allocation.CreatedAt); err != nil {
 			writeAccountPoolStorageError(w)
 			return
 		}
+		multiplier, err := accounting.NewAllocationMultiplier(ppm)
+		if err != nil {
+			writeAccountPoolStorageError(w)
+			return
+		}
+		if _, err := time.Parse(time.RFC3339Nano, item.Allocation.CreatedAt); err != nil {
+			writeAccountPoolStorageError(w)
+			return
+		}
+		item.Allocation.MultiplierPPM = multiplier.CanonicalPPM()
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
+		writeAccountPoolStorageError(w)
+		return
+	}
+	if err := rows.Close(); err != nil {
+		writeAccountPoolStorageError(w)
+		return
+	}
+	if len(items) != expectedCount {
+		writeAccountPoolStorageError(w)
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeAccountPoolStorageError(w)
 		return
 	}
@@ -336,13 +382,19 @@ func (a *App) createAccountGroup(w http.ResponseWriter, r *http.Request, session
 		writeAdminError(w, http.StatusConflict, "resource_limit", "Account group limit reached.")
 		return
 	}
+	createdAt := time.Now().UTC()
 	item := accountGroupView{ID: id, Name: input.Name, Revision: 1}
-	if _, err := tx.ExecContext(r.Context(), `INSERT INTO account_groups(id,name,revision,created_at) VALUES(?,?,?,?)`, item.ID, item.Name, item.Revision, utcNow()); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO account_groups(id,name,revision,created_at) VALUES(?,?,?,?)`, item.ID, item.Name, item.Revision, createdAt.Format(time.RFC3339Nano)); err != nil {
 		if isConflict(err) {
 			writeAdminError(w, http.StatusConflict, "already_exists", "Account group already exists.")
 		} else {
 			writeAccountPoolStorageError(w)
 		}
+		return
+	}
+	item.Allocation, err = createDefaultAccountGroupAllocationTx(r.Context(), tx, item.ID, item.Revision, createdAt)
+	if err != nil {
+		writeAccountPoolStorageError(w)
 		return
 	}
 	if err := recordAccountPoolAudit(r.Context(), tx, session.AdminID, "account_group.create", "account_group", item.ID); err != nil {
@@ -362,7 +414,7 @@ func (a *App) updateAccountGroup(w http.ResponseWriter, r *http.Request, session
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
-	if input.ExpectedRevision < 1 || !validText(input.Name, 1, 120) {
+	if input.ExpectedRevision < 1 || input.ExpectedRevision >= accountGroupAllocationMaxRevision || !validText(input.Name, 1, 120) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Invalid account group fields.")
 		return
 	}
@@ -405,11 +457,16 @@ func (a *App) updateAccountGroup(w http.ResponseWriter, r *http.Request, session
 		writeAccountPoolStorageError(w)
 		return
 	}
+	allocation, _, _, err := loadAccountGroupAllocationTx(r.Context(), tx, r.PathValue("id"))
+	if err != nil {
+		writeAccountPoolStorageError(w)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeAccountPoolStorageError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, accountGroupView{ID: r.PathValue("id"), Name: input.Name, Revision: next})
+	writeJSON(w, http.StatusOK, accountGroupView{ID: r.PathValue("id"), Name: input.Name, Revision: next, Allocation: allocation})
 }
 
 func (a *App) listAccountChannels(w http.ResponseWriter, r *http.Request, _ adminSession) {

@@ -111,6 +111,9 @@ func (a *App) commitBudgetDispatch(ctx context.Context, tx *sql.Tx, selected rou
 	if err := req.coordinator.ledger.BeginAttemptTx(ctx, tx, start); err != nil {
 		return budgetStorageFailure()
 	}
+	if err := a.recordAttemptAllocationSnapshotTx(ctx, tx, start.ID, req.publicModel, selected); err != nil {
+		return budgetStorageFailure()
+	}
 	result, err := a.budget.ReserveTx(ctx, tx, reserve)
 	if err != nil {
 		return budgetStorageFailure()

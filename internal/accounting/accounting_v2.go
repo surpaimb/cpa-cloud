@@ -142,51 +142,57 @@ const (
 )
 
 type AccountingV2Row struct {
-	AttemptID          string
-	RequestID          string
-	EmployeeID         string
-	KeyID              string
-	PublicModel        string
-	EffectiveModel     *string
-	AccountID          string
-	Provider           Provider
-	Protocol           *UsageProtocol
-	Status             Status
-	Dispatch           Dispatch
-	StartedAt          time.Time
-	DispatchedAt       *time.Time
-	FinishedAt         time.Time
-	EventID            *string
-	Evidence           *UsageEvidence
-	ResponseID         *string
-	TaskID             *string
-	ToolRunID          *string
-	CorrectionCount    int64
-	InputTokens        *int64
-	OutputTokens       *int64
-	CacheReadTokens    *int64
-	CacheWriteTokens   *int64
-	ReasoningTokens    *int64
-	PriceVersion       *string
-	Currency           *string
-	EstimatedCostMicro *int64
+	AttemptID                   string
+	RequestID                   string
+	EmployeeID                  string
+	KeyID                       string
+	PublicModel                 string
+	EffectiveModel              *string
+	AccountID                   string
+	Provider                    Provider
+	Protocol                    *UsageProtocol
+	Status                      Status
+	Dispatch                    Dispatch
+	StartedAt                   time.Time
+	DispatchedAt                *time.Time
+	FinishedAt                  time.Time
+	EventID                     *string
+	Evidence                    *UsageEvidence
+	ResponseID                  *string
+	TaskID                      *string
+	ToolRunID                   *string
+	CorrectionCount             int64
+	InputTokens                 *int64
+	OutputTokens                *int64
+	CacheReadTokens             *int64
+	CacheWriteTokens            *int64
+	ReasoningTokens             *int64
+	PriceVersion                *string
+	Currency                    *string
+	EstimatedCostMicro          *int64
+	AccountGroupID              *string
+	AllocationMultiplierVersion *string
+	AllocationMultiplierPPM     *int64
+	AdjustedAllocationCostMicro *int64
 }
 
 type AccountingV2Report struct {
-	PeriodStart             time.Time
-	PeriodEnd               time.Time
-	Currency                string
-	Requests                int64
-	Attempts                int64
-	Corrections             int64
-	MissingEvidenceAttempts int64
-	KnownEstimatedCostMicro int64
-	UnknownCostAttempts     int64
-	InputTokens             KnownValueSummary
-	OutputTokens            KnownValueSummary
-	CacheReadTokens         KnownValueSummary
-	CacheWriteTokens        KnownValueSummary
-	ReasoningTokens         KnownValueSummary
+	PeriodStart                       time.Time
+	PeriodEnd                         time.Time
+	Currency                          string
+	Requests                          int64
+	Attempts                          int64
+	Corrections                       int64
+	MissingEvidenceAttempts           int64
+	KnownEstimatedCostMicro           int64
+	UnknownCostAttempts               int64
+	KnownAdjustedAllocationCostMicro  int64
+	UnknownAdjustedAllocationAttempts int64
+	InputTokens                       KnownValueSummary
+	OutputTokens                      KnownValueSummary
+	CacheReadTokens                   KnownValueSummary
+	CacheWriteTokens                  KnownValueSummary
+	ReasoningTokens                   KnownValueSummary
 }
 
 func (l *Ledger) MigrateV2(ctx context.Context) error {
@@ -473,18 +479,20 @@ func recordUsageBaseTx(ctx context.Context, tx *sql.Tx, finish AttemptFinish, co
 		return err
 	}
 	inserted, err := result.RowsAffected()
-	if err != nil || inserted == 1 {
-		return err
-	}
-	stored, err := loadBaseEvent(ctx, tx, finish.ID)
 	if err != nil {
 		return err
 	}
-	if stored.ID != id || stored.Status != finish.Status || !stored.FinishedAt.Equal(finish.FinishedAt) || !sameNullableString(stored.SourceEventID, finish.SourceEventID) || !sameNullableString(stored.ResponseID, responseID) || !sameNullableString(stored.TaskID, taskID) || !sameNullableString(stored.ToolRunID, toolRunID) || !sameUsage(Usage{InputTokens: stored.InputTokens, OutputTokens: stored.OutputTokens, CacheReadTokens: stored.CacheReadTokens, CacheWriteTokens: stored.CacheWriteTokens}, finish.Usage) || !samePointer(stored.ReasoningTokens, finish.ReasoningTokens) || !samePointer(stored.EstimatedCostMicro, cost) {
-		return ErrConflict
+	if inserted == 0 {
+		stored, err := loadBaseEvent(ctx, tx, finish.ID)
+		if err != nil {
+			return err
+		}
+		if stored.ID != id || stored.Status != finish.Status || !stored.FinishedAt.Equal(finish.FinishedAt) || !sameNullableString(stored.SourceEventID, finish.SourceEventID) || !sameNullableString(stored.ResponseID, responseID) || !sameNullableString(stored.TaskID, taskID) || !sameNullableString(stored.ToolRunID, toolRunID) || !sameUsage(Usage{InputTokens: stored.InputTokens, OutputTokens: stored.OutputTokens, CacheReadTokens: stored.CacheReadTokens, CacheWriteTokens: stored.CacheWriteTokens}, finish.Usage) || !samePointer(stored.ReasoningTokens, finish.ReasoningTokens) || !samePointer(stored.EstimatedCostMicro, cost) {
+			return ErrConflict
+		}
 	}
 	_ = protocol
-	return nil
+	return recordUsageAllocationEventTx(ctx, tx, finish.ID, id, cost)
 }
 
 // RecoverV2Tx appends an unknown system-terminal event only for attempts whose
@@ -533,6 +541,9 @@ func (l *Ledger) RecoverV2Tx(ctx context.Context, tx *sql.Tx) (int64, error) {
 		}
 		changed, err := result.RowsAffected()
 		if err != nil {
+			return 0, err
+		}
+		if err := recordUsageAllocationEventTx(ctx, tx, item.attemptID, usageEventID(item.attemptID), nil); err != nil {
 			return 0, err
 		}
 		inserted += changed
@@ -633,7 +644,10 @@ func (l *Ledger) AppendCorrectionTx(ctx context.Context, tx *sql.Tx, correction 
 		input_delta,input_set,output_delta,output_set,cache_read_delta,cache_read_set,cache_write_delta,cache_write_set,reasoning_delta,reasoning_set,estimated_cost_delta_micro)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, correction.ID, correction.AttemptID, correction.TargetEventID, correction.OperationID, correctionCount+1, correction.Actor, string(correction.Reason), at, nullableCurrency(correction.Currency),
 		nullableValue(correction.InputTokens.Delta), nullableValue(correction.InputTokens.Set), nullableValue(correction.OutputTokens.Delta), nullableValue(correction.OutputTokens.Set), nullableValue(correction.CacheReadTokens.Delta), nullableValue(correction.CacheReadTokens.Set), nullableValue(correction.CacheWriteTokens.Delta), nullableValue(correction.CacheWriteTokens.Set), nullableValue(correction.ReasoningTokens.Delta), nullableValue(correction.ReasoningTokens.Set), nullableValue(correction.EstimatedCostDeltaMicro))
-	return err
+	if err != nil {
+		return err
+	}
+	return recordUsageAllocationCorrectionTx(ctx, tx, correction.ID, correction.AttemptID, newCost)
 }
 
 func (l *Ledger) AccountingV2Export(ctx context.Context, filters AccountingV2Filters, limit int) ([]AccountingV2Row, error) {
@@ -653,12 +667,26 @@ func (l *Ledger) accountingV2ExportPage(ctx context.Context, filters AccountingV
 		where += ` AND (` + accountingV2FinishedKeySQL + `>? OR (` + accountingV2FinishedKeySQL + `=? AND a.id>?))`
 		args = append(args, afterFinishedKey, afterFinishedKey, afterAttemptID)
 	}
+	allocationColumns := `,NULL,NULL,NULL,NULL`
+	allocationJoins := ``
+	allocationAvailable, err := allocationLedgerAvailable(ctx, l.db)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if allocationAvailable {
+		allocationColumns = `,als.account_group_id,als.multiplier_version,als.multiplier_ppm,
+			CASE WHEN latest_correction.id IS NOT NULL THEN alc.adjusted_cost_micro ELSE ale.adjusted_cost_micro END`
+		allocationJoins = ` LEFT JOIN accounting_attempt_allocation_snapshots als ON als.attempt_id=a.id
+		LEFT JOIN accounting_usage_allocation_events ale ON ale.event_id=e.id
+		LEFT JOIN accounting_usage_corrections latest_correction ON latest_correction.id=(SELECT lc.id FROM accounting_usage_corrections lc WHERE lc.attempt_id=a.id ORDER BY lc.sequence DESC LIMIT 1)
+		LEFT JOIN accounting_usage_allocation_corrections alc ON alc.correction_id=latest_correction.id`
+	}
 	args = append(args, limit)
 	rows, err := l.db.QueryContext(ctx, `SELECT a.id,a.request_id,r.employee_id,r.key_id,r.model_id,a.account_id,a.provider,a.status,a.dispatch,a.started_at,d.dispatched_at,a.finished_at,
 		c.protocol,c.effective_model,e.id,e.evidence,e.response_id,e.task_id,e.tool_run_id,e.input_tokens,e.output_tokens,e.cache_read_tokens,e.cache_write_tokens,e.reasoning_tokens,e.price_version,e.currency,e.estimated_cost_micro,
-		a.input_rate,a.output_rate,a.cache_read_rate,a.cache_write_rate
+		a.input_rate,a.output_rate,a.cache_read_rate,a.cache_write_rate`+allocationColumns+`
 		FROM accounting_attempts a JOIN accounting_requests r ON r.id=a.request_id
-		LEFT JOIN accounting_attempt_contexts c ON c.attempt_id=a.id LEFT JOIN accounting_attempt_dispatches d ON d.attempt_id=a.id LEFT JOIN accounting_usage_events e ON e.attempt_id=a.id
+		LEFT JOIN accounting_attempt_contexts c ON c.attempt_id=a.id LEFT JOIN accounting_attempt_dispatches d ON d.attempt_id=a.id LEFT JOIN accounting_usage_events e ON e.attempt_id=a.id`+allocationJoins+`
 		WHERE a.status<>'pending' AND `+where+` ORDER BY `+accountingV2FinishedKeySQL+`,a.id LIMIT ?`, args...)
 	if err != nil {
 		return nil, "", "", err
@@ -674,10 +702,11 @@ func (l *Ledger) accountingV2ExportPage(ctx context.Context, filters AccountingV
 		item := &raw.item
 		var started, finished string
 		var dispatched sql.NullString
-		var protocol, effectiveModel, eventID, evidence, responseID, taskID, toolRunID, priceVersion, currency sql.NullString
-		var input, output, cacheRead, cacheWrite, reasoning, cost, inputRate, outputRate, cacheReadRate, cacheWriteRate sql.NullInt64
+		var protocol, effectiveModel, eventID, evidence, responseID, taskID, toolRunID, priceVersion, currency, accountGroupID, multiplierVersion sql.NullString
+		var input, output, cacheRead, cacheWrite, reasoning, cost, inputRate, outputRate, cacheReadRate, cacheWriteRate, multiplierPPM, adjustedCost sql.NullInt64
 		if err := rows.Scan(&item.AttemptID, &item.RequestID, &item.EmployeeID, &item.KeyID, &item.PublicModel, &item.AccountID, &item.Provider, &item.Status, &item.Dispatch, &started, &dispatched, &finished,
-			&protocol, &effectiveModel, &eventID, &evidence, &responseID, &taskID, &toolRunID, &input, &output, &cacheRead, &cacheWrite, &reasoning, &priceVersion, &currency, &cost, &inputRate, &outputRate, &cacheReadRate, &cacheWriteRate); err != nil {
+			&protocol, &effectiveModel, &eventID, &evidence, &responseID, &taskID, &toolRunID, &input, &output, &cacheRead, &cacheWrite, &reasoning, &priceVersion, &currency, &cost, &inputRate, &outputRate, &cacheReadRate, &cacheWriteRate,
+			&accountGroupID, &multiplierVersion, &multiplierPPM, &adjustedCost); err != nil {
 			rows.Close()
 			return nil, "", "", err
 		}
@@ -703,6 +732,17 @@ func (l *Ledger) accountingV2ExportPage(ctx context.Context, filters AccountingV
 		item.EventID = nullStringPointer(eventID)
 		item.ResponseID, item.TaskID, item.ToolRunID = nullStringPointer(responseID), nullStringPointer(taskID), nullStringPointer(toolRunID)
 		item.PriceVersion, item.Currency = nullStringPointer(priceVersion), nullStringPointer(currency)
+		item.AccountGroupID, item.AllocationMultiplierVersion = nullStringPointer(accountGroupID), nullStringPointer(multiplierVersion)
+		item.AllocationMultiplierPPM, item.AdjustedAllocationCostMicro = pointerFromNull(multiplierPPM), pointerFromNull(adjustedCost)
+		if multiplierPPM.Valid {
+			if _, multiplierErr := NewAllocationMultiplier(multiplierPPM.Int64); multiplierErr != nil || accountGroupID.Valid != multiplierVersion.Valid || !accountGroupID.Valid && multiplierPPM.Int64 != AllocationMultiplierScale {
+				rows.Close()
+				return nil, "", "", ErrInvalid
+			}
+		} else if accountGroupID.Valid || multiplierVersion.Valid || adjustedCost.Valid {
+			rows.Close()
+			return nil, "", "", ErrInvalid
+		}
 		if protocol.Valid {
 			value := UsageProtocol(protocol.String)
 			item.Protocol = &value
@@ -877,6 +917,11 @@ func (l *Ledger) AccountingV2Report(ctx context.Context, filters AccountingV2Fil
 			if item.EstimatedCostMicro == nil {
 				group.UnknownCostAttempts++
 			} else if group.KnownEstimatedCostMicro, err = checkedReportAdd(group.KnownEstimatedCostMicro, *item.EstimatedCostMicro); err != nil {
+				return nil, err
+			}
+			if item.AdjustedAllocationCostMicro == nil {
+				group.UnknownAdjustedAllocationAttempts++
+			} else if group.KnownAdjustedAllocationCostMicro, err = checkedReportAdd(group.KnownAdjustedAllocationCostMicro, *item.AdjustedAllocationCostMicro); err != nil {
 				return nil, err
 			}
 			for _, metric := range []struct {

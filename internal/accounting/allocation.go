@@ -1,5 +1,6 @@
 package accounting
 
+// Independently implemented from docs/account-group-cost-allocation-contract.md.
 import (
 	"math"
 	"math/bits"

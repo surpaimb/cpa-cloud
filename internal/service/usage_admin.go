@@ -64,19 +64,21 @@ type usageTokenCounts struct {
 }
 
 type usageAttemptSummary struct {
-	Currency            string           `json:"currency"`
-	Total               string           `json:"total"`
-	Pending             string           `json:"pending"`
-	Succeeded           string           `json:"succeeded"`
-	Failed              string           `json:"failed"`
-	Cancelled           string           `json:"cancelled"`
-	Interrupted         string           `json:"interrupted"`
-	KnownCostMicro      string           `json:"known_cost_micro"`
-	UnknownCostAttempts string           `json:"unknown_cost_attempts"`
-	InputTokens         usageTokenCounts `json:"input_tokens"`
-	OutputTokens        usageTokenCounts `json:"output_tokens"`
-	CacheReadTokens     usageTokenCounts `json:"cache_read_tokens"`
-	CacheWriteTokens    usageTokenCounts `json:"cache_write_tokens"`
+	Currency                          string           `json:"currency"`
+	Total                             string           `json:"total"`
+	Pending                           string           `json:"pending"`
+	Succeeded                         string           `json:"succeeded"`
+	Failed                            string           `json:"failed"`
+	Cancelled                         string           `json:"cancelled"`
+	Interrupted                       string           `json:"interrupted"`
+	KnownCostMicro                    string           `json:"known_cost_micro"`
+	UnknownCostAttempts               string           `json:"unknown_cost_attempts"`
+	KnownAdjustedAllocationCostMicro  string           `json:"known_adjusted_allocation_cost_micro"`
+	UnknownAdjustedAllocationAttempts string           `json:"unknown_adjusted_allocation_attempts"`
+	InputTokens                       usageTokenCounts `json:"input_tokens"`
+	OutputTokens                      usageTokenCounts `json:"output_tokens"`
+	CacheReadTokens                   usageTokenCounts `json:"cache_read_tokens"`
+	CacheWriteTokens                  usageTokenCounts `json:"cache_write_tokens"`
 }
 
 type usageRequestItem struct {
@@ -93,21 +95,25 @@ type usageRequestItem struct {
 }
 
 type usageAttemptItem struct {
-	ID               string  `json:"id"`
-	RequestID        string  `json:"request_id"`
-	AccountID        string  `json:"account_id"`
-	Provider         string  `json:"provider"`
-	Dispatch         string  `json:"dispatch"`
-	Status           string  `json:"status"`
-	StartedAt        string  `json:"started_at"`
-	FinishedAt       *string `json:"finished_at"`
-	PriceVersion     *string `json:"price_version"`
-	Currency         *string `json:"currency"`
-	InputTokens      *string `json:"input_tokens"`
-	OutputTokens     *string `json:"output_tokens"`
-	CacheReadTokens  *string `json:"cache_read_tokens"`
-	CacheWriteTokens *string `json:"cache_write_tokens"`
-	CostMicro        *string `json:"cost_micro"`
+	ID                          string  `json:"id"`
+	RequestID                   string  `json:"request_id"`
+	AccountID                   string  `json:"account_id"`
+	Provider                    string  `json:"provider"`
+	Dispatch                    string  `json:"dispatch"`
+	Status                      string  `json:"status"`
+	StartedAt                   string  `json:"started_at"`
+	FinishedAt                  *string `json:"finished_at"`
+	PriceVersion                *string `json:"price_version"`
+	Currency                    *string `json:"currency"`
+	InputTokens                 *string `json:"input_tokens"`
+	OutputTokens                *string `json:"output_tokens"`
+	CacheReadTokens             *string `json:"cache_read_tokens"`
+	CacheWriteTokens            *string `json:"cache_write_tokens"`
+	CostMicro                   *string `json:"cost_micro"`
+	AccountGroupID              *string `json:"account_group_id"`
+	AllocationMultiplierVersion *string `json:"allocation_multiplier_version"`
+	AllocationMultiplierPPM     *string `json:"allocation_multiplier_ppm"`
+	AdjustedAllocationCostMicro *string `json:"adjusted_allocation_cost_micro"`
 }
 
 func (a *App) registerUsageHandlers(mux *http.ServeMux) {
@@ -153,11 +159,17 @@ func (a *App) usageSummary(w http.ResponseWriter, r *http.Request, _ adminSessio
 		COALESCE(SUM(CASE WHEN a.status='cancelled' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN a.status='interrupted' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(a.cost_micro),0),COALESCE(SUM(CASE WHEN a.status<>'pending' AND a.cost_micro IS NULL THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN latest_correction.id IS NOT NULL THEN alc.adjusted_cost_micro ELSE ale.adjusted_cost_micro END),0),
+		COALESCE(SUM(CASE WHEN a.status<>'pending' AND (CASE WHEN latest_correction.id IS NOT NULL THEN alc.adjusted_cost_micro ELSE ale.adjusted_cost_micro END) IS NULL THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(a.input_tokens),0),COALESCE(SUM(CASE WHEN a.status<>'pending' AND a.input_tokens IS NULL THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(a.output_tokens),0),COALESCE(SUM(CASE WHEN a.status<>'pending' AND a.output_tokens IS NULL THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(a.cache_read_tokens),0),COALESCE(SUM(CASE WHEN a.status<>'pending' AND a.cache_read_tokens IS NULL THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(a.cache_write_tokens),0),COALESCE(SUM(CASE WHEN a.status<>'pending' AND a.cache_write_tokens IS NULL THEN 1 ELSE 0 END),0)
 		FROM accounting_attempts a JOIN accounting_requests r ON r.id=a.request_id
+		LEFT JOIN accounting_usage_events usage_event ON usage_event.attempt_id=a.id
+		LEFT JOIN accounting_usage_allocation_events ale ON ale.event_id=usage_event.id
+		LEFT JOIN accounting_usage_corrections latest_correction ON latest_correction.id=(SELECT lc.id FROM accounting_usage_corrections lc WHERE lc.attempt_id=a.id ORDER BY lc.sequence DESC LIMIT 1)
+		LEFT JOIN accounting_usage_allocation_corrections alc ON alc.correction_id=latest_correction.id
 		WHERE `+attemptWhere+` GROUP BY COALESCE(a.currency,'UNKNOWN') ORDER BY COALESCE(a.currency,'UNKNOWN')`, attemptArgs...)
 	if err != nil {
 		writeUsageStorageError(w)
@@ -166,8 +178,8 @@ func (a *App) usageSummary(w http.ResponseWriter, r *http.Request, _ adminSessio
 	attempts := make([]usageAttemptSummary, 0)
 	for rows.Next() {
 		var currency string
-		var values [16]int64
-		if err := rows.Scan(&currency, &values[0], &values[1], &values[2], &values[3], &values[4], &values[5], &values[6], &values[7], &values[8], &values[9], &values[10], &values[11], &values[12], &values[13], &values[14], &values[15]); err != nil {
+		var values [18]int64
+		if err := rows.Scan(&currency, &values[0], &values[1], &values[2], &values[3], &values[4], &values[5], &values[6], &values[7], &values[8], &values[9], &values[10], &values[11], &values[12], &values[13], &values[14], &values[15], &values[16], &values[17]); err != nil {
 			rows.Close()
 			writeUsageStorageError(w)
 			return
@@ -175,10 +187,11 @@ func (a *App) usageSummary(w http.ResponseWriter, r *http.Request, _ adminSessio
 		attempts = append(attempts, usageAttemptSummary{
 			Currency: currency, Total: decimal(values[0]), Pending: decimal(values[1]), Succeeded: decimal(values[2]), Failed: decimal(values[3]), Cancelled: decimal(values[4]), Interrupted: decimal(values[5]),
 			KnownCostMicro: decimal(values[6]), UnknownCostAttempts: decimal(values[7]),
-			InputTokens:      usageTokenCounts{KnownTotal: decimal(values[8]), UnknownAttempts: decimal(values[9])},
-			OutputTokens:     usageTokenCounts{KnownTotal: decimal(values[10]), UnknownAttempts: decimal(values[11])},
-			CacheReadTokens:  usageTokenCounts{KnownTotal: decimal(values[12]), UnknownAttempts: decimal(values[13])},
-			CacheWriteTokens: usageTokenCounts{KnownTotal: decimal(values[14]), UnknownAttempts: decimal(values[15])},
+			KnownAdjustedAllocationCostMicro: decimal(values[8]), UnknownAdjustedAllocationAttempts: decimal(values[9]),
+			InputTokens:      usageTokenCounts{KnownTotal: decimal(values[10]), UnknownAttempts: decimal(values[11])},
+			OutputTokens:     usageTokenCounts{KnownTotal: decimal(values[12]), UnknownAttempts: decimal(values[13])},
+			CacheReadTokens:  usageTokenCounts{KnownTotal: decimal(values[14]), UnknownAttempts: decimal(values[15])},
+			CacheWriteTokens: usageTokenCounts{KnownTotal: decimal(values[16]), UnknownAttempts: decimal(values[17])},
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -299,8 +312,16 @@ func (a *App) usageRequestAttempts(w http.ResponseWriter, r *http.Request, _ adm
 		return
 	}
 	rows, err := a.store.db.QueryContext(ctx, `SELECT a.id,a.request_id,a.account_id,a.provider,a.dispatch,a.status,a.started_at,a.finished_at,
-		a.price_version,a.currency,a.input_tokens,a.output_tokens,a.cache_read_tokens,a.cache_write_tokens,a.cost_micro
-		FROM accounting_attempts a WHERE a.request_id=? ORDER BY `+usageAttemptTimeKeySQL+`,a.id LIMIT 101`, requestID)
+		a.price_version,a.currency,a.input_tokens,a.output_tokens,a.cache_read_tokens,a.cache_write_tokens,a.cost_micro,
+		s.account_group_id,s.multiplier_version,s.multiplier_ppm,
+		CASE WHEN latest_correction.id IS NOT NULL THEN alc.adjusted_cost_micro ELSE ale.adjusted_cost_micro END
+		FROM accounting_attempts a
+		LEFT JOIN accounting_attempt_allocation_snapshots s ON s.attempt_id=a.id
+		LEFT JOIN accounting_usage_events usage_event ON usage_event.attempt_id=a.id
+		LEFT JOIN accounting_usage_allocation_events ale ON ale.event_id=usage_event.id
+		LEFT JOIN accounting_usage_corrections latest_correction ON latest_correction.id=(SELECT lc.id FROM accounting_usage_corrections lc WHERE lc.attempt_id=a.id ORDER BY lc.sequence DESC LIMIT 1)
+		LEFT JOIN accounting_usage_allocation_corrections alc ON alc.correction_id=latest_correction.id
+		WHERE a.request_id=? ORDER BY `+usageAttemptTimeKeySQL+`,a.id LIMIT 101`, requestID)
 	if err != nil {
 		writeUsageStorageError(w)
 		return
@@ -309,9 +330,9 @@ func (a *App) usageRequestAttempts(w http.ResponseWriter, r *http.Request, _ adm
 	items := make([]usageAttemptItem, 0)
 	for rows.Next() {
 		var item usageAttemptItem
-		var finished, price, currency sql.NullString
-		var input, output, cacheRead, cacheWrite, cost sql.NullInt64
-		if err := rows.Scan(&item.ID, &item.RequestID, &item.AccountID, &item.Provider, &item.Dispatch, &item.Status, &item.StartedAt, &finished, &price, &currency, &input, &output, &cacheRead, &cacheWrite, &cost); err != nil {
+		var finished, price, currency, accountGroupID, multiplierVersion sql.NullString
+		var input, output, cacheRead, cacheWrite, cost, multiplierPPM, adjustedCost sql.NullInt64
+		if err := rows.Scan(&item.ID, &item.RequestID, &item.AccountID, &item.Provider, &item.Dispatch, &item.Status, &item.StartedAt, &finished, &price, &currency, &input, &output, &cacheRead, &cacheWrite, &cost, &accountGroupID, &multiplierVersion, &multiplierPPM, &adjustedCost); err != nil {
 			writeUsageStorageError(w)
 			return
 		}
@@ -334,6 +355,10 @@ func (a *App) usageRequestAttempts(w http.ResponseWriter, r *http.Request, _ adm
 		item.CacheReadTokens = nullableDecimal(cacheRead)
 		item.CacheWriteTokens = nullableDecimal(cacheWrite)
 		item.CostMicro = nullableDecimal(cost)
+		item.AccountGroupID = nullableText(accountGroupID)
+		item.AllocationMultiplierVersion = nullableText(multiplierVersion)
+		item.AllocationMultiplierPPM = nullableDecimal(multiplierPPM)
+		item.AdjustedAllocationCostMicro = nullableDecimal(adjustedCost)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {

@@ -140,6 +140,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err := migrateAccountingV2(ctx, s.db); err != nil {
 		return nil, errUsageLedgerUnavailable
 	}
+	if err := migrateAccountGroupAllocation(ctx, s.db); err != nil {
+		return nil, fmt.Errorf("migrate account group cost allocation: %w", err)
+	}
 	if err := migrateBackupAutomation(ctx, s.db); err != nil {
 		return nil, fmt.Errorf("migrate backup automation: %w", err)
 	}
@@ -430,6 +433,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"automated_backups_running":       a.backupAutomation != nil && a.backupAutomation.Running(),
 			"upstream_cooldown_management":    a.accountPool != nil,
 			"account_pool_configuration":      true,
+			"account_group_cost_allocation":   true,
 			"account_pool_routing":            a.accountPool != nil,
 			"account_pool_preflight_failover": a.accountPool != nil,
 			"usage_reporting":                 true,

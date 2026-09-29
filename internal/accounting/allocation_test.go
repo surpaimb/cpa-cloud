@@ -1,5 +1,6 @@
 package accounting
 
+// Independently authored acceptance for docs/account-group-cost-allocation-contract.md.
 import (
 	"errors"
 	"math"
