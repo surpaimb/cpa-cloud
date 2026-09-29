@@ -2,6 +2,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -123,5 +124,78 @@ func TestTrustedProxySourceResolutionProtectsOpenAIAndGeminiCatalogs(t *testing.
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("untrusted peer did not ignore spoofed forwarding headers: status=%d", response.StatusCode)
+	}
+}
+
+func TestTrustedProxySourceResolutionCoversEmployeeEntryFamilies(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := Initialize(context.Background(), dataDir, strings.NewReader("a-strong-preview-password\n")); err != nil {
+		t.Fatal(err)
+	}
+	app, err := Open(context.Background(), Config{
+		DataDir: dataDir, Listen: "127.0.0.1:0", Version: "test",
+		TrustedProxyCIDRs:          []string{"127.0.0.1/32"},
+		ResponsesStatefulResources: true, ResponsesBackgroundTasks: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	t.Cleanup(func() { server.Close(); _ = app.Close() })
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	upstream := createModelAdmissionUpstream(t, server.URL, cookie, csrf, "trusted-entry-source", "openai-compatible", "https://8.8.8.8/v1", "synthetic-secret")
+	createModelAdmissionModel(t, server.URL, cookie, csrf, "trusted-entry-model", upstream.ID, "provider-model")
+	employee := createModelAdmissionEmployee(t, server.URL, cookie, csrf, "Trusted Entry Employee")
+	key := createTestKey(t, server.URL, employee.ID, "trusted-entry-key", cookie, csrf)
+
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		headers http.Header
+	}{
+		{name: "chat", method: http.MethodPost, path: "/v1/chat/completions", body: `{"model":"trusted-entry-model","messages":[{"role":"user","content":"hello"}]}`},
+		{name: "responses", method: http.MethodPost, path: "/v1/responses", body: `{"model":"trusted-entry-model","input":"hello"}`},
+		{name: "responses continuation", method: http.MethodPost, path: "/v1/responses", body: `{"model":"trusted-entry-model","input":"hello","previous_response_id":"resp_missing"}`},
+		{name: "messages", method: http.MethodPost, path: "/v1/messages", body: `{"model":"trusted-entry-model","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}`, headers: http.Header{"Anthropic-Version": []string{"2023-06-01"}}},
+		{name: "messages count tokens", method: http.MethodPost, path: "/v1/messages/count_tokens", body: `{"model":"trusted-entry-model","messages":[{"role":"user","content":"hello"}]}`, headers: http.Header{"Anthropic-Version": []string{"2023-06-01"}}},
+		{name: "gemini", method: http.MethodPost, path: "/v1beta/models/trusted-entry-model:generateContent", body: `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`},
+		{name: "gemini stream", method: http.MethodPost, path: "/v1beta/models/trusted-entry-model:streamGenerateContent?alt=sse", body: `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`},
+		{name: "response resource read", method: http.MethodGet, path: "/v1/responses/resp_missing"},
+		{name: "response resource cancel", method: http.MethodPost, path: "/v1/responses/resp_missing/cancel"},
+		{name: "response resource delete", method: http.MethodDelete, path: "/v1/responses/resp_missing"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request, requestErr := http.NewRequest(test.method, server.URL+test.path, bytes.NewBufferString(test.body))
+			if requestErr != nil {
+				t.Fatal(requestErr)
+			}
+			request.Header = make(http.Header)
+			if test.headers != nil {
+				request.Header = test.headers.Clone()
+			}
+			request.Header.Set("Authorization", "Bearer "+key.Key)
+			request.Header.Set("Content-Type", "application/json")
+			response, requestErr := http.DefaultClient.Do(request)
+			if requestErr != nil {
+				t.Fatal(requestErr)
+			}
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			if response.StatusCode != http.StatusForbidden || !strings.Contains(string(body), keyPolicyDeniedMessage) {
+				t.Fatalf("status=%d body=%s", response.StatusCode, body)
+			}
+		})
+	}
+
+	var requestCount int
+	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM model_requests`).Scan(&requestCount); err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 0 {
+		t.Fatalf("trusted-source rejection created %d model requests", requestCount)
 	}
 }
