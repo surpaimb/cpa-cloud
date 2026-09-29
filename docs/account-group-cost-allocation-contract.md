@@ -135,16 +135,22 @@ func (m AllocationMultiplier) Apply(base *int64) (*int64, error)
 - `account_group_allocation_versions`：不可变 version、group ID、写入时组 revision、operation
   ID（迁移/新建的默认版本可为 NULL）、ppm 和创建时间；同一管理员 operation ID 全局唯一；
 - `account_group_allocation_current`：每组唯一 current version，并以复合外键绑定同组版本；
+- `account_group_allocation_legacy_attempts`：只记录首次迁移事务开始时已经存在的 attempt ID，
+  不保存或猜测组、倍率和金额；
 - `accounting_attempt_allocation_snapshots`：attempt 的可选 group ID、可选 multiplier version
   和必有 ppm；显式组版本必须三者一致，内建 `1x` 必须是 group/version NULL 与 ppm 1,000,000；
 - `accounting_usage_allocation_events`：每个可靠 base usage event 的 nullable 调整后成本；
 - `accounting_usage_allocation_corrections`：每个更正后的 nullable 有效调整后成本快照。
 
-版本表有禁止 UPDATE/DELETE 的触发器。倍率更新 current 指针使用延迟复合外键；所有 ppm、
-revision、时间、唯一键、外键和“未知或已知非负金额”均有数据库约束。查询所需的 group、
-attempt 和时间索引有固定名称并经过核验。
+版本表、历史 attempt 标记、attempt 倍率快照及 allocation event/correction 伴随事实有禁止
+UPDATE/DELETE 的触发器；同一 attempt 不能同时拥有历史标记和倍率快照。快照的
+`version + group_id + multiplier_ppm` 复合外键必须精确匹配不可变版本，不能只绑定版本后另写
+一个 ppm。倍率更新 current 指针使用延迟复合外键；所有 ppm、revision、时间、唯一键、外键
+和“未知或已知非负金额”均有数据库约束。查询所需的 group、attempt 和时间索引有固定名称并
+经过核验。
 
 首次迁移为事务开始时存在的每个账号组追加 `1_000_000 ppm` 默认版本并建立 current 覆盖；
+同时仅把事务开始时已经存在的 attempt ID 写入历史标记表，绝不为它们推测组或倍率。
 同一事务核验每组恰有 current、current 指向同组版本、所有 attempt/usage/correction 伴随行无
 孤儿，并执行 `PRAGMA foreign_key_check`。已有部分对象、错误列/约束/触发器、错误 marker、
 缺失覆盖或任意 SQL 失败都使启动失败并完整回滚；修复冲突后可重试。正常重启不得重建版本
@@ -187,12 +193,16 @@ attempt 终结仍先以冻结 `PriceSnapshot` 和原始 usage 生成原始估算
 
 - 无价格、任一必需 usage 未知、系统中断或其他原始成本未知时，调整后成本也为 NULL。
 - 原始成本为已知 0 时，调整后成本必须为已知 0。
+- 完整 App 启动成功后把 allocation schema 视为必需组合；运行中全部或部分表消失、非历史
+  attempt 缺少快照、可靠原始事件缺少 allocation event，或原始更正缺少 allocation correction
+  都失败关闭，不能静默退回旧可选投影。仅未组合该迁移的 package 隔离夹具可继续不启用投影。
 - 计算溢出或 allocation 表写失败使整个终结事务失败；不能把原始事件提交而丢掉调整后事实。
 - 更正使用 attempt 冻结的倍率和更正后的有效原始总额，原始 correction 与 allocation correction
   快照同事务提交；重放继续遵守原 operation ID，不读当前组倍率。
 - 重启恢复只为既有 durable dispatch 写现有 unknown system-terminal 事实，并原子写 NULL 的
   allocation event；不建立新 attempt、不访问上游、不读取当前倍率替换快照。
-- 迁移前旧 attempt 没有快照，显示“倍率未知/调整后成本未知”；不能假装 `1x` 回填历史。
+- 只有首次迁移时写入不可变历史标记的旧 attempt 才可没有快照，并显示“倍率未知/调整后成本
+  未知”；迁移后的 attempt 缺快照属于持久化损坏，不能假装 `1x` 或普通旧历史。
 
 ## 7. 查询、汇总与网页
 
@@ -231,14 +241,15 @@ durable dispatch 和一个 attempt，不能重复分摊。
 自动化测试至少覆盖：
 
 1. 规范 ppm 解析、上下界、`1x`、最小倍率、1000x、nil、已知零、向上取整和 int64 溢出；
-2. 旧库/空库/新组默认 1x、迁移失败回滚、部分 schema 拒绝、重试和重启版本不变；
+2. 旧库/空库/新组默认 1x、旧 attempt 显式历史标记、迁移失败回滚、部分 schema 拒绝、重试
+   和重启版本不变；
 3. 管理员 session、CSRF/Origin、严格 JSON、revision 并发、name 与倍率并发、operation 重放/
    冲突、审计脱敏和安全整数边界；
 4. 候选后渠道改组、倍率更新、Key 组权限收紧、池切换和派发前 failover 的最终事务重核；
 5. 四生成协议与 Embeddings 的 known/unknown/known-zero 成本、预算启停两条 dispatch 路径、
    price version 与 multiplier version 各自冻结、混合币种不合并；
-6. 流式取消、持久化失败、SQLite 整数/求和溢出、并发终结、重启 interrupted 和更正重放，
-   均无部分提交或已派发重放；
+6. 流式取消、持久化失败、运行时全部表丢失、非历史快照丢失、SQLite 整数/求和溢出、并发
+   终结、重启 interrupted 和更正重放，均无部分提交或已派发重放；
 7. 目录、count_tokens、测试/探针/恢复探测和派发前取消不产生 allocation attempt；
 8. 管理 API、日志、数据库、WAL、导出和浏览器响应不含 Key、Authorization、Cookie、上游
    token、prompt、模型响应或任意 SQL 错误。
