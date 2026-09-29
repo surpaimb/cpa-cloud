@@ -55,10 +55,13 @@ func (m AllocationMultiplier) Apply(base *int64) (*int64, error)
 
 `Apply` 只接受非负 base，使用整数运算计算
 `ceil(base * ppm / 1_000_000)`。这与既有 token→microcurrency 成本向上取整规则一致，不使用
-浮点数。`base == nil` 表示未知并返回 `nil`；指向零的 base 是已知零并返回指向零的结果，
-不能和未知混淆。非法零值倍率、负 base、乘法/加法/除法溢出或大于 `math.MaxInt64` 的结果
-返回 `accounting.ErrInvalid`，绝不饱和、截断、回绕或回退到 `1x`。此接口不接收币种；调用者
-保留原始价格快照的三个大写字母币种，且不同币种永不相加。
+浮点数。计算必须等价于对无限精度整数做上述乘法、加 `scale-1` 和除法；64 位中间乘积溢出
+本身不是失败条件。只要最终数学结果不大于 `math.MaxInt64` 就必须成功，包括接近
+`math.MaxInt64` 的 `1x` base；可使用商余分解、`math/bits` 的完整宽度运算或 `big.Int`。
+`base == nil` 表示未知并返回 `nil`；指向零的 base 是已知零并返回指向零的结果，不能和未知
+混淆。非法零值倍率、负 base 或最终数学结果大于 `math.MaxInt64` 返回
+`accounting.ErrInvalid`，绝不饱和、截断、回绕或回退到 `1x`。此接口不接收币种；调用者保留
+原始价格快照的三个大写字母币种，且不同币种永不相加。
 
 更正账本不直接对可能为负的 delta 乘倍率。每次更正先按现有规则得到非负的有效原始成本
 总额，再用 attempt 已冻结的倍率计算新的有效调整后总额并持久化。这样舍入只作用于每个
