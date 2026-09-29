@@ -315,6 +315,7 @@ export type SystemStatus = {
     single_instance_billing?: boolean
     key_access_policy?: boolean
     key_source_policy?: boolean
+    trusted_proxy_source?: boolean
   }
 }
 

@@ -29,8 +29,8 @@ const legacyPolicy = {
   effective_models: ['public-model'],
 }
 
-function systemStatus(keyPolicy: boolean | undefined, sourcePolicy?: boolean) {
-  return { version: 'test', ready: true, storage: 'sqlite-wal', limitations: [], features: keyPolicy === undefined ? {} : { key_access_policy: keyPolicy, ...(sourcePolicy === undefined ? {} : { key_source_policy: sourcePolicy }) } }
+function systemStatus(keyPolicy: boolean | undefined, sourcePolicy?: boolean, trustedProxySource?: boolean) {
+  return { version: 'test', ready: true, storage: 'sqlite-wal', limitations: [], features: keyPolicy === undefined ? {} : { key_access_policy: keyPolicy, ...(sourcePolicy === undefined ? {} : { key_source_policy: sourcePolicy }), ...(trustedProxySource === undefined ? {} : { trusted_proxy_source: trustedProxySource }) } }
 }
 
 describe('access-key policy administration', () => {
@@ -89,6 +89,28 @@ describe('access-key policy administration', () => {
     expect(dialog).toHaveTextContent('沿用员工权限')
     expect(within(dialog).queryByRole('button', { name: '编辑独立权限' })).not.toBeInTheDocument()
     expect(within(dialog).queryByRole('button', { name: '保存独立权限' })).not.toBeInTheDocument()
+  })
+
+  it('explains trusted proxy source resolution without adding a Key authorization toggle', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response(systemStatus(true, true, true))
+      if (url.endsWith('/employees') && !init?.method) return response({ items: [employee] })
+      if (url.endsWith('/models')) return response({ items: [model] })
+      if (url.endsWith('/employees/emp-1/keys')) return response({ items: [] })
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    }))
+    render(<EmployeesPage csrf="csrf" />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '管理 Key' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('只有真实 socket peer 命中管理员显式配置的可信代理 CIDR')
+    expect(dialog).toHaveTextContent('一条 X-Forwarded-For 链')
+    expect(dialog).toHaveTextContent('从右向左的第一个不可信 hop 作为来源')
+    expect(dialog).toHaveTextContent('Forwarded 和 X-Real-IP 仍会忽略')
+    expect(dialog).toHaveTextContent('不会授予 Key 访问权限')
+    expect(within(dialog).queryByRole('checkbox', { name: /可信代理|信任.*header/i })).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('radio', { name: /可信代理|信任.*header/i })).not.toBeInTheDocument()
   })
 
   it('keeps PR8 protocol and model policy management without sending source fields', async () => {
