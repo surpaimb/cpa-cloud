@@ -69,9 +69,9 @@ func (a *App) handleConvertedModelJSON(w http.ResponseWriter, r *http.Request, r
 	_, _ = w.Write(body)
 }
 
-// handleConvertedModelSSE converts the two explicitly supported OpenAI stream
-// pairs while preserving the single dispatch and accounting parent created by
-// the caller. Raw upstream event JSON is observed before conversion.
+// handleConvertedModelSSE converts the explicitly supported cross-protocol
+// stream pairs while preserving the single dispatch and accounting parent
+// created by the caller. Raw upstream event JSON is observed before conversion.
 func (a *App) handleConvertedModelSSE(w http.ResponseWriter, r *http.Request, runtime *protocolRuntime, req *http.Request, client upstreamHTTPDoer, requestID string) {
 	controller := http.NewResponseController(w)
 	if !supportsProtocolStreamFlush(w) || controller.SetWriteDeadline(time.Now().Add(protocolStreamWriteTimeout)) != nil || controller.SetWriteDeadline(time.Time{}) != nil {
