@@ -24,6 +24,7 @@ func TestMigrateBackfillsExistingKeysAndIsRetryable(t *testing.T) {
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{},
 		ModelMode: ModeSelected, Models: []string{"public-a"},
 		SourceMode: ModeSelected, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime)
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +53,7 @@ func TestMigrateFailsClosedWhenMarkedDatabaseLosesPolicy(t *testing.T) {
 	if _, err := Replace(context.Background(), db, "key-restricted", 1, Replacement{
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{},
 		SourceMode: ModeSelected, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime); err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +87,7 @@ func TestMigrateRejectsInvalidPersistentMarkerWithoutChangingPolicy(t *testing.T
 	if _, err := Replace(context.Background(), db, "key-restricted", 1, Replacement{
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{},
 		SourceMode: ModeSelected, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime); err != nil {
 		t.Fatal(err)
 	}
@@ -185,6 +188,7 @@ func TestCreateAndReplaceTxEnforceExactPolicyAndCAS(t *testing.T) {
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{ProtocolOpenAIResponses},
 		ModelMode: ModeSelected, Models: []string{"public-a"},
 		SourceMode: ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime)
 	if err != nil {
 		t.Fatal(err)
@@ -204,6 +208,7 @@ func TestCreateAndReplaceTxEnforceExactPolicyAndCAS(t *testing.T) {
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{},
 		ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
@@ -217,6 +222,7 @@ func TestCreateAndReplaceTxEnforceExactPolicyAndCAS(t *testing.T) {
 	_, err = Replace(context.Background(), db, "key-new", 1, Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime.Add(2*time.Minute))
 	if !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale replacement error=%v", err)
@@ -224,6 +230,7 @@ func TestCreateAndReplaceTxEnforceExactPolicyAndCAS(t *testing.T) {
 	reset, err := Replace(context.Background(), db, "key-new", 2, Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime.Add(3*time.Minute))
 	if err != nil {
 		t.Fatal(err)
@@ -234,6 +241,7 @@ func TestCreateAndReplaceTxEnforceExactPolicyAndCAS(t *testing.T) {
 	if _, err := Replace(context.Background(), db, "key-new", 1, Replacement{
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, testTime.Add(4*time.Minute)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("ABA stale revision error=%v", err)
 	}
@@ -246,13 +254,13 @@ func TestStrictPolicyValidationRejectsDuplicatesUnknownAndArchivedModels(t *test
 	insertModel(t, db, "archived-model", true)
 	migratePolicyAndInstallSourceSchema(t, db)
 	tests := []Replacement{
-		{ProtocolMode: ModeAll, Protocols: nil, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}},
-		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{ProtocolOpenAIChat}, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}},
-		{ProtocolMode: ModeSelected, Protocols: []ClientProtocol{"unknown"}, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}},
-		{ProtocolMode: ModeSelected, Protocols: []ClientProtocol{ProtocolOpenAIChat, ProtocolOpenAIChat}, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}},
-		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"active-model", "active-model"}, SourceMode: ModeAll, SourceCIDRs: []string{}},
-		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"missing-model"}, SourceMode: ModeAll, SourceCIDRs: []string{}},
-		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"archived-model"}, SourceMode: ModeAll, SourceCIDRs: []string{}},
+		{ProtocolMode: ModeAll, Protocols: nil, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}, AccountGroupMode: ModeAll, AccountGroupIDs: []string{}},
+		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{ProtocolOpenAIChat}, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}, AccountGroupMode: ModeAll, AccountGroupIDs: []string{}},
+		{ProtocolMode: ModeSelected, Protocols: []ClientProtocol{"unknown"}, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}, AccountGroupMode: ModeAll, AccountGroupIDs: []string{}},
+		{ProtocolMode: ModeSelected, Protocols: []ClientProtocol{ProtocolOpenAIChat, ProtocolOpenAIChat}, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}, AccountGroupMode: ModeAll, AccountGroupIDs: []string{}},
+		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"active-model", "active-model"}, SourceMode: ModeAll, SourceCIDRs: []string{}, AccountGroupMode: ModeAll, AccountGroupIDs: []string{}},
+		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"missing-model"}, SourceMode: ModeAll, SourceCIDRs: []string{}, AccountGroupMode: ModeAll, AccountGroupIDs: []string{}},
+		{ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeSelected, Models: []string{"archived-model"}, SourceMode: ModeAll, SourceCIDRs: []string{}, AccountGroupMode: ModeAll, AccountGroupIDs: []string{}},
 	}
 	for index, replacement := range tests {
 		if _, err := Replace(context.Background(), db, "key-one", 1, replacement, testTime.Add(time.Duration(index)*time.Minute)); !errors.Is(err, ErrInvalidPolicy) {
@@ -266,6 +274,7 @@ func TestNormalizeReturnsDeterministicDetachedReplacement(t *testing.T) {
 		ProtocolMode: ModeSelected, Protocols: []ClientProtocol{ProtocolGeminiGenerate, ProtocolOpenAIChat},
 		ModelMode: ModeSelected, Models: []string{"z-model", "a-model"},
 		SourceMode: ModeSelected, SourceCIDRs: []string{"2001:db8::1", "192.0.2.1"},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}
 	normalized, err := Normalize(input)
 	if err != nil {
@@ -283,7 +292,7 @@ func TestNormalizeReturnsDeterministicDetachedReplacement(t *testing.T) {
 	if got, want := normalized.SourceCIDRs, []string{"192.0.2.1/32", "2001:db8::1/128"}; !slices.Equal(got, want) {
 		t.Fatalf("source CIDRs=%v want=%v", got, want)
 	}
-	if _, err := Normalize(Replacement{ProtocolMode: ModeAll, Protocols: nil, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}}); !errors.Is(err, ErrInvalidPolicy) {
+	if _, err := Normalize(Replacement{ProtocolMode: ModeAll, Protocols: nil, ModelMode: ModeAll, Models: []string{}, SourceMode: ModeAll, SourceCIDRs: []string{}, AccountGroupMode: ModeAll, AccountGroupIDs: []string{}}); !errors.Is(err, ErrInvalidPolicy) {
 		t.Fatalf("missing protocol array error=%v", err)
 	}
 }
@@ -319,6 +328,7 @@ func openTestDB(t *testing.T) *sql.DB {
 		`CREATE TABLE employees(id TEXT PRIMARY KEY)`,
 		`CREATE TABLE access_keys(id TEXT PRIMARY KEY,employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE CASCADE)`,
 		`CREATE TABLE models(id TEXT PRIMARY KEY,archived INTEGER NOT NULL CHECK(archived IN (0,1)))`,
+		`CREATE TABLE account_groups(id TEXT PRIMARY KEY)`,
 		`INSERT INTO employees(id) VALUES('employee-one'),('employee-two')`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
