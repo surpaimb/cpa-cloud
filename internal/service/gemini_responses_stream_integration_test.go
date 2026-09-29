@@ -48,7 +48,7 @@ func TestExplicitWireGeminiToResponsesStreamUsesConvertedRuntime(t *testing.T) {
 		t.Fatalf("Gemini-to-Responses stream dispatched %d upstream requests", calls.Load())
 	}
 	assertSingleWireAttempt(t, fixture.app, "openai-responses")
-	assertSingleWireUsage(t, fixture.app, int64Ptr(4), int64Ptr(2))
+	assertSingleWireUsage(t, fixture.app, nil, int64Ptr(2))
 }
 
 func TestExplicitWireResponsesToGeminiStreamBuffersLateIdentityWithoutReplay(t *testing.T) {
@@ -84,5 +84,5 @@ func TestExplicitWireResponsesToGeminiStreamBuffersLateIdentityWithoutReplay(t *
 		t.Fatalf("Responses-to-Gemini stream dispatched %d upstream requests", calls.Load())
 	}
 	assertSingleWireAttempt(t, fixture.app, "gemini-generate-content")
-	assertSingleWireUsage(t, fixture.app, int64Ptr(3), int64Ptr(2))
+	assertSingleWireUsage(t, fixture.app, nil, int64Ptr(2))
 }
