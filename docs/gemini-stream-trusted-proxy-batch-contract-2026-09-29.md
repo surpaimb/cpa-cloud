@@ -1,6 +1,6 @@
 # Gemini Responses SSE and trusted-proxy source batch contract
 
-Date: 2026-09-29  
+Date: 2026-09-29
 Base: `main@d56e0cedf17e036b56c57473b99eef088912d1f5`
 
 This contract freezes two development-preview milestones before implementation. It is independently authored from CPA Cloud's functional requirements, the public protocol sources below, and the repository's existing interfaces. It does not authorize use of archived CPA, CLIProxyAPI, Sub2API, `../cpa-cloud-reference`, or `../cpa` as an implementation source.
