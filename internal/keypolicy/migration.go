@@ -10,25 +10,38 @@ import (
 )
 
 const (
-	policiesTable               = "access_key_policies"
-	protocolsTable              = "access_key_policy_protocols"
-	modelsTable                 = "access_key_policy_models"
-	migrationStateTable         = "access_key_policy_migration_state"
-	migrationStateVersion       = 1
-	sourceMigrationStateTable   = "access_key_policy_source_migration_state"
-	sourceMigrationStateVersion = 1
-	sourceCIDRIndex             = "access_key_policy_source_cidrs_cidr_idx"
+	policiesTable                     = "access_key_policies"
+	protocolsTable                    = "access_key_policy_protocols"
+	modelsTable                       = "access_key_policy_models"
+	migrationStateTable               = "access_key_policy_migration_state"
+	migrationStateVersion             = 1
+	sourceMigrationStateTable         = "access_key_policy_source_migration_state"
+	sourceMigrationStateVersion       = 1
+	sourceCIDRIndex                   = "access_key_policy_source_cidrs_cidr_idx"
+	accountGroupMigrationStateTable   = "access_key_policy_account_group_migration_state"
+	accountGroupMigrationStateVersion = 1
+	accountGroupPoliciesTable         = "access_key_policy_account_groups"
+	accountGroupMembersTable          = "access_key_policy_account_group_members"
+	accountGroupMemberIndex           = "access_key_policy_account_group_members_group_idx"
 )
 
 func Migrate(ctx context.Context, db *sql.DB) error {
-	return migrateWithHooks(ctx, db, nil, nil)
+	return migrateWithAllHooks(ctx, db, nil, nil, nil)
 }
 
 func migrate(ctx context.Context, db *sql.DB, afterSchema func(*sql.Tx) error) error {
-	return migrateWithHooks(ctx, db, afterSchema, nil)
+	return migrateWithAllHooks(ctx, db, afterSchema, nil, nil)
 }
 
 func migrateWithHooks(ctx context.Context, db *sql.DB, afterSchema, beforeSourceMarker func(*sql.Tx) error) error {
+	return migrateWithAllHooks(ctx, db, afterSchema, beforeSourceMarker, nil)
+}
+
+func migrateWithAccountGroupHook(ctx context.Context, db *sql.DB, beforeAccountGroupMarker func(*sql.Tx) error) error {
+	return migrateWithAllHooks(ctx, db, nil, nil, beforeAccountGroupMarker)
+}
+
+func migrateWithAllHooks(ctx context.Context, db *sql.DB, afterSchema, beforeSourceMarker, beforeAccountGroupMarker func(*sql.Tx) error) error {
 	if db == nil {
 		return ErrInvalidSchema
 	}
@@ -59,6 +72,9 @@ func migrateWithHooks(ctx context.Context, db *sql.DB, afterSchema, beforeSource
 			return err
 		}
 		if err := migrateSourcePolicy(ctx, tx, beforeSourceMarker); err != nil {
+			return err
+		}
+		if err := migrateAccountGroupPolicy(ctx, tx, beforeAccountGroupMarker); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
@@ -122,6 +138,9 @@ func migrateWithHooks(ctx context.Context, db *sql.DB, afterSchema, beforeSource
 		return err
 	}
 	if err := migrateSourcePolicy(ctx, tx, beforeSourceMarker); err != nil {
+		return err
+	}
+	if err := migrateAccountGroupPolicy(ctx, tx, beforeAccountGroupMarker); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -309,6 +328,224 @@ func verifySourceSchema(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	return verifyIndex(ctx, tx, sourceCIDRIndex, []string{"cidr", "key_id"})
+}
+
+func migrateAccountGroupPolicy(ctx context.Context, tx *sql.Tx, beforeMarker func(*sql.Tx) error) error {
+	anyPresent, markerPresent, err := accountGroupMigrationObjectsPresent(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if anyPresent && !markerPresent {
+		return fmt.Errorf("%w: unmarked or partial key policy account group schema", ErrInvalidSchema)
+	}
+	if markerPresent {
+		if err := verifyAccountGroupSchema(ctx, tx); err != nil {
+			return err
+		}
+		if err := verifyAccountGroupMigrationState(ctx, tx); err != nil {
+			return err
+		}
+		if err := verifyAccountGroupCoverage(ctx, tx); err != nil {
+			return err
+		}
+		return verifyAccountGroupForeignKeys(ctx, tx)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE access_key_policy_account_group_migration_state (
+			singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
+			version INTEGER NOT NULL CHECK(version=1),
+			completed_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE access_key_policy_account_groups (
+			key_id TEXT PRIMARY KEY NOT NULL REFERENCES access_key_policies(key_id) ON DELETE CASCADE,
+			account_group_mode TEXT NOT NULL CHECK(account_group_mode IN ('all','selected'))
+		)`,
+		`CREATE TABLE access_key_policy_account_group_members (
+			key_id TEXT NOT NULL REFERENCES access_key_policy_account_groups(key_id) ON DELETE CASCADE,
+			account_group_id TEXT NOT NULL REFERENCES account_groups(id) ON DELETE RESTRICT,
+			PRIMARY KEY(key_id,account_group_id)
+		)`,
+		`CREATE INDEX access_key_policy_account_group_members_group_idx ON access_key_policy_account_group_members(account_group_id,key_id)`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("create key policy account group schema: %w", err)
+		}
+	}
+	if err := verifyAccountGroupSchema(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO access_key_policy_account_groups(key_id,account_group_mode)
+		SELECT key_id,'all' FROM access_key_policies`); err != nil {
+		return fmt.Errorf("backfill key policy account groups: %w", err)
+	}
+	if err := verifyAccountGroupCoverage(ctx, tx); err != nil {
+		return err
+	}
+	if err := verifyAccountGroupForeignKeys(ctx, tx); err != nil {
+		return err
+	}
+	if beforeMarker != nil {
+		if err := beforeMarker(tx); err != nil {
+			return err
+		}
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO access_key_policy_account_group_migration_state(singleton,version,completed_at) VALUES(1,?,?)`, accountGroupMigrationStateVersion, stamp); err != nil {
+		return fmt.Errorf("write key policy account group migration marker: %w", err)
+	}
+	return verifyAccountGroupMigrationState(ctx, tx)
+}
+
+func accountGroupMigrationObjectsPresent(ctx context.Context, tx *sql.Tx) (anyPresent bool, markerPresent bool, err error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE name IN (
+		'access_key_policy_account_group_migration_state','access_key_policy_account_groups',
+		'access_key_policy_account_group_members','access_key_policy_account_group_members_group_idx'
+	)`)
+	if err != nil {
+		return false, false, fmt.Errorf("%w: inspect key policy account group migration objects", ErrInvalidSchema)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, false, fmt.Errorf("%w: inspect key policy account group migration objects", ErrInvalidSchema)
+		}
+		anyPresent = true
+		if name == accountGroupMigrationStateTable {
+			markerPresent = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, false, fmt.Errorf("%w: inspect key policy account group migration objects", ErrInvalidSchema)
+	}
+	return anyPresent, markerPresent, nil
+}
+
+func verifyAccountGroupMigrationState(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT singleton,version,completed_at FROM access_key_policy_account_group_migration_state`)
+	if err != nil {
+		return fmt.Errorf("%w: read key policy account group migration marker", ErrInvalidSchema)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+		var singleton, version int
+		var completedAt string
+		if err := rows.Scan(&singleton, &version, &completedAt); err != nil || singleton != 1 || version != accountGroupMigrationStateVersion {
+			return fmt.Errorf("%w: invalid key policy account group migration marker", ErrInvalidSchema)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, completedAt); err != nil {
+			return fmt.Errorf("%w: invalid key policy account group migration timestamp", ErrInvalidSchema)
+		}
+	}
+	if err := rows.Err(); err != nil || count != 1 {
+		return fmt.Errorf("%w: invalid key policy account group migration marker count", ErrInvalidSchema)
+	}
+	return nil
+}
+
+func verifyAccountGroupCoverage(ctx context.Context, tx *sql.Tx) error {
+	var missing, orphaned, orphanedMembers, unknownGroups int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_key_policies p LEFT JOIN access_key_policy_account_groups g ON g.key_id=p.key_id WHERE g.key_id IS NULL`).Scan(&missing); err != nil {
+		return fmt.Errorf("verify key policy account group coverage: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_key_policy_account_groups g LEFT JOIN access_key_policies p ON p.key_id=g.key_id WHERE p.key_id IS NULL`).Scan(&orphaned); err != nil {
+		return fmt.Errorf("verify key policy account group ownership: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_key_policy_account_group_members m LEFT JOIN access_key_policy_account_groups g ON g.key_id=m.key_id WHERE g.key_id IS NULL`).Scan(&orphanedMembers); err != nil {
+		return fmt.Errorf("verify key policy account group member ownership: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_key_policy_account_group_members m LEFT JOIN account_groups g ON g.id=m.account_group_id WHERE g.id IS NULL`).Scan(&unknownGroups); err != nil {
+		return fmt.Errorf("verify key policy account group references: %w", err)
+	}
+	if missing != 0 || orphaned != 0 || orphanedMembers != 0 || unknownGroups != 0 {
+		return fmt.Errorf("%w: incomplete key policy account group coverage", ErrInvalidSchema)
+	}
+	return nil
+}
+
+func verifyAccountGroupSchema(ctx context.Context, tx *sql.Tx) error {
+	var accountGroupObjectType string
+	if err := tx.QueryRowContext(ctx, `SELECT type FROM sqlite_master WHERE name='account_groups'`).Scan(&accountGroupObjectType); err != nil || accountGroupObjectType != "table" {
+		return fmt.Errorf("%w: account_groups table is unavailable", ErrInvalidSchema)
+	}
+	expectedColumns := map[string]map[string]columnSpec{
+		accountGroupMigrationStateTable: {
+			"singleton": {"INTEGER", true, 1}, "version": {"INTEGER", true, 0}, "completed_at": {"TEXT", true, 0},
+		},
+		accountGroupPoliciesTable: {
+			"key_id": {"TEXT", true, 1}, "account_group_mode": {"TEXT", true, 0},
+		},
+		accountGroupMembersTable: {
+			"key_id": {"TEXT", true, 1}, "account_group_id": {"TEXT", true, 2},
+		},
+	}
+	for table, expected := range expectedColumns {
+		actual, err := readColumns(ctx, tx, table)
+		if err != nil {
+			return err
+		}
+		if len(actual) != len(expected) {
+			return fmt.Errorf("%w: unexpected columns on %s", ErrInvalidSchema, table)
+		}
+		for name, want := range expected {
+			if got, ok := actual[name]; !ok || got != want {
+				return fmt.Errorf("%w: invalid column %s.%s", ErrInvalidSchema, table, name)
+			}
+		}
+	}
+	checks := map[string][]string{
+		accountGroupMigrationStateTable: {"check(singleton=1)", "check(version=1)"},
+		accountGroupPoliciesTable:       {"check(account_group_modein('all','selected'))"},
+	}
+	for table, fragments := range checks {
+		var raw string
+		if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&raw); err != nil {
+			return fmt.Errorf("%w: read table %s", ErrInvalidSchema, table)
+		}
+		normalized := normalizeDDL(raw)
+		for _, fragment := range fragments {
+			if !strings.Contains(normalized, fragment) {
+				return fmt.Errorf("%w: missing constraint on %s", ErrInvalidSchema, table)
+			}
+		}
+	}
+	if err := verifyForeignKeys(ctx, tx, accountGroupMigrationStateTable, []foreignKeySpec{}); err != nil {
+		return err
+	}
+	if err := verifyForeignKeys(ctx, tx, accountGroupPoliciesTable, []foreignKeySpec{{"key_id", policiesTable, "key_id", "CASCADE"}}); err != nil {
+		return err
+	}
+	if err := verifyForeignKeys(ctx, tx, accountGroupMembersTable, []foreignKeySpec{
+		{"key_id", accountGroupPoliciesTable, "key_id", "CASCADE"},
+		{"account_group_id", "account_groups", "id", "RESTRICT"},
+	}); err != nil {
+		return err
+	}
+	return verifyIndex(ctx, tx, accountGroupMemberIndex, []string{"account_group_id", "key_id"})
+}
+
+func verifyAccountGroupForeignKeys(ctx context.Context, tx *sql.Tx) error {
+	for _, table := range []string{accountGroupPoliciesTable, accountGroupMembersTable} {
+		rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check(`+table+`)`)
+		if err != nil {
+			return fmt.Errorf("%w: check foreign keys on %s", ErrInvalidSchema, table)
+		}
+		violated := rows.Next()
+		iterationErr := rows.Err()
+		closeErr := rows.Close()
+		if iterationErr != nil {
+			return fmt.Errorf("%w: check foreign keys on %s", ErrInvalidSchema, table)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("%w: check foreign keys on %s", ErrInvalidSchema, table)
+		}
+		if violated {
+			return fmt.Errorf("%w: foreign key violation on %s", ErrInvalidSchema, table)
+		}
+	}
+	return nil
 }
 
 func migrationObjectsPresent(ctx context.Context, tx *sql.Tx) (anyPresent bool, markerPresent bool, err error) {

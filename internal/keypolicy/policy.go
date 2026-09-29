@@ -44,26 +44,30 @@ var (
 )
 
 type Policy struct {
-	Revision     int64            `json:"revision"`
-	ProtocolMode Mode             `json:"protocol_mode"`
-	Protocols    []ClientProtocol `json:"protocols"`
-	ModelMode    Mode             `json:"model_mode"`
-	Models       []string         `json:"models"`
-	SourceMode   Mode             `json:"source_mode"`
-	SourceCIDRs  []string         `json:"source_cidrs"`
+	Revision         int64            `json:"revision"`
+	ProtocolMode     Mode             `json:"protocol_mode"`
+	Protocols        []ClientProtocol `json:"protocols"`
+	ModelMode        Mode             `json:"model_mode"`
+	Models           []string         `json:"models"`
+	SourceMode       Mode             `json:"source_mode"`
+	SourceCIDRs      []string         `json:"source_cidrs"`
+	AccountGroupMode Mode             `json:"account_group_mode"`
+	AccountGroupIDs  []string         `json:"account_group_ids"`
 }
 
 type Replacement struct {
-	ProtocolMode Mode             `json:"protocol_mode"`
-	Protocols    []ClientProtocol `json:"protocols"`
-	ModelMode    Mode             `json:"model_mode"`
-	Models       []string         `json:"models"`
-	SourceMode   Mode             `json:"source_mode"`
-	SourceCIDRs  []string         `json:"source_cidrs"`
+	ProtocolMode     Mode             `json:"protocol_mode"`
+	Protocols        []ClientProtocol `json:"protocols"`
+	ModelMode        Mode             `json:"model_mode"`
+	Models           []string         `json:"models"`
+	SourceMode       Mode             `json:"source_mode"`
+	SourceCIDRs      []string         `json:"source_cidrs"`
+	AccountGroupMode Mode             `json:"account_group_mode"`
+	AccountGroupIDs  []string         `json:"account_group_ids"`
 }
 
 // Normalize validates an API replacement and returns deterministic, detached
-// protocol and model slices for idempotency fingerprints and persistence.
+// slices for idempotency fingerprints and persistence.
 func Normalize(input Replacement) (Replacement, error) {
 	return normalizeReplacement(input)
 }
@@ -72,6 +76,7 @@ func CreateDefaultTx(ctx context.Context, tx *sql.Tx, keyID string, at time.Time
 	_, err := CreateTx(ctx, tx, keyID, Replacement{
 		ProtocolMode: ModeAll, Protocols: []ClientProtocol{}, ModelMode: ModeAll, Models: []string{},
 		SourceMode: ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: ModeAll, AccountGroupIDs: []string{},
 	}, at)
 	return err
 }
@@ -87,6 +92,9 @@ func CreateTx(ctx context.Context, tx *sql.Tx, keyID string, replacement Replace
 	if err := validateModelsExist(ctx, tx, normalized.Models); err != nil {
 		return Policy{}, err
 	}
+	if err := validateAccountGroupsExist(ctx, tx, normalized.AccountGroupMode, normalized.AccountGroupIDs); err != nil {
+		return Policy{}, err
+	}
 	stamp := at.UTC().Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO access_key_policies(key_id,revision,protocol_mode,model_mode,created_at,updated_at) VALUES(?,1,?,?,?,?)`,
 		keyID, normalized.ProtocolMode, normalized.ModelMode, stamp, stamp); err != nil {
@@ -98,7 +106,15 @@ func CreateTx(ctx context.Context, tx *sql.Tx, keyID string, replacement Replace
 	if err := createSourceTx(ctx, tx, keyID, normalized); err != nil {
 		return Policy{}, err
 	}
-	return Policy{Revision: 1, ProtocolMode: normalized.ProtocolMode, Protocols: normalized.Protocols, ModelMode: normalized.ModelMode, Models: normalized.Models, SourceMode: normalized.SourceMode, SourceCIDRs: normalized.SourceCIDRs}, nil
+	if err := createAccountGroupTx(ctx, tx, keyID, normalized); err != nil {
+		return Policy{}, err
+	}
+	return Policy{
+		Revision: 1, ProtocolMode: normalized.ProtocolMode, Protocols: normalized.Protocols,
+		ModelMode: normalized.ModelMode, Models: normalized.Models, SourceMode: normalized.SourceMode,
+		SourceCIDRs: normalized.SourceCIDRs, AccountGroupMode: normalized.AccountGroupMode,
+		AccountGroupIDs: normalized.AccountGroupIDs,
+	}, nil
 }
 
 func LoadTx(ctx context.Context, tx *sql.Tx, keyID string) (Policy, error) {
@@ -129,6 +145,9 @@ func LoadTx(ctx context.Context, tx *sql.Tx, keyID string) (Policy, error) {
 		return Policy{}, err
 	}
 	if err := loadSourceTx(ctx, tx, keyID, &item); err != nil {
+		return Policy{}, err
+	}
+	if err := loadAccountGroupTx(ctx, tx, keyID, &item); err != nil {
 		return Policy{}, err
 	}
 	if err := validateStored(item); err != nil {
@@ -174,6 +193,9 @@ func ReplaceTx(ctx context.Context, tx *sql.Tx, keyID string, expected int64, re
 	if err := validateModelsExist(ctx, tx, normalized.Models); err != nil {
 		return Policy{}, err
 	}
+	if err := validateAccountGroupsExist(ctx, tx, normalized.AccountGroupMode, normalized.AccountGroupIDs); err != nil {
+		return Policy{}, err
+	}
 	nextRevision := current.Revision + 1
 	result, err := tx.ExecContext(ctx, `UPDATE access_key_policies SET revision=?,protocol_mode=?,model_mode=?,updated_at=? WHERE key_id=? AND revision=?`,
 		nextRevision, normalized.ProtocolMode, normalized.ModelMode, at.UTC().Format(time.RFC3339Nano), keyID, expected)
@@ -193,9 +215,14 @@ func ReplaceTx(ctx context.Context, tx *sql.Tx, keyID string, expected int64, re
 	if err := replaceSourceTx(ctx, tx, keyID, normalized); err != nil {
 		return Policy{}, err
 	}
+	if err := replaceAccountGroupTx(ctx, tx, keyID, normalized); err != nil {
+		return Policy{}, err
+	}
 	return Policy{
 		Revision: nextRevision, ProtocolMode: normalized.ProtocolMode, Protocols: normalized.Protocols,
-		ModelMode: normalized.ModelMode, Models: normalized.Models, SourceMode: normalized.SourceMode, SourceCIDRs: normalized.SourceCIDRs,
+		ModelMode: normalized.ModelMode, Models: normalized.Models, SourceMode: normalized.SourceMode,
+		SourceCIDRs: normalized.SourceCIDRs, AccountGroupMode: normalized.AccountGroupMode,
+		AccountGroupIDs: normalized.AccountGroupIDs,
 	}, nil
 }
 
@@ -266,14 +293,26 @@ func normalizeReplacement(input Replacement) (Replacement, error) {
 	if err != nil {
 		return Replacement{}, err
 	}
-	return Replacement{ProtocolMode: input.ProtocolMode, Protocols: protocols, ModelMode: input.ModelMode, Models: models, SourceMode: input.SourceMode, SourceCIDRs: sourceCIDRs}, nil
+	accountGroupIDs, err := normalizeAccountGroups(input.AccountGroupMode, input.AccountGroupIDs)
+	if err != nil {
+		return Replacement{}, err
+	}
+	return Replacement{
+		ProtocolMode: input.ProtocolMode, Protocols: protocols, ModelMode: input.ModelMode, Models: models,
+		SourceMode: input.SourceMode, SourceCIDRs: sourceCIDRs,
+		AccountGroupMode: input.AccountGroupMode, AccountGroupIDs: accountGroupIDs,
+	}, nil
 }
 
 func validateStored(policy Policy) error {
-	if policy.Revision < 1 || !validMode(policy.ProtocolMode) || !validMode(policy.ModelMode) || !validMode(policy.SourceMode) || policy.Protocols == nil || policy.Models == nil || policy.SourceCIDRs == nil {
+	if policy.Revision < 1 || !validMode(policy.ProtocolMode) || !validMode(policy.ModelMode) || !validMode(policy.SourceMode) || !validMode(policy.AccountGroupMode) || policy.Protocols == nil || policy.Models == nil || policy.SourceCIDRs == nil || policy.AccountGroupIDs == nil {
 		return ErrInvalidPolicy
 	}
-	_, err := normalizeReplacement(Replacement{ProtocolMode: policy.ProtocolMode, Protocols: policy.Protocols, ModelMode: policy.ModelMode, Models: policy.Models, SourceMode: policy.SourceMode, SourceCIDRs: policy.SourceCIDRs})
+	_, err := normalizeReplacement(Replacement{
+		ProtocolMode: policy.ProtocolMode, Protocols: policy.Protocols, ModelMode: policy.ModelMode, Models: policy.Models,
+		SourceMode: policy.SourceMode, SourceCIDRs: policy.SourceCIDRs,
+		AccountGroupMode: policy.AccountGroupMode, AccountGroupIDs: policy.AccountGroupIDs,
+	})
 	return err
 }
 
