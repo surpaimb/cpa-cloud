@@ -26,6 +26,10 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 普通 upstream 对象 {id,name,provider_kind,endpoint,enabled,revision}。
 
+### 管理员账号池本机容量快照（OBS-01 第一段）
+
+`GET /admin/api/v1/models/{id}/pool-runtime` 仅接受管理员会话、匹配的可选 Origin 和无查询参数；响应包含模型/池 revision、UTC `as_of`、明确的 `explicit_pool|legacy_no_pool|model_disabled` 状态，以及最多 64 条不含凭据或身份信息的路由本机容量/持久预留/阻塞原因。读取在单个 SQLite 只读事务内完成，结构、时间或存储错误统一 503 且不返回部分结果。网页必须经 `features.account_pool_runtime_observation=true` 门控，仅手动刷新。该投影不是供应商配额、实时请求数或派发承诺；详见[本机观测契约](account-pool-runtime-observation-contract.md)。
+
 ### 管理员只读审计总览（AUDIT-01 第二段）
 
 `GET /admin/api/v1/audit/events` 只读投影五类现存事务事实；完整范围、参数、游标升级与失败关闭规则见[第一段契约](admin-audit-overview-contract.md)和[第五源增量契约](admin-audit-financial-source-contract.md)。新增 `financial_commercial` 对应现有不可变 `financial_commercial_operations`；其 `actor_admin_id IS NULL` 映射为响应 `actor_id:null`，不伪称管理员操作。`features.admin_audit_overview=true` 门控入口；`features.admin_audit_financial_source=true` 单独门控第五源，旧服务仅有前一能力时网页仍只请求四源。旧四水位 v1 游标在新服务上需重新从首页查询。本接口不返回金额、operation digest、凭据或正文，也不宣称完整财务/统一审计或外部支付成功。

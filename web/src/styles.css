@@ -212,6 +212,25 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .pool-routing-note, .pool-global-note { margin-bottom: 16px; padding: 12px 14px; color: #5d4a27; background: #fff9ed; border: 1px solid #edd8aa; border-radius: 7px; font-size: 13px; line-height: 1.55; }
 .pool-routing-note--enabled { color: #17654f; background: #eef9f5; border-color: #bfe3d5; }
 .pool-global-note { color: #31566c; background: #edf6fa; border-color: #c5dee9; }
+.pool-runtime-observation { min-width: 0; margin: 0 0 18px; padding: 16px; border: 1px solid #c5dee9; border-radius: 8px; background: #f7fbfd; }
+.pool-runtime-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.pool-runtime-heading h3 { margin: 0 0 5px; color: var(--navy); font-size: 16px; }
+.pool-runtime-heading p, .pool-runtime-meta, .pool-runtime-limited, .pool-runtime-error { margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.pool-runtime-heading .button { flex: 0 0 auto; }
+.pool-runtime-meta { margin-top: 12px; overflow-wrap: anywhere; }
+.pool-runtime-limited { padding: 10px 12px; border-radius: 6px; background: #fff7e8; color: #734213; }
+.pool-runtime-error { margin-top: 12px; color: var(--danger); }
+.pool-runtime-list { display: grid; gap: 10px; }
+.pool-runtime-route { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 7px; background: #fff; }
+.pool-runtime-route header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; }
+.pool-runtime-route header code { overflow-wrap: anywhere; }
+.pool-runtime-route header small { color: var(--muted); }
+.pool-runtime-route dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 9px; margin: 12px 0; }
+.pool-runtime-route dt { color: var(--muted); font-size: 11px; }
+.pool-runtime-route dd { margin: 3px 0 0; color: var(--navy); font-weight: 700; }
+.pool-runtime-reasons, .pool-runtime-cooldown { margin: 8px 0 0; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
+.pool-runtime-reasons span { color: var(--muted); }
+.pool-runtime-cooldown { color: #925014; }
 .pool-account-list { display: grid; gap: 14px; }
 .pool-account-card { min-width: 0; margin: 0; padding: 14px; border: 1px solid var(--border); border-radius: 8px; }
 .pool-account-card legend { padding: 0 7px; color: var(--muted); font-size: 12px; font-weight: 650; }
@@ -541,6 +560,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .pool-account-grid { grid-template-columns: 1fr; }
   .pool-reload { align-items: stretch; flex-direction: column; }
   .pool-reload .button { width: 100%; }
+  .pool-runtime-heading { flex-direction: column; }
+  .pool-runtime-heading .button { width: 100%; }
   .usage-filters { grid-template-columns: 1fr; padding: 16px; }
   .token-grid, .attempt-list dl, .price-form { grid-template-columns: 1fr 1fr; }
   .section-heading, .price-toolbar { align-items: stretch; flex-direction: column; }

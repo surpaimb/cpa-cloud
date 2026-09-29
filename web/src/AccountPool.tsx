@@ -10,6 +10,7 @@ import {
   type Upstream,
 } from './api'
 import { Button, Dialog, Field, FormError, PageState } from './ui'
+import { PoolRuntimeObservationPanel } from './PoolRuntimeObservation'
 
 const encoder = new TextEncoder()
 
@@ -232,7 +233,7 @@ function validateAccounts(items: ModelAccount[], upstreams: Upstream[]) {
   return null
 }
 
-export function ModelAccountPoolEditor({ model, csrf, routingEnabled, onClose }: { model: ModelRoute; csrf: string; routingEnabled: boolean; onClose: () => void }) {
+export function ModelAccountPoolEditor({ model, csrf, routingEnabled, observationEnabled = false, onClose }: { model: ModelRoute; csrf: string; routingEnabled: boolean; observationEnabled?: boolean; onClose: () => void }) {
   const [accounts, setAccounts] = useState<ModelAccounts | null>(null)
   const [items, setItems] = useState<ModelAccount[]>([])
   const [upstreams, setUpstreams] = useState<Upstream[]>([])
@@ -327,6 +328,7 @@ export function ModelAccountPoolEditor({ model, csrf, routingEnabled, onClose }:
       </div>
       {accounts.revision === 0 ? <div className="membership-limitations"><strong>当前为兼容默认路由</strong>只有点击“保存账号池”才会写入新配置；打开或关闭此窗口都不会自动保存。</div> : null}
       <div className="pool-global-note">同一上游账号如果出现在多个已启用账号池中，全局并发上限按这些账号池里最小的“最大并发”执行。</div>
+      {observationEnabled ? <PoolRuntimeObservationPanel modelID={model.id} savedRevision={accounts.revision} /> : null}
       <div className="pool-account-list">{items.map((item, index) => {
         const upstream = upstreams.find((candidate) => candidate.id === item.upstream_id)
         const disabled = upstream && !upstream.enabled

@@ -2,6 +2,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AccountPoolDirectory, ModelAccountPoolEditor } from '../AccountPool'
+import { PoolRuntimeObservationPanel } from '../PoolRuntimeObservation'
 import { ModelsPage } from '../pages/ModelsPage'
 import type { ModelRoute } from '../api'
 
@@ -139,6 +140,56 @@ describe('account pool configuration', () => {
     expect(JSON.parse(String((put?.[1] as RequestInit).body))).toEqual({ expected_revision: 0, items: accounts.items })
     expect(new Headers((put?.[1] as RequestInit).headers).get('X-CSRF-Token')).toBe('csrf-token')
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/employees'))).toBe(false)
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/pool-runtime'))).toBe(false)
+  })
+
+  it('shows a gated persisted snapshot and refreshes it after a saved pool revision', async () => {
+    const accounts = { model_id: 'public-model', revision: 1, items: [{ upstream_id: 'up-1', upstream_model: 'provider-model', priority: 0, weight: 1, max_concurrency: 3 }] }
+    const baseFetch = editorFetch(accounts)
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/pool-runtime')) {
+        reads += 1
+        return response({ body: { model_id: 'public-model', model_revision: 1, pool_revision: reads >= 3 ? 2 : 1, pool_status: 'explicit_pool', as_of: '2026-09-30T00:00:00Z', items: [{ upstream_id: 'up-1', account_revision: 1, configured_max_concurrency: 3, global_max_concurrency: 2, request_reservations: 1, maintenance_reservations: 1, remaining_local_slots: 0, block_reasons: ['cooldown_active', 'capacity_reserved'], cooldown_until: '2026-09-30T00:01:00Z' }] } })
+      }
+      return baseFetch(input, init)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ModelAccountPoolEditor model={model()} csrf="csrf" routingEnabled observationEnabled onClose={() => undefined} />)
+    expect(await screen.findByText('本机账号池容量快照')).toBeInTheDocument()
+    expect(await screen.findByText('跨模型全局上限')).toBeInTheDocument()
+    expect(screen.getByText(/冷却中、本机持久槽位已占满/)).toBeInTheDocument()
+    expect(screen.getByText(/不是实时 HTTP 请求数/)).toBeInTheDocument()
+    expect(reads).toBe(1)
+    await userEvent.click(screen.getByRole('button', { name: '刷新快照' }))
+    await waitFor(() => expect(reads).toBe(2))
+    await userEvent.click(screen.getByRole('button', { name: '保存账号池' }))
+    await screen.findByText('账号池已保存。')
+    await waitFor(() => expect(reads).toBe(3))
+    expect(screen.getByText(/池 r2/)).toBeInTheDocument()
+  })
+
+  it('drops stale runtime data on failure and ignores a late response from another model', async () => {
+    let fail = false
+    const runtimeFetch = vi.fn((input: RequestInfo | URL) => fail ? response({ status: 503, body: { error: { code: 'storage_unavailable', message: 'hidden' } } }) : response({ body: { model_id: 'public-model', model_revision: 1, pool_revision: 0, pool_status: 'legacy_no_pool', as_of: '2026-09-30T00:00:00Z', items: [] } }))
+    vi.stubGlobal('fetch', runtimeFetch)
+    render(<PoolRuntimeObservationPanel modelID="public-model" savedRevision={0} />)
+    expect(await screen.findByText(/没有显式账号池/)).toBeInTheDocument()
+    fail = true
+    await userEvent.click(screen.getByRole('button', { name: '刷新快照' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('未显示旧数据')
+    expect(screen.queryByText(/没有显式账号池/)).not.toBeInTheDocument()
+
+    let resolveOld!: (value: Response) => void
+    const old = new Promise<Response>((resolve) => { resolveOld = resolve })
+    const switchedFetch = vi.fn((input: RequestInfo | URL) => String(input).includes('/model-old/') ? old : response({ body: { model_id: 'model-new', model_revision: 1, pool_revision: 0, pool_status: 'legacy_no_pool', as_of: '2026-09-30T00:00:01Z', items: [] } }))
+    vi.stubGlobal('fetch', switchedFetch)
+    const view = render(<PoolRuntimeObservationPanel modelID="model-old" savedRevision={0} />)
+    view.rerender(<PoolRuntimeObservationPanel modelID="model-new" savedRevision={0} />)
+    expect(await screen.findByText(/00:00:01Z/)).toBeInTheDocument()
+    await act(async () => { resolveOld(await response({ body: { model_id: 'model-old', model_revision: 1, pool_revision: 0, pool_status: 'legacy_no_pool', as_of: '2026-09-30T00:00:00Z', items: [] } })) })
+    expect(screen.getByText(/00:00:01Z/)).toBeInTheDocument()
+    view.unmount()
   })
 
   it('allows a saved disabled account to be removed but never offers disabled or different-provider accounts to add', async () => {

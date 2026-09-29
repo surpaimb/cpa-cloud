@@ -284,6 +284,26 @@ export type ModelAccount = {
   channel_id?: string | null
 }
 export type ModelAccounts = { model_id: string; revision: number; items: ModelAccount[] }
+export type PoolRuntimeBlockReason = 'model_disabled' | 'upstream_disabled' | 'cooldown_active' | 'recovery_isolated' | 'membership_disabled' | 'reauth_required' | 'capacity_reserved'
+export type PoolRuntimeRoute = {
+  upstream_id: string
+  account_revision: number
+  configured_max_concurrency: number
+  global_max_concurrency: number | null
+  request_reservations: number
+  maintenance_reservations: number
+  remaining_local_slots: number | null
+  block_reasons: PoolRuntimeBlockReason[]
+  cooldown_until: string | null
+}
+export type PoolRuntimeObservation = {
+  model_id: string
+  model_revision: number
+  pool_revision: number
+  pool_status: 'explicit_pool' | 'legacy_no_pool' | 'model_disabled'
+  as_of: string
+  items: PoolRuntimeRoute[]
+}
 export type DiscoveredModel = {
   id: string
   display_name?: string
@@ -315,6 +335,7 @@ export type SystemStatus = {
     anthropic_native_api?: boolean
     gemini_native_api?: boolean
     account_pool_configuration?: boolean
+    account_pool_runtime_observation?: boolean
     account_pool_routing?: boolean
     account_group_cost_allocation?: boolean
     openai_embeddings?: boolean
@@ -976,6 +997,8 @@ export const api = {
     request<AccountChannel>('/channels', { method: 'POST', body: JSON.stringify(body) }, csrf),
   modelAccounts: (id: string, signal?: AbortSignal) =>
     request<ModelAccounts>(`/models/${encodeURIComponent(id)}/accounts`, { signal }),
+  modelPoolRuntime: (id: string, signal?: AbortSignal) =>
+    request<PoolRuntimeObservation>(`/models/${encodeURIComponent(id)}/pool-runtime`, { signal }),
   putModelAccounts: (id: string, body: { expected_revision: number; items: ModelAccount[] }, csrf: string) =>
     request<ModelAccounts>(`/models/${encodeURIComponent(id)}/accounts`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
   usageSummary: (filters: UsageFilters, signal?: AbortSignal) =>

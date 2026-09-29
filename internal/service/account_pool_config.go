@@ -88,6 +88,7 @@ func (a *App) registerAccountPoolHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/api/v1/channels", a.requireAdmin(a.listAccountChannels, false))
 	mux.HandleFunc("POST /admin/api/v1/channels", a.requireAdmin(a.createAccountChannel, true))
 	mux.HandleFunc("GET /admin/api/v1/models/{id}/accounts", a.requireAdmin(a.getModelAccounts, false))
+	mux.HandleFunc("GET "+poolRuntimeObservationPath, a.requireAdmin(a.getModelPoolRuntime, false))
 	mux.HandleFunc("PUT /admin/api/v1/models/{id}/accounts", a.requireAdmin(a.putModelAccounts, true))
 }
 

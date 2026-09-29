@@ -1,4 +1,5 @@
 // CPA Cloud account-pool process acceptance. Synthetic loopback upstreams only.
+// OBS-01 snapshot assertions are independently authored from docs/account-pool-runtime-observation-contract.md.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -37,14 +38,14 @@ const mock=http.createServer(async(req,res)=>{
 });
 function launch(args){const proc=spawn(executable,['--data-dir',directory,...args],{windowsHide:true,stdio:['pipe','pipe','pipe']});for(const stream of [proc.stdout,proc.stderr])stream.on('data',b=>{logs+=b;if(logs.length>1<<20)proc.kill();});return proc;}
 async function stop(){if(child&&child.exitCode===null&&child.signalCode===null){const exit=once(child,'exit');child.stdin.end();const timer=setTimeout(()=>child.kill(),5000);try{await exit;}finally{clearTimeout(timer);}}}
-async function start(){const probe=http.createServer();probe.listen(0,'127.0.0.1');await once(probe,'listening');origin=`http://127.0.0.1:${probe.address().port}`;await new Promise(resolve=>probe.close(resolve));child=launch(['--listen',new URL(origin).host,'--allow-loopback-upstream','--shutdown-on-stdin-eof']);for(let i=0;i<100;i++){if(child.exitCode!==null)throw Error('Service startup failed');try{if((await fetch(origin+'/healthz',{signal:AbortSignal.timeout(500)})).ok){cookie='';csrf=(await admin('/sessions','POST',{username:'admin',password})).csrf_token;return;}}catch{}await delay(100);}throw Error('Readiness timeout');}
+async function start(){const probe=http.createServer();probe.listen(0,'127.0.0.1');await once(probe,'listening');origin=`http://127.0.0.1:${probe.address().port}`;await new Promise(resolve=>probe.close(resolve));assert.notEqual(new URL(origin).port,'8787','Reserved port must not be used');child=launch(['--listen',new URL(origin).host,'--allow-loopback-upstream','--shutdown-on-stdin-eof']);for(let i=0;i<100;i++){if(child.exitCode!==null)throw Error('Service startup failed');try{if((await fetch(origin+'/healthz',{signal:AbortSignal.timeout(500)})).ok){cookie='';csrf=(await admin('/sessions','POST',{username:'admin',password})).csrf_token;return;}}catch{}await delay(100);}throw Error('Readiness timeout');}
 async function admin(route,method='GET',body,status=200){const response=await fetch(origin+'/admin/api/v1'+route,{method,headers:{Cookie:cookie,Origin:origin,'X-CSRF-Token':csrf,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(10000)});if(response.headers.get('set-cookie'))cookie=response.headers.get('set-cookie').split(';')[0];const raw=await response.text();assert.equal(response.status,status,method+' '+route+' '+raw);return JSON.parse(raw);}
 async function request(protocol,key,extra={}){const model='pool-'+protocol;const native=protocol==='gemini';const url=native?`/v1beta/models/${model}:generateContent`:protocol==='claude'?'/v1/messages':protocol==='responses'?'/v1/responses':'/v1/chat/completions';const body=native?{contents:[{role:'user',parts:[{text:prompt}]}]}:protocol==='responses'?{model,input:prompt}:{model,messages:[{role:'user',content:prompt}],...(protocol==='claude'?{max_tokens:16}:{})};return fetch(origin+url,{method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json',...(protocol==='claude'?{'Anthropic-Version':'2023-06-01'}:{}),...(extra.headers??{})},body:JSON.stringify(body),signal:extra.signal??AbortSignal.timeout(10000)});}
 function noSecrets(value){const bytes=Buffer.from(value);assert.ok(!secrets.some(secret=>bytes.includes(Buffer.from(secret))),'Sensitive content persisted');}
 try{
   child=launch(['--init']);const initialized=once(child,'exit');child.stdin.end(password+'\n');assert.equal((await initialized)[0],0);
   mock.listen(0,'127.0.0.1');await once(mock,'listening');const endpoint=`http://127.0.0.1:${mock.address().port}`;
-  await start();assert.equal((await admin('/system/status')).features.account_pool_routing,true);
+  await start();const features=(await admin('/system/status')).features;assert.equal(features.account_pool_routing,true);assert.equal(features.account_pool_runtime_observation,true);
   const employee=await admin('/employees','POST',{name:'Synthetic employee'},201);
   const issued=await admin(`/employees/${employee.id}/keys`,'POST',{name:'synthetic',operation_id:randomUUID()},201);secrets.push(issued.key);
   const pools={};
@@ -55,6 +56,11 @@ try{
     const items=accounts.map((account,i)=>({upstream_id:account.id,upstream_model:'mapped-'+protocol,priority:i?1:10,weight:1,max_concurrency:1}));
     await admin('/models/pool-'+protocol+'/accounts','PUT',{expected_revision:0,items});
     await admin('/upstreams/'+accounts[0].id,'PATCH',{expected_revision:1,enabled:false});pools[protocol]={accounts,items};
+    const snapshot=await admin('/models/pool-'+protocol+'/pool-runtime');
+    assert.equal(snapshot.pool_status,'explicit_pool');assert.equal(snapshot.pool_revision,1);assert.equal(snapshot.items.length,2);
+    assert.equal(snapshot.items[0].upstream_id,accounts[0].id);assert.equal(snapshot.items[0].global_max_concurrency,1);assert.equal(snapshot.items[0].request_reservations,0);assert.equal(snapshot.items[0].maintenance_reservations,0);
+    assert.ok(snapshot.items[0].block_reasons.includes('upstream_disabled'));assert.equal(snapshot.items[1].remaining_local_slots,1);
+    noSecrets(JSON.stringify(snapshot));assert.ok(!JSON.stringify(snapshot).includes(employee.id));assert.ok(!JSON.stringify(snapshot).includes(issued.id));
     const response=await request(protocol,issued.key);assert.equal(response.status,200,protocol+' route failed');await response.text();
     assert.equal(received.at(-1).account,protocol+'-b','Disabled default blocked alternative route');
     if(protocol==='gemini')assert.ok(received.at(-1).url.includes('/mapped-gemini:'));else assert.equal(received.at(-1).model,'mapped-'+protocol);
@@ -73,12 +79,16 @@ try{
   blockNext=true;const firstEntered=new Promise(resolve=>{entered=resolve;});
   const active=request('chat',issued.key,{headers:{'X-CPA-Session':session}});
   await Promise.race([firstEntered,active.then(()=>{throw Error('Capacity fixture did not reach the provider');})]);
+  const held=await admin('/models/pool-chat/pool-runtime');const heldAccount=held.items.find(item=>item.upstream_id===pools.chat.accounts[1].id);
+  assert.equal(heldAccount.request_reservations,1);assert.equal(heldAccount.remaining_local_slots,0);assert.ok(heldAccount.block_reasons.includes('capacity_reserved'));
+  const anonymous=await fetch(origin+'/admin/api/v1/models/pool-chat/pool-runtime');assert.equal(anonymous.status,401);noSecrets(await anonymous.text());
+  const wrongOrigin=await fetch(origin+'/admin/api/v1/models/pool-chat/pool-runtime',{headers:{Cookie:cookie,Origin:'https://wrong.invalid'}});assert.equal(wrongOrigin.status,403);noSecrets(await wrongOrigin.text());
   const beforeQueued=received.length;const queued=request('chat',issued.key);await delay(100);
   await admin('/keys/'+issued.id+'/revoke','POST',{});unblock();
   const activeResult=await active;await activeResult.text();const denied=await queued;assert.equal(denied.status,401);await denied.text();assert.equal(received.length,beforeQueued,'Revoked queued request reached provider');
   assert.deepEqual(mockErrors,[]);await stop();noSecrets(logs);
   for(const entry of await readdir(directory,{withFileTypes:true}))if(entry.isFile())noSecrets(await readFile(path.join(directory,entry.name)));
-  console.log('PASS: four-protocol pool execution, disabled-primary alternative, directories, mapped models, no unsafe retry, cooldown restart, queued-key revocation, metadata isolation');
+  console.log('PASS: four-protocol pool execution, local pool reservation snapshots, disabled-primary alternative, directories, mapped models, no unsafe retry, cooldown restart, queued-key revocation, metadata isolation');
 }finally{
   unblock?.();await stop();mock.closeAllConnections();if(mock.listening)await new Promise(resolve=>mock.close(resolve));
   const resolved=path.resolve(directory);assert.ok(path.dirname(resolved)===path.resolve(os.tmpdir())&&path.basename(resolved).startsWith('cpac-pool-'));await rm(resolved,{recursive:true,force:true});

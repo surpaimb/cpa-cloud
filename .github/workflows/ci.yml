@@ -56,6 +56,8 @@ jobs:
       - run: go vet ./...
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud" ./cmd/cpa-cloud
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud-backup" ./cmd/cpa-cloud-backup
+      - name: Test local account-pool reservation snapshot with synthetic traffic
+        run: node scripts/smoke-account-pool.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test bounded four-source administrator audit overview
         env:
           CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/admin-audit

@@ -1,4 +1,5 @@
 // Independent browser acceptance using a real, isolated Go process.
+// OBS-01 UI assertions follow docs/account-pool-runtime-observation-contract.md.
 // Arguments: absolute executable, built web directory, installed Playwright module, output directory.
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -41,6 +42,7 @@ const { chromium } = require(playwrightPath);
     const endpoint = `http://127.0.0.1:${mock.address().port}`;
     const probe = http.createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
     const origin = `http://127.0.0.1:${probe.address().port}`; await new Promise(resolve => probe.close(resolve));
+    assert.notEqual(new URL(origin).port,'8787','Reserved port must not be used');
     child = launch(['--listen', new URL(origin).host, '--web-dir', web, '--allow-loopback-upstream', '--shutdown-on-stdin-eof']);
     let ready = false;
     for (let i = 0; i < 100; i++) {
@@ -60,6 +62,7 @@ const { chromium } = require(playwrightPath);
       return route.continue();
     });
     await page.goto(origin);
+    assert.match(await page.title(),/CPA Cloud/);
     await page.getByLabel('用户名', { exact: true }).fill('admin');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -99,6 +102,9 @@ const { chromium } = require(playwrightPath);
     await page.getByRole('button',{name:'关闭',exact:true}).last().click();
     await page.getByRole('button',{name:'编辑账号池',exact:true}).click();
     await page.getByText('当前为兼容默认路由',{exact:true}).waitFor();
+    await page.getByRole('heading',{name:'本机账号池容量快照',exact:true}).waitFor();
+    await page.getByText(/没有显式账号池；不推算容量或余额/).waitFor();
+    assert.equal((await api('GET','/models/pool-model/pool-runtime')).pool_status,'legacy_no_pool');
     await page.getByRole('button',{name:'关闭',exact:true}).last().click();
     assert.equal((await api('GET','/models/pool-model/accounts')).revision,0,'Opening editor saved a pool');
     await page.getByRole('button',{name:'编辑账号池',exact:true}).click();
@@ -110,6 +116,17 @@ const { chromium } = require(playwrightPath);
     await page.getByRole('button',{name:'保存账号池',exact:true}).click();
     await page.getByText('账号池已保存。',{exact:true}).waitFor();
     const saved=await api('GET','/models/pool-model/accounts');assert.equal(saved.revision,1);assert.equal(saved.items.length,2);
+    await page.getByText('跨模型全局上限',{exact:true}).first().waitFor();
+    await page.getByRole('button',{name:'刷新快照',exact:true}).click();
+    await page.getByText(/快照时间（UTC）/).waitFor();
+    const observed=await api('GET','/models/pool-model/pool-runtime');assert.equal(observed.pool_status,'explicit_pool');assert.equal(observed.items.length,2);assert.equal(observed.items[0].remaining_local_slots,1);
+    cleanSecrets(await page.getByRole('dialog').innerText());
+    await page.screenshot({path:path.join(output,'pool-runtime-desktop.png'),animations:'disabled'});
+    await page.setViewportSize({width:390,height:844});
+    await page.getByRole('heading',{name:'本机账号池容量快照',exact:true}).scrollIntoViewIfNeeded();
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),await page.evaluate(()=>document.documentElement.clientWidth),'Pool observation overflows 390px');
+    await page.screenshot({path:path.join(output,'pool-runtime-mobile.png'),animations:'disabled'});
+    await page.setViewportSize({width:1440,height:1000});
     await api('PUT','/models/pool-model/accounts',{expected_revision:1,items:saved.items});
     await page.getByLabel('账号 2 权重',{exact:true}).fill('3');
     await page.getByRole('button',{name:'保存账号池',exact:true}).click();
@@ -137,8 +154,8 @@ const { chromium } = require(playwrightPath);
     assert.equal(allowed.status,200);await allowed.json();assert.deepEqual(received,['backup-mapped']);
     assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);
     assert.deepEqual(pageErrors,[]);cleanSecrets(logs);
-    await fs.writeFile(path.join(output,'result.json'),JSON.stringify({status:'PASS',providerCalls,pageErrors:0,poolRevision:2,allocationPPM:'1250000',permissionPreserved:true},null,2));
-    console.log('PASS: real Go + browser pool groups/channels/allocation multiplier, explicit save, revision conflict/reload, disabled account, permission isolation, mapped upstream execution, desktop/mobile');
+    await fs.writeFile(path.join(output,'result.json'),JSON.stringify({status:'PASS',providerCalls,pageErrors:0,poolRevision:2,allocationPPM:'1250000',poolRuntimeObservation:true,permissionPreserved:true},null,2));
+    console.log('PASS: real Go + browser pool groups/channels/allocation multiplier, bounded local runtime snapshot, explicit save, revision conflict/reload, disabled account, permission isolation, mapped upstream execution, desktop/mobile');
   } finally {
     await browser?.close();
     if (child && child.exitCode === null && child.signalCode === null) {
