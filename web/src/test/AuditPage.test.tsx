@@ -153,6 +153,62 @@ describe('financial commercial audit source', () => {
   })
 })
 
+describe('bounded audit CSV export', () => {
+  it('downloads the applied four-source window without a cursor or page limit', async () => {
+    const calls: string[] = []
+    const NativeURL = URL
+    class DownloadURL extends NativeURL {
+      static createObjectURL = vi.fn(() => 'blob:audit-csv')
+      static revokeObjectURL = vi.fn()
+    }
+    vi.stubGlobal('URL', DownloadURL)
+    const linkClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const target = String(input)
+      calls.push(target)
+      if (target.includes('/audit/events/export.csv?')) return Promise.resolve(new Response('source,event_id\r\n', { headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="cpa-cloud-admin-audit.csv"',
+      } }))
+      return response(auditPage())
+    }))
+    render(<AuditPage csvExport />)
+    await screen.findByText('account_group.update')
+    await userEvent.click(screen.getByRole('button', { name: '导出 CSV（最多 1000 行）' }))
+    await waitFor(() => expect(linkClick).toHaveBeenCalledTimes(1))
+    expect(calls).toHaveLength(2)
+    expect(calls[1]).toContain('/audit/events/export.csv?')
+    expect(calls[1]).toContain('sources=account_pool%2Caccount_lifecycle%2Cgovernance_management%2Cgovernance_general_budget')
+    expect(calls[1]).toContain('from=2026-09-28T08%3A30%3A00Z')
+    expect(calls[1]).toContain('to=2026-09-29T08%3A30%3A00Z')
+    expect(calls[1]).not.toContain('cursor=')
+    expect(calls[1]).not.toContain('limit=')
+    expect((linkClick.mock.instances[0] as HTMLAnchorElement).download).toBe('cpa-cloud-admin-audit.csv')
+    expect(DownloadURL.createObjectURL).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the server bound error and never saves an error body as CSV', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input).includes('/export.csv?')
+      ? response({ error: { code: 'export_too_large', message: '请缩小筛选范围。' } }, 413)
+      : response(auditPage())))
+    const linkClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    render(<AuditPage csvExport />)
+    await screen.findByText('account_group.update')
+    await userEvent.click(screen.getByRole('button', { name: '导出 CSV（最多 1000 行）' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('请缩小筛选范围。')
+    expect(linkClick).not.toHaveBeenCalled()
+  })
+
+  it('does not offer export when the capability is absent', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => { calls.push(String(input)); return response(auditPage()) }))
+    render(<AuditPage />)
+    await screen.findByText('account_group.update')
+    expect(screen.queryByRole('button', { name: /导出 CSV/ })).not.toBeInTheDocument()
+    expect(calls).toHaveLength(1)
+  })
+})
+
 describe('audit capability negotiation', () => {
   it('hides audit navigation and makes zero audit requests when an old server omits the capability', async () => {
     const calls: string[] = []
@@ -189,6 +245,22 @@ describe('audit capability negotiation', () => {
     await userEvent.click(auditButton)
     expect(await screen.findByRole('heading', { name: '管理审计' })).toBeInTheDocument()
     expect(await screen.findByText('account_group.update')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /导出 CSV/ })).not.toBeInTheDocument()
     expect(calls.filter((url) => url.includes('/audit/events'))).toHaveLength(1)
+  })
+
+  it('shows export only when its distinct status capability is true', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const target = String(input)
+      if (target.endsWith('/session')) return response({ username: 'admin', csrf_token: 'csrf' })
+      if (target.endsWith('/employees')) return response({ items: [] })
+      if (target.endsWith('/system/status')) return response({ version: 'new', ready: true, storage: 'ready', limitations: [], features: { admin_audit_overview: true, admin_audit_csv_export: true } })
+      if (target.includes('/audit/events?')) return response(auditPage())
+      throw new Error(`Unexpected request: ${target}`)
+    }))
+    render(<App />)
+    const navigation = await screen.findByRole('navigation', { name: '主导航' })
+    await userEvent.click(await within(navigation).findByRole('button', { name: '管理审计' }))
+    expect(await screen.findByRole('button', { name: '导出 CSV（最多 1000 行）' })).toBeInTheDocument()
   })
 })

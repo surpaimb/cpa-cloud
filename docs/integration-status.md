@@ -1,11 +1,17 @@
 # 集成状态
 
-## 2026-09-30：管理员只读审计总览第二段（本分支，CI 待最终 HEAD）
+## 2026-09-30：管理员只读审计 CSV 第三段（本分支）
+
+- 按[导出契约](admin-audit-export-contract.md)，新增独立管理员 GET CSV：与五源总览共享 allowlist、筛选/排序和严格结构校验，在单一只读事务中捕获五源水位并完整缓冲后才发送响应。1000 行/2 MiB 双上限，超限 413 而不静默截断；失败在 CSV 响应头与首字节之前返回脱敏 JSON。CSV 固定九列、CRLF、UTF-8，危险公式前缀加单引号，空 actor/revision 有明确语义；不读金额、digest、正文或凭据，不改变原 facts、游标、保留或财务写入。
+- 服务新能力 `admin_audit_csv_export` 独立门控网页下载；旧服务缺少时不显示/请求导出。下载按已应用的筛选窗口重新查询全部匹配行而非仅当前页，413 在网页显示错误而不保存伪 CSV。本机审计导出专项 Go、Web TypeScript/20 文件 164 项测试和 production build、预备二进制动态非 8787 合成进程 smoke 均 PASS。Browser 插件不可用，Playwright CLI 对真实 Go 服务在 1280px 与 390px 完成登录、审计页、空结果 CSV 下载和无横向溢出检查；控制台仅见登录前预期 `/session` 401。最终 HEAD 全 Go、实际 CGO race、CI 和独立固定二进制核验仍以 PR 证据为准，不用本段本机预备构建替代。
+- 范围仍只是五类现存事务元数据，不是完整统一写审计、完整财务或外部支付结果；未运行真实 provider/会员/支付流，也没有部署、release 或安装包。
+
+## 2026-09-30：管理员只读审计总览第二段（已合并 PR #17）
 
 - 按[第五源增量契约](admin-audit-financial-source-contract.md)，只读加入现有不可变 `financial_commercial_operations`。仅选 operation ID、action、nullable actor、resource kind/ID、revision 与 created time；不读 payload digest、金额、正文或凭据。`actor_id:null` 明示未关联管理员；常量 `succeeded` 只代表业务事务提交，不代表外部支付完成。
 - 新服务每页严格验证原四源及财务表既有 DDL/两个不可变触发器；不改商业写入、迁移或财务 schema 计数。v2 游标捕获五源水位，旧 v1 游标返回 400 并要求重开首页。旧四源顺序、精确筛选和页面上界保留。
 - 网页由原 `admin_audit_overview` 与新增 `admin_audit_financial_source` 分层门控：旧服务仍只请求/显示四源；新服务显示第五源、nullable actor 和明确的非完整财务范围。响应运行时校验仍整页失败关闭。
-- 本地 Web TypeScript、160 项测试和 production build 已通过。Browser 插件不可用，按前端验收技能使用 Playwright CLI 在 `127.0.0.1:4179` 的 Vite 页面与**合成 API mock**核查五源卡片、动作筛选后只剩财务事实、未关联管理员标签、桌面与 390px 单列、无横向溢出及 0 console error/warning；这不是 Go 进程验收。为本批验证在工作区外下载[Go 官方 1.26.8 Windows amd64 ZIP](https://go.dev/dl/)（SHA-256 `b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59`），不安装产品或改变仓库依赖。该工具链下审计专项 Go 测试、`go vet ./...`、预备二进制的动态非 8787 隔离进程 smoke 已通过；非缓存全 Go 尚在运行，Windows 默认 `CGO_ENABLED=0`，不冒充 CGO race。最终精确 HEAD 仍须 GitHub CI 的实际 CGO race/双 CLI build/进程 smoke 和独立固定二进制验收，不能借用第一段旧 HEAD。
+- 本地 Web TypeScript、160 项测试和 production build 已通过。Browser 插件不可用，Playwright CLI 在 `127.0.0.1:4179` 的 Vite 页面与**合成 API mock**核查五源卡片、动作筛选、nullable actor、桌面和 390px 无溢出及控制台健康；这不是 Go 浏览器流程。官方 Go 1.26.8 便携 ZIP 经 SHA-256 核对并仅用于仓库外验证。最终 HEAD `062f97712e66d2a90a605f395d295860a979327c` 的本机非缓存全 Go、vet、双 CLI build 和动态非 8787 smoke 均通过；[GitHub Code validation #76](https://github.com/surpaimb/cpa-cloud/actions/runs/36609741715) 的 Linux 全 Go、实际 CGO service/有状态 race、双构建、进程 smoke 与 Web 全绿。独立固定 VCS 二进制进程验收两遍通过；未将跳过的平台发布 job 或真实 provider/支付算作验证。
 
 ## 2026-09-29：管理员只读审计总览第一段
 

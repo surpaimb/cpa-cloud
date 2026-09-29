@@ -1,4 +1,5 @@
-// Independently authored UI for docs/admin-audit-overview-contract.md.
+// Independently authored UI for docs/admin-audit-overview-contract.md and
+// docs/admin-audit-export-contract.md.
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { adminAuditSources, api, ApiError, type AdminAuditFilters, type AdminAuditPage, type AdminAuditSource } from '../api'
 import { messageFor } from '../hooks'
@@ -27,7 +28,7 @@ function formatTime(value: string) {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(value))
 }
 
-export function AuditPage({ financialSource = false }: { financialSource?: boolean }) {
+export function AuditPage({ financialSource = false, csvExport = false }: { financialSource?: boolean; csvExport?: boolean }) {
   const availableSources = financialSource ? adminAuditSources : legacySources
   const [selectedSources, setSelectedSources] = useState(() => new Set<AdminAuditSource>(availableSources))
   const [actor, setActor] = useState('')
@@ -41,6 +42,8 @@ export function AuditPage({ financialSource = false }: { financialSource?: boole
   const [data, setData] = useState<AdminAuditPage | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
   const [filters, setFilters] = useState<AdminAuditFilters>(() => ({ limit: 20, sources: [...availableSources] }))
   const [cursorChain, setCursorChain] = useState<Array<string | undefined>>([undefined])
   const [pageCache, setPageCache] = useState<AdminAuditPage[]>([])
@@ -131,9 +134,33 @@ export function AuditPage({ financialSource = false }: { financialSource?: boole
     void load(filters, data.next_cursor, nextIndex, nextChain)
   }
 
+  async function exportCSV() {
+    if (!csvExport || !data || exporting || loading) return
+    setExporting(true)
+    setExportError(null)
+    try {
+      const blob = await api.auditExport({ ...filters, from: data.from, to: data.to })
+      const objectURL = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectURL
+      link.download = 'cpa-cloud-admin-audit.csv'
+      document.body.append(link)
+      try { link.click() } finally {
+        link.remove()
+        const revoke = URL.revokeObjectURL.bind(URL)
+        window.setTimeout(() => revoke(objectURL), 1000)
+      }
+    } catch (caught) {
+      setExportError(messageFor(caught))
+    } finally {
+      setExporting(false)
+    }
+  }
+
   return <>
-    <header className="page-header audit-page-header"><div><h1>管理审计</h1><p>按固定字段查看{financialSource ? '五' : '四'}类现存事务事实，不读取请求正文或敏感凭据。</p></div><div className="page-header__action"><Button variant="secondary" disabled={loading} onClick={retry}>刷新本页</Button></div></header>
-    <section className="audit-boundary" aria-label="审计范围说明"><strong>这是现存事实视图，不是完整历史</strong><p>{financialSource ? '包含账号池、账号生命周期、治理管理、通用预算及财务商业操作中仍保留的已提交事务事实；未关联管理员的财务事实明确标注，不代表外部支付完成。' : '仅包含账号池、账号生命周期、治理管理和通用预算中仍保留的成功事实。'}不覆盖登录、备份或全部管理操作，也不改变各来源原有保留规则；不是完整财务或统一审计。</p></section>
+    <header className="page-header audit-page-header"><div><h1>管理审计</h1><p>按固定字段查看{financialSource ? '五' : '四'}类现存事务事实，不读取请求正文或敏感凭据。</p></div><div className="page-header__action"><Button variant="secondary" disabled={loading} onClick={retry}>刷新本页</Button>{csvExport ? <Button variant="secondary" disabled={loading || exporting || !data} onClick={() => void exportCSV()}>{exporting ? '正在导出…' : '导出 CSV（最多 1000 行）'}</Button> : null}</div></header>
+    <section className="audit-boundary" aria-label="审计范围说明"><strong>这是现存事实视图，不是完整历史</strong><p>{financialSource ? '包含账号池、账号生命周期、治理管理、通用预算及财务商业操作中仍保留的已提交事务事实；未关联管理员的财务事实明确标注，不代表外部支付完成。' : '仅包含账号池、账号生命周期、治理管理和通用预算中仍保留的成功事实。'}不覆盖登录、备份或全部管理操作，也不改变各来源原有保留规则；不是完整财务或统一审计。</p>{csvExport ? <p>CSV 按当前筛选窗口重新查询全部匹配事实，不限于当前页；超过 1000 行或 2 MiB 会报错，请缩小筛选范围。</p> : null}</section>
+    {csvExport ? <FormError error={exportError} /> : null}
     <section className="content-panel audit-panel">
       <form className="audit-filters" onSubmit={submit}>
         <fieldset className="audit-source-options"><legend>事实来源</legend>{availableSources.map((source) => <label key={source}><input type="checkbox" checked={selectedSources.has(source)} onChange={(event) => setSelectedSources((current) => { const next = new Set(current); event.target.checked ? next.add(source) : next.delete(source); return next })} /><span>{sourceLabels[source]}</span></label>)}</fieldset>

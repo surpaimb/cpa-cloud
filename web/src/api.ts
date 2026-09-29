@@ -322,6 +322,7 @@ export type SystemStatus = {
     single_instance_billing?: boolean
     admin_audit_overview?: boolean
     admin_audit_financial_source?: boolean
+    admin_audit_csv_export?: boolean
     key_access_policy?: boolean
     key_source_policy?: boolean
     key_account_group_policy?: boolean
@@ -864,6 +865,25 @@ function adminAuditSearch(filters: AdminAuditFilters, cursor?: string) {
   return query.toString()
 }
 
+// Independently authored for docs/admin-audit-export-contract.md.
+async function adminAuditExport(filters: AdminAuditFilters, signal?: AbortSignal): Promise<Blob> {
+  const query = new URLSearchParams(adminAuditSearch(filters))
+  query.delete('limit')
+  const response = await fetch(`${API_ROOT}/audit/events/export.csv?${query}`, { credentials: 'same-origin', signal })
+  if (!response.ok) {
+    let envelope: ErrorEnvelope = {}
+    try { envelope = (await response.json()) as ErrorEnvelope } catch { /* Keep a stable fallback. */ }
+    throw new ApiError(response.status, envelope.error?.code ?? 'request_failed', envelope.error?.message ?? '导出失败，请稍后重试。')
+  }
+  if (!response.headers.get('Content-Type')?.toLowerCase().startsWith('text/csv')
+    || response.headers.get('Content-Disposition') !== 'attachment; filename="cpa-cloud-admin-audit.csv"') {
+    throw new ApiError(502, 'invalid_response', '导出响应格式无效，未保存文件。')
+  }
+  const blob = await response.blob()
+  if (blob.size > 2 * 1024 * 1024) throw new ApiError(502, 'invalid_response', '导出响应过大，未保存文件。')
+  return blob
+}
+
 export const api = {
   session: () => request<Session>('/session'),
   login: (username: string, password: string) =>
@@ -1011,6 +1031,7 @@ export const api = {
     request<GovernanceObservationsPage>(`/governance/observations?${governanceObservationSearch(filters, cursor)}`, { signal }),
   auditEvents: async (filters: AdminAuditFilters, cursor?: string, signal?: AbortSignal) =>
     parseAdminAuditPage(await request<unknown>(`/audit/events?${adminAuditSearch(filters, cursor)}`, { signal })),
+  auditExport: adminAuditExport,
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
     request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   billingSettings: (signal?: AbortSignal) => request<BillingSettings>('/billing/settings', { signal }),
