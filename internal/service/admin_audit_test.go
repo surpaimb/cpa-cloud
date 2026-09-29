@@ -390,9 +390,58 @@ func TestAdminAuditFinancialSchemaTriggerAndBadRowFailClosed(t *testing.T) {
 				query = "?from=2026-09-29T09%3A59%3A59Z&to=2026-09-29T10%3A00%3A01Z&sources=financial_commercial"
 			}
 			assertAdminAuditError(t, requestJSON(t, http.MethodGet, fixture.server.URL+adminAuditPath+query, "", fixture.cookie, "", ""), http.StatusServiceUnavailable, "storage_unavailable")
-			assertAdminAuditError(t, requestJSON(t, http.MethodGet, fixture.server.URL+adminAuditPath+"?cursor="+url.QueryEscape(*first.NextCursor), "", fixture.cookie, "", ""), http.StatusServiceUnavailable, "storage_unavailable")
+			continuation := requestJSON(t, http.MethodGet, fixture.server.URL+adminAuditPath+"?cursor="+url.QueryEscape(*first.NextCursor), "", fixture.cookie, "", "")
+			if change.name == "bad row" {
+				if continuation.StatusCode != http.StatusOK {
+					t.Fatalf("post-watermark invalid row changed continuation: status=%d body=%s", continuation.StatusCode, readBody(continuation))
+				}
+				var page adminAuditTestPage
+				decodeResponse(t, continuation, &page)
+				continuation.Body.Close()
+				for _, item := range page.Items {
+					if item.EventID == "financial-bad" {
+						t.Fatal("post-watermark row entered continuation")
+					}
+				}
+			} else {
+				assertAdminAuditError(t, continuation, http.StatusServiceUnavailable, "storage_unavailable")
+			}
 		})
 	}
+}
+
+func TestAdminAuditFinancialBadRowUnderCursorWatermarkFailsClosed(t *testing.T) {
+	fixture := newRuntimeAccountPoolFixture(t)
+	fixture.enableRuntimeAdminHTTP(t)
+	adminID := adminAuditTestAdminID(t, fixture.app.store.db)
+	seedAdminAuditFourSources(t, fixture.app.store.db, adminID)
+	seedFinancialAuditFact(t, fixture.app.store.db, "financial-valid-1", "", "2026-09-29T10:00:00.09Z", "settings.update", "settings", "one")
+	seedFinancialAuditFact(t, fixture.app.store.db, "financial-valid-2", "", "2026-09-29T10:00:00.08Z", "settings.update", "settings", "two")
+	if _, err := fixture.app.store.db.Exec(`INSERT INTO financial_commercial_operations(operation_id,action,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at) VALUES('financial-bad','settings.update',NULL,zeroblob(32),'settings','',1,'2026-09-29T10:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := fixture.server.URL + adminAuditPath + "?from=2026-09-29T09%3A59%3A59Z&to=2026-09-29T10%3A00%3A01Z&limit=1"
+	for pageNumber := 1; pageNumber <= 10; pageNumber++ {
+		response := requestJSON(t, http.MethodGet, endpoint, "", fixture.cookie, "", "")
+		if response.StatusCode == http.StatusServiceUnavailable {
+			if pageNumber == 1 {
+				t.Fatal("bad row outside first page candidates blocked the homepage")
+			}
+			assertAdminAuditError(t, response, http.StatusServiceUnavailable, "storage_unavailable")
+			return
+		}
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("page %d status=%d body=%s", pageNumber, response.StatusCode, readBody(response))
+		}
+		var page adminAuditTestPage
+		decodeResponse(t, response, &page)
+		response.Body.Close()
+		if page.NextCursor == nil {
+			t.Fatalf("page chain ended before bad row was reached: page=%d", pageNumber)
+		}
+		endpoint = fixture.server.URL + adminAuditPath + "?cursor=" + url.QueryEscape(*page.NextCursor)
+	}
+	t.Fatal("bad row under signed watermark was never detected")
 }
 
 func seedFinancialAuditFact(t *testing.T, db *sql.DB, operationID, adminID, stamp, action, kind, resourceID string) {

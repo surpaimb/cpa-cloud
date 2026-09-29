@@ -90,15 +90,15 @@ type adminAuditCursor struct {
 }
 
 type adminAuditEventView struct {
-	Source     string `json:"source"`
-	EventID    string `json:"event_id"`
+	Source     string  `json:"source"`
+	EventID    string  `json:"event_id"`
 	ActorID    *string `json:"actor_id"`
-	Action     string `json:"action"`
-	TargetType string `json:"target_type"`
-	TargetID   string `json:"target_id"`
-	Result     string `json:"result"`
-	Revision   *int64 `json:"revision"`
-	OccurredAt string `json:"occurred_at"`
+	Action     string  `json:"action"`
+	TargetType string  `json:"target_type"`
+	TargetID   string  `json:"target_id"`
+	Result     string  `json:"result"`
+	Revision   *int64  `json:"revision"`
+	OccurredAt string  `json:"occurred_at"`
 
 	occurred time.Time
 	rank     int

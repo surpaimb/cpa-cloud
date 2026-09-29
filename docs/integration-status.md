@@ -5,7 +5,7 @@
 - 按[第五源增量契约](admin-audit-financial-source-contract.md)，只读加入现有不可变 `financial_commercial_operations`。仅选 operation ID、action、nullable actor、resource kind/ID、revision 与 created time；不读 payload digest、金额、正文或凭据。`actor_id:null` 明示未关联管理员；常量 `succeeded` 只代表业务事务提交，不代表外部支付完成。
 - 新服务每页严格验证原四源及财务表既有 DDL/两个不可变触发器；不改商业写入、迁移或财务 schema 计数。v2 游标捕获五源水位，旧 v1 游标返回 400 并要求重开首页。旧四源顺序、精确筛选和页面上界保留。
 - 网页由原 `admin_audit_overview` 与新增 `admin_audit_financial_source` 分层门控：旧服务仍只请求/显示四源；新服务显示第五源、nullable actor 和明确的非完整财务范围。响应运行时校验仍整页失败关闭。
-- 本地 Web TypeScript、160 项测试和 production build 已通过。Browser 插件不可用，按前端验收技能使用 Playwright CLI 在 `127.0.0.1:4179` 的 Vite 页面与**合成 API mock**核查五源卡片、动作筛选后只剩财务事实、未关联管理员标签、桌面与 390px 单列、无横向溢出及 0 console error/warning；这不是 Go 进程验收。本机没有 Go 工具链，**尚未在本机运行 Go/gofmt/vet/race 或精确 HEAD 进程验收**。待最终提交的 GitHub CI 日志逐项确认 Go 非缓存测试、vet、实际 CGO race、双 CLI build 和隔离进程 smoke；独立固定二进制验收也须单列实际结果，不能借用第一段旧 HEAD。
+- 本地 Web TypeScript、160 项测试和 production build 已通过。Browser 插件不可用，按前端验收技能使用 Playwright CLI 在 `127.0.0.1:4179` 的 Vite 页面与**合成 API mock**核查五源卡片、动作筛选后只剩财务事实、未关联管理员标签、桌面与 390px 单列、无横向溢出及 0 console error/warning；这不是 Go 进程验收。为本批验证在工作区外下载[Go 官方 1.26.8 Windows amd64 ZIP](https://go.dev/dl/)（SHA-256 `b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59`），不安装产品或改变仓库依赖。该工具链下审计专项 Go 测试、`go vet ./...`、预备二进制的动态非 8787 隔离进程 smoke 已通过；非缓存全 Go 尚在运行，Windows 默认 `CGO_ENABLED=0`，不冒充 CGO race。最终精确 HEAD 仍须 GitHub CI 的实际 CGO race/双 CLI build/进程 smoke 和独立固定二进制验收，不能借用第一段旧 HEAD。
 
 ## 2026-09-29：管理员只读审计总览第一段
 
