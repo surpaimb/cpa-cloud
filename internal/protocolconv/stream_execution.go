@@ -18,6 +18,8 @@ type crossProtocolStreamConverter struct {
 	response         *ResponsesToChatStream
 	messagesResponse *MessagesToResponsesStream
 	responseMessages *ResponsesToMessagesStream
+	geminiResponse   *GeminiToResponsesStream
+	responseGemini   *ResponsesToGeminiStream
 	terminal         bool
 }
 
@@ -38,6 +40,10 @@ func NewStreamConverter(prepared PreparedRequest) (StreamConverter, error) {
 		converter.responseMessages = new(ResponsesToMessagesStream)
 	case PlanResponsesToMessages:
 		converter.messagesResponse = new(MessagesToResponsesStream)
+	case PlanGeminiToResponses:
+		converter.responseGemini = new(ResponsesToGeminiStream)
+	case PlanResponsesToGemini:
+		converter.geminiResponse = new(GeminiToResponsesStream)
 	default:
 		return nil, &UnsupportedRouteError{
 			ClientProtocol: prepared.Plan.ClientProtocol, UpstreamProtocol: prepared.Plan.UpstreamProtocol,
@@ -110,6 +116,28 @@ func (c *crossProtocolStreamConverter) FeedFrame(frame SSEFrame) ([]SSEEvent, er
 			return nil, invalidUpstream("event", "Messages SSE event name must match its type")
 		}
 		events, err = c.messagesResponse.Feed(frame.Data)
+	case PlanGeminiToResponses:
+		if !json.Valid(frame.Data) {
+			return nil, invalidUpstream("data", "Responses SSE data must be JSON")
+		}
+		var envelope struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(frame.Data, &envelope) != nil || envelope.Type == "" {
+			return nil, invalidUpstream("type", "Responses SSE event type is required")
+		}
+		if frame.Event != "" && frame.Event != envelope.Type {
+			return nil, invalidUpstream("event", "Responses SSE event name does not match its type")
+		}
+		events, err = c.responseGemini.Feed(frame.Data)
+	case PlanResponsesToGemini:
+		if frame.Event != "" && frame.Event != "message" {
+			return nil, invalidUpstream("event", "unexpected Gemini SSE event name")
+		}
+		if !json.Valid(frame.Data) {
+			return nil, invalidUpstream("data", "Gemini SSE data must be JSON")
+		}
+		events, err = c.geminiResponse.Feed(frame.Data)
 	default:
 		return nil, invalidUpstream("stream", "unsupported stream plan")
 	}
@@ -148,6 +176,10 @@ func (c *crossProtocolStreamConverter) EOF() error {
 		return c.responseMessages.EOF()
 	case PlanResponsesToMessages:
 		return c.messagesResponse.EOF()
+	case PlanGeminiToResponses:
+		return c.responseGemini.EOF()
+	case PlanResponsesToGemini:
+		return c.geminiResponse.EOF()
 	default:
 		return interrupted("stream conversion did not complete")
 	}
