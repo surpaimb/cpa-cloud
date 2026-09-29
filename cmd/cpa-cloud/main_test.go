@@ -135,11 +135,26 @@ func TestHelpDoesNotStartOrWriteData(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("help: code=%d err=%v", code, err)
 	}
-	if !strings.Contains(output.String(), "check-initialized") || !strings.Contains(output.String(), "shutdown-on-stdin-eof") || !strings.Contains(output.String(), "codex-oauth-client-id") || !strings.Contains(output.String(), "scheduled-tests-enabled") || !strings.Contains(output.String(), "automated-backups-enabled") {
+	if !strings.Contains(output.String(), "check-initialized") || !strings.Contains(output.String(), "shutdown-on-stdin-eof") || !strings.Contains(output.String(), "codex-oauth-client-id") || !strings.Contains(output.String(), "scheduled-tests-enabled") || !strings.Contains(output.String(), "automated-backups-enabled") || !strings.Contains(output.String(), "trusted-proxy-cidr") {
 		t.Fatalf("help omitted launcher flags: %s", output.String())
 	}
 	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
 		t.Fatalf("help wrote data directory: %v", err)
+	}
+}
+
+func TestInvalidTrustedProxyConfigurationDoesNotWriteData(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "unused")
+	code, err := runCLI([]string{
+		"--data-dir", dataDir,
+		"--trusted-proxy-cidr", "127.0.0.1/32",
+		"--trusted-proxy-cidr", "127.0.0.1",
+	}, strings.NewReader(""), io.Discard)
+	if err == nil || code != 1 {
+		t.Fatalf("invalid trusted proxy configuration: code=%d err=%v", code, err)
+	}
+	if _, statErr := os.Stat(dataDir); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid trusted proxy configuration wrote data: %v", statErr)
 	}
 }
 

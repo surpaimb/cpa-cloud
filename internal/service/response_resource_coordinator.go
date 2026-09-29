@@ -49,19 +49,20 @@ type responseStateItem struct {
 }
 
 type responseResourceCreateInput struct {
-	OperationID      string
-	EmployeeID       string
-	KeyID            string
-	PublicModel      string
-	ParentResponseID string
-	ProviderKind     string
-	SourceAddr       netip.Addr
-	PolicyRevision   int64
-	Background       bool
-	StoreBody        bool
-	Items            []responseStateItem
-	CreatedAt        time.Time
-	TerminalAt       *time.Time
+	OperationID         string
+	EmployeeID          string
+	KeyID               string
+	PublicModel         string
+	ParentResponseID    string
+	ProviderKind        string
+	SourceAddr          netip.Addr
+	SourceTrustRevision string
+	PolicyRevision      int64
+	Background          bool
+	StoreBody           bool
+	Items               []responseStateItem
+	CreatedAt           time.Time
+	TerminalAt          *time.Time
 }
 
 type responseResourceView struct {
@@ -97,7 +98,13 @@ func newResponseResourceCoordinator(app *App, events accounting.EventRecorder) (
 }
 
 func (c *responseResourceCoordinator) Create(ctx context.Context, input responseResourceCreateInput) (responseResourceView, error) {
-	if !validResponseResourceCreate(input) || c == nil || c.db == nil || c.secrets == nil || c.events == nil || c.now == nil || c.commitTx == nil {
+	if c == nil || c.app == nil || c.db == nil || c.secrets == nil || c.events == nil || c.now == nil || c.commitTx == nil {
+		return responseResourceView{}, errResponseResourceInvalid
+	}
+	if input.SourceTrustRevision == "" {
+		input.SourceTrustRevision = c.app.trustedProxies.Revision()
+	}
+	if !validResponseResourceCreate(input) || input.SourceTrustRevision != c.app.trustedProxies.Revision() {
 		return responseResourceView{}, errResponseResourceInvalid
 	}
 	created := input.CreatedAt.UTC()
@@ -208,7 +215,7 @@ func (c *responseResourceCoordinator) Create(ctx context.Context, input response
 		if err != nil {
 			return responseResourceView{}, errResponseResourceUnavailable
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO background_task_policy_contexts(task_id,source_addr,key_policy_revision) VALUES(?,?,?)`, taskID, input.SourceAddr.String(), input.PolicyRevision); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO background_task_policy_contexts(task_id,source_addr,key_policy_revision,source_trust_revision) VALUES(?,?,?,?)`, taskID, input.SourceAddr.String(), input.PolicyRevision, input.SourceTrustRevision); err != nil {
 			return responseResourceView{}, errResponseResourceUnavailable
 		}
 		view.TaskID, view.RequestID = taskID, requestID
@@ -506,7 +513,7 @@ func responseTerminalStatus(status string) bool {
 }
 
 func validResponseResourceCreate(input responseResourceCreateInput) bool {
-	if !validIdentifier(input.OperationID, 128) || !validIdentifier(input.EmployeeID, 128) || !validIdentifier(input.KeyID, 128) || !validIdentifier(input.PublicModel, 128) || !input.SourceAddr.IsValid() || input.SourceAddr.Zone() != "" || input.SourceAddr != input.SourceAddr.Unmap() || input.PolicyRevision < 1 || input.PolicyRevision > 9007199254740991 || len(input.Items) == 0 || len(input.Items) > responseStateMaxItems || (!input.Background && !input.StoreBody) {
+	if !validIdentifier(input.OperationID, 128) || !validIdentifier(input.EmployeeID, 128) || !validIdentifier(input.KeyID, 128) || !validIdentifier(input.PublicModel, 128) || !input.SourceAddr.IsValid() || input.SourceAddr.Zone() != "" || input.SourceAddr != input.SourceAddr.Unmap() || !validTrustRevision(input.SourceTrustRevision) || input.PolicyRevision < 1 || input.PolicyRevision > 9007199254740991 || len(input.Items) == 0 || len(input.Items) > responseStateMaxItems || (!input.Background && !input.StoreBody) {
 		return false
 	}
 	if input.Background == (input.TerminalAt != nil) {
@@ -550,6 +557,7 @@ func (c *responseResourceCoordinator) inputFingerprint(input responseResourceCre
 		writeFingerprintPart([]byte(value))
 	}
 	writeFingerprintPart([]byte(input.SourceAddr.String()))
+	writeFingerprintPart([]byte(input.SourceTrustRevision))
 	var revision [8]byte
 	binary.BigEndian.PutUint64(revision[:], uint64(input.PolicyRevision))
 	writeFingerprintPart(revision[:])
@@ -566,6 +574,20 @@ func (c *responseResourceCoordinator) inputFingerprint(input responseResourceCre
 		writeFingerprintPart(item.Payload)
 	}
 	return h.Sum(nil), nil
+}
+
+func validTrustRevision(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (c *responseResourceCoordinator) authorizeOwnerTx(ctx context.Context, tx *sql.Tx, employeeID, keyID, model string, at time.Time, requireCurrentModelPolicy bool, sourceAddr netip.Addr, expectedPolicyRevision int64) error {

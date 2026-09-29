@@ -123,6 +123,8 @@ func newRuntimeFixtureWithBase(t *testing.T, base *accountPoolFixture, random sc
 		auth1: employeeAuth{EmployeeID: "emp_runtime_1", KeyID: "key_runtime_1", Mode: "selected", ClientProtocol: keypolicy.ProtocolOpenAIChat, SourceAddr: netip.MustParseAddr("127.0.0.1")},
 		auth2: employeeAuth{EmployeeID: "emp_runtime_2", KeyID: "key_runtime_2", Mode: "selected", ClientProtocol: keypolicy.ProtocolOpenAIChat, SourceAddr: netip.MustParseAddr("127.0.0.1")},
 	}
+	fixture.auth1.SourceTrustRevision = base.app.trustedProxies.Revision()
+	fixture.auth2.SourceTrustRevision = base.app.trustedProxies.Revision()
 	fixture.insertEmployee(t, fixture.auth1)
 	fixture.insertEmployee(t, fixture.auth2)
 	fixture.auth1.Policy = keypolicy.Policy{Revision: 1, ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{}, ModelMode: keypolicy.ModeAll, Models: []string{}, SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{}}

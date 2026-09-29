@@ -334,6 +334,43 @@ func TestBackgroundResponsePolicyNarrowingInterruptsBeforeDispatch(t *testing.T)
 	}
 }
 
+func TestBackgroundResponseTrustRevisionChangeInterruptsBeforeDispatch(t *testing.T) {
+	coordinator, db := newResponseResourceTestCoordinator(t)
+	now := time.Now().UTC()
+	coordinator.now = func() time.Time { return now }
+	created, err := coordinator.Create(context.Background(), responseResourceCreateInput{
+		OperationID: "op_background_trust_revision", EmployeeID: "emp_one", KeyID: "key_one", PublicModel: "model_one",
+		ProviderKind: "openai-compatible", Background: true, CreatedAt: now,
+		SourceAddr: netip.MustParseAddr("127.0.0.1"), PolicyRevision: 1,
+		Items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"queued"}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.app.trustedProxies, err = keypolicy.NewTrustedProxySet([]string{"192.0.2.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.app.responseResources = coordinator
+	worker := &backgroundResponseWorker{app: coordinator.app, ctx: context.Background()}
+	if claim, err := worker.claimOne(); err == nil || claim != nil {
+		t.Fatalf("changed trust revision claim=%+v err=%v", claim, err)
+	}
+	var taskStatus, responseStatus, requestStatus string
+	if err := db.QueryRow(`SELECT t.status,r.status,a.status FROM background_tasks t JOIN response_resources r ON r.id=t.response_id JOIN accounting_requests a ON a.id=t.request_id WHERE t.id=?`, created.TaskID).Scan(&taskStatus, &responseStatus, &requestStatus); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != "interrupted" || responseStatus != "interrupted" || requestStatus != "interrupted" {
+		t.Fatalf("task=%s response=%s request=%s", taskStatus, responseStatus, requestStatus)
+	}
+	for _, table := range []string{"model_requests", "accounting_attempts"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s count=%d err=%v", table, count, err)
+		}
+	}
+}
+
 func TestBackgroundResponseCancelAndRestartRecoveryAreNoReplay(t *testing.T) {
 	coordinator, db := newResponseResourceTestCoordinator(t)
 	now := time.Date(2026, 9, 24, 7, 30, 0, 0, time.UTC)
@@ -533,7 +570,11 @@ func newResponseResourceTestCoordinatorFromDB(t *testing.T, db *sql.DB, secretSt
 	if err := ledger.MigrateV2(ctx); err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := newResponseResourceCoordinator(&App{store: &store{db: db}, secrets: secretStore}, ledger)
+	trustedProxies, err := keypolicy.NewTrustedProxySet(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := newResponseResourceCoordinator(&App{store: &store{db: db}, secrets: secretStore, trustedProxies: trustedProxies}, ledger)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,6 +17,20 @@ import (
 
 var version = "dev"
 
+type repeatableStringFlag []string
+
+func (values *repeatableStringFlag) String() string {
+	if values == nil {
+		return ""
+	}
+	return fmt.Sprint([]string(*values))
+}
+
+func (values *repeatableStringFlag) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
+
 func main() {
 	exitCode, err := runCLI(os.Args[1:], os.Stdin, os.Stdout)
 	if err != nil {
@@ -42,6 +56,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.StringVar(&cfg.WebDir, "web-dir", "", "directory containing the web console build")
 	flags.StringVar(&cfg.TLSCert, "tls-cert", "", "TLS certificate file")
 	flags.StringVar(&cfg.TLSKey, "tls-key", "", "TLS private key file")
+	flags.Var((*repeatableStringFlag)(&cfg.TrustedProxyCIDRs), "trusted-proxy-cidr", "trusted reverse-proxy address or CIDR; repeat for multiple ranges")
 	flags.StringVar(&cfg.InstanceID, "instance-id", "", "public UUID identifying this service process in /healthz")
 	flags.BoolVar(&cfg.AllowLoopbackUpstream, "allow-loopback-upstream", false, "allow loopback upstream endpoints for local development tests")
 	flags.BoolVar(&cfg.AccountRecoveryEnabled, "allow-account-recovery", false, "permit administrator-enabled background generation recovery probes (may consume upstream usage)")

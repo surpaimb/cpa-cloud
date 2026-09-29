@@ -261,7 +261,8 @@ func TestCrossProtocolStreamDispatchRejectsStaleKeyPolicyRevisionAndABA(t *testi
 		name   string
 		aba    bool
 		source bool
-	}{{name: "stale_revision"}, {name: "aba", aba: true}, {name: "source_narrowing", source: true}} {
+		trust  bool
+	}{{name: "stale_revision"}, {name: "aba", aba: true}, {name: "source_narrowing", source: true}, {name: "trust_revision", trust: true}} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newRuntimeFixture(t, &runtimeSequenceRandom{}, time.Minute, 4)
 			a := f.base.app
@@ -294,22 +295,33 @@ func TestCrossProtocolStreamDispatchRejectsStaleKeyPolicyRevisionAndABA(t *testi
 				sourceMode = keypolicy.ModeSelected
 				sourceCIDRs = []string{"203.0.113.0/24"}
 			}
-			stored, err := keypolicy.Replace(ctx, a.store.db, f.auth1.KeyID, 1, keypolicy.Replacement{
-				ProtocolMode: protocolMode, Protocols: []keypolicy.ClientProtocol{},
-				ModelMode: keypolicy.ModeAll, Models: []string{},
-				SourceMode: sourceMode, SourceCIDRs: sourceCIDRs,
-			}, now)
-			if err != nil {
-				t.Fatal(err)
+			stored := f.auth1.Policy
+			if test.trust {
+				changedTrust, trustErr := keypolicy.NewTrustedProxySet([]string{"192.0.2.0/24"})
+				if trustErr != nil {
+					t.Fatal(trustErr)
+				}
+				a.trustedProxies = changedTrust
+			} else {
+				var replaceErr error
+				stored, replaceErr = keypolicy.Replace(ctx, a.store.db, f.auth1.KeyID, 1, keypolicy.Replacement{
+					ProtocolMode: protocolMode, Protocols: []keypolicy.ClientProtocol{},
+					ModelMode: keypolicy.ModeAll, Models: []string{},
+					SourceMode: sourceMode, SourceCIDRs: sourceCIDRs,
+				}, now)
+				if replaceErr != nil {
+					t.Fatal(replaceErr)
+				}
 			}
 			if test.aba {
-				stored, err = keypolicy.Replace(ctx, a.store.db, f.auth1.KeyID, stored.Revision, keypolicy.Replacement{
+				var replaceErr error
+				stored, replaceErr = keypolicy.Replace(ctx, a.store.db, f.auth1.KeyID, stored.Revision, keypolicy.Replacement{
 					ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
 					ModelMode: keypolicy.ModeAll, Models: []string{},
 					SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
 				}, now.Add(time.Nanosecond))
-				if err != nil {
-					t.Fatal(err)
+				if replaceErr != nil {
+					t.Fatal(replaceErr)
 				}
 				if stored.Revision != 3 || !keypolicy.Allows(stored, keypolicy.ProtocolOpenAIChat, "key-policy-stream-model") {
 					t.Fatalf("ABA policy=%+v", stored)

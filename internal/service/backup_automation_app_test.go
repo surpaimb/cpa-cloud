@@ -64,13 +64,13 @@ func TestSystemStatusReportsBackupCapabilities(t *testing.T) {
 
 func TestPrepareBackupRehearsalConfigDisablesBackgroundAndNetworkFeatures(t *testing.T) {
 	cfg := Config{
-		Listen: "0.0.0.0:8787", TLSCert: "cert", TLSKey: "key", AllowLoopbackUpstream: true,
+		Listen: "0.0.0.0:8787", TLSCert: "cert", TLSKey: "key", TrustedProxyCIDRs: []string{"127.0.0.1/32"}, AllowLoopbackUpstream: true,
 		AccountRecoveryEnabled: true, ScheduledTestsEnabled: true, AutomatedBackupsEnabled: true,
 		ResponsesStatefulResources: true, ResponsesBackgroundTasks: true,
 		ExperimentalCodexMembership: true, CodexOAuthClientID: "client", CodexOAuthRedirectURI: "https://example.test/admin/api/v1/codex/oauth/callback",
 	}
 	prepareBackupRehearsalConfig(&cfg)
-	if cfg.Listen != "127.0.0.1:0" || cfg.TLSCert != "" || cfg.TLSKey != "" || cfg.AllowLoopbackUpstream || cfg.AccountRecoveryEnabled || cfg.ScheduledTestsEnabled || cfg.AutomatedBackupsEnabled || cfg.ResponsesStatefulResources || cfg.ResponsesBackgroundTasks || cfg.ExperimentalCodexMembership || cfg.CodexOAuthClientID != "" || cfg.CodexOAuthRedirectURI != "" || !cfg.backupAutomationRehearsal {
+	if cfg.Listen != "127.0.0.1:0" || cfg.TLSCert != "" || cfg.TLSKey != "" || len(cfg.TrustedProxyCIDRs) != 0 || cfg.AllowLoopbackUpstream || cfg.AccountRecoveryEnabled || cfg.ScheduledTestsEnabled || cfg.AutomatedBackupsEnabled || cfg.ResponsesStatefulResources || cfg.ResponsesBackgroundTasks || cfg.ExperimentalCodexMembership || cfg.CodexOAuthClientID != "" || cfg.CodexOAuthRedirectURI != "" || !cfg.backupAutomationRehearsal {
 		t.Fatalf("unsafe rehearsal config: %+v", cfg)
 	}
 }

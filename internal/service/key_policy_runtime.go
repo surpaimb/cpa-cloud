@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
 	"net/netip"
 
 	"cpacloud.local/server/internal/keypolicy"
@@ -11,12 +12,20 @@ import (
 
 const keyPolicyDeniedMessage = "This request is not allowed for this key."
 
-func authorizeKeySource(auth employeeAuth, remoteAddr string) (employeeAuth, *modelAdmissionError) {
-	peer, err := keypolicy.ParseSocketPeer(remoteAddr)
-	if err != nil || !keypolicy.AllowsSource(auth.Policy, peer) {
+func (a *App) authorizeKeySource(auth employeeAuth, r *http.Request) (employeeAuth, *modelAdmissionError) {
+	return a.resolveKeySource(auth, r, true)
+}
+
+func (a *App) resolveKeySource(auth employeeAuth, r *http.Request, enforcePolicy bool) (employeeAuth, *modelAdmissionError) {
+	if a == nil || r == nil {
 		return employeeAuth{}, &modelAdmissionError{status: 403, code: "model_not_allowed", message: keyPolicyDeniedMessage}
 	}
-	auth.SourceAddr = peer
+	resolved, err := a.trustedProxies.Resolve(r.RemoteAddr, r.Header.Values("X-Forwarded-For"))
+	if err != nil || enforcePolicy && !keypolicy.AllowsSource(auth.Policy, resolved.SourceAddr) {
+		return employeeAuth{}, &modelAdmissionError{status: 403, code: "model_not_allowed", message: keyPolicyDeniedMessage}
+	}
+	auth.SourceAddr = resolved.SourceAddr
+	auth.SourceTrustRevision = resolved.TrustRevision
 	return auth, nil
 }
 
@@ -40,8 +49,8 @@ func keyPolicyAllowsProtocol(policy keypolicy.Policy, protocol keypolicy.ClientP
 	return false
 }
 
-func keyPolicyCurrentTx(ctx context.Context, tx *sql.Tx, auth employeeAuth, publicModel string) (bool, error) {
-	if auth.ClientProtocol == "" || auth.Policy.Revision < 1 {
+func (a *App) keyPolicyCurrentTx(ctx context.Context, tx *sql.Tx, auth employeeAuth, publicModel string) (bool, error) {
+	if a == nil || auth.ClientProtocol == "" || auth.Policy.Revision < 1 || auth.SourceTrustRevision == "" || auth.SourceTrustRevision != a.trustedProxies.Revision() {
 		return false, nil
 	}
 	current, err := keypolicy.LoadTx(ctx, tx, auth.KeyID)

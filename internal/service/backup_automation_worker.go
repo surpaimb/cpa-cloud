@@ -702,6 +702,7 @@ func prepareBackupRehearsalConfig(cfg *Config) {
 	cfg.Listen = "127.0.0.1:0"
 	cfg.TLSCert = ""
 	cfg.TLSKey = ""
+	cfg.TrustedProxyCIDRs = nil
 	cfg.AllowLoopbackUpstream = false
 	cfg.AccountRecoveryEnabled = false
 	cfg.ScheduledTestsEnabled = false
