@@ -17,6 +17,7 @@ export function ModelsPage({ csrf }: { csrf: string }) {
 	const [editing, setEditing] = useState<ModelRoute | null>(null)
   const poolConfiguration = status?.features?.account_pool_configuration === true
   const poolRouting = status?.features?.account_pool_routing === true
+  const poolObservation = poolConfiguration && status?.features?.account_pool_runtime_observation === true
 	const allocationEnabled = status?.features?.account_group_cost_allocation === true
 	const lifecycle = status?.features?.account_lifecycle_management === true
 	const embeddings = status?.features?.openai_embeddings === true
@@ -29,7 +30,7 @@ export function ModelsPage({ csrf }: { csrf: string }) {
     </div>
     {creating ? <CreateModel csrf={csrf} embeddingsEnabled={embeddings} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void reload() }} /> : null}
     {managingDirectory ? <AccountPoolDirectory csrf={csrf} allocationEnabled={allocationEnabled} onClose={() => setManagingDirectory(false)} /> : null}
-    {poolModel ? <ModelAccountPoolEditor key={poolModel.id} model={poolModel} csrf={csrf} routingEnabled={poolRouting} onClose={() => setPoolModel(null)} /> : null}
+    {poolModel ? <ModelAccountPoolEditor key={poolModel.id} model={poolModel} csrf={csrf} routingEnabled={poolRouting} observationEnabled={poolObservation} onClose={() => setPoolModel(null)} /> : null}
 	{editing ? <EditModelRoute csrf={csrf} item={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); void reload() }} /> : null}
   </>
 }
