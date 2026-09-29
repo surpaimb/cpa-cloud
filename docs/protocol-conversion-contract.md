@@ -15,8 +15,8 @@
 | Responses → Chat Completions | 字符串或文本 message input、instructions、function tools、相邻并行 function calls、字符串 function_call_output | completed response 的文本和 function calls；usage 与 cache/reasoning 子计数 | 严格验证 sequence、item ID、output/content index、累计文本/参数、done item 和 terminal output；只在 `response.completed` 后生成 Chat finish chunk 与 `[DONE]` |
 | Client Messages → wire Responses | 文本/system、客户端 function tools、tool choice、`tool_use`/`tool_result` | 文本与客户端工具块、停止原因、usage | Responses 上游事件转换为 Messages 客户端事件；目标 Anthropic usage 必需，较早已知可生成期间增量，仅终态已知则有界全流延迟，始终未知则输出前拒绝 |
 | Client Responses → wire Messages | 无状态文本/instructions、客户端 function tools、function call/output | 文本与客户端工具块、停止原因、usage | Messages 上游事件转换为 Responses 客户端事件；严格验证 message_start/message_delta 累计 usage 与 completed/incomplete/failed，未知事件失败关闭 |
-| Gemini generateContent → Responses | 文本、system instruction、function declarations/calls/responses、生成参数子集 | 文本与函数调用、finish reason、usage | 未接入；共享 HTTP 路由派发前拒绝 |
-| Responses → Gemini generateContent | 无状态文本/instructions、function tools/calls/results、生成参数子集 | 文本与函数调用、finish reason、usage | 未接入；共享 HTTP 路由派发前拒绝 |
+| Gemini generateContent → Responses | 文本、system instruction、function declarations/calls/responses、生成参数子集 | 文本与函数调用、finish reason、usage | `streamGenerateContent` 转 Responses SSE；文本/function、累计 usage、STOP/MAX_TOKENS 严格子集 |
+| Responses → Gemini generateContent | 无状态文本/instructions、function tools/calls/results、生成参数子集 | 文本与函数调用、finish reason、usage | Responses SSE 转 data-only Gemini SSE；函数参数仅在完整对象生命周期验证后单次输出 |
 
 共同支持 `model`、严格布尔 `stream`/`parallel_tool_calls`、正整数 token 上限、范围为 0–2 的
 `temperature` 和范围为 0–1 的 `top_p`。Chat 流使用 `stream_options.include_usage=true`；Responses
@@ -41,10 +41,9 @@
 实际 wire 的 usage 观察器，再转换为客户端响应。accounting attempt 记录实际上游协议，治理父记录继续记录
 客户端协议。路由、账号 revision 或 wire 在派发前变化时失败关闭。
 
-本批共享 HTTP 接线只接受跨协议非流式请求。任何显式跨协议 SSE 都在上游派发和 attempt 创建前拒绝；
-纯转换模块已有的 Chat/Responses SSE 状态机尚未作为共享运行时开放。Responses 的 state、background、
-previous response、conversation 与持久资源只允许原生 Responses 路由，不能经过转换。Messages
-`count_tokens` 也只允许原生 Anthropic 路由。
+共享 HTTP 接线接受六个非流式方向，以及 Chat↔Responses、Messages↔Responses、Gemini↔Responses 三组契约内 SSE。每个方向仍只派发一次；未列出的显式跨协议流请求在 attempt 和上游网络前拒绝。Responses 的 state、background、previous response、conversation 与持久资源只允许原生 Responses 路由，不能经过转换。Messages `count_tokens` 也只允许原生 Anthropic 路由。
+
+Gemini 流的 `responseId` 与 `modelVersion` 可在前序帧省略；转换器在两者首次非空出现前有界暂存语义动作，随后按原顺序恰好释放一次。显式 null/空值、后续冲突或终态仍缺任一身份都失败关闭，服务不会合成供应商 ID 或模型名。该合成身份子集及完整事件边界见[批次契约](gemini-stream-trusted-proxy-batch-contract-2026-09-29.md)，不代表通用 Google/OpenAI 供应商兼容性。
 
 ## 明确拒绝的字段和语义
 
