@@ -269,7 +269,9 @@ export type ModelRoute = {
   archived_at?: string | null
   archive_result?: 'archived' | 'already_archived'
 }
-export type AccountGroup = { id: string; name: string; revision: number }
+export type AccountGroupAllocation = { version: string; multiplier_ppm: string; created_at: string }
+export type AccountGroup = { id: string; name: string; revision: number; allocation?: AccountGroupAllocation }
+export type AccountGroupAllocationVersion = { group_id: string; version: string; revision: number; allocation_multiplier_ppm: string; created_at: string }
 export type AccountChannel = { id: string; name: string; group_id?: string | null; revision: number }
 export type WireProtocol = 'legacy-native' | 'openai-chat' | 'openai-responses' | 'openai-embeddings' | 'anthropic-messages' | 'gemini-generate-content'
 export type ModelAccount = {
@@ -314,6 +316,7 @@ export type SystemStatus = {
     gemini_native_api?: boolean
     account_pool_configuration?: boolean
     account_pool_routing?: boolean
+    account_group_cost_allocation?: boolean
     openai_embeddings?: boolean
     account_lifecycle_management?: boolean
     single_instance_billing?: boolean
@@ -467,6 +470,8 @@ export type UsageSummary = {
     interrupted: string
     known_cost_micro: string
     unknown_cost_attempts: string
+    known_adjusted_allocation_cost_micro?: string
+    unknown_adjusted_allocation_attempts?: string
     input_tokens: UsageCounter
     output_tokens: UsageCounter
     cache_read_tokens: UsageCounter
@@ -506,6 +511,10 @@ export type UsageAttempt = {
   cache_read_tokens: string | null
   cache_write_tokens: string | null
   cost_micro: string | null
+  account_group_id?: string | null
+  allocation_multiplier_version?: string | null
+  allocation_multiplier_ppm?: string | null
+  adjusted_allocation_cost_micro?: string | null
 }
 export type UsageSettlementReportItem = {
   period_start: string
@@ -517,6 +526,8 @@ export type UsageSettlementReportItem = {
   missing_evidence_attempts: string
   known_estimated_cost_micro: string
   unknown_cost_attempts: string
+  known_adjusted_allocation_cost_micro?: string
+  unknown_adjusted_allocation_attempts?: string
   input_tokens: UsageCounter
   output_tokens: UsageCounter
   cache_read_tokens: UsageCounter
@@ -782,6 +793,8 @@ export const api = {
     request<AccountGroup>('/account-groups', { method: 'POST', body: JSON.stringify(body) }, csrf),
   updateAccountGroup: (id: string, body: { expected_revision: number; name: string }, csrf: string) =>
     request<AccountGroup>(`/account-groups/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
+  updateAccountGroupAllocation: (id: string, body: { operation_id: string; expected_revision: number; allocation_multiplier_ppm: string }, csrf: string) =>
+    request<AccountGroupAllocationVersion>(`/account-groups/${encodeURIComponent(id)}/allocation`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   accountChannels: (signal?: AbortSignal) => request<{ items: AccountChannel[] }>('/channels', { signal }),
   createAccountChannel: (body: { name: string; group_id?: string }, csrf: string) =>
     request<AccountChannel>('/channels', { method: 'POST', body: JSON.stringify(body) }, csrf),
@@ -878,7 +891,7 @@ export const api = {
   redeemBillingCode: (body: { operation_id: string; owner: BillingOwner; code: string }, csrf: string) => request<{ receipt: BillingReceipt; entry_id: string; amount_micro: string; currency: string }>('/billing/redemptions', { method: 'POST', body: JSON.stringify(body) }, csrf),
   billingRefunds: (afterId?: string, limit = 50, signal?: AbortSignal) => billingList<BillingRefund>('/billing/refunds', afterId, limit, signal),
   createBillingRefund: (body: { operation_id: string; payment_id: string; amount_micro: string }, csrf: string) => request<{ receipt: BillingReceipt; refund: BillingRefund }>('/billing/refunds', { method: 'POST', body: JSON.stringify(body) }, csrf),
-  status: () => request<SystemStatus>('/system/status'),
+  status: (signal?: AbortSignal) => request<SystemStatus>('/system/status', { signal }),
 	backupKeyProviders: (signal?: AbortSignal) => request<{ items: BackupKeyProvider[]; ready: boolean; store_ready: boolean; reason_code: string | null }>('/backups/key-providers', { signal }),
 	createBackupKeyProvider: (csrf: string) => request<BackupKeyProvider>('/backups/key-providers', { method: 'POST', body: JSON.stringify({ kind: 'windows-dpapi-user' }) }, csrf),
 	rotateBackupKeyProvider: (id: string, expectedRevision: number, csrf: string) => request<BackupKeyProvider>(`/backups/key-providers/${encodeURIComponent(id)}/rotate`, { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }) }, csrf),

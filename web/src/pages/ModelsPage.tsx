@@ -17,6 +17,7 @@ export function ModelsPage({ csrf }: { csrf: string }) {
 	const [editing, setEditing] = useState<ModelRoute | null>(null)
   const poolConfiguration = status?.features?.account_pool_configuration === true
   const poolRouting = status?.features?.account_pool_routing === true
+	const allocationEnabled = status?.features?.account_group_cost_allocation === true
 	const lifecycle = status?.features?.account_lifecycle_management === true
 	const embeddings = status?.features?.openai_embeddings === true
   return <>
@@ -27,7 +28,7 @@ export function ModelsPage({ csrf }: { csrf: string }) {
       {data?.items.length ? <div className="table-scroll"><table><thead><tr><th>对外模型 ID</th>{embeddings ? <th>类型</th> : null}<th>上游</th><th>上游模型</th><th>Wire 协议</th><th>状态</th>{poolConfiguration || lifecycle ? <th>操作</th> : null}</tr></thead><tbody>{data.items.map((item) => <tr key={item.id}><td><strong>{item.id}</strong>{item.revision ? <small>r{item.revision}</small> : null}</td>{embeddings ? <td>{item.model_kind === 'embedding' ? 'Embedding' : '生成'}</td> : null}<td><code>{item.upstream_id}</code></td><td>{item.upstream_model}</td><td>{item.model_kind === 'embedding' ? '账号池：OpenAI Embeddings' : wireLabel(item.wire_protocol ?? 'legacy-native')}</td><td><span className={`status status--${item.archived ? 'disabled' : item.enabled ? 'active' : 'disabled'}`}><i />{item.archived ? '已归档' : item.enabled ? '启用' : '已停用'}</span></td>{poolConfiguration || lifecycle ? <td><div className="row-actions">{poolConfiguration && !item.archived ? <button type="button" className="link-button" onClick={() => setPoolModel(item)}>编辑账号池</button> : null}{lifecycle && !item.archived ? <button type="button" className="link-button" onClick={() => setEditing(item)}>修改 / 归档</button> : null}</div></td> : null}</tr>)}</tbody></table></div> : null}
     </div>
     {creating ? <CreateModel csrf={csrf} embeddingsEnabled={embeddings} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void reload() }} /> : null}
-    {managingDirectory ? <AccountPoolDirectory csrf={csrf} onClose={() => setManagingDirectory(false)} /> : null}
+    {managingDirectory ? <AccountPoolDirectory csrf={csrf} allocationEnabled={allocationEnabled} onClose={() => setManagingDirectory(false)} /> : null}
     {poolModel ? <ModelAccountPoolEditor key={poolModel.id} model={poolModel} csrf={csrf} routingEnabled={poolRouting} onClose={() => setPoolModel(null)} /> : null}
 	{editing ? <EditModelRoute csrf={csrf} item={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); void reload() }} /> : null}
   </>

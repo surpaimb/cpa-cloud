@@ -74,6 +74,74 @@ describe('usage and pricing page', () => {
     expect(exportLink.getAttribute('href')).toContain('limit=5000')
   })
 
+  it('shows internal allocation amounts and frozen multiplier details behind the capability', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const common = commonRoute(url)
+      if (common) return common
+      if (url.endsWith('/system/status')) return json({ version: 'test', ready: true, storage: 'sqlite', limitations: [], features: { account_group_cost_allocation: true } })
+      if (url.includes('/usage/summary?')) return json({
+        ...emptySummary,
+        requests: { total: '1', pending: '0', succeeded: '1', failed: '0', cancelled: '0', interrupted: '0' },
+        attempts: [{
+          currency: 'USD', total: '1', pending: '0', succeeded: '1', failed: '0', cancelled: '0', interrupted: '0',
+          known_cost_micro: '200', unknown_cost_attempts: '0', known_adjusted_allocation_cost_micro: '250', unknown_adjusted_allocation_attempts: '0',
+          input_tokens: { known_total: '100', unknown_attempts: '0' }, output_tokens: { known_total: '50', unknown_attempts: '0' },
+          cache_read_tokens: { known_total: '0', unknown_attempts: '0' }, cache_write_tokens: { known_total: '0', unknown_attempts: '0' },
+        }],
+      })
+      if (url.includes('/usage/requests/req-allocation/attempts')) return json({ items: [{
+        id: 'attempt-allocation', request_id: 'req-allocation', account_id: 'up-1', provider: 'openai-compatible', dispatch: 'selected', status: 'succeeded',
+        started_at: '2026-09-22T12:00:00Z', finished_at: '2026-09-22T12:00:01Z', price_version: 'price-v1', currency: 'USD',
+        input_tokens: '100', output_tokens: '50', cache_read_tokens: '0', cache_write_tokens: '0', cost_micro: '200',
+        account_group_id: 'group-1', allocation_multiplier_version: 'agalloc-1', allocation_multiplier_ppm: '1250000', adjusted_allocation_cost_micro: '250',
+      }] })
+      if (url.includes('/usage/requests?')) return json({
+        ...emptyPage,
+        items: [{ id: 'req-allocation', employee_id: 'emp-1', key_id: 'key-1', model_id: 'public-model', provider: 'openai-compatible', status: 'succeeded', started_at: '2026-09-22T12:00:00Z', finished_at: '2026-09-22T12:00:01Z', attempt_count: '1' }],
+      })
+      if (url.includes('/usage/daily?')) return json({ ...emptyPage, granularity: 'day', items: [{
+        period_start: emptySummary.from, period_end: emptySummary.to, currency: 'USD', requests: '1', attempts: '1', corrections: '0', missing_evidence_attempts: '0',
+        known_estimated_cost_micro: '200', unknown_cost_attempts: '0', known_adjusted_allocation_cost_micro: '250', unknown_adjusted_allocation_attempts: '0',
+        input_tokens: { known_total: '100', unknown_attempts: '0' }, output_tokens: { known_total: '50', unknown_attempts: '0' },
+        cache_read_tokens: { known_total: '0', unknown_attempts: '0' }, cache_write_tokens: { known_total: '0', unknown_attempts: '0' }, reasoning_tokens: { known_total: '0', unknown_attempts: '1' },
+      }] })
+      if (url.endsWith('/upstreams/up-1/prices')) return json({ items: [] })
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<UsagePage csrf="csrf" />)
+
+    expect((await screen.findAllByText('内部调整后分摊成本')).length).toBeGreaterThan(0)
+    expect(screen.getByText('0.00025 USD')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '查看尝试' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('group-1')).toBeInTheDocument()
+    expect(within(dialog).getByText(/1\.25× · 1250000 ppm/)).toBeInTheDocument()
+    expect(within(dialog).getByText('agalloc-1')).toBeInTheDocument()
+    await userEvent.click(within(dialog).getAllByRole('button', { name: '关闭' })[1])
+    await userEvent.click(screen.getByRole('button', { name: '查看日汇总' }))
+    expect((await screen.findAllByText('0.00025 USD')).length).toBeGreaterThan(1)
+  })
+
+  it('fails closed when a capable service omits adjusted summary fields', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const common = commonRoute(url)
+      if (common) return common
+      if (url.endsWith('/system/status')) return json({ version: 'test', ready: true, storage: 'sqlite', limitations: [], features: { account_group_cost_allocation: true } })
+      if (url.includes('/usage/summary?')) return json({ ...emptySummary, attempts: [{
+        currency: 'USD', total: '1', pending: '0', succeeded: '1', failed: '0', cancelled: '0', interrupted: '0', known_cost_micro: '1', unknown_cost_attempts: '0',
+        input_tokens: { known_total: '0', unknown_attempts: '0' }, output_tokens: { known_total: '0', unknown_attempts: '0' }, cache_read_tokens: { known_total: '0', unknown_attempts: '0' }, cache_write_tokens: { known_total: '0', unknown_attempts: '0' },
+      }] })
+      if (url.includes('/usage/requests?')) return json(emptyPage)
+      if (url.endsWith('/upstreams/up-1/prices')) return json({ items: [] })
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<UsagePage csrf="csrf" />)
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.queryByText('内部调整后分摊成本')).not.toBeInTheDocument()
+  })
+
   it('recovers the initial load, preserves decimal strings, pins pagination, and opens attempt details', async () => {
     let summaryCalls = 0
     let requestCalls = 0
