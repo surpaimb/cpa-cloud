@@ -42,6 +42,7 @@ try {
   const login = await admin.login();
   const status = await admin.request('/system/status');
   assert.equal(status.features.admin_audit_overview, true, 'Audit capability was not advertised');
+  assert.equal(status.features.admin_audit_financial_source, true, 'Financial audit source capability was not advertised');
 
   response = await fetch(serviceProcess.origin + '/admin/api/v1/audit/events', { headers: { Cookie: admin.cookie(), Origin: 'http://wrong-origin.invalid' } });
   assert.equal(response.status, 403, 'Cross-site audit read was not rejected');
@@ -60,11 +61,12 @@ try {
     operation_id: randomUUID(), scope_kind: 'employee', scope_id: employee.id, protocol: null, model: null,
     enabled: true, token_limit: 100, cost_limit_micro: null, currency: null,
   });
+  const financial = await admin.request('/billing/settings', 'PUT', { operation_id: randomUUID(), expected_revision: 1, enabled: false });
 
   const first = await admin.request('/audit/events?limit=2');
   assertAuditPage(first);
   assert.equal(first.items.length, 2);
-  assert.ok(first.next_cursor, 'Synthetic four-source result did not paginate');
+  assert.ok(first.next_cursor, 'Synthetic five-source result did not paginate');
   const afterWatermark = await admin.request('/account-groups', 'POST', { name: 'Must stay outside cursor chain' }, 201);
   const items = [...first.items];
   let cursor = first.next_cursor;
@@ -75,11 +77,12 @@ try {
     cursor = page.next_cursor;
   }
   assert.equal(cursor, null, 'Audit cursor chain exceeded the bounded synthetic result');
-  assert.deepEqual(new Set(items.map(item => item.source)), new Set(['account_pool', 'account_lifecycle', 'governance_management', 'governance_general_budget']));
+  assert.deepEqual(new Set(items.map(item => item.source)), new Set(['account_pool', 'account_lifecycle', 'governance_management', 'governance_general_budget', 'financial_commercial']));
   assert.ok(items.some(item => item.target_id === poolGroup.id));
   assert.ok(items.some(item => item.target_id === model.id));
   assert.ok(items.some(item => item.target_id === governance.resource_id));
   assert.ok(items.some(item => item.target_id === budget.resource_id));
+  assert.ok(items.some(item => item.source === 'financial_commercial' && item.target_id === financial.resource_id));
   assert.ok(!items.some(item => item.target_id === afterWatermark.id), 'Post-watermark fact entered the cursor chain');
   assert.equal(new Set(items.map(item => `${item.source}:${item.event_id}`)).size, items.length, 'Cursor chain duplicated an event');
 
@@ -100,7 +103,7 @@ try {
   assert.ok(!databaseBytes.includes(Buffer.from(upstreamSecret)), 'Plaintext synthetic upstream secret persisted');
   const database = new DatabaseSync(path.join(dataDir, 'cpa-cloud.db'), { readOnly: true });
   try {
-    for (const table of ['account_pool_audit', 'account_lifecycle_audit', 'governance_management_audit', 'governance_general_budget_audit']) {
+    for (const table of ['account_pool_audit', 'account_lifecycle_audit', 'governance_management_audit', 'governance_general_budget_audit', 'financial_commercial_operations']) {
       assert.ok(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count >= 1, `${table} lost synthetic facts`);
     }
   } finally { database.close(); }
@@ -115,7 +118,7 @@ try {
   captureLogs(serviceProcess);
   await stopServer(serviceProcess); serviceProcess = undefined;
   for (const value of [upstreamSecret, login.csrf_token]) assert.ok(!combinedLogs.includes(value), 'Sensitive value appeared in service logs');
-  console.log('PASS admin audit: auth/origin/no-CSRF/four-source/filter/cursor-watermark/restart/metadata-only/secret-scan');
+  console.log('PASS admin audit: auth/origin/no-CSRF/five-source/filter/cursor-watermark/restart/metadata-only/secret-scan');
 } finally {
   captureLogs(serviceProcess);
   await stopServer(serviceProcess);

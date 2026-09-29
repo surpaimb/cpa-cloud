@@ -4,10 +4,7 @@
 
 ## 当前执行批次
 
-当前增量按[管理员只读审计总览第一段契约](admin-audit-overview-contract.md)实施 `AUDIT-01` 的窄范围读路径：只规范化
-已有 `account_pool_audit`、`account_lifecycle_audit`、`governance_management_audit` 和
-`governance_general_budget_audit` 四类现存同事务事实，提供有界时间/页面、固定源 allowlist、签名水位游标
-和能力门控网页。本段不改写或统一保留原事实，不宣称完整审计覆盖；其他 mutator、导出、防篡改、可配置保留和二次认证留待后续。
+`AUDIT-01` 第一段按[管理员只读审计总览第一段契约](admin-audit-overview-contract.md)已纳入四类现存同事务事实。当前第二段按[财务商业事实源契约](admin-audit-financial-source-contract.md)只读增加已有不可变 `financial_commercial_operations`：五源有界页面、签名 v2 水位游标、nullable actor 明示和独立网页能力门控；不读取金额、payload digest 或凭据，不改商业写路径。本段仍不改写或统一保留原事实，不宣称完整财务或统一审计覆盖；其他 mutator、导出、防篡改、可配置保留和二次认证留待后续。
 
 当前增量按 [账号组内部成本分摊倍率契约](account-group-cost-allocation-contract.md)实施 `ACCT-02/BILL-02` 第一段：既有账号池组获得有界 ppm 倍率、不可变版本、共享 revision/CAS、最终派发事务快照，以及与可靠用量、更正、日/月报表、CSV 和管理网页分离的“内部调整后分摊成本”。原供应商估算成本、价格版本、预算、余额和员工钱包保持原义；本段不是员工售价、供应商账单、多币兑换或员工身份组费率。
 

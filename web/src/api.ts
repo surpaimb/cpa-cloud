@@ -321,6 +321,7 @@ export type SystemStatus = {
     account_lifecycle_management?: boolean
     single_instance_billing?: boolean
     admin_audit_overview?: boolean
+    admin_audit_financial_source?: boolean
     key_access_policy?: boolean
     key_source_policy?: boolean
     key_account_group_policy?: boolean
@@ -328,12 +329,12 @@ export type SystemStatus = {
   }
 }
 
-export const adminAuditSources = ['account_pool', 'account_lifecycle', 'governance_management', 'governance_general_budget'] as const
+export const adminAuditSources = ['account_pool', 'account_lifecycle', 'governance_management', 'governance_general_budget', 'financial_commercial'] as const
 export type AdminAuditSource = typeof adminAuditSources[number]
 export type AdminAuditEvent = {
   source: AdminAuditSource
   event_id: string
-  actor_id: string
+  actor_id: string | null
   action: string
   target_type: string
   target_id: string
@@ -813,8 +814,8 @@ function parseAdminAuditPage(value: unknown): AdminAuditPage {
     if (!auditRecord(raw) || !hasExactKeys(raw, adminAuditEventKeys)) invalidAdminAuditResponse()
     if (typeof raw.source !== 'string' || !sources.includes(raw.source as AdminAuditSource)) invalidAdminAuditResponse()
     const source = raw.source as AdminAuditSource
-    const strings = [raw.event_id, raw.actor_id, raw.action, raw.target_type, raw.target_id]
-    if (!strings.every(auditMetadata) || raw.result !== 'succeeded') invalidAdminAuditResponse()
+    const strings = [raw.event_id, raw.action, raw.target_type, raw.target_id]
+    if (!strings.every(auditMetadata) || (raw.actor_id === null ? source !== 'financial_commercial' : !auditMetadata(raw.actor_id)) || raw.result !== 'succeeded') invalidAdminAuditResponse()
     if (raw.revision !== null && (!Number.isSafeInteger(raw.revision) || (raw.revision as number) < 1)) invalidAdminAuditResponse()
     const occurredKey = auditTimeKey(raw.occurred_at)
     if (!occurredKey || occurredKey < fromKey || occurredKey >= toKey) invalidAdminAuditResponse()
@@ -829,7 +830,7 @@ function parseAdminAuditPage(value: unknown): AdminAuditPage {
     items.push({
       source,
       event_id: raw.event_id as string,
-      actor_id: raw.actor_id as string,
+      actor_id: raw.actor_id as string | null,
       action: raw.action as string,
       target_type: raw.target_type as string,
       target_id: raw.target_id as string,

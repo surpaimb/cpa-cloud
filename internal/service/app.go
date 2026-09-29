@@ -440,6 +440,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"account_pool_configuration":      true,
 			"account_group_cost_allocation":   a.accountGroupAllocationRequired,
 			"admin_audit_overview":            true,
+			"admin_audit_financial_source":    true,
 			"account_pool_routing":            a.accountPool != nil,
 			"account_pool_preflight_failover": a.accountPool != nil,
 			"usage_reporting":                 true,

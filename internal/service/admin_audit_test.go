@@ -4,6 +4,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -121,7 +122,7 @@ func TestAdminAuditRejectsInvalidQueriesAndFailsClosedForEverySource(t *testing.
 		t.Fatalf("SQL-like filter was not exact: %+v", empty.Items)
 	}
 
-	for _, table := range []string{"account_pool_audit", "account_lifecycle_audit", "governance_management_audit", "governance_general_budget_audit"} {
+	for _, table := range []string{"account_pool_audit", "account_lifecycle_audit", "governance_management_audit", "governance_general_budget_audit", "financial_commercial_operations"} {
 		t.Run(table, func(t *testing.T) {
 			broken := newRuntimeAccountPoolFixture(t)
 			broken.enableRuntimeAdminHTTP(t)
@@ -161,7 +162,7 @@ func TestAdminAuditCancelledQueryAndCursorValidation(t *testing.T) {
 	if _, err := fixture.app.queryAdminAudit(ctx, query, nil); err == nil {
 		t.Fatal("cancelled audit query succeeded")
 	}
-	invalid := adminAuditCursor{Version: adminAuditCursorVersion, From: query.From.Format(time.RFC3339Nano), To: query.To.Format(time.RFC3339Nano), SnapshotAt: query.To.Format(time.RFC3339Nano), Sources: allAdminAuditSourceTokens(), Limit: 10, Watermarks: []int64{0, 0, 0, -1}, LastTime: adminAuditTimeKey(query.From), LastSource: "account_pool", LastID: "aud"}
+	invalid := adminAuditCursor{Version: adminAuditCursorVersion, From: query.From.Format(time.RFC3339Nano), To: query.To.Format(time.RFC3339Nano), SnapshotAt: query.To.Format(time.RFC3339Nano), Sources: allAdminAuditSourceTokens(), Limit: 10, Watermarks: []int64{0, 0, 0, 0, -1}, LastTime: adminAuditTimeKey(query.From), LastSource: "account_pool", LastID: "aud"}
 	encoded, err := fixture.app.encodeAdminAuditCursor(invalid)
 	if err != nil {
 		t.Fatal(err)
@@ -169,14 +170,14 @@ func TestAdminAuditCancelledQueryAndCursorValidation(t *testing.T) {
 	if _, err := fixture.app.decodeAdminAuditCursor(encoded); err == nil {
 		t.Fatal("negative signed cursor watermark was accepted")
 	}
-	base := adminAuditCursor{Version: adminAuditCursorVersion, From: query.From.Format(time.RFC3339Nano), To: query.To.Format(time.RFC3339Nano), SnapshotAt: query.To.Format(time.RFC3339Nano), Sources: allAdminAuditSourceTokens(), Limit: 10, Watermarks: []int64{0, 0, 0, 0}, LastTime: adminAuditTimeKey(query.From), LastSource: "account_pool", LastID: "aud"}
+	base := adminAuditCursor{Version: adminAuditCursorVersion, From: query.From.Format(time.RFC3339Nano), To: query.To.Format(time.RFC3339Nano), SnapshotAt: query.To.Format(time.RFC3339Nano), Sources: allAdminAuditSourceTokens(), Limit: 10, Watermarks: []int64{0, 0, 0, 0, 0}, LastTime: adminAuditTimeKey(query.From), LastSource: "account_pool", LastID: "aud"}
 	mutations := map[string]func(*adminAuditCursor){
 		"old version":    func(cursor *adminAuditCursor) { cursor.Version = 0 },
 		"unknown source": func(cursor *adminAuditCursor) { cursor.Sources[0] = "unknown" },
 		"noncanonical sources": func(cursor *adminAuditCursor) {
 			cursor.Sources[0], cursor.Sources[1] = cursor.Sources[1], cursor.Sources[0]
 		},
-		"short watermarks":    func(cursor *adminAuditCursor) { cursor.Watermarks = cursor.Watermarks[:3] },
+		"short watermarks":    func(cursor *adminAuditCursor) { cursor.Watermarks = cursor.Watermarks[:4] },
 		"unknown last source": func(cursor *adminAuditCursor) { cursor.LastSource = "unknown" },
 		"malformed last time": func(cursor *adminAuditCursor) { cursor.LastTime = "2026-09-29T00:00:00Z" },
 		"noncanonical snapshot": func(cursor *adminAuditCursor) {
@@ -207,6 +208,17 @@ func TestAdminAuditCancelledQueryAndCursorValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertAdminAuditError(t, requestJSON(t, http.MethodGet, fixture.server.URL+adminAuditPath+"?cursor="+url.QueryEscape(valid[:len(valid)-1]), "", fixture.cookie, "", ""), http.StatusBadRequest, "invalid_request")
+	legacy := base
+	legacy.Version = 1
+	legacy.Sources = legacy.Sources[:4]
+	legacy.Watermarks = legacy.Watermarks[:4]
+	legacyJSON, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyMAC := fixture.app.secrets.digest("admin-audit-cursor/v1", string(legacyJSON))
+	legacyCursor := base64.RawURLEncoding.EncodeToString(append(legacyJSON, legacyMAC...))
+	assertAdminAuditError(t, requestJSON(t, http.MethodGet, fixture.server.URL+adminAuditPath+"?cursor="+url.QueryEscape(legacyCursor), "", fixture.cookie, "", ""), http.StatusBadRequest, "invalid_request")
 }
 
 func TestAdminAuditSameTimestampUsesSourceThenEventIDKeyset(t *testing.T) {
@@ -300,5 +312,96 @@ func TestAdminAuditResponseContainsMetadataOnly(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("response contains forbidden value %q: %s", forbidden, body)
 		}
+	}
+}
+
+func TestAdminAuditFinancialFifthSourceNullableActorAndWatermark(t *testing.T) {
+	fixture := newRuntimeAccountPoolFixture(t)
+	fixture.enableRuntimeAdminHTTP(t)
+	adminID := adminAuditTestAdminID(t, fixture.app.store.db)
+	seedAdminAuditFourSources(t, fixture.app.store.db, adminID)
+	seedFinancialAuditFact(t, fixture.app.store.db, "financial-admin", adminID, "2026-09-29T10:00:00.100Z", "settings.update", "settings", "singleton")
+	seedFinancialAuditFact(t, fixture.app.store.db, "financial-unattributed", "", "2026-09-29T10:00:00Z", "redemption.redeem", "redemption", "redeem-1")
+
+	endpoint := fixture.server.URL + adminAuditPath + "?from=2026-09-29T09%3A59%3A59Z&to=2026-09-29T10%3A00%3A01Z&limit=3"
+	firstResponse := requestJSON(t, http.MethodGet, endpoint, "", fixture.cookie, "", "")
+	if firstResponse.StatusCode != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", firstResponse.StatusCode, readBody(firstResponse))
+	}
+	var first adminAuditTestPage
+	decodeResponse(t, firstResponse, &first)
+	firstResponse.Body.Close()
+	if len(first.Sources) != 5 || len(first.Items) != 3 || first.Items[0].Source != "account_pool" || first.Items[1].Source != "account_lifecycle" || first.Items[2].Source != "financial_commercial" || first.NextCursor == nil {
+		t.Fatalf("first five-source page=%+v", first)
+	}
+	if first.Items[2].ActorID == nil || *first.Items[2].ActorID != adminID || first.Items[2].Revision == nil || *first.Items[2].Revision != 1 {
+		t.Fatalf("financial administrator projection=%+v", first.Items[2])
+	}
+	seedFinancialAuditFact(t, fixture.app.store.db, "financial-after-watermark", "", "2026-09-29T10:00:00.005Z", "settings.update", "settings", "later")
+	secondResponse := requestJSON(t, http.MethodGet, fixture.server.URL+adminAuditPath+"?cursor="+url.QueryEscape(*first.NextCursor), "", fixture.cookie, "", "")
+	if secondResponse.StatusCode != http.StatusOK {
+		t.Fatalf("continuation status=%d body=%s", secondResponse.StatusCode, readBody(secondResponse))
+	}
+	var second adminAuditTestPage
+	decodeResponse(t, secondResponse, &second)
+	secondResponse.Body.Close()
+	if len(second.Items) != 3 || second.Items[0].Source != "governance_management" || second.Items[1].Source != "governance_general_budget" || second.Items[2].Source != "financial_commercial" || second.NextCursor != nil {
+		t.Fatalf("second five-source page=%+v", second)
+	}
+	if second.Items[2].EventID != "financial-unattributed" || second.Items[2].ActorID != nil || second.Items[2].OccurredAt != "2026-09-29T10:00:00Z" {
+		t.Fatalf("nullable actor projection=%+v", second.Items[2])
+	}
+	if second.From != first.From || second.To != first.To || second.SnapshotAt != first.SnapshotAt {
+		t.Fatalf("page boundary changed: first=%+v second=%+v", first, second)
+	}
+	filter := fixture.server.URL + adminAuditPath + "?from=2026-09-29T09%3A59%3A59Z&to=2026-09-29T10%3A00%3A01Z&sources=financial_commercial&actor_id=" + url.QueryEscape(adminID)
+	filteredResponse := requestJSON(t, http.MethodGet, filter, "", fixture.cookie, "", "")
+	var filtered adminAuditTestPage
+	decodeResponse(t, filteredResponse, &filtered)
+	filteredResponse.Body.Close()
+	if len(filtered.Items) != 1 || filtered.Items[0].EventID != "financial-admin" {
+		t.Fatalf("non-null actor filter=%+v", filtered)
+	}
+}
+
+func TestAdminAuditFinancialSchemaTriggerAndBadRowFailClosed(t *testing.T) {
+	for _, change := range []struct{ name, statement string }{
+		{"missing immutable trigger", `DROP TRIGGER financial_commercial_operations_no_update`},
+		{"extra trigger", `CREATE TRIGGER financial_commercial_operations_extra BEFORE INSERT ON financial_commercial_operations BEGIN SELECT 1; END`},
+		{"bad row", `INSERT INTO financial_commercial_operations(operation_id,action,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at) VALUES('financial-bad','settings.update',NULL,zeroblob(32),'settings','',1,'2026-09-29T10:00:00Z')`},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			fixture := newRuntimeAccountPoolFixture(t)
+			fixture.enableRuntimeAdminHTTP(t)
+			adminID := adminAuditTestAdminID(t, fixture.app.store.db)
+			seedAdminAuditFourSources(t, fixture.app.store.db, adminID)
+			firstResponse := requestJSON(t, http.MethodGet, fixture.server.URL+adminAuditPath+"?from=2026-09-29T09%3A59%3A59Z&to=2026-09-29T10%3A00%3A01Z&limit=1", "", fixture.cookie, "", "")
+			var first adminAuditTestPage
+			decodeResponse(t, firstResponse, &first)
+			firstResponse.Body.Close()
+			if first.NextCursor == nil {
+				t.Fatalf("no continuation before schema mutation: %+v", first)
+			}
+			if _, err := fixture.app.store.db.Exec(change.statement); err != nil {
+				t.Fatal(err)
+			}
+			query := "?sources=account_pool"
+			if change.name == "bad row" {
+				query = "?from=2026-09-29T09%3A59%3A59Z&to=2026-09-29T10%3A00%3A01Z&sources=financial_commercial"
+			}
+			assertAdminAuditError(t, requestJSON(t, http.MethodGet, fixture.server.URL+adminAuditPath+query, "", fixture.cookie, "", ""), http.StatusServiceUnavailable, "storage_unavailable")
+			assertAdminAuditError(t, requestJSON(t, http.MethodGet, fixture.server.URL+adminAuditPath+"?cursor="+url.QueryEscape(*first.NextCursor), "", fixture.cookie, "", ""), http.StatusServiceUnavailable, "storage_unavailable")
+		})
+	}
+}
+
+func seedFinancialAuditFact(t *testing.T, db *sql.DB, operationID, adminID, stamp, action, kind, resourceID string) {
+	t.Helper()
+	var actor any
+	if adminID != "" {
+		actor = adminID
+	}
+	if _, err := db.Exec(`INSERT INTO financial_commercial_operations(operation_id,action,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at) VALUES(?,?,?,zeroblob(32),?,?,1,?)`, operationID, action, actor, kind, resourceID, stamp); err != nil {
+		t.Fatal(err)
 	}
 }
