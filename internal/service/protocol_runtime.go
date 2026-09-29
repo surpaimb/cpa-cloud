@@ -26,7 +26,9 @@ func prepareProtocolRuntime(capability protocolconv.RouteCapability, model strin
 		(capability.ClientProtocol == protocolconv.ProtocolOpenAIChat && capability.UpstreamProtocol == protocolconv.ProtocolOpenAIResponses ||
 			capability.ClientProtocol == protocolconv.ProtocolOpenAIResponses && capability.UpstreamProtocol == protocolconv.ProtocolOpenAIChat ||
 			capability.ClientProtocol == protocolconv.ProtocolAnthropicMessages && capability.UpstreamProtocol == protocolconv.ProtocolOpenAIResponses ||
-			capability.ClientProtocol == protocolconv.ProtocolOpenAIResponses && capability.UpstreamProtocol == protocolconv.ProtocolAnthropicMessages) {
+			capability.ClientProtocol == protocolconv.ProtocolOpenAIResponses && capability.UpstreamProtocol == protocolconv.ProtocolAnthropicMessages ||
+			capability.ClientProtocol == protocolconv.ProtocolGeminiGenerate && capability.UpstreamProtocol == protocolconv.ProtocolOpenAIResponses ||
+			capability.ClientProtocol == protocolconv.ProtocolOpenAIResponses && capability.UpstreamProtocol == protocolconv.ProtocolGeminiGenerate) {
 		prepared, err = protocolconv.PrepareCrossProtocolStreamRequest(capability, model, body)
 	} else {
 		prepared, err = protocolconv.PrepareRequest(capability, model, body)

@@ -49,8 +49,9 @@ func (s FeatureSet) HasAll(required FeatureSet) bool { return s&required == requ
 type RouteCapability struct {
 	ClientProtocol   Protocol
 	UpstreamProtocol Protocol
-	// Streaming declares native route support. RequestStreaming describes the
-	// employee request and is always rejected for conversion plans in this slice.
+	// Streaming declares route support. RequestStreaming describes the employee
+	// request. PrepareRequest rejects cross-protocol streams; the separately
+	// reviewed PrepareCrossProtocolStreamRequest admits only its named pairs.
 	Streaming        bool
 	RequestStreaming bool
 	Features         FeatureSet

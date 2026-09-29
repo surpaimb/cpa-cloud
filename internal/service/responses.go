@@ -210,7 +210,7 @@ func (a *App) responsesAPI(w http.ResponseWriter, r *http.Request) {
 		case protocolconv.ProtocolAnthropicMessages:
 			target, err = upstreamAnthropicURL(endpoint, false)
 		case protocolconv.ProtocolGeminiGenerate:
-			target, err = geminiGenerateURL(endpoint, preparedRuntime.model(), false)
+			target, err = geminiGenerateURL(endpoint, preparedRuntime.model(), stream)
 		default:
 			err = errors.New("unsupported OpenAI wire protocol")
 		}

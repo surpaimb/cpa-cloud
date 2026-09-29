@@ -159,3 +159,64 @@ func TestPrepareCrossProtocolStreamRequestIsExplicitAndNarrow(t *testing.T) {
 		t.Fatalf("unexpected Messages preparation: %#v, %v", prepared, err)
 	}
 }
+
+func TestStreamConverterGeminiToResponsesPlanConsumesResponsesEvents(t *testing.T) {
+	converter, err := NewStreamConverter(streamingPrepared(PlanGeminiToResponses, ProtocolGeminiGenerate, ProtocolOpenAIResponses))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := []SSEFrame{
+		{Event: "response.created", Data: []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"r","created_at":1,"model":"m"}}`)},
+		{Event: "response.incomplete", Data: []byte(`{"type":"response.incomplete","sequence_number":1,"response":{"id":"r","object":"response","created_at":1,"model":"m","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[]}}`)},
+	}
+	for index, frame := range frames {
+		events, err := converter.FeedFrame(frame)
+		if err != nil {
+			t.Fatalf("frame %d: %v", index, err)
+		}
+		if index == 1 {
+			if len(events) != 1 || events[0].Name != "" || events[0].TerminalOutcome != StreamTerminalIncomplete {
+				t.Fatalf("unexpected Gemini terminal: %#v", events)
+			}
+		}
+	}
+	if err := converter.EOF(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStreamConverterResponsesToGeminiPlanConsumesGeminiEvents(t *testing.T) {
+	converter, err := NewStreamConverter(streamingPrepared(PlanResponsesToGemini, ProtocolOpenAIResponses, ProtocolGeminiGenerate))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := []SSEFrame{
+		{Event: "message", Data: []byte(`{"responseId":"g","modelVersion":"m","candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)},
+		{Data: []byte(`{"candidates":[{"content":{"role":"model"},"finishReason":"STOP"}]}`)},
+	}
+	var output []SSEEvent
+	for _, frame := range frames {
+		events, err := converter.FeedFrame(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output = append(output, events...)
+	}
+	if len(output) == 0 || output[0].Name != "response.created" || output[len(output)-1].Name != "response.completed" || output[len(output)-1].TerminalOutcome != StreamTerminalCompleted {
+		t.Fatalf("unexpected Responses events: %#v", output)
+	}
+	if err := converter.EOF(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStreamConverterGeminiResponsesRejectsMismatchedEventNames(t *testing.T) {
+	responses, _ := NewStreamConverter(streamingPrepared(PlanGeminiToResponses, ProtocolGeminiGenerate, ProtocolOpenAIResponses))
+	if _, err := responses.FeedFrame(SSEFrame{Event: "response.completed", Data: []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"r","created_at":1,"model":"m"}}`)}); !errors.Is(err, ErrInvalidUpstream) {
+		t.Fatalf("Responses mismatch: %v", err)
+	}
+	gemini, _ := NewStreamConverter(streamingPrepared(PlanResponsesToGemini, ProtocolOpenAIResponses, ProtocolGeminiGenerate))
+	if _, err := gemini.FeedFrame(SSEFrame{Event: "response.created", Data: []byte(`{"responseId":"g","modelVersion":"m","candidates":[{"content":{"role":"model"}}]}`)}); !errors.Is(err, ErrInvalidUpstream) {
+		t.Fatalf("Gemini event name: %v", err)
+	}
+}
