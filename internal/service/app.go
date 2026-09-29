@@ -308,6 +308,7 @@ func (a *App) Handler() http.Handler {
 	a.registerSystemProbeHandlers(mux)
 	a.registerAccountRecoveryHandlers(mux)
 	a.registerScheduledTestHandlers(mux)
+	a.registerAdminAuditHandlers(mux)
 	registerBackupAutomationHandlers(a, a.backupAutomation, mux)
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("POST /admin/api/v1/sessions", a.login)
@@ -438,6 +439,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"upstream_cooldown_management":    a.accountPool != nil,
 			"account_pool_configuration":      true,
 			"account_group_cost_allocation":   a.accountGroupAllocationRequired,
+			"admin_audit_overview":            true,
 			"account_pool_routing":            a.accountPool != nil,
 			"account_pool_preflight_failover": a.accountPool != nil,
 			"usage_reporting":                 true,

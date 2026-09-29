@@ -1,5 +1,39 @@
 # 集成状态
 
+## 2026-09-29：管理员只读审计总览第一段
+
+- 按[管理员只读审计总览第一段契约](admin-audit-overview-contract.md)，新增
+  `GET /admin/api/v1/audit/events`，只规范化 `account_pool_audit`、`account_lifecycle_audit`、
+  `governance_management_audit` 与 `governance_general_budget_audit` 四类已有同事务事实。接口使用管理员
+  会话、错误 Origin 拒绝、固定源 allowlist、最多 31 天窗口、最多 100 项页面和 HMAC 签名游标；首页在
+  同一只读事务捕获四张表的 `rowid` 水位，续页不会纳入之后新增或回拨时间的行。
+- 每次读取先严格验证全部四源 schema，即使只筛选一个来源也不能绕过组合完整性；缺表、view 替换、错列/
+  约束/索引、查询取消和扫描错误均在输出条目前以统一 503 失败关闭。响应只投影 source、event ID、actor、
+  action、target、result、可选 revision 与 UTC 时间，不读取管理正文、operation digest、Key、上游凭据、
+  prompt 或模型响应。
+- 管理网页仅在 `admin_audit_overview=true` 时显示入口；旧服务省略能力时不发送审计请求。新服务响应经过
+  运行时严格验证，未知来源/结果、缺字段、错类型、非规范 UTC、非法 revision、乱序/重复项和畸形 cursor
+  均整页失败关闭。桌面使用元数据卡片，窄屏改为有标签的单列信息，并固定提示“四类现存成功事实，不是
+  完整历史”。
+- 当前工作树的 Go 审计专项与非缓存全仓回归 PASS（`internal/service` 784.695s）；`go vet ./...`、两个
+  `-trimpath` CLI build、Web 20 个文件/157 项全量测试、TypeScript 与 production build 均 PASS。
+  固定临时程序的动态非 8787 回环 smoke PASS，覆盖匿名 401、错误 Origin 403、只读 GET 无 CSRF、四源、
+  精确筛选、恶意参数、签名游标首页水位、无重复、重启恢复、固定响应字段、日志中无合成上游凭据/CSRF
+  token，以及数据库中无合成上游凭据明文。
+  Browser 插件不可用，按回退路径使用 Playwright CLI 验证桌面与 390×844：筛选交互、四源卡片、范围提示、
+  移动导航与无横向溢出通过；修复移动端空白刷新按钮后重载控制台 0 error/0 warning，登录前仅有预期 session
+  401。Windows 本机 `CGO_ENABLED=0`，不冒充 race 通过；PR CI/Linux race 仍以本批后续结果补齐。
+- 独立固定二进制验收对实现提交 `84fd087958beb2fb441151e9e92e648eb8ff1212` 的干净构建运行两遍，
+  SHA-256 为 `D6F96C3DC85A21FDB7D5BADCD6D2E640B5DBE542FC73C474A8A3E790C866D3BE`。四源、混合时间精度、
+  跨源分页与并发水位、权限/Origin、23 类恶意参数、缺表/view/错 schema/坏行失败关闭、重启和审计响应/日志
+  脱敏均通过。数据库及 WAL 未出现合成管理员密码、员工 Key 明文、上游凭据明文或 session cookie。
+  验收同时确认既有 `sessions.csrf_token` 在数据库中明文持久化；审计接口和日志未泄露该 token，本段不改变
+  原会话存储。未注入底层 SQLite I/O/取消故障，亦未运行真实旧版程序；这两项不以独立进程验收宣称已覆盖。
+- 本段不创建新的统一写审计，不回填、复制或延长原事实，也不声称完整覆盖。账务、登录/会话、备份、支付
+  和其他 mutator 的缺失事实，以及导出、可配置保留、防篡改、独立审计角色和敏感操作二次认证继续保留；
+  正文审计始终排除。验收只使用临时目录和合成元数据，不访问真实 provider/会员账号，不创建部署、tag、
+  安装包或 release。
+
 ## 2026-09-29：账号组内部成本分摊倍率第一段
 
 - 按 [账号组内部成本分摊倍率契约](account-group-cost-allocation-contract.md)为既有账号池组增加

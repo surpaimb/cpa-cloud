@@ -4,6 +4,11 @@
 
 ## 当前执行批次
 
+当前增量按[管理员只读审计总览第一段契约](admin-audit-overview-contract.md)实施 `AUDIT-01` 的窄范围读路径：只规范化
+已有 `account_pool_audit`、`account_lifecycle_audit`、`governance_management_audit` 和
+`governance_general_budget_audit` 四类现存同事务事实，提供有界时间/页面、固定源 allowlist、签名水位游标
+和能力门控网页。本段不改写或统一保留原事实，不宣称完整审计覆盖；其他 mutator、导出、防篡改、可配置保留和二次认证留待后续。
+
 当前增量按 [账号组内部成本分摊倍率契约](account-group-cost-allocation-contract.md)实施 `ACCT-02/BILL-02` 第一段：既有账号池组获得有界 ppm 倍率、不可变版本、共享 revision/CAS、最终派发事务快照，以及与可靠用量、更正、日/月报表、CSV 和管理网页分离的“内部调整后分摊成本”。原供应商估算成本、价格版本、预算、余额和员工钱包保持原义；本段不是员工售价、供应商账单、多币兑换或员工身份组费率。
 
 请求治理已进入源码集成：员工、Key 与独立治理组的 RPM/并发硬限制默认关闭，管理网页和持久幂等操作已接线；旧库升级、关闭/开启、超限零派发、取消、重启及撤销的隔离进程验收通过。完整回归结果以[集成状态](integration-status.md)为准。TPM/成本只读 shadow 观测已通过进程、浏览器及 Linux CI 验收；新增默认关闭的固定模型硬预算已完成管理、持久预留、最终派发、原子结算及恢复接线，本批证据见[预算集成进度](budget-service-integration-progress.md)。这仍是有限模型/请求范围的实验，不能把统计或局部上界证明当成通用预算完成。来源与边界见[治理总契约](governance-contract.md)和[管理契约](governance-management-contract.md)。
