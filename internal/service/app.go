@@ -29,38 +29,39 @@ const (
 )
 
 type App struct {
-	cfg                 Config
-	store               *store
-	secrets             *secrets
-	outboundProxies     *outboundProxyStore
-	proxyClients        *egress.ClientCache
-	proxyTests          *outboundProxyTestCoordinator
-	http                *http.Client
-	codex               codexExecutor
-	responses           codexResponsesExecutor
-	oauthHTTP           *http.Client
-	admission           sync.RWMutex
-	refresh             *codexRefreshCoordinator
-	accountPool         *accountPoolRuntime
-	healthTests         *upstreamHealthCoordinator
-	scheduledTests      *scheduledTestCoordinator
-	systemProbes        *accounting.SystemProbeLedger
-	recovery            *accountRecoveryCoordinator
-	backupAutomation    *backupAutomationCoordinator
-	usage               *usageLedgerCoordinator
-	responseResources   *responseResourceCoordinator
-	backgroundResponses *backgroundResponseWorker
-	governance          *requestGovernance
-	governancePolicies  *governanceManagementStore
-	budget              *governance.Budget
-	budgetCommit        func(string, *sql.Tx) error
-	usageRequests       sync.Map
-	trustedProxies      keypolicy.TrustedProxySet
-	loginMu             sync.Mutex
-	logins              map[string]*loginAttempt
-	catalogMu           sync.Mutex
-	catalogs            map[string]codexCatalogCacheEntry
-	codexCatalog        codexCatalogLister
+	cfg                            Config
+	store                          *store
+	secrets                        *secrets
+	outboundProxies                *outboundProxyStore
+	proxyClients                   *egress.ClientCache
+	proxyTests                     *outboundProxyTestCoordinator
+	http                           *http.Client
+	codex                          codexExecutor
+	responses                      codexResponsesExecutor
+	oauthHTTP                      *http.Client
+	admission                      sync.RWMutex
+	refresh                        *codexRefreshCoordinator
+	accountPool                    *accountPoolRuntime
+	healthTests                    *upstreamHealthCoordinator
+	scheduledTests                 *scheduledTestCoordinator
+	systemProbes                   *accounting.SystemProbeLedger
+	recovery                       *accountRecoveryCoordinator
+	backupAutomation               *backupAutomationCoordinator
+	usage                          *usageLedgerCoordinator
+	accountGroupAllocationRequired bool
+	responseResources              *responseResourceCoordinator
+	backgroundResponses            *backgroundResponseWorker
+	governance                     *requestGovernance
+	governancePolicies             *governanceManagementStore
+	budget                         *governance.Budget
+	budgetCommit                   func(string, *sql.Tx) error
+	usageRequests                  sync.Map
+	trustedProxies                 keypolicy.TrustedProxySet
+	loginMu                        sync.Mutex
+	logins                         map[string]*loginAttempt
+	catalogMu                      sync.Mutex
+	catalogs                       map[string]codexCatalogCacheEntry
+	codexCatalog                   codexCatalogLister
 	// Lifecycle integration hooks are SQL-only before commit and non-blocking
 	// after commit. Scheduled-test integration wires these without changing the
 	// account lock -> admission lock -> transaction ordering.
@@ -143,6 +144,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err := migrateAccountGroupAllocation(ctx, s.db); err != nil {
 		return nil, fmt.Errorf("migrate account group cost allocation: %w", err)
 	}
+	app.accountGroupAllocationRequired = true
+	app.usage.accountGroupAllocationRequired = true
+	app.usage.ledger = accounting.NewRequiredAllocationLedger(s.db)
 	if err := migrateBackupAutomation(ctx, s.db); err != nil {
 		return nil, fmt.Errorf("migrate backup automation: %w", err)
 	}
@@ -433,7 +437,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"automated_backups_running":       a.backupAutomation != nil && a.backupAutomation.Running(),
 			"upstream_cooldown_management":    a.accountPool != nil,
 			"account_pool_configuration":      true,
-			"account_group_cost_allocation":   true,
+			"account_group_cost_allocation":   a.accountGroupAllocationRequired,
 			"account_pool_routing":            a.accountPool != nil,
 			"account_pool_preflight_failover": a.accountPool != nil,
 			"usage_reporting":                 true,

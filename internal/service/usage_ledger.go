@@ -34,6 +34,9 @@ type usageLedgerCoordinator struct {
 	budgetCommit func(*sql.Tx) error
 	// Package-private fault injection for the non-budget dispatch barrier.
 	dispatchCommit func(*sql.Tx) error
+	// Full App instances require the composed allocation schema. Isolated
+	// package fixtures leave this false and retain the legacy optional boundary.
+	accountGroupAllocationRequired bool
 }
 
 type usageRequestStart struct {

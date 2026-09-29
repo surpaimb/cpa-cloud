@@ -21,6 +21,7 @@ var accountGroupAllocationTables = []string{
 	"account_group_allocation_migration_state",
 	"account_group_allocation_versions",
 	"account_group_allocation_current",
+	"account_group_allocation_legacy_attempts",
 	"accounting_attempt_allocation_snapshots",
 	"accounting_usage_allocation_events",
 	"accounting_usage_allocation_corrections",
@@ -69,6 +70,15 @@ func migrateAccountGroupAllocation(ctx context.Context, db *sql.DB) error {
 		}
 		if err := backfillAccountGroupAllocations(ctx, tx); err != nil {
 			return err
+		}
+		var accountingAttemptsPresent int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounting_attempts'`).Scan(&accountingAttemptsPresent); err != nil {
+			return err
+		}
+		if accountingAttemptsPresent == 1 {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO account_group_allocation_legacy_attempts(attempt_id) SELECT id FROM accounting_attempts`); err != nil {
+				return fmt.Errorf("mark pre-allocation accounting attempts: %w", err)
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO account_group_allocation_migration_state(singleton,version,completed_at) VALUES(1,?,?)`, accountGroupAllocationMigrationVersion, utcNow()); err != nil {
 			return err
@@ -121,6 +131,9 @@ func createAccountGroupAllocationSchema(ctx context.Context, tx *sql.Tx) error {
 				REFERENCES account_group_allocation_versions(version,group_id,group_revision)
 				DEFERRABLE INITIALLY DEFERRED
 		)`,
+		`CREATE TABLE account_group_allocation_legacy_attempts (
+			attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id) ON DELETE RESTRICT
+		)`,
 		`CREATE TABLE accounting_attempt_allocation_snapshots (
 			attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id) ON DELETE RESTRICT,
 			account_group_id TEXT,
@@ -152,6 +165,22 @@ func createAccountGroupAllocationSchema(ctx context.Context, tx *sql.Tx) error {
 			BEFORE UPDATE ON accounting_attempt_allocation_snapshots BEGIN SELECT RAISE(ABORT,'allocation snapshots are immutable'); END`,
 		`CREATE TRIGGER accounting_attempt_allocation_snapshots_no_delete
 			BEFORE DELETE ON accounting_attempt_allocation_snapshots BEGIN SELECT RAISE(ABORT,'allocation snapshots are immutable'); END`,
+		`CREATE TRIGGER accounting_attempt_allocation_snapshots_not_legacy
+			BEFORE INSERT ON accounting_attempt_allocation_snapshots
+			WHEN EXISTS(SELECT 1 FROM account_group_allocation_legacy_attempts WHERE attempt_id=NEW.attempt_id)
+			BEGIN SELECT RAISE(ABORT,'legacy attempts cannot receive allocation snapshots'); END`,
+		`CREATE TRIGGER account_group_allocation_legacy_attempts_no_update
+			BEFORE UPDATE ON account_group_allocation_legacy_attempts BEGIN SELECT RAISE(ABORT,'legacy allocation markers are immutable'); END`,
+		`CREATE TRIGGER account_group_allocation_legacy_attempts_no_delete
+			BEFORE DELETE ON account_group_allocation_legacy_attempts BEGIN SELECT RAISE(ABORT,'legacy allocation markers are immutable'); END`,
+		`CREATE TRIGGER account_group_allocation_legacy_attempts_not_snapshot
+			BEFORE INSERT ON account_group_allocation_legacy_attempts
+			WHEN EXISTS(SELECT 1 FROM accounting_attempt_allocation_snapshots WHERE attempt_id=NEW.attempt_id)
+			BEGIN SELECT RAISE(ABORT,'snapshotted attempts cannot become legacy'); END`,
+		`CREATE TRIGGER account_group_allocation_legacy_attempts_migration_only
+			BEFORE INSERT ON account_group_allocation_legacy_attempts
+			WHEN EXISTS(SELECT 1 FROM account_group_allocation_migration_state WHERE singleton=1)
+			BEGIN SELECT RAISE(ABORT,'legacy allocation markers are migration-only'); END`,
 		`CREATE TRIGGER accounting_usage_allocation_events_no_update
 			BEFORE UPDATE ON accounting_usage_allocation_events BEGIN SELECT RAISE(ABORT,'allocation events are immutable'); END`,
 		`CREATE TRIGGER accounting_usage_allocation_events_no_delete
@@ -233,6 +262,7 @@ func validateAccountGroupAllocationSchema(ctx context.Context, tx *sql.Tx) error
 		{"account_group_allocation_migration_state", []string{"singleton", "version", "completed_at"}, []string{"check(singleton=1)", "check(version=1)"}},
 		{"account_group_allocation_versions", []string{"version", "group_id", "group_revision", "operation_id", "expected_revision", "multiplier_ppm", "created_at"}, []string{"references account_groups(id) on delete restrict", "unique(group_id,group_revision)", "unique(version,group_id)", "unique(version,group_id,multiplier_ppm)", "check(multiplier_ppm between 1 and 1000000000)"}},
 		{"account_group_allocation_current", []string{"group_id", "version", "group_revision"}, []string{"references account_groups(id) on delete restrict", "references account_group_allocation_versions(version,group_id,group_revision)"}},
+		{"account_group_allocation_legacy_attempts", []string{"attempt_id"}, []string{"references accounting_attempts(id) on delete restrict"}},
 		{"accounting_attempt_allocation_snapshots", []string{"attempt_id", "account_group_id", "multiplier_version", "multiplier_ppm"}, []string{"references accounting_attempts(id) on delete restrict", "references account_group_allocation_versions(version,group_id,multiplier_ppm) on delete restrict", "check(multiplier_ppm between 1 and 1000000000)"}},
 		{"accounting_usage_allocation_events", []string{"event_id", "attempt_id", "adjusted_cost_micro"}, []string{"references accounting_usage_events(id) on delete restrict", "references accounting_attempt_allocation_snapshots(attempt_id) on delete restrict"}},
 		{"accounting_usage_allocation_corrections", []string{"correction_id", "attempt_id", "adjusted_cost_micro"}, []string{"references accounting_usage_corrections(id) on delete restrict", "references accounting_attempt_allocation_snapshots(attempt_id) on delete restrict"}},
@@ -250,6 +280,11 @@ func validateAccountGroupAllocationSchema(ctx context.Context, tx *sql.Tx) error
 		{"trigger", "account_group_allocation_versions_no_delete", "before delete on account_group_allocation_versions"},
 		{"trigger", "accounting_attempt_allocation_snapshots_no_update", "before update on accounting_attempt_allocation_snapshots"},
 		{"trigger", "accounting_attempt_allocation_snapshots_no_delete", "before delete on accounting_attempt_allocation_snapshots"},
+		{"trigger", "accounting_attempt_allocation_snapshots_not_legacy", "before insert on accounting_attempt_allocation_snapshots"},
+		{"trigger", "account_group_allocation_legacy_attempts_no_update", "before update on account_group_allocation_legacy_attempts"},
+		{"trigger", "account_group_allocation_legacy_attempts_no_delete", "before delete on account_group_allocation_legacy_attempts"},
+		{"trigger", "account_group_allocation_legacy_attempts_not_snapshot", "before insert on account_group_allocation_legacy_attempts"},
+		{"trigger", "account_group_allocation_legacy_attempts_migration_only", "before insert on account_group_allocation_legacy_attempts"},
 		{"trigger", "accounting_usage_allocation_events_no_update", "before update on accounting_usage_allocation_events"},
 		{"trigger", "accounting_usage_allocation_events_no_delete", "before delete on accounting_usage_allocation_events"},
 		{"trigger", "accounting_usage_allocation_corrections_no_update", "before update on accounting_usage_allocation_corrections"},
@@ -319,8 +354,10 @@ func validateAccountGroupAllocationSchema(ctx context.Context, tx *sql.Tx) error
 		`SELECT COUNT(*) FROM account_groups g LEFT JOIN account_group_allocation_current c ON c.group_id=g.id WHERE c.group_id IS NULL`,
 		`SELECT COUNT(*) FROM account_group_allocation_current c LEFT JOIN account_groups g ON g.id=c.group_id WHERE g.id IS NULL`,
 		`SELECT COUNT(*) FROM account_group_allocation_current c LEFT JOIN account_group_allocation_versions v ON v.version=c.version AND v.group_id=c.group_id AND v.group_revision=c.group_revision WHERE v.version IS NULL`,
+		`SELECT COUNT(*) FROM accounting_attempts a LEFT JOIN accounting_attempt_allocation_snapshots s ON s.attempt_id=a.id LEFT JOIN account_group_allocation_legacy_attempts l ON l.attempt_id=a.id WHERE s.attempt_id IS NULL AND l.attempt_id IS NULL`,
 		`SELECT COUNT(*) FROM accounting_usage_allocation_events e LEFT JOIN accounting_attempt_allocation_snapshots s ON s.attempt_id=e.attempt_id WHERE s.attempt_id IS NULL`,
 		`SELECT COUNT(*) FROM accounting_usage_allocation_corrections c LEFT JOIN accounting_attempt_allocation_snapshots s ON s.attempt_id=c.attempt_id WHERE s.attempt_id IS NULL`,
+		`SELECT COUNT(*) FROM account_group_allocation_legacy_attempts l JOIN accounting_attempt_allocation_snapshots s ON s.attempt_id=l.attempt_id`,
 	}
 	for _, query := range queries {
 		if err := tx.QueryRowContext(ctx, query).Scan(&mismatches); err != nil || mismatches != 0 {

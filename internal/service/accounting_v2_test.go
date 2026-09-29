@@ -91,6 +91,9 @@ func seedAccountingV2ServiceAttempt(t *testing.T, db *sql.DB) (time.Time, string
 	if err := ledger.BeginAttempt(context.Background(), attempt); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`INSERT INTO accounting_attempt_allocation_snapshots(attempt_id,multiplier_ppm) VALUES(?,?)`, attempt.ID, accounting.AllocationMultiplierScale); err != nil {
+		t.Fatal(err)
+	}
 	if err := ledger.MarkAttemptDispatched(context.Background(), accounting.AttemptDispatch{ID: attempt.ID, OperationID: "dispatch-http", DispatchedAt: started.Add(time.Second)}); err != nil {
 		t.Fatal(err)
 	}

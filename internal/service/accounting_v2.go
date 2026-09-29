@@ -42,6 +42,13 @@ func (a *App) registerAccountingV2Handlers(mux *http.ServeMux) {
 	a.registerBillingV1Handlers(mux)
 }
 
+func (a *App) accountingV2Ledger() *accounting.Ledger {
+	if a != nil && a.accountGroupAllocationRequired {
+		return accounting.NewRequiredAllocationLedger(a.store.db)
+	}
+	return accounting.NewLedger(a.store.db)
+}
+
 type accountingV2ReportView struct {
 	PeriodStart                       string           `json:"period_start"`
 	PeriodEnd                         string           `json:"period_end"`
@@ -77,7 +84,7 @@ func (a *App) accountingV2Report(w http.ResponseWriter, r *http.Request, period 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), usageQueryTimeout)
 	defer cancel()
-	items, err := accounting.NewLedger(a.store.db).AccountingV2Report(ctx, filters, period)
+	items, err := a.accountingV2Ledger().AccountingV2Report(ctx, filters, period)
 	if err != nil {
 		writeAccountingV2Error(w, err)
 		return
@@ -107,7 +114,7 @@ func (a *App) accountingV2Export(w http.ResponseWriter, r *http.Request, _ admin
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), usageQueryTimeout)
 	defer cancel()
-	items, err := accounting.NewLedger(a.store.db).AccountingV2Export(ctx, filters, limit)
+	items, err := a.accountingV2Ledger().AccountingV2Export(ctx, filters, limit)
 	if err != nil {
 		writeAccountingV2Error(w, err)
 		return
@@ -197,7 +204,7 @@ func (a *App) accountingV2Correction(w http.ResponseWriter, r *http.Request, ses
 		}
 		correction.EstimatedCostDeltaMicro = &parsed
 	}
-	if err := accounting.NewLedger(a.store.db).AppendCorrection(r.Context(), correction); err != nil {
+	if err := a.accountingV2Ledger().AppendCorrection(r.Context(), correction); err != nil {
 		writeAccountingV2Error(w, err)
 		return
 	}

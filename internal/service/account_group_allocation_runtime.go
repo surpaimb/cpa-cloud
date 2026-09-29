@@ -13,7 +13,7 @@ func (a *App) recordAttemptAllocationSnapshotTx(ctx context.Context, tx *sql.Tx,
 	if a == nil || tx == nil || ctx == nil || attemptID == "" || publicModel == "" || selected.AccountID == "" {
 		return accounting.ErrInvalid
 	}
-	available, err := accountGroupAllocationRuntimeAvailableTx(ctx, tx)
+	available, err := accountGroupAllocationRuntimeAvailableTx(ctx, tx, a.accountGroupAllocationRequired)
 	if err != nil || !available {
 		return err
 	}
@@ -84,8 +84,8 @@ func sameNullableText(value sql.NullString, expected *string) bool {
 	return value.Valid && value.String == *expected
 }
 
-func requireAttemptAllocationSnapshotTx(ctx context.Context, tx *sql.Tx, attemptID string) error {
-	available, err := accountGroupAllocationRuntimeAvailableTx(ctx, tx)
+func requireAttemptAllocationSnapshotTx(ctx context.Context, tx *sql.Tx, attemptID string, required bool) error {
+	available, err := accountGroupAllocationRuntimeAvailableTx(ctx, tx, required)
 	if err != nil || !available {
 		return err
 	}
@@ -93,6 +93,9 @@ func requireAttemptAllocationSnapshotTx(ctx context.Context, tx *sql.Tx, attempt
 	var groupID, version sql.NullString
 	err = tx.QueryRowContext(ctx, `SELECT account_group_id,multiplier_version,multiplier_ppm FROM accounting_attempt_allocation_snapshots WHERE attempt_id=?`, attemptID).Scan(&groupID, &version, &ppm)
 	if errors.Is(err, sql.ErrNoRows) {
+		if required {
+			return accounting.ErrAllocationUnavailable
+		}
 		return accounting.ErrNotFound
 	}
 	if err != nil {
@@ -107,17 +110,23 @@ func requireAttemptAllocationSnapshotTx(ctx context.Context, tx *sql.Tx, attempt
 	return nil
 }
 
-func accountGroupAllocationRuntimeAvailableTx(ctx context.Context, tx *sql.Tx) (bool, error) {
+func accountGroupAllocationRuntimeAvailableTx(ctx context.Context, tx *sql.Tx, required bool) (bool, error) {
 	var tables int
 	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN (
-		'account_group_allocation_migration_state','account_group_allocation_versions','account_group_allocation_current','accounting_attempt_allocation_snapshots','accounting_usage_allocation_events','accounting_usage_allocation_corrections')`).Scan(&tables)
+		'account_group_allocation_migration_state','account_group_allocation_versions','account_group_allocation_current','account_group_allocation_legacy_attempts','accounting_attempt_allocation_snapshots','accounting_usage_allocation_events','accounting_usage_allocation_corrections')`).Scan(&tables)
 	if err != nil {
 		return false, err
 	}
 	if tables == 0 {
+		if required {
+			return false, accounting.ErrAllocationUnavailable
+		}
 		return false, nil // Package-isolated legacy fixtures do not compose the feature migration.
 	}
-	if tables != 6 {
+	if tables != 7 {
+		if required {
+			return false, accounting.ErrAllocationUnavailable
+		}
 		return false, accounting.ErrInvalid
 	}
 	return true, nil

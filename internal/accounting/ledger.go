@@ -17,6 +17,10 @@ var (
 	ErrConflict = errors.New("accounting conflict")
 	ErrInvalid  = errors.New("invalid accounting metadata")
 	ErrNotFound = errors.New("accounting record not found")
+	// ErrAllocationUnavailable indicates that the composed allocation
+	// projection is absent or internally incomplete. Service callers map it to
+	// a fixed storage-unavailable response rather than a client input error.
+	ErrAllocationUnavailable = errors.New("accounting allocation projection unavailable")
 )
 
 type Provider string
@@ -166,11 +170,19 @@ type AttemptSummary struct {
 const UnknownCurrency = "UNKNOWN"
 
 type Ledger struct {
-	db *sql.DB
+	db                          *sql.DB
+	requireAllocationProjection bool
 }
 
 func NewLedger(db *sql.DB) *Ledger {
 	return &Ledger{db: db}
+}
+
+// NewRequiredAllocationLedger composes the accounting ledger inside a fully
+// migrated service. Unlike the package-isolated ledger, it fails closed when
+// the account-group allocation projection is absent or incomplete.
+func NewRequiredAllocationLedger(db *sql.DB) *Ledger {
+	return &Ledger{db: db, requireAllocationProjection: true}
 }
 
 func (l *Ledger) Migrate(ctx context.Context) error {
@@ -405,7 +417,7 @@ func (l *Ledger) FinishAttempt(ctx context.Context, input AttemptFinish) error {
 		return err
 	}
 	defer tx.Rollback()
-	if err := finishAttemptTx(ctx, tx, input, finishedAt); err != nil {
+	if err := l.finishAttemptTx(ctx, tx, input, finishedAt); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -421,10 +433,10 @@ func (l *Ledger) FinishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptF
 	if err != nil {
 		return err
 	}
-	return finishAttemptTx(ctx, tx, input, finishedAt)
+	return l.finishAttemptTx(ctx, tx, input, finishedAt)
 }
 
-func finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finishedAt string) error {
+func (l *Ledger) finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finishedAt string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE accounting_attempts SET status=status WHERE id=?`, input.ID); err != nil {
 		return err
 	}
@@ -444,7 +456,7 @@ func finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finis
 			return fmt.Errorf("%w: attempt finish differs", ErrConflict)
 		}
 		if input.ReliableUsage {
-			return recordUsageBaseTx(ctx, tx, input, cost)
+			return l.recordUsageBaseTx(ctx, tx, input, cost)
 		}
 		return nil
 	}
@@ -463,7 +475,7 @@ func finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finis
 		return fmt.Errorf("%w: attempt was already finished", ErrConflict)
 	}
 	if input.ReliableUsage {
-		return recordUsageBaseTx(ctx, tx, input, cost)
+		return l.recordUsageBaseTx(ctx, tx, input, cost)
 	}
 	return nil
 }

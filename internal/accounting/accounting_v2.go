@@ -433,7 +433,7 @@ func markAttemptDispatchedTx(ctx context.Context, tx *sql.Tx, input AttemptDispa
 	return nil
 }
 
-func recordUsageBaseTx(ctx context.Context, tx *sql.Tx, finish AttemptFinish, cost *int64) error {
+func (l *Ledger) recordUsageBaseTx(ctx context.Context, tx *sql.Tx, finish AttemptFinish, cost *int64) error {
 	var requestID string
 	var protocol UsageProtocol
 	var evidence UsageEvidence
@@ -492,7 +492,7 @@ func recordUsageBaseTx(ctx context.Context, tx *sql.Tx, finish AttemptFinish, co
 		}
 	}
 	_ = protocol
-	return recordUsageAllocationEventTx(ctx, tx, finish.ID, id, cost)
+	return l.recordUsageAllocationEventTx(ctx, tx, finish.ID, id, cost)
 }
 
 // RecoverV2Tx appends an unknown system-terminal event only for attempts whose
@@ -543,7 +543,7 @@ func (l *Ledger) RecoverV2Tx(ctx context.Context, tx *sql.Tx) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		if err := recordUsageAllocationEventTx(ctx, tx, item.attemptID, usageEventID(item.attemptID), nil); err != nil {
+		if err := l.recordUsageAllocationEventTx(ctx, tx, item.attemptID, usageEventID(item.attemptID), nil); err != nil {
 			return 0, err
 		}
 		inserted += changed
@@ -647,7 +647,7 @@ func (l *Ledger) AppendCorrectionTx(ctx context.Context, tx *sql.Tx, correction 
 	if err != nil {
 		return err
 	}
-	return recordUsageAllocationCorrectionTx(ctx, tx, correction.ID, correction.AttemptID, newCost)
+	return l.recordUsageAllocationCorrectionTx(ctx, tx, correction.ID, correction.AttemptID, newCost)
 }
 
 func (l *Ledger) AccountingV2Export(ctx context.Context, filters AccountingV2Filters, limit int) ([]AccountingV2Row, error) {
@@ -669,7 +669,7 @@ func (l *Ledger) accountingV2ExportPage(ctx context.Context, filters AccountingV
 	}
 	allocationColumns := `,NULL,NULL,NULL,NULL`
 	allocationJoins := ``
-	allocationAvailable, err := allocationLedgerAvailable(ctx, l.db)
+	allocationAvailable, err := allocationLedgerAvailable(ctx, l.db, l.requireAllocationProjection)
 	if err != nil {
 		return nil, "", "", err
 	}

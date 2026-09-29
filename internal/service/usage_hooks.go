@@ -403,7 +403,7 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 		}
 		defer tx.Rollback()
 		if attempt != nil {
-			if err := requireAttemptAllocationSnapshotTx(writeCtx, tx, attempt.id); err != nil {
+			if err := requireAttemptAllocationSnapshotTx(writeCtx, tx, attempt.id, r.coordinator.accountGroupAllocationRequired); err != nil {
 				return err
 			}
 			reasoning, responseID := attempt.usage.ReliableMetadata()
