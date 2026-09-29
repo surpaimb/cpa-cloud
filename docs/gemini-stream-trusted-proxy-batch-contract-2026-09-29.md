@@ -10,6 +10,7 @@ The two milestones ship as separate pull requests. The Gemini/Responses SSE pull
 ## Public sources and provenance
 
 - Google Gemini API, [`models.streamGenerateContent` and `GenerateContentResponse`](https://ai.google.dev/api/generate-content), v1beta endpoint and SSE response schema. The public reference says `:streamGenerateContent` returns a stream of `GenerateContentResponse` instances, documents `candidates`, `promptFeedback`, `usageMetadata`, `modelVersion`, `responseId`, `Part`, `FunctionCall`, `FunctionResponse`, and candidate finish reasons.
+- Google Gen AI JavaScript SDK, [`GenerateContentResponse`](https://googleapis.github.io/js-genai/release_docs/classes/types.GenerateContentResponse.html), as corroborating public schema evidence that `modelVersion` and `responseId` are optional response properties rather than fields guaranteed in every streamed chunk.
 - OpenAI, [Streaming API responses](https://developers.openai.com/api/docs/guides/streaming-responses) and [Function calling](https://developers.openai.com/api/docs/guides/function-calling), for the Responses API event lifecycle and function-call argument events. This slice uses the Responses API only; it does not use or claim support for the newer Interactions API.
 - IETF, [RFC 7239 section 8.1](https://www.rfc-editor.org/rfc/rfc7239.html#section-8.1), only for the security warning that forwarding data is mutable and must be bounded by explicit proxy trust. This slice does **not** implement the standardized `Forwarded` header.
 - Go standard library, [`net/netip`](https://pkg.go.dev/net/netip), for numeric address/prefix parsing, IPv4-mapped IPv6 unmapping, canonical prefixes, and containment. `Addr.IsPrivate` is not an access-control primitive and must not be used to infer trust.
@@ -70,7 +71,9 @@ Gemini input SSE accepts only a blank event name or `message`; its `data` must b
 
 ### Gemini frame contract
 
-Each successful semantic or terminal Gemini frame must contain a non-empty `responseId` and `modelVersion`; both are frozen by the first frame and must match on every later frame. A non-blocked frame has exactly one candidate, explicitly or implicitly at index `0`. Candidate role, when content is present, is exactly `model`. Multiple candidates, another index, duplicate identities, missing identities, null where omission is required, unknown root fields, or unknown candidate/part fields fail closed.
+`responseId` and `modelVersion` may be omitted from an individual Gemini frame because the public response schema does not guarantee them in every streamed chunk. The first non-empty string observed for each field is frozen; every later explicit value must match it. Explicit null or an empty string is invalid. Until both values have been observed, semantic text/function actions are retained in bounded converter state and nothing is emitted downstream. Once both are available, the converter emits `response.created` and releases the retained actions in original wire order exactly once. If the terminal frame is reached before both identities are available, conversion fails without inventing an ID or model version. The common path where the first semantic frame supplies both identities remains live. This is intentionally support for the identity-bearing subset of legal Gemini streams, not a claim that every Gemini stream is convertible.
+
+A non-blocked frame has exactly one candidate, explicitly or implicitly at index `0`. Candidate role, when content is present, is exactly `model`. Multiple candidates, another index, changing identities, null identities, unknown root fields, or unknown candidate/part fields fail closed.
 
 The only successful candidate parts are:
 
@@ -108,7 +111,7 @@ The existing `protocolRuntime.executeStream` remains the single converted SSE br
 Acceptance tests cover, in both directions:
 
 - text-only and mixed text/function streams, call ID preservation/generation, argument buffering, order, and no replay;
-- omitted versus cumulative usage, decreasing/inconsistent counters, STOP and MAX_TOKENS;
+- omitted, late, or changing identity fields; bounded pre-identity buffering; omitted versus cumulative usage; decreasing/inconsistent counters; STOP and MAX_TOKENS;
 - prompt block, candidate safety finish, multi-candidate, media/citation/thinking/hosted-tool/state fields, malformed lifecycle, duplicate terminal, post-terminal data, truncation, and over-limit input;
 - observer-before-write ordering, durable-before-network, one upstream request, downstream short write/flush failure, cancellation, clean EOF, bounded drain, and failure settlement;
 - preservation of Chat, Messages, six non-stream conversions, native Gemini/Responses, `ClientProtocol` policy checks, and `UpstreamProtocol` raw usage/pricing.
@@ -202,4 +205,4 @@ The integrator is the sole owner of final branches, conflict resolution, combine
 
 Each pull request must run `gofmt`, focused package tests, `go test ./...`, `go vet ./...`, `npm test`, `npm run build`, `git diff --check`, documentation link checks, and the repository CI equivalent. The untracked research note `docs/research/membership-next-step.md` is out of scope and must retain SHA-256 `650B116157AC4E5328EA79AC4DDEEDE71159F786132B5D87B531B0AB57F3CCC9`.
 
-After the relevant exact PR head is fixed, workflow G verifies the built binary in a real temporary process using loopback ephemeral ports only. G covers converted Gemini/Responses text and function SSE, clean EOF/failure/cancellation/no-replay/accounting boundaries, and trusted-proxy direct/trusted/malformed/tightening/restart cases. G also runs the smallest actually representable CLI path for experimental Codex credential routing when feasible and labels it precisely as experimental CLI coverage, never as “real membership”. Any unavailable external credential or provider path is reported as untested, not inferred.
+After the relevant exact PR head is fixed, workflow G verifies the built binary in a real temporary process using loopback ephemeral ports only. G covers converted Gemini/Responses text and function SSE, including late-identity and terminal-missing-identity cases, clean EOF/failure/cancellation/no-replay/accounting boundaries, and trusted-proxy direct/trusted/malformed/tightening/restart cases. A synthetic identity-bearing Gemini stream proves only this contracted subset and must not be described as general provider stream compatibility. G also runs the smallest actually representable CLI path for experimental Codex credential routing when feasible and labels it precisely as experimental CLI coverage, never as “real membership”. Any unavailable external credential or provider path is reported as untested, not inferred.
