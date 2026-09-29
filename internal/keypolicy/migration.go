@@ -23,7 +23,15 @@ const (
 	accountGroupPoliciesTable         = "access_key_policy_account_groups"
 	accountGroupMembersTable          = "access_key_policy_account_group_members"
 	accountGroupMemberIndex           = "access_key_policy_account_group_members_group_idx"
+	embeddingsMigrationStateTable     = "access_key_policy_embeddings_migration_state"
+	embeddingsMigrationStateVersion   = 1
 )
+
+const embeddingsMigrationStateDDL = `CREATE TABLE access_key_policy_embeddings_migration_state (
+	singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
+	version INTEGER NOT NULL CHECK(version=1),
+	completed_at TEXT NOT NULL
+)`
 
 func Migrate(ctx context.Context, db *sql.DB) error {
 	return migrateWithAllHooks(ctx, db, nil, nil, nil)
@@ -62,7 +70,11 @@ func migrateWithAllHooks(ctx context.Context, db *sql.DB, afterSchema, beforeSou
 		return fmt.Errorf("%w: unmarked or partial key policy schema", ErrInvalidSchema)
 	}
 	if markerPresent {
-		if err := verifySchema(ctx, tx); err != nil {
+		embeddingsPresent, err := embeddingsMigrationMarkerPresent(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if err := verifySchema(ctx, tx, embeddingsPresent); err != nil {
 			return err
 		}
 		if err := verifyMigrationState(ctx, tx); err != nil {
@@ -75,6 +87,9 @@ func migrateWithAllHooks(ctx context.Context, db *sql.DB, afterSchema, beforeSou
 			return err
 		}
 		if err := migrateAccountGroupPolicy(ctx, tx, beforeAccountGroupMarker); err != nil {
+			return err
+		}
+		if err := migrateEmbeddingsProtocol(ctx, tx); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
@@ -115,7 +130,7 @@ func migrateWithAllHooks(ctx context.Context, db *sql.DB, afterSchema, beforeSou
 			return fmt.Errorf("create key policy schema: %w", err)
 		}
 	}
-	if err := verifySchema(ctx, tx); err != nil {
+	if err := verifySchema(ctx, tx, false); err != nil {
 		return err
 	}
 	if afterSchema != nil {
@@ -143,8 +158,96 @@ func migrateWithAllHooks(ctx context.Context, db *sql.DB, afterSchema, beforeSou
 	if err := migrateAccountGroupPolicy(ctx, tx, beforeAccountGroupMarker); err != nil {
 		return err
 	}
+	if err := migrateEmbeddingsProtocol(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit key policy migration: %w", err)
+	}
+	return nil
+}
+
+// migrateEmbeddingsProtocol expands the protocol domain without granting the
+// new capability to pre-existing "all" policies. Those rows are converted to
+// an explicit selection of the four protocols that "all" meant previously;
+// their revision is intentionally unchanged because this is a semantic
+// preservation migration, not an administrator edit.
+func migrateEmbeddingsProtocol(ctx context.Context, tx *sql.Tx) error {
+	present, err := embeddingsMigrationMarkerPresent(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if present {
+		if err := verifyEmbeddingsMigrationState(ctx, tx); err != nil {
+			return err
+		}
+		return verifySchema(ctx, tx, true)
+	}
+	if err := verifySchema(ctx, tx, false); err != nil {
+		return err
+	}
+	statements := []string{
+		`DROP INDEX access_key_policy_protocols_protocol_idx`,
+		`ALTER TABLE access_key_policy_protocols RENAME TO access_key_policy_protocols_legacy`,
+		`CREATE TABLE access_key_policy_protocols (
+			key_id TEXT NOT NULL REFERENCES access_key_policies(key_id) ON DELETE CASCADE,
+			protocol TEXT NOT NULL CHECK(protocol IN ('openai-chat','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
+			PRIMARY KEY(key_id,protocol)
+		)`,
+		`INSERT INTO access_key_policy_protocols(key_id,protocol) SELECT key_id,protocol FROM access_key_policy_protocols_legacy`,
+		`INSERT INTO access_key_policy_protocols(key_id,protocol)
+		 SELECT key_id,'openai-chat' FROM access_key_policies WHERE protocol_mode='all'
+		 UNION ALL SELECT key_id,'openai-responses' FROM access_key_policies WHERE protocol_mode='all'
+		 UNION ALL SELECT key_id,'anthropic-messages' FROM access_key_policies WHERE protocol_mode='all'
+		 UNION ALL SELECT key_id,'gemini-generate-content' FROM access_key_policies WHERE protocol_mode='all'`,
+		`UPDATE access_key_policies SET protocol_mode='selected' WHERE protocol_mode='all'`,
+		`DROP TABLE access_key_policy_protocols_legacy`,
+		`CREATE INDEX access_key_policy_protocols_protocol_idx ON access_key_policy_protocols(protocol,key_id)`,
+		embeddingsMigrationStateDDL,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate key policy embeddings protocol: %w", err)
+		}
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO access_key_policy_embeddings_migration_state(singleton,version,completed_at) VALUES(1,?,?)`, embeddingsMigrationStateVersion, stamp); err != nil {
+		return fmt.Errorf("write key policy embeddings migration marker: %w", err)
+	}
+	if err := verifyEmbeddingsMigrationState(ctx, tx); err != nil {
+		return err
+	}
+	return verifySchema(ctx, tx, true)
+}
+
+func embeddingsMigrationMarkerPresent(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, embeddingsMigrationStateTable).Scan(&count); err != nil {
+		return false, fmt.Errorf("%w: inspect key policy embeddings migration marker", ErrInvalidSchema)
+	}
+	return count == 1, nil
+}
+
+func verifyEmbeddingsMigrationState(ctx context.Context, tx *sql.Tx) error {
+	var kind, ddl string
+	if err := tx.QueryRowContext(ctx, `SELECT type,sql FROM sqlite_master WHERE name=?`, embeddingsMigrationStateTable).Scan(&kind, &ddl); err != nil || kind != "table" || normalizeDDL(ddl) != normalizeDDL(embeddingsMigrationStateDDL) {
+		return fmt.Errorf("%w: invalid key policy embeddings migration marker schema", ErrInvalidSchema)
+	}
+	var unexpected int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL`, embeddingsMigrationStateTable).Scan(&unexpected); err != nil || unexpected != 0 {
+		return fmt.Errorf("%w: invalid key policy embeddings migration marker objects", ErrInvalidSchema)
+	}
+	var singleton, version int
+	var completedAt string
+	if err := tx.QueryRowContext(ctx, `SELECT singleton,version,completed_at FROM access_key_policy_embeddings_migration_state`).Scan(&singleton, &version, &completedAt); err != nil || singleton != 1 || version != embeddingsMigrationStateVersion {
+		return fmt.Errorf("%w: invalid key policy embeddings migration marker", ErrInvalidSchema)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, completedAt); err != nil {
+		return fmt.Errorf("%w: invalid key policy embeddings migration timestamp", ErrInvalidSchema)
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_key_policy_embeddings_migration_state`).Scan(&count); err != nil || count != 1 {
+		return fmt.Errorf("%w: invalid key policy embeddings migration marker count", ErrInvalidSchema)
 	}
 	return nil
 }
@@ -617,7 +720,7 @@ type columnSpec struct {
 	pk      int
 }
 
-func verifySchema(ctx context.Context, tx *sql.Tx) error {
+func verifySchema(ctx context.Context, tx *sql.Tx, embeddings bool) error {
 	expectedColumns := map[string]map[string]columnSpec{
 		migrationStateTable: {
 			"singleton": {"INTEGER", true, 1}, "version": {"INTEGER", true, 0}, "completed_at": {"TEXT", true, 0},
@@ -645,10 +748,14 @@ func verifySchema(ctx context.Context, tx *sql.Tx) error {
 			}
 		}
 	}
+	protocolConstraint := "check(protocolin('openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))"
+	if embeddings {
+		protocolConstraint = "check(protocolin('openai-chat','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings'))"
+	}
 	checks := map[string][]string{
 		migrationStateTable: {"check(singleton=1)", "check(version=1)"},
 		policiesTable:       {"check(revisionbetween1and9007199254740991)", "check(protocol_modein('all','selected'))", "check(model_modein('all','selected'))"},
-		protocolsTable:      {"check(protocolin('openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))"},
+		protocolsTable:      {protocolConstraint},
 	}
 	for table, fragments := range checks {
 		var raw string

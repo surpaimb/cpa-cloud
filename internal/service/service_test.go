@@ -11,10 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"cpacloud.local/server/internal/keypolicy"
 )
 
 func TestPreviewWorkflowPersistenceStreamingAndRevocation(t *testing.T) {
@@ -111,7 +114,7 @@ func TestPreviewWorkflowPersistenceStreamingAndRevocation(t *testing.T) {
 	if duplicate.ID != firstKey.ID || duplicate.Key != "" {
 		t.Fatal("idempotent key creation re-exposed or replaced the secret")
 	}
-	if firstKey.Policy.Revision != 1 || firstKey.Policy.ProtocolMode != "all" || firstKey.Policy.ModelMode != "all" {
+	if firstKey.Policy.Revision != 1 || firstKey.Policy.ProtocolMode != "selected" || !slices.Equal(firstKey.Policy.Protocols, keypolicy.LegacyClientProtocols) || firstKey.Policy.ModelMode != "all" {
 		t.Fatalf("default key policy=%+v", firstKey.Policy)
 	}
 	conflict := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/employees/"+employeeObject.ID+"/keys",

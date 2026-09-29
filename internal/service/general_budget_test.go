@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -214,6 +215,50 @@ func TestGeneralBudgetStrictMigrationAndCurrencyOverlap(t *testing.T) {
 	}
 	if _, err := writeGeneralBudgetPolicy(ctx, f.base.db, "admin-one", governanceOperationID(1011), "budget.create", "", 0, generalBudgetPolicy{ScopeKind: governance.ScopeEmployee, ScopeID: "employee-one", Protocol: accounting.ProtocolOpenAIResponses, Enabled: true, CostLimitMicro: &two, Currency: "EUR"}, governanceManagementTestTime.Add(time.Second)); !errors.Is(err, errGovernanceManagementResourceConflict) {
 		t.Fatalf("overlapping currency err=%v", err)
+	}
+}
+
+func TestGeneralBudgetEmbeddingsProtocolMigrationPreservesPolicies(t *testing.T) {
+	f := newGovernanceManagementFixture(t)
+	ctx := context.Background()
+	migrateGeneralBudgetPrerequisites(t, f)
+	withoutEmbeddings := func(ddl string) string {
+		return strings.Replace(ddl, ",'openai-embeddings'", "", 1)
+	}
+	for _, statement := range []string{
+		generalBudgetSettingsDDL,
+		withoutEmbeddings(generalBudgetPoliciesDDL),
+		generalBudgetOperationsDDL,
+		generalBudgetAuditDDL,
+		withoutEmbeddings(generalBudgetRequestScopesDDL),
+		withoutEmbeddings(generalBudgetReservationScopesDDL),
+		generalBudgetScopeIndexDDL,
+		generalBudgetReservationScopeIndexDDL,
+	} {
+		if _, err := f.base.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stamp := governanceManagementTestTime.Format(time.RFC3339Nano)
+	if _, err := f.base.db.Exec(`INSERT INTO governance_general_budget_settings(singleton,revision,updated_at) VALUES(1,1,?)`, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.base.db.Exec(`INSERT INTO governance_general_budget_policies(id,scope_kind,scope_id,protocol,model,enabled,token_limit,token_window,cost_limit_micro,currency,cost_window,revision,created_at,updated_at)
+		VALUES('pre-embeddings','employee','employee-one','openai-responses','',1,10,'rolling_60s',NULL,'','',1,?,?)`, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateGeneralBudgets(ctx, f.base.db); err != nil {
+		t.Fatal(err)
+	}
+	var protocol string
+	if err := f.base.db.QueryRow(`SELECT protocol FROM governance_general_budget_policies WHERE id='pre-embeddings'`).Scan(&protocol); err != nil || protocol != "openai-responses" {
+		t.Fatalf("preserved protocol=%q err=%v", protocol, err)
+	}
+	one := int64(1)
+	if _, err := writeGeneralBudgetPolicy(ctx, f.base.db, "admin-one", governanceOperationID(1012), "budget.create", "", 0, generalBudgetPolicy{
+		ScopeKind: governance.ScopeEmployee, ScopeID: "employee-one", Protocol: accounting.ProtocolOpenAIEmbeddings, Enabled: true, TokenLimit: &one,
+	}, governanceManagementTestTime.Add(time.Second)); err != nil {
+		t.Fatal(err)
 	}
 }
 

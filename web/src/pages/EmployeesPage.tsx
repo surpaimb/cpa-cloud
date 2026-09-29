@@ -13,6 +13,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
   const [keySourcePolicyCapability, setKeySourcePolicyCapability] = useState<boolean | null>(null)
   const [keyAccountGroupPolicyCapability, setKeyAccountGroupPolicyCapability] = useState<boolean | null>(null)
   const [trustedProxySource, setTrustedProxySource] = useState(false)
+  const [openAIEmbeddings, setOpenAIEmbeddings] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -22,6 +23,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
         setKeySourcePolicyCapability(status.features?.key_source_policy === true)
         setKeyAccountGroupPolicyCapability(status.features?.key_account_group_policy === true)
         setTrustedProxySource(status.features?.trusted_proxy_source === true)
+        setOpenAIEmbeddings(status.features?.openai_embeddings === true)
       }
     }).catch(() => {
       if (active) {
@@ -29,6 +31,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
         setKeySourcePolicyCapability(false)
         setKeyAccountGroupPolicyCapability(false)
         setTrustedProxySource(false)
+        setOpenAIEmbeddings(false)
       }
     })
     return () => { active = false }
@@ -52,7 +55,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
       </table></div> : null}
     </div>
     {creating ? <CreateEmployee csrf={csrf} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void reload() }} /> : null}
-    {selected ? <KeysDialog employee={selected} csrf={csrf} keyPolicyCapability={keyPolicyCapability} sourcePolicyCapability={keySourcePolicyCapability} accountGroupPolicyCapability={keyAccountGroupPolicyCapability} trustedProxySource={trustedProxySource} onClose={() => setSelected(null)} /> : null}
+    {selected ? <KeysDialog employee={selected} csrf={csrf} keyPolicyCapability={keyPolicyCapability} sourcePolicyCapability={keySourcePolicyCapability} accountGroupPolicyCapability={keyAccountGroupPolicyCapability} trustedProxySource={trustedProxySource} openAIEmbeddings={openAIEmbeddings} onClose={() => setSelected(null)} /> : null}
     {policy ? <PolicyDialog employee={policy} csrf={csrf} onClose={() => setPolicy(null)} onSaved={() => { setPolicy(null); void reload() }} /> : null}
   </>
 }
@@ -87,6 +90,7 @@ function ToggleEmployee({ employee, csrf, onDone }: { employee: Employee; csrf: 
 const protocolChoices: Array<{ id: ClientProtocol; label: string }> = [
   { id: 'openai-chat', label: 'OpenAI Chat Completions' },
   { id: 'openai-responses', label: 'OpenAI Responses' },
+  { id: 'openai-embeddings', label: 'OpenAI Embeddings（文本 / float）' },
   { id: 'anthropic-messages', label: 'Anthropic Messages' },
   { id: 'gemini-generate-content', label: 'Gemini generateContent' },
 ]
@@ -136,7 +140,7 @@ function normalizedPolicy(draft: KeyPolicyInput, includeSource: boolean, include
   return normalized
 }
 
-function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapability, accountGroupPolicyCapability, trustedProxySource, onClose }: { employee: Employee; csrf: string; keyPolicyCapability: boolean | null; sourcePolicyCapability: boolean | null; accountGroupPolicyCapability: boolean | null; trustedProxySource: boolean; onClose: () => void }) {
+function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapability, accountGroupPolicyCapability, trustedProxySource, openAIEmbeddings, onClose }: { employee: Employee; csrf: string; keyPolicyCapability: boolean | null; sourcePolicyCapability: boolean | null; accountGroupPolicyCapability: boolean | null; trustedProxySource: boolean; openAIEmbeddings: boolean; onClose: () => void }) {
   const load = useCallback(() => api.keys(employee.id), [employee.id])
   const { data, loading, error, reload } = useResource(load)
   const loadModels = useCallback(() => keyPolicyCapability === true ? api.models() : Promise.resolve({ items: [] as ModelRoute[] }), [keyPolicyCapability])
@@ -157,12 +161,12 @@ function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapabilit
   }, [employee.model_mode, employee.models, modelData])
   const accountGroups = accountGroupData?.items ?? []
   if (created?.key) return <KeyReveal created={created} onClose={() => { setCreated(null); onClose() }} />
-  if (editing) return <EditKeyPolicyDialog employee={employee} keyItem={editing} csrf={csrf} sourcePolicyCapability={sourcePolicyCapability === true} accountGroupPolicyCapability={accountGroupPolicyCapability === true} trustedProxySource={trustedProxySource} modelIds={modelIds} modelsLoading={modelsLoading} modelsError={modelsError} onRetryModels={() => void reloadModels()} accountGroups={accountGroups} accountGroupsLoading={accountGroupsLoading} accountGroupsError={accountGroupsError} onRetryAccountGroups={() => void reloadAccountGroups()} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void reload() }} />
+  if (editing) return <EditKeyPolicyDialog employee={employee} keyItem={editing} csrf={csrf} sourcePolicyCapability={sourcePolicyCapability === true} accountGroupPolicyCapability={accountGroupPolicyCapability === true} trustedProxySource={trustedProxySource} openAIEmbeddings={openAIEmbeddings} modelIds={modelIds} modelsLoading={modelsLoading} modelsError={modelsError} onRetryModels={() => void reloadModels()} accountGroups={accountGroups} accountGroupsLoading={accountGroupsLoading} accountGroupsError={accountGroupsError} onRetryAccountGroups={() => void reloadAccountGroups()} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void reload() }} />
   return <Dialog title={`${employee.name} 的 Key`} description="Key 默认永久有效；可为不同设备或用途分别创建。" onClose={onClose} wide>
     {keyPolicyCapability === null ? <div className="key-policy-compat">正在确认服务是否支持独立 Key 权限…</div> : null}
     {keyPolicyCapability === false ? <div className="key-policy-compat"><strong>当前服务不支持独立 Key 策略</strong><span>新 Key 将沿用员工权限；此页面不会提供无效的策略保存操作。</span></div> : null}
     {keyPolicyCapability === true && accountGroupPolicyCapability === false ? <div className="key-policy-compat"><strong>当前服务不支持 Key 账号池分组限制</strong><span>仍可配置协议、模型和来源；保存时不会发送账号池分组字段。</span></div> : null}
-    {keyPolicyCapability === true ? <KeyPolicyEditor draft={draft} onChange={setDraft} sourcePolicyCapability={sourcePolicyCapability === true} accountGroupPolicyCapability={accountGroupPolicyCapability === true} trustedProxySource={trustedProxySource} modelIds={modelIds} loading={modelsLoading} error={modelsError} onRetry={() => void reloadModels()} accountGroups={accountGroups} accountGroupsLoading={accountGroupsLoading} accountGroupsError={accountGroupsError} onRetryAccountGroups={() => void reloadAccountGroups()} context="创建 Key 的独立权限" /> : null}
+    {keyPolicyCapability === true ? <KeyPolicyEditor draft={draft} onChange={setDraft} sourcePolicyCapability={sourcePolicyCapability === true} accountGroupPolicyCapability={accountGroupPolicyCapability === true} trustedProxySource={trustedProxySource} openAIEmbeddings={openAIEmbeddings} modelIds={modelIds} loading={modelsLoading} error={modelsError} onRetry={() => void reloadModels()} accountGroups={accountGroups} accountGroupsLoading={accountGroupsLoading} accountGroupsError={accountGroupsError} onRetryAccountGroups={() => void reloadAccountGroups()} context="创建 Key 的独立权限" /> : null}
     <div className="key-create"><Field label="Key 名称"><input value={name} onChange={(e) => setName(e.target.value)} /></Field><Button disabled={busy || !name.trim() || keyPolicyCapability === null || (keyPolicyCapability === true && (sourcePolicyCapability === null || accountGroupPolicyCapability === null))} onClick={async () => {
       setBusy(true); setActionError(null)
       try { setCreated(await api.createKey(employee.id, name.trim(), csrf, keyPolicyCapability === true ? normalizedPolicy(draft, sourcePolicyCapability === true, accountGroupPolicyCapability === true) : undefined)); await reload() }
@@ -177,7 +181,7 @@ function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapabilit
   </Dialog>
 }
 
-function KeyPolicyEditor({ draft, onChange, sourcePolicyCapability, accountGroupPolicyCapability, trustedProxySource, modelIds, loading, error, onRetry, accountGroups, accountGroupsLoading, accountGroupsError, onRetryAccountGroups, context }: { draft: KeyPolicyInput; onChange: (next: KeyPolicyInput) => void; sourcePolicyCapability: boolean; accountGroupPolicyCapability: boolean; trustedProxySource: boolean; modelIds: string[]; loading: boolean; error: string | null; onRetry: () => void; accountGroups: AccountGroup[]; accountGroupsLoading: boolean; accountGroupsError: string | null; onRetryAccountGroups: () => void; context: string }) {
+function KeyPolicyEditor({ draft, onChange, sourcePolicyCapability, accountGroupPolicyCapability, trustedProxySource, openAIEmbeddings, modelIds, loading, error, onRetry, accountGroups, accountGroupsLoading, accountGroupsError, onRetryAccountGroups, context }: { draft: KeyPolicyInput; onChange: (next: KeyPolicyInput) => void; sourcePolicyCapability: boolean; accountGroupPolicyCapability: boolean; trustedProxySource: boolean; openAIEmbeddings: boolean; modelIds: string[]; loading: boolean; error: string | null; onRetry: () => void; accountGroups: AccountGroup[]; accountGroupsLoading: boolean; accountGroupsError: string | null; onRetryAccountGroups: () => void; context: string }) {
   const selectedProtocols = new Set(draft.protocols)
   const selectedModels = new Set(draft.models)
   const source = sourcePolicyFields(draft)
@@ -188,9 +192,9 @@ function KeyPolicyEditor({ draft, onChange, sourcePolicyCapability, accountGroup
     <h3>{context}</h3>
     <div className="key-policy-grid">
       <fieldset><legend>入口协议</legend>
-        <label><input type="radio" name={`${context}-protocol-mode`} checked={draft.protocol_mode === 'all'} onChange={() => onChange({ ...draft, protocol_mode: 'all' })} />全部协议</label>
+        <label><input type="radio" name={`${context}-protocol-mode`} checked={draft.protocol_mode === 'all'} onChange={() => onChange({ ...draft, protocol_mode: 'all' })} />{openAIEmbeddings ? '全部协议（含 Embeddings）' : '全部协议'}</label>
         <label><input type="radio" name={`${context}-protocol-mode`} checked={draft.protocol_mode === 'selected'} onChange={() => onChange({ ...draft, protocol_mode: 'selected' })} />仅指定协议</label>
-        {draft.protocol_mode === 'selected' ? <div className="key-policy-options">{protocolChoices.map((protocol) => <label key={protocol.id}><input type="checkbox" checked={selectedProtocols.has(protocol.id)} onChange={(event) => onChange({ ...draft, protocols: event.target.checked ? [...draft.protocols, protocol.id] : draft.protocols.filter((id) => id !== protocol.id) })} />{protocol.label}</label>)}</div> : null}
+        {draft.protocol_mode === 'selected' ? <div className="key-policy-options">{protocolChoices.filter((protocol) => openAIEmbeddings || protocol.id !== 'openai-embeddings').map((protocol) => <label key={protocol.id}><input type="checkbox" checked={selectedProtocols.has(protocol.id)} onChange={(event) => onChange({ ...draft, protocols: event.target.checked ? [...draft.protocols, protocol.id] : draft.protocols.filter((id) => id !== protocol.id) })} />{protocol.label}</label>)}</div> : null}
       </fieldset>
       <fieldset><legend>公开模型</legend>
         <label><input type="radio" name={`${context}-model-mode`} checked={draft.model_mode === 'all'} onChange={() => onChange({ ...draft, model_mode: 'all' })} />员工可用的全部模型</label>
@@ -223,7 +227,7 @@ function KeyPolicySummary({ policy, sourcePolicyCapability, accountGroupPolicyCa
   return <div className="key-policy-summary"><span>配置：{configuredProtocols} · {configuredModels} · {configuredSources} · {configuredGroups}</span><small>当前生效：{policy.effective_protocols.length} 个协议 · {policy.effective_models.length} 个模型 · 修订 {policy.revision}</small></div>
 }
 
-function EditKeyPolicyDialog({ employee, keyItem, csrf, sourcePolicyCapability, accountGroupPolicyCapability, trustedProxySource, modelIds, modelsLoading, modelsError, onRetryModels, accountGroups, accountGroupsLoading, accountGroupsError, onRetryAccountGroups, onClose, onSaved }: { employee: Employee; keyItem: EmployeeKey; csrf: string; sourcePolicyCapability: boolean; accountGroupPolicyCapability: boolean; trustedProxySource: boolean; modelIds: string[]; modelsLoading: boolean; modelsError: string | null; onRetryModels: () => void; accountGroups: AccountGroup[]; accountGroupsLoading: boolean; accountGroupsError: string | null; onRetryAccountGroups: () => void; onClose: () => void; onSaved: () => void }) {
+function EditKeyPolicyDialog({ employee, keyItem, csrf, sourcePolicyCapability, accountGroupPolicyCapability, trustedProxySource, openAIEmbeddings, modelIds, modelsLoading, modelsError, onRetryModels, accountGroups, accountGroupsLoading, accountGroupsError, onRetryAccountGroups, onClose, onSaved }: { employee: Employee; keyItem: EmployeeKey; csrf: string; sourcePolicyCapability: boolean; accountGroupPolicyCapability: boolean; trustedProxySource: boolean; openAIEmbeddings: boolean; modelIds: string[]; modelsLoading: boolean; modelsError: string | null; onRetryModels: () => void; accountGroups: AccountGroup[]; accountGroupsLoading: boolean; accountGroupsError: string | null; onRetryAccountGroups: () => void; onClose: () => void; onSaved: () => void }) {
   const [loaded, setLoaded] = useState<KeyAccessPolicy | null>(null)
   const [draft, setDraft] = useState<KeyPolicyInput | null>(null)
   const [loading, setLoading] = useState(true)
@@ -250,7 +254,7 @@ function EditKeyPolicyDialog({ employee, keyItem, csrf, sourcePolicyCapability, 
   useEffect(() => { void load() }, [load])
   return <Dialog title={`${keyItem.name} 的独立权限`} description={`权限只会进一步限制 ${employee.name} 的员工权限，不能扩大权限。`} onClose={onClose} wide>
     <PageState loading={loading} error={error} onRetry={() => void load()} />
-    {draft ? <KeyPolicyEditor draft={draft} onChange={(next) => { setDraft(next); setConflict(null) }} sourcePolicyCapability={sourcePolicyCapability} accountGroupPolicyCapability={accountGroupPolicyCapability} trustedProxySource={trustedProxySource} modelIds={modelIds} loading={modelsLoading} error={modelsError} onRetry={onRetryModels} accountGroups={accountGroups} accountGroupsLoading={accountGroupsLoading} accountGroupsError={accountGroupsError} onRetryAccountGroups={onRetryAccountGroups} context="编辑 Key 独立权限" /> : null}
+    {draft ? <KeyPolicyEditor draft={draft} onChange={(next) => { setDraft(next); setConflict(null) }} sourcePolicyCapability={sourcePolicyCapability} accountGroupPolicyCapability={accountGroupPolicyCapability} trustedProxySource={trustedProxySource} openAIEmbeddings={openAIEmbeddings} modelIds={modelIds} loading={modelsLoading} error={modelsError} onRetry={onRetryModels} accountGroups={accountGroups} accountGroupsLoading={accountGroupsLoading} accountGroupsError={accountGroupsError} onRetryAccountGroups={onRetryAccountGroups} context="编辑 Key 独立权限" /> : null}
     {conflict ? <div className="key-policy-conflict" role="alert">{conflict}</div> : null}
     {loaded ? <KeyPolicySummary policy={loaded} sourcePolicyCapability={sourcePolicyCapability} accountGroupPolicyCapability={accountGroupPolicyCapability} /> : null}
     <div className="dialog__actions"><Button variant="secondary" onClick={onClose}>取消</Button><Button disabled={!draft || !loaded || saving || loading || Boolean(error)} onClick={async () => {

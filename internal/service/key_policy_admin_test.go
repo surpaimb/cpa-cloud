@@ -53,7 +53,7 @@ func TestKeyPolicyAdminGetPutCASAndEffectiveView(t *testing.T) {
 	}
 	var view keyPolicyView
 	decodeResponse(t, get, &view)
-	if view.Revision != 1 || view.ProtocolMode != keypolicy.ModeAll || len(view.Protocols) != 0 || view.SourceMode != keypolicy.ModeAll || len(view.SourceCIDRs) != 0 || len(view.EffectiveProtocols) != 4 || len(view.EffectiveModels) != 1 || view.EffectiveModels[0] != "public-a" {
+	if view.Revision != 1 || view.ProtocolMode != keypolicy.ModeSelected || !slices.Equal(view.Protocols, keypolicy.LegacyClientProtocols) || view.SourceMode != keypolicy.ModeAll || len(view.SourceCIDRs) != 0 || len(view.EffectiveProtocols) != 4 || len(view.EffectiveModels) != 1 || view.EffectiveModels[0] != "public-a" {
 		t.Fatalf("default view=%#v", view)
 	}
 
@@ -90,7 +90,7 @@ func TestKeyPolicyAdminGetPutCASAndEffectiveView(t *testing.T) {
 		t.Fatalf("reset status=%d body=%s", reset.StatusCode, readBody(reset))
 	}
 	decodeResponse(t, reset, &view)
-	if view.Revision != 3 || len(view.EffectiveProtocols) != 4 || len(view.EffectiveModels) != 1 {
+	if view.Revision != 3 || len(view.EffectiveProtocols) != 5 || len(view.EffectiveModels) != 1 {
 		t.Fatalf("reset view=%#v", view)
 	}
 

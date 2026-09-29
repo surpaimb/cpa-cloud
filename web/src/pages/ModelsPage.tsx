@@ -18,14 +18,15 @@ export function ModelsPage({ csrf }: { csrf: string }) {
   const poolConfiguration = status?.features?.account_pool_configuration === true
   const poolRouting = status?.features?.account_pool_routing === true
 	const lifecycle = status?.features?.account_lifecycle_management === true
+	const embeddings = status?.features?.openai_embeddings === true
   return <>
     <PageHeader title="模型路由" description="将员工可用的模型名称映射到已配置的上游模型。"><div className="page-header-buttons">{lifecycle ? <Button variant="secondary" onClick={() => setIncludeArchived((value) => !value)}>{includeArchived ? '隐藏已归档' : '查看已归档'}</Button> : null}{poolConfiguration ? <Button variant="secondary" onClick={() => setManagingDirectory(true)}><Icon name="settings" />分组与渠道</Button> : null}<Button onClick={() => setCreating(true)}><Icon name="plus" />添加模型路由</Button></div></PageHeader>
     {poolConfiguration ? <div className={`membership-panel ${poolRouting ? 'membership-panel--enabled' : ''}`}><div><h2>{poolRouting ? '账号池路由已启用' : '账号池配置可用，路由尚未启用'}</h2><p>{poolRouting ? '可以为每个模型配置同服务商的多个账号，并按优先级、权重与并发上限调度。' : '可以提前保存账号池配置，但当前请求仍使用原有单账号路由，保存内容暂不参与请求调度。'}</p></div></div> : null}
     <div className="content-panel"><PageState loading={loading} error={error} onRetry={() => void reload()} />
       {!loading && !error && data?.items.length === 0 ? <EmptyState title="还没有模型路由" body="先添加上游连接，再建立第一个模型路由。" action={<Button onClick={() => setCreating(true)}>添加模型路由</Button>} /> : null}
-      {data?.items.length ? <div className="table-scroll"><table><thead><tr><th>对外模型 ID</th><th>上游</th><th>上游模型</th><th>Wire 协议</th><th>状态</th>{poolConfiguration || lifecycle ? <th>操作</th> : null}</tr></thead><tbody>{data.items.map((item) => <tr key={item.id}><td><strong>{item.id}</strong>{item.revision ? <small>r{item.revision}</small> : null}</td><td><code>{item.upstream_id}</code></td><td>{item.upstream_model}</td><td>{wireLabel(item.wire_protocol ?? 'legacy-native')}</td><td><span className={`status status--${item.archived ? 'disabled' : item.enabled ? 'active' : 'disabled'}`}><i />{item.archived ? '已归档' : item.enabled ? '启用' : '已停用'}</span></td>{poolConfiguration || lifecycle ? <td><div className="row-actions">{poolConfiguration && !item.archived ? <button type="button" className="link-button" onClick={() => setPoolModel(item)}>编辑账号池</button> : null}{lifecycle && !item.archived ? <button type="button" className="link-button" onClick={() => setEditing(item)}>修改 / 归档</button> : null}</div></td> : null}</tr>)}</tbody></table></div> : null}
+      {data?.items.length ? <div className="table-scroll"><table><thead><tr><th>对外模型 ID</th>{embeddings ? <th>类型</th> : null}<th>上游</th><th>上游模型</th><th>Wire 协议</th><th>状态</th>{poolConfiguration || lifecycle ? <th>操作</th> : null}</tr></thead><tbody>{data.items.map((item) => <tr key={item.id}><td><strong>{item.id}</strong>{item.revision ? <small>r{item.revision}</small> : null}</td>{embeddings ? <td>{item.model_kind === 'embedding' ? 'Embedding' : '生成'}</td> : null}<td><code>{item.upstream_id}</code></td><td>{item.upstream_model}</td><td>{item.model_kind === 'embedding' ? '账号池：OpenAI Embeddings' : wireLabel(item.wire_protocol ?? 'legacy-native')}</td><td><span className={`status status--${item.archived ? 'disabled' : item.enabled ? 'active' : 'disabled'}`}><i />{item.archived ? '已归档' : item.enabled ? '启用' : '已停用'}</span></td>{poolConfiguration || lifecycle ? <td><div className="row-actions">{poolConfiguration && !item.archived ? <button type="button" className="link-button" onClick={() => setPoolModel(item)}>编辑账号池</button> : null}{lifecycle && !item.archived ? <button type="button" className="link-button" onClick={() => setEditing(item)}>修改 / 归档</button> : null}</div></td> : null}</tr>)}</tbody></table></div> : null}
     </div>
-    {creating ? <CreateModel csrf={csrf} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void reload() }} /> : null}
+    {creating ? <CreateModel csrf={csrf} embeddingsEnabled={embeddings} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void reload() }} /> : null}
     {managingDirectory ? <AccountPoolDirectory csrf={csrf} onClose={() => setManagingDirectory(false)} /> : null}
     {poolModel ? <ModelAccountPoolEditor key={poolModel.id} model={poolModel} csrf={csrf} routingEnabled={poolRouting} onClose={() => setPoolModel(null)} /> : null}
 	{editing ? <EditModelRoute csrf={csrf} item={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); void reload() }} /> : null}
@@ -34,7 +35,7 @@ export function ModelsPage({ csrf }: { csrf: string }) {
 
 const wireLabels: Record<WireProtocol, string> = {
 	'legacy-native': '兼容原生入口', 'openai-chat': 'OpenAI Chat', 'openai-responses': 'OpenAI Responses',
-	'anthropic-messages': 'Anthropic Messages', 'gemini-generate-content': 'Gemini generateContent',
+	'openai-embeddings': 'OpenAI Embeddings', 'anthropic-messages': 'Anthropic Messages', 'gemini-generate-content': 'Gemini generateContent',
 }
 
 function wireLabel(value: WireProtocol) { return wireLabels[value] }
@@ -45,6 +46,11 @@ function wireOptions(provider?: Upstream['provider_kind']): WireProtocol[] {
 	if (provider === 'anthropic-api-key') return ['legacy-native', 'anthropic-messages']
 	if (provider === 'gemini-api-key') return ['legacy-native', 'gemini-generate-content']
 	return ['legacy-native']
+}
+
+function modelWireOptions(kind: ModelRoute['model_kind'], provider?: Upstream['provider_kind']): WireProtocol[] {
+	if (kind === 'embedding') return ['legacy-native']
+	return wireOptions(provider)
 }
 
 function EditModelRoute({ csrf, item, onClose, onDone }: { csrf: string; item: ModelRoute; onClose: () => void; onDone: () => void }) {
@@ -66,12 +72,12 @@ function EditModelRoute({ csrf, item, onClose, onDone }: { csrf: string; item: M
 		}}><div className="form-grid">
 			<Field label="上游连接"><select value={upstreamID} onChange={(event) => {
 				const nextID = event.target.value
-				const options = wireOptions(data?.items.find((upstream) => upstream.id === nextID)?.provider_kind)
+				const options = modelWireOptions(item.model_kind, data?.items.find((upstream) => upstream.id === nextID)?.provider_kind)
 				setUpstreamID(nextID)
 				if (!options.includes(wireProtocol)) setWireProtocol('legacy-native')
-			}}>{data?.items.filter((upstream) => !upstream.archived && (upstream.enabled || upstream.id === item.upstream_id)).map((upstream) => <option key={upstream.id} value={upstream.id}>{upstream.name}</option>)}</select></Field>
+			}}>{data?.items.filter((upstream) => !upstream.archived && (upstream.enabled || upstream.id === item.upstream_id) && (item.model_kind !== 'embedding' || upstream.provider_kind === 'openai-compatible')).map((upstream) => <option key={upstream.id} value={upstream.id}>{upstream.name}</option>)}</select></Field>
 			<Field label="上游模型"><input value={upstreamModel} onChange={(event) => setUpstreamModel(event.target.value)} required /></Field>
-			<Field label="上游 Wire 协议" hint="兼容模式保持各员工入口原有原生协议；显式选择才启用跨协议转换。"><select value={wireProtocol} onChange={(event) => setWireProtocol(event.target.value as WireProtocol)}>{wireOptions(data?.items.find((upstream) => upstream.id === upstreamID)?.provider_kind).map((value) => <option key={value} value={value}>{wireLabel(value)}</option>)}</select></Field>
+			<Field label="上游 Wire 协议" hint={item.model_kind === 'embedding' ? 'Embedding 的实际 wire 在账号池中显式配置。' : '兼容模式保持各员工入口原有原生协议；显式选择才启用跨协议转换。'}><select value={wireProtocol} onChange={(event) => setWireProtocol(event.target.value as WireProtocol)}>{modelWireOptions(item.model_kind, data?.items.find((upstream) => upstream.id === upstreamID)?.provider_kind).map((value) => <option key={value} value={value}>{wireLabel(value)}</option>)}</select></Field>
 			<label className="toggle-field"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>启用路由</strong><small>停用后员工目录和新请求立即不再使用。</small></span></label>
 		</div><FormError error={saveError} /><div className="lifecycle-warning"><strong>归档不可恢复</strong><p>归档会保留此 ID 和历史账本关联，并禁止用相同 ID 新建路由。</p></div><div className="dialog__actions"><Button type="button" variant="secondary" disabled={busy} onClick={async () => {
 			if (!window.confirm(`确认归档模型 ${item.id}？归档后不能恢复，也不能重新使用此 ID。`)) return
@@ -81,7 +87,7 @@ function EditModelRoute({ csrf, item, onClose, onDone }: { csrf: string; item: M
 	</Dialog>
 }
 
-export function CreateModel({ csrf, onClose, onCreated }: { csrf: string; onClose: () => void; onCreated: () => void }) {
+export function CreateModel({ csrf, embeddingsEnabled = false, onClose, onCreated }: { csrf: string; embeddingsEnabled?: boolean; onClose: () => void; onCreated: () => void }) {
   const loadUpstreams = useCallback(() => api.upstreams(), [])
   const { data, loading, error, reload } = useResource(loadUpstreams)
   const [upstreamID, setUpstreamID] = useState('')
@@ -90,6 +96,7 @@ export function CreateModel({ csrf, onClose, onCreated }: { csrf: string; onClos
   const [discoverError, setDiscoverError] = useState<string | null>(null)
   const [upstreamModel, setUpstreamModel] = useState('')
   const [externalID, setExternalID] = useState('')
+  const [modelKind, setModelKind] = useState<ModelRoute['model_kind']>('generation')
   const [wireProtocol, setWireProtocol] = useState<WireProtocol>('legacy-native')
   const [busy, setBusy] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -150,14 +157,15 @@ export function CreateModel({ csrf, onClose, onCreated }: { csrf: string; onClos
       event.preventDefault()
       setBusy(true); setSaveError(null)
       try {
-        await api.createModel({ id: externalID.trim(), upstream_id: upstreamID, upstream_model: upstreamModel.trim(), wire_protocol: wireProtocol }, csrf)
+        await api.createModel({ id: externalID.trim(), ...(embeddingsEnabled ? { model_kind: modelKind } : {}), upstream_id: upstreamID, upstream_model: upstreamModel.trim(), wire_protocol: wireProtocol }, csrf)
         onCreated()
       } catch (caught) {
         setSaveError(messageFor(caught))
         setBusy(false)
       }
     }}><div className="form-grid">
-      <Field label="上游连接"><select name="upstream_id" value={upstreamID} onChange={(event) => chooseUpstream(event.target.value)} required autoFocus>{enabled.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>
+      {embeddingsEnabled ? <Field label="模型类型" hint="Embedding 类型不可改回生成模型，并且必须在账号池中显式选择 OpenAI Embeddings wire。"><select value={modelKind} onChange={(event) => { const kind = event.target.value as ModelRoute['model_kind']; setModelKind(kind); setWireProtocol('legacy-native'); if (kind === 'embedding' && selectedUpstream?.provider_kind !== 'openai-compatible') { const first = enabled.find((item) => item.provider_kind === 'openai-compatible'); if (first) chooseUpstream(first.id) } }}><option value="generation">生成模型</option><option value="embedding">Embedding 模型</option></select></Field> : null}
+      <Field label="上游连接"><select name="upstream_id" value={upstreamID} onChange={(event) => chooseUpstream(event.target.value)} required autoFocus>{enabled.filter((item) => modelKind !== 'embedding' || item.provider_kind === 'openai-compatible').map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>
       <Field label="上游模型名称" hint="可从同步结果选择，也可以手动输入上游支持的模型 ID。"><input name="upstream_model" list="discovered-models" value={upstreamModel} placeholder="例如：gpt-4.1" required onChange={(event) => {
         const value = event.target.value
         setUpstreamModel(value)
@@ -168,7 +176,7 @@ export function CreateModel({ csrf, onClose, onCreated }: { csrf: string; onClos
       {canDiscover && discoverError ? <div className="model-discovery-error" role="alert"><span>模型同步失败：{discoverError}</span><button type="button" className="link-button" onClick={() => void discover()}>重试同步</button></div> : null}
       {canDiscover && !discovering && !discoverError ? <div className="field-note" role="status">已同步 {discovered.length} 个模型；请选择或手动输入。</div> : null}
       <Field label="对外模型 ID" hint="默认使用所选上游模型 ID，你可以在保存前修改。"><input name="id" value={externalID} placeholder="例如：gpt-4.1" required onChange={(event) => setExternalID(event.target.value)} /></Field>
-      <Field label="上游 Wire 协议" hint="只有显式固定 wire 才会启用跨协议转换；流式跨协议仍会在派发前拒绝。"><select value={wireProtocol} onChange={(event) => setWireProtocol(event.target.value as WireProtocol)}>{wireOptions(selectedUpstream?.provider_kind).map((value) => <option key={value} value={value}>{wireLabel(value)}</option>)}</select></Field>
+      <Field label="上游 Wire 协议" hint={modelKind === 'embedding' ? '创建后请在账号池中选择 OpenAI Embeddings wire；直连不会执行。' : '只有显式固定 wire 才会启用跨协议转换；流式跨协议仍会在派发前拒绝。'}><select value={wireProtocol} onChange={(event) => setWireProtocol(event.target.value as WireProtocol)}>{modelWireOptions(modelKind, selectedUpstream?.provider_kind).map((value) => <option key={value} value={value}>{wireLabel(value)}</option>)}</select></Field>
     </div><FormError error={saveError} /><div className="dialog__actions"><Button type="button" variant="secondary" onClick={onClose}>取消</Button><Button type="submit" disabled={busy || discovering}>{busy ? '正在添加…' : '添加路由'}</Button></div></form> : null}
   </Dialog>
 }

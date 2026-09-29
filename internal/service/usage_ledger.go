@@ -378,7 +378,7 @@ func (c *usageLedgerCoordinator) persistDuringShutdown(operation func(context.Co
 func usageProvider(providerKind string, protocol accounting.UsageProtocol) (accounting.Provider, error) {
 	switch providerKind {
 	case "openai-compatible":
-		if protocol == accounting.ProtocolOpenAIChatCompletions || protocol == accounting.ProtocolOpenAIResponses {
+		if protocol == accounting.ProtocolOpenAIChatCompletions || protocol == accounting.ProtocolOpenAIResponses || protocol == accounting.ProtocolOpenAIEmbeddings {
 			return accounting.ProviderOpenAICompatible, nil
 		}
 	case codexMembershipProvider:

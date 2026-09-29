@@ -110,7 +110,7 @@ func (s *store) migrateAccountPools(ctx context.Context) error {
 			model_id TEXT NOT NULL REFERENCES model_account_pool_configs(model_id) ON DELETE CASCADE,
 			upstream_id TEXT NOT NULL REFERENCES upstreams(id),
 			upstream_model TEXT NOT NULL,
-			wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content')),
+			wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
 			priority INTEGER NOT NULL CHECK(priority BETWEEN -1000000 AND 1000000),
 			weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 10000),
 			max_concurrency INTEGER NOT NULL CHECK(max_concurrency BETWEEN 1 AND 1024),
@@ -147,8 +147,34 @@ func (s *store) migrateAccountPools(ctx context.Context) error {
 		return err
 	}
 	if _, ok := poolSchema["wire_protocol"]; !ok {
-		if _, err := tx.ExecContext(ctx, `ALTER TABLE model_account_pool_routes ADD COLUMN wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))`); err != nil {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE model_account_pool_routes ADD COLUMN wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings'))`); err != nil {
 			return err
+		}
+	}
+	var routeDDL string
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='model_account_pool_routes'`).Scan(&routeDDL); err != nil {
+		return err
+	}
+	if !strings.Contains(strings.ToLower(strings.Join(strings.Fields(routeDDL), "")), "'openai-embeddings'") {
+		for _, statement := range []string{
+			`DROP INDEX IF EXISTS model_account_pool_routes_channel_idx`,
+			`ALTER TABLE model_account_pool_routes RENAME TO model_account_pool_routes_pre_embeddings`,
+			`CREATE TABLE model_account_pool_routes (
+				model_id TEXT NOT NULL REFERENCES model_account_pool_configs(model_id) ON DELETE CASCADE,
+				upstream_id TEXT NOT NULL REFERENCES upstreams(id), upstream_model TEXT NOT NULL,
+				wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
+				priority INTEGER NOT NULL CHECK(priority BETWEEN -1000000 AND 1000000), weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 10000),
+				max_concurrency INTEGER NOT NULL CHECK(max_concurrency BETWEEN 1 AND 1024), channel_id TEXT REFERENCES account_channels(id) ON DELETE SET NULL,
+				position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 63), PRIMARY KEY(model_id,upstream_id), UNIQUE(model_id,position)
+			)`,
+			`INSERT INTO model_account_pool_routes(model_id,upstream_id,upstream_model,wire_protocol,priority,weight,max_concurrency,channel_id,position)
+			 SELECT model_id,upstream_id,upstream_model,wire_protocol,priority,weight,max_concurrency,channel_id,position FROM model_account_pool_routes_pre_embeddings`,
+			`DROP TABLE model_account_pool_routes_pre_embeddings`,
+			`CREATE INDEX model_account_pool_routes_channel_idx ON model_account_pool_routes(channel_id)`,
+		} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
 		}
 	}
 	type tableRequirement struct {
@@ -176,7 +202,7 @@ func (s *store) migrateAccountPools(ctx context.Context) error {
 				"references account_channels(id) on delete set null",
 				"primary key(model_id, upstream_id)",
 				"unique(model_id, position)",
-				"check(wire_protocol in ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))",
+				"check(wire_protocol in ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings'))",
 			},
 		},
 		accountPoolAuditTable: {
@@ -528,8 +554,8 @@ func (a *App) putModelAccounts(w http.ResponseWriter, r *http.Request, session a
 		return
 	}
 	defer tx.Rollback()
-	var modelExists int
-	if err := tx.QueryRowContext(r.Context(), `SELECT 1 FROM models WHERE id=? AND archived=0`, r.PathValue("id")).Scan(&modelExists); errors.Is(err, sql.ErrNoRows) {
+	var modelKind string
+	if err := tx.QueryRowContext(r.Context(), `SELECT model_kind FROM models WHERE id=? AND archived=0`, r.PathValue("id")).Scan(&modelKind); errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, http.StatusNotFound, "not_found", "Model was not found.")
 		return
 	} else if err != nil {
@@ -604,6 +630,10 @@ func (a *App) putModelAccounts(w http.ResponseWriter, r *http.Request, session a
 		}
 		if !validRouteWireProtocol(wire) || !providerSupportsWire(itemProvider, wire) {
 			writeAdminError(w, http.StatusBadRequest, "invalid_request", "The wire protocol is not supported by that provider.")
+			return
+		}
+		if modelKind == "embedding" && (itemProvider != "openai-compatible" || wire != string(wireProtocolEmbeddings)) || modelKind == "generation" && wire == string(wireProtocolEmbeddings) {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request", "The model kind and wire protocol are incompatible.")
 			return
 		}
 		item.WireProtocol = &wire

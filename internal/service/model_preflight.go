@@ -46,7 +46,7 @@ func (a *App) prepareModelRoute(r *http.Request, auth employeeAuth, model string
 			candidateRequest = r.WithContext(lease.Context())
 		}
 		var preparationError *modelPreflightError
-		if lease != nil && protocol != "" {
+		if lease != nil && protocol != "" && protocol != accounting.ProtocolOpenAIEmbeddings {
 			upstream, resolveErr := routeUpstreamProtocol(selected, protocol)
 			bindingProtocol, mapErr := accountingProtocol(upstream)
 			if resolveErr != nil || mapErr != nil {
@@ -62,7 +62,7 @@ func (a *App) prepareModelRoute(r *http.Request, auth employeeAuth, model string
 			}
 			if actual.AccountID != "" {
 				selected = actual
-				if lease != nil && protocol != "" {
+				if lease != nil && protocol != "" && protocol != accounting.ProtocolOpenAIEmbeddings {
 					upstream, resolveErr := routeUpstreamProtocol(actual, protocol)
 					bindingProtocol, mapErr := accountingProtocol(upstream)
 					if resolveErr != nil || mapErr != nil {

@@ -1,5 +1,14 @@
 # 集成状态
 
+## 2026-09-29：PROTO-08 第一段 OpenAI Embeddings 源码集成
+
+- 按 [OpenAI Embeddings 文本子集契约](openai-embeddings-contract.md)新增 `POST /v1/embeddings`，范围严格限定为 `openai-compatible` API Key、文本/string batch、float、非流式。请求和响应均由独立 `internal/embeddingwire` 包做严格字段、大小、索引、维数、有限数、model 与 usage 校验；输入文本和向量不写日志、错误或账本。
+- 模型新增不可变 `generation|embedding` 类型，Embedding 只允许显式账号池的 `openai-embeddings` wire；Key 策略新增第五协议，但旧 `all` 会事务化固化为原四协议，省略策略创建的新 Key 也不自动扩权。生成入口、Gemini 目录与 Embedding 模型相互隔离，`/v1/models` 只返回当前 Key 与实际合格路由的并集。
+- 实际 attempt/usage 按 OpenAI-compatible、实际账号/上游模型和 `openai-embeddings` 归因；只记录上游明确给出的 input/total token，output/cache 保持未知。没有受信 tokenizer 或输入 Token 上界，因此命中 strict token/cost 预算时在 durable dispatch 前失败关闭，不创建 attempt、不访问上游。
+- 管理网页通过 `openai_embeddings` capability 才显示/发送模型类型和第五协议；旧服务保持四协议与旧创建负载。token 数组、base64、dimensions、user、流式、多模态、其他 provider/会员、真实 provider/CLI 和通用 Embeddings 预算上界仍未实现或验证。本批未引入第三方依赖，不创建安装包、tag、部署或 release。
+- 本批候选工作树的非缓存验证：`go test -count=1 -timeout=20m ./internal/service` PASS（884.228s）；其余 Go 包非缓存全量 PASS，Embeddings/通用预算/Key 迁移专项另行 PASS；`go vet -p 1 ./...` 与两个 `-trimpath` CLI build PASS。Web `typecheck`、19 个文件 142 项测试和 production build PASS；300 条本地 Markdown 链接检查及 `git diff --check` PASS。Windows 本机为 `CGO_ENABLED=0`，未冒充执行 race，交由 PR Linux CI 覆盖。
+- 固定候选程序通过 CI 同款七条进程级 smoke（governance、observations、proxy、health、recovery foundations、automatic recovery、next-batch），并额外通过 key policy、account pool 与 preview smoke；全部只使用临时目录、动态非 8787 回环端口和合成凭据。桌面 1440×900 与手机 390×844 浏览器验收完成 embedding 模型、显式池 wire 和 Key 授权流程，控制台仅有预期的登录前 401 与故意触发的模型发现 502。最终干净程序的 source SHA/hash 与独立 runner、PR 精确 HEAD/CI 结果由协调记录补齐，不借用旧提交证据。
+
 ## 2026-09-29：Key 到既有账号池分组的源码收窄
 
 - 本批按 [Key 与账号池分组绑定契约](key-account-group-policy-contract.md)在既有 `account_groups ← account_channels ← model_account_pool_routes` 图上增加 `account_group_mode=all|selected` 与 `account_group_ids`，不建立员工身份组或计费组。旧 Key/创建省略默认 `all`，PUT 同时省略两字段保留旧值，`selected + []` 明确拒绝全部账号候选；策略继续共用原 revision/CAS。旧库迁移使用独立耐久标记、精确 schema/外键/覆盖核验和事务回滚。

@@ -337,6 +337,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/api/v1/system/status", a.requireAdmin(a.systemStatus, false))
 	mux.HandleFunc("GET /v1/models", a.listModels)
 	mux.HandleFunc("POST /v1/chat/completions", a.chatCompletions)
+	mux.HandleFunc("POST /v1/embeddings", a.embeddings)
 	mux.HandleFunc("POST /v1/responses", a.responsesAPI)
 	mux.HandleFunc("GET /v1/responses/{id}", a.getResponseResource)
 	mux.HandleFunc("DELETE /v1/responses/{id}", a.deleteResponseResource)
@@ -393,6 +394,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"multi-process storage is not implemented",
 		"the host administrator can access runtime secrets and must protect the data directory and master key",
 		"single process and single SQLite database only",
+		"OpenAI embeddings support is a bounded text-only, float, non-streaming subset and requires an explicit embedding model and account-pool route",
 	}
 	if a.cfg.ExperimentalCodexMembership {
 		limitations = append(limitations, "Codex membership support is experimental, uses a fixed observed protocol, and has not been verified with a real account")
@@ -410,6 +412,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"features": map[string]bool{
 			"codex_membership_import":         a.cfg.ExperimentalCodexMembership,
 			"responses_api":                   true,
+			"openai_embeddings":               true,
 			"responses_streaming":             true,
 			"responses_stateful_resources":    a.cfg.ResponsesStatefulResources,
 			"responses_background_tasks":      a.cfg.ResponsesStatefulResources && a.cfg.ResponsesBackgroundTasks && a.backgroundResponses != nil,

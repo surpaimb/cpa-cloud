@@ -50,6 +50,10 @@ func (a *App) prepareBudgetDispatch(r *http.Request, selected route, lease *acco
 		state.unlock()
 		return nil, budgetStorageFailure()
 	}
+	if req.protocol == accounting.ProtocolOpenAIEmbeddings {
+		state.unlock()
+		return nil, budgetDecisionFailure(governance.BudgetDecisionBoundUnavailable)
+	}
 	if len(wire) == 1 {
 		proof, err := proveModelBudgetWire(wire[0], req.protocol, req.provider, selected.UpstreamModel)
 		if err == nil {

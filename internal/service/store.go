@@ -124,6 +124,7 @@ func (s *store) initialize(ctx context.Context) error {
 		)`,
 		`CREATE TABLE IF NOT EXISTS models (
 			id TEXT PRIMARY KEY,
+			model_kind TEXT NOT NULL DEFAULT 'generation' CHECK(model_kind IN ('generation','embedding')),
 			upstream_id TEXT NOT NULL REFERENCES upstreams(id),
 			upstream_model TEXT NOT NULL,
 			wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content')),
@@ -233,6 +234,7 @@ func (s *store) migrateAccountLifecycle(ctx context.Context) error {
 		{!modelColumns["archived"], `ALTER TABLE models ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))`},
 		{!modelColumns["archived_at"], `ALTER TABLE models ADD COLUMN archived_at TEXT`},
 		{!modelColumns["wire_protocol"], `ALTER TABLE models ADD COLUMN wire_protocol TEXT NOT NULL DEFAULT 'legacy-native' CHECK(wire_protocol IN ('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))`},
+		{!modelColumns["model_kind"], `ALTER TABLE models ADD COLUMN model_kind TEXT NOT NULL DEFAULT 'generation' CHECK(model_kind IN ('generation','embedding'))`},
 	} {
 		if migration.missing {
 			if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
@@ -327,6 +329,10 @@ func validateAccountLifecycleSchema(ctx context.Context, query schemaQueryer) er
 	if !ok || wire.kind != "TEXT" || !wire.notNull || !wire.defaultSQL.Valid || strings.Trim(wire.defaultSQL.String, "() '") != string(wireProtocolLegacyNative) {
 		return errors.New("model wire protocol column has an incompatible schema")
 	}
+	kind, ok := models["model_kind"]
+	if !ok || kind.kind != "TEXT" || !kind.notNull || !kind.defaultSQL.Valid || strings.Trim(kind.defaultSQL.String, "() '") != "generation" {
+		return errors.New("model kind column has an incompatible schema")
+	}
 	for name, expected := range map[string]schemaColumn{
 		"id":          {kind: "TEXT", primaryKey: 1},
 		"actor_id":    {kind: "TEXT", notNull: true},
@@ -356,13 +362,13 @@ func validateAccountLifecycleSchema(ctx context.Context, query schemaQueryer) er
 	}
 	normalize := func(value string) string { return strings.ToLower(strings.Join(strings.Fields(value), "")) }
 	if !strings.Contains(normalize(upstreamSQL), "check(archivedin(0,1))") || !strings.Contains(normalize(modelSQL), "check(archivedin(0,1))") ||
-		!strings.Contains(normalize(modelSQL), "check(revisionbetween1and9007199254740991)") || !strings.Contains(normalize(modelSQL), "check(wire_protocolin('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))") || !strings.Contains(normalize(indexSQL), "onaccount_lifecycle_audit(occurred_at,id)") {
+		!strings.Contains(normalize(modelSQL), "check(revisionbetween1and9007199254740991)") || !strings.Contains(normalize(modelSQL), "check(wire_protocolin('legacy-native','openai-chat','openai-responses','anthropic-messages','gemini-generate-content'))") || !strings.Contains(normalize(modelSQL), "check(model_kindin('generation','embedding'))") || !strings.Contains(normalize(indexSQL), "onaccount_lifecycle_audit(occurred_at,id)") {
 		return errors.New("account lifecycle constraints have an incompatible schema")
 	}
 	var invalid int
 	if err := query.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(*) FROM upstreams WHERE archived NOT IN (0,1) OR (archived=0 AND archived_at IS NOT NULL) OR (archived=1 AND archived_at IS NULL)) +
-		(SELECT COUNT(*) FROM models WHERE revision<1 OR revision>9007199254740991 OR archived NOT IN (0,1) OR (archived=0 AND archived_at IS NOT NULL) OR (archived=1 AND archived_at IS NULL))`).Scan(&invalid); err != nil {
+		(SELECT COUNT(*) FROM models WHERE model_kind NOT IN ('generation','embedding') OR revision<1 OR revision>9007199254740991 OR archived NOT IN (0,1) OR (archived=0 AND archived_at IS NOT NULL) OR (archived=1 AND archived_at IS NULL))`).Scan(&invalid); err != nil {
 		return err
 	}
 	if invalid != 0 {

@@ -221,7 +221,7 @@ export function ModelAccountPoolEditor({ model, csrf, routingEnabled, onClose }:
       ])
       if (requestVersion.current !== version) return
       setAccounts(nextAccounts)
-      setItems(nextAccounts.items)
+      setItems(model.model_kind === 'embedding' ? nextAccounts.items.map((item) => ({ ...item, wire_protocol: 'openai-embeddings' as WireProtocol })) : nextAccounts.items)
       setUpstreams(nextUpstreams.items)
       setChannels(nextChannels.items)
       setGroups(nextGroups.items)
@@ -232,7 +232,7 @@ export function ModelAccountPoolEditor({ model, csrf, routingEnabled, onClose }:
     } finally {
       if (requestVersion.current === version) setLoading(false)
     }
-  }, [model.id])
+  }, [model.id, model.model_kind])
 
   useEffect(() => {
     void reload()
@@ -256,7 +256,7 @@ export function ModelAccountPoolEditor({ model, csrf, routingEnabled, onClose }:
 
   function addAccount() {
     if (!candidateID || items.length >= 64) return
-    setItems((current) => [...current, { upstream_id: candidateID, upstream_model: model.upstream_model, wire_protocol: current[0]?.wire_protocol ?? model.wire_protocol ?? 'legacy-native', priority: 0, weight: 1, max_concurrency: 1 }])
+    setItems((current) => [...current, { upstream_id: candidateID, upstream_model: model.upstream_model, wire_protocol: model.model_kind === 'embedding' ? 'openai-embeddings' : current[0]?.wire_protocol ?? model.wire_protocol ?? 'legacy-native', priority: 0, weight: 1, max_concurrency: 1 }])
     setSaved(false)
   }
 
@@ -294,7 +294,7 @@ export function ModelAccountPoolEditor({ model, csrf, routingEnabled, onClose }:
           <div className="pool-account-heading"><div><strong>{upstream?.name ?? item.upstream_id}</strong>{disabled ? <span className="pool-disabled-badge">已停用，可移除</span> : null}{!upstream ? <span className="pool-disabled-badge">已删除，可移除</span> : null}<small><code>{item.upstream_id}</code>{groupName ? ` · ${groupName}` : ''}</small></div><Button type="button" variant="danger" disabled={items.length === 1 || busy} onClick={() => { setItems((current) => current.filter((_, itemIndex) => itemIndex !== index)); setSaved(false) }}>移除</Button></div>
           <div className="pool-account-grid">
             <Field label={`账号 ${index + 1} 上游模型`}><input value={item.upstream_model} onChange={(event) => updateItem(index, { upstream_model: event.target.value })} /></Field>
-            <Field label={`账号 ${index + 1} Wire 协议`}><select value={item.wire_protocol ?? 'legacy-native'} onChange={(event) => updateItem(index, { wire_protocol: event.target.value as WireProtocol })}><option value="legacy-native">兼容原生入口</option>{upstream?.provider_kind === 'openai-compatible' ? <><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option></> : null}{upstream?.provider_kind === 'codex-membership' ? <option value="openai-responses">OpenAI Responses</option> : null}{upstream?.provider_kind === 'anthropic-api-key' ? <option value="anthropic-messages">Anthropic Messages</option> : null}{upstream?.provider_kind === 'gemini-api-key' ? <option value="gemini-generate-content">Gemini generateContent</option> : null}</select></Field>
+            <Field label={`账号 ${index + 1} Wire 协议`}><select value={item.wire_protocol ?? 'legacy-native'} onChange={(event) => updateItem(index, { wire_protocol: event.target.value as WireProtocol })}>{model.model_kind === 'embedding' ? <option value="openai-embeddings">OpenAI Embeddings</option> : <><option value="legacy-native">兼容原生入口</option>{upstream?.provider_kind === 'openai-compatible' ? <><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option></> : null}{upstream?.provider_kind === 'codex-membership' ? <option value="openai-responses">OpenAI Responses</option> : null}{upstream?.provider_kind === 'anthropic-api-key' ? <option value="anthropic-messages">Anthropic Messages</option> : null}{upstream?.provider_kind === 'gemini-api-key' ? <option value="gemini-generate-content">Gemini generateContent</option> : null}</>}</select></Field>
             <Field label={`账号 ${index + 1} 渠道`}><select value={item.channel_id ?? ''} onChange={(event) => updateItem(index, { channel_id: event.target.value || undefined })}><option value="">无渠道</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{groups.find((group) => group.id === channel.group_id)?.name ? `${groups.find((group) => group.id === channel.group_id)?.name} / ` : ''}{channel.name}</option>)}</select></Field>
             <Field label={`账号 ${index + 1} 优先级`}><input type="number" min={-1000000} max={1000000} step={1} value={item.priority} onChange={(event) => updateItem(index, { priority: Number(event.target.value) })} /></Field>
             <Field label={`账号 ${index + 1} 权重`}><input type="number" min={1} max={10000} step={1} value={item.weight} onChange={(event) => updateItem(index, { weight: Number(event.target.value) })} /></Field>

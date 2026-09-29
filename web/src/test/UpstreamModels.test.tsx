@@ -207,4 +207,29 @@ describe('upstream and model discovery flows', () => {
     const create = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/models') && (init as RequestInit)?.method === 'POST')
     expect(JSON.parse(String((create?.[1] as RequestInit).body))).toEqual({ id: 'codex-model', upstream_id: 'codex-1', upstream_model: 'codex-model', wire_protocol: 'openai-responses' })
   })
+
+  it('only sends model_kind when the embeddings capability is advertised', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/upstreams') && !init?.method) return response({ body: { items: [
+        { id: 'openai-1', name: 'OpenAI', provider_kind: 'openai-compatible', endpoint: 'https://api.openai.com/v1', enabled: true, revision: 1 },
+      ] } })
+      if (url.endsWith('/upstreams/openai-1/discover-models')) return response({ body: { items: [] } })
+      if (url.endsWith('/models') && init?.method === 'POST') return response({ body: { id: 'embed', model_kind: 'embedding', upstream_id: 'openai-1', upstream_model: 'text-embedding', enabled: true } })
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onCreated = vi.fn()
+    render(<CreateModel csrf="csrf" embeddingsEnabled onClose={() => undefined} onCreated={onCreated} />)
+
+    await screen.findByText('已同步 0 个模型；请选择或手动输入。')
+    await userEvent.selectOptions(screen.getByLabelText('模型类型'), 'embedding')
+    await userEvent.type(screen.getByLabelText('上游模型名称'), 'text-embedding')
+    await userEvent.type(screen.getByLabelText('对外模型 ID'), 'embed')
+    await userEvent.click(screen.getByRole('button', { name: '添加路由' }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1))
+
+    const create = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/models') && (init as RequestInit)?.method === 'POST')
+    expect(JSON.parse(String((create?.[1] as RequestInit).body))).toMatchObject({ id: 'embed', model_kind: 'embedding', upstream_id: 'openai-1' })
+  })
 })

@@ -138,7 +138,7 @@ func (a *App) updateModel(w http.ResponseWriter, r *http.Request, session adminS
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	if !validProviderModelName(provider, nextModel) || provider == geminiAPIKeyProvider && strings.Contains(item.ID, "/") || !validRouteWireProtocol(nextWire) || !providerSupportsWire(provider, nextWire) {
+	if !validProviderModelName(provider, nextModel) || provider == geminiAPIKeyProvider && strings.Contains(item.ID, "/") || !validRouteWireProtocol(nextWire) || !providerSupportsWire(provider, nextWire) || item.ModelKind == "embedding" && (provider != "openai-compatible" || nextWire != string(wireProtocolLegacyNative)) || item.ModelKind == "generation" && nextWire == string(wireProtocolEmbeddings) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "The upstream model is not supported by that provider.")
 		return
 	}
@@ -219,8 +219,8 @@ func loadModelView(ctx context.Context, query queryRower, id string) (modelView,
 	var item modelView
 	var enabled, archived int
 	var archivedAt sql.NullString
-	err := query.QueryRowContext(ctx, `SELECT id,upstream_id,upstream_model,wire_protocol,enabled,revision,archived,archived_at FROM models WHERE id=?`, id).
-		Scan(&item.ID, &item.UpstreamID, &item.UpstreamModel, &item.WireProtocol, &enabled, &item.Revision, &archived, &archivedAt)
+	err := query.QueryRowContext(ctx, `SELECT id,model_kind,upstream_id,upstream_model,wire_protocol,enabled,revision,archived,archived_at FROM models WHERE id=?`, id).
+		Scan(&item.ID, &item.ModelKind, &item.UpstreamID, &item.UpstreamModel, &item.WireProtocol, &enabled, &item.Revision, &archived, &archivedAt)
 	item.Enabled, item.Archived, item.ArchivedAt = enabled != 0, archived != 0, nullString(archivedAt)
 	return item, err
 }

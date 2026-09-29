@@ -27,7 +27,7 @@ const generalBudgetPoliciesDDL = `CREATE TABLE IF NOT EXISTS governance_general_
 	id TEXT PRIMARY KEY,
 	scope_kind TEXT NOT NULL CHECK(scope_kind IN ('employee','key','group')),
 	scope_id TEXT NOT NULL,
-	protocol TEXT NOT NULL CHECK(protocol IN ('','openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content')),
+	protocol TEXT NOT NULL CHECK(protocol IN ('','openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
 	model TEXT NOT NULL,
 	enabled INTEGER NOT NULL CHECK(typeof(enabled)='integer' AND enabled IN (0,1)),
 	token_limit INTEGER CHECK(token_limit IS NULL OR (typeof(token_limit)='integer' AND token_limit BETWEEN 1 AND 9007199254740991)),
@@ -68,7 +68,7 @@ const generalBudgetRequestScopesDDL = `CREATE TABLE IF NOT EXISTS governance_gen
 	request_id TEXT NOT NULL REFERENCES governance_requests(id) ON DELETE CASCADE,
 	scope_kind TEXT NOT NULL CHECK(scope_kind IN ('employee','key','group')),
 	scope_id TEXT NOT NULL,
-	protocol TEXT NOT NULL CHECK(protocol IN ('','openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content')),
+	protocol TEXT NOT NULL CHECK(protocol IN ('','openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
 	model TEXT NOT NULL,
 	policy_id TEXT NOT NULL REFERENCES governance_general_budget_policies(id) ON DELETE RESTRICT,
 	policy_revision INTEGER NOT NULL CHECK(typeof(policy_revision)='integer' AND policy_revision BETWEEN 1 AND 9007199254740991),
@@ -89,7 +89,7 @@ const generalBudgetReservationScopesDDL = `CREATE TABLE IF NOT EXISTS governance
 	attempt_id TEXT NOT NULL REFERENCES governance_budget_reservations(attempt_id) ON DELETE CASCADE,
 	scope_kind TEXT NOT NULL CHECK(scope_kind IN ('employee','key','group')),
 	scope_id TEXT NOT NULL,
-	protocol TEXT NOT NULL CHECK(protocol IN ('','openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content')),
+	protocol TEXT NOT NULL CHECK(protocol IN ('','openai-chat-completions','openai-responses','anthropic-messages','gemini-generate-content','openai-embeddings')),
 	model TEXT NOT NULL,
 	policy_id TEXT NOT NULL,
 	policy_revision INTEGER NOT NULL CHECK(typeof(policy_revision)='integer' AND policy_revision BETWEEN 1 AND 9007199254740991),
@@ -149,6 +149,9 @@ func migrateGeneralBudgets(ctx context.Context, db *sql.DB) error {
 			return errGovernanceManagementSchema
 		}
 	}
+	if err := migrateGeneralBudgetEmbeddingsProtocolTx(ctx, tx); err != nil {
+		return err
+	}
 	for _, statement := range []string{generalBudgetSettingsDDL, generalBudgetPoliciesDDL, generalBudgetOperationsDDL, generalBudgetAuditDDL, generalBudgetRequestScopesDDL, generalBudgetReservationScopesDDL, generalBudgetScopeIndexDDL, generalBudgetReservationScopeIndexDDL} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return errGovernanceManagementUnavailable
@@ -169,7 +172,55 @@ func migrateGeneralBudgets(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+func migrateGeneralBudgetEmbeddingsProtocolTx(ctx context.Context, tx *sql.Tx) error {
+	var policyDDL string
+	err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='governance_general_budget_policies'`).Scan(&policyDDL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return errGovernanceManagementUnavailable
+	}
+	if strings.Contains(policyDDL, "'openai-embeddings'") {
+		return nil
+	}
+	if err := validateGeneralBudgetSchemaVersion(ctx, tx, false); err != nil {
+		return err
+	}
+	statements := []string{
+		`DROP INDEX governance_general_budget_scope_idx`,
+		`DROP INDEX governance_general_budget_reservation_scope_idx`,
+		`ALTER TABLE governance_general_budget_request_scopes RENAME TO governance_general_budget_request_scopes_pre_embeddings`,
+		`ALTER TABLE governance_general_budget_reservation_scopes RENAME TO governance_general_budget_reservation_scopes_pre_embeddings`,
+		`ALTER TABLE governance_general_budget_policies RENAME TO governance_general_budget_policies_pre_embeddings`,
+		generalBudgetPoliciesDDL,
+		generalBudgetRequestScopesDDL,
+		generalBudgetReservationScopesDDL,
+		`INSERT INTO governance_general_budget_policies(id,scope_kind,scope_id,protocol,model,enabled,token_limit,token_window,cost_limit_micro,currency,cost_window,revision,created_at,updated_at)
+		 SELECT id,scope_kind,scope_id,protocol,model,enabled,token_limit,token_window,cost_limit_micro,currency,cost_window,revision,created_at,updated_at FROM governance_general_budget_policies_pre_embeddings`,
+		`INSERT INTO governance_general_budget_request_scopes(request_id,scope_kind,scope_id,protocol,model,policy_id,policy_revision,group_revision,settings_revision,selector_revision,hard_tpm,hard_cost_micro,hard_currency,hard_window,unknown_mode)
+		 SELECT request_id,scope_kind,scope_id,protocol,model,policy_id,policy_revision,group_revision,settings_revision,selector_revision,hard_tpm,hard_cost_micro,hard_currency,hard_window,unknown_mode FROM governance_general_budget_request_scopes_pre_embeddings`,
+		`INSERT INTO governance_general_budget_reservation_scopes(attempt_id,scope_kind,scope_id,protocol,model,policy_id,policy_revision,group_revision,settings_revision,selector_revision,hard_tpm,hard_cost_micro,hard_currency,hard_window,unknown_mode)
+		 SELECT attempt_id,scope_kind,scope_id,protocol,model,policy_id,policy_revision,group_revision,settings_revision,selector_revision,hard_tpm,hard_cost_micro,hard_currency,hard_window,unknown_mode FROM governance_general_budget_reservation_scopes_pre_embeddings`,
+		`DROP TABLE governance_general_budget_request_scopes_pre_embeddings`,
+		`DROP TABLE governance_general_budget_reservation_scopes_pre_embeddings`,
+		`DROP TABLE governance_general_budget_policies_pre_embeddings`,
+		generalBudgetScopeIndexDDL,
+		generalBudgetReservationScopeIndexDDL,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return errGovernanceManagementUnavailable
+		}
+	}
+	return validateGeneralBudgetSchema(ctx, tx)
+}
+
 func validateGeneralBudgetSchema(ctx context.Context, tx *sql.Tx) error {
+	return validateGeneralBudgetSchemaVersion(ctx, tx, true)
+}
+
+func validateGeneralBudgetSchemaVersion(ctx context.Context, tx *sql.Tx, embeddings bool) error {
 	expected := map[string]string{
 		"governance_general_budget_settings":           generalBudgetSettingsDDL,
 		"governance_general_budget_policies":           generalBudgetPoliciesDDL,
@@ -177,6 +228,11 @@ func validateGeneralBudgetSchema(ctx context.Context, tx *sql.Tx) error {
 		"governance_general_budget_audit":              generalBudgetAuditDDL,
 		"governance_general_budget_request_scopes":     generalBudgetRequestScopesDDL,
 		"governance_general_budget_reservation_scopes": generalBudgetReservationScopesDDL,
+	}
+	if !embeddings {
+		for _, name := range []string{"governance_general_budget_policies", "governance_general_budget_request_scopes", "governance_general_budget_reservation_scopes"} {
+			expected[name] = strings.Replace(expected[name], ",'openai-embeddings'", "", 1)
+		}
 	}
 	for name, ddl := range expected {
 		var kind, actual string
@@ -801,7 +857,7 @@ func validGeneralBudgetPolicy(item generalBudgetPolicy) bool {
 }
 
 func validGeneralBudgetProtocol(protocol accounting.UsageProtocol) bool {
-	return protocol == accounting.ProtocolOpenAIChatCompletions || protocol == accounting.ProtocolOpenAIResponses || protocol == accounting.ProtocolAnthropicMessages || protocol == accounting.ProtocolGeminiGenerateContent
+	return protocol == accounting.ProtocolOpenAIChatCompletions || protocol == accounting.ProtocolOpenAIResponses || protocol == accounting.ProtocolOpenAIEmbeddings || protocol == accounting.ProtocolAnthropicMessages || protocol == accounting.ProtocolGeminiGenerateContent
 }
 
 func validGeneralBudgetCurrency(currency string) bool {

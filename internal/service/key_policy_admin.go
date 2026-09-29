@@ -196,8 +196,12 @@ func readKeyPolicyViewTxWithPolicy(ctx context.Context, tx *sql.Tx, a *App, keyI
 	} else {
 		view.EffectiveProtocols = append(view.EffectiveProtocols, policy.Protocols...)
 	}
-	query := `SELECT m.id FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND m.archived=0 AND ` + a.availableModelRouteSQL(false)
-	args := []any{}
+	allowGeneration, allowEmbeddings := keyPolicyModelKinds(policy.ProtocolMode, policy.Protocols)
+	query := `SELECT m.id FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.enabled=1 AND m.archived=0 AND ` + a.availableModelRouteSQL(false) + `
+		AND ((m.model_kind='generation' AND ?=1) OR (m.model_kind='embedding' AND ?=1 AND EXISTS(
+			SELECT 1 FROM model_account_pool_routes er JOIN upstreams eu ON eu.id=er.upstream_id
+			WHERE er.model_id=m.id AND er.wire_protocol='openai-embeddings' AND eu.provider_kind='openai-compatible' AND eu.enabled=1 AND eu.archived=0)))`
+	args := []any{boolInt(allowGeneration), boolInt(allowEmbeddings)}
 	if owner.EmployeeMode == "selected" {
 		query += ` AND EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id)`
 		args = append(args, owner.EmployeeID)
@@ -246,9 +250,13 @@ func (a *App) validateKeyPolicyModelsTx(ctx context.Context, tx *sql.Tx, owner k
 	if replacement.ModelMode != keypolicy.ModeSelected {
 		return nil
 	}
+	allowGeneration, allowEmbeddings := keyPolicyModelKinds(replacement.ProtocolMode, replacement.Protocols)
 	for _, model := range replacement.Models {
-		query := `SELECT 1 FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND ` + a.availableModelRouteSQL(false)
-		args := []any{model}
+		query := `SELECT 1 FROM models m JOIN upstreams u ON u.id=m.upstream_id WHERE m.id=? AND m.enabled=1 AND m.archived=0 AND ` + a.availableModelRouteSQL(false) + `
+			AND ((m.model_kind='generation' AND ?=1) OR (m.model_kind='embedding' AND ?=1 AND EXISTS(
+				SELECT 1 FROM model_account_pool_routes er JOIN upstreams eu ON eu.id=er.upstream_id
+				WHERE er.model_id=m.id AND er.wire_protocol='openai-embeddings' AND eu.provider_kind='openai-compatible' AND eu.enabled=1 AND eu.archived=0)))`
+		args := []any{model, boolInt(allowGeneration), boolInt(allowEmbeddings)}
 		if owner.EmployeeMode == "selected" {
 			query += ` AND EXISTS(SELECT 1 FROM employee_models WHERE employee_id=? AND model_id=m.id)`
 			args = append(args, owner.EmployeeID)
@@ -261,6 +269,20 @@ func (a *App) validateKeyPolicyModelsTx(ctx context.Context, tx *sql.Tx, owner k
 		}
 	}
 	return nil
+}
+
+func keyPolicyModelKinds(mode keypolicy.Mode, protocols []keypolicy.ClientProtocol) (generation, embeddings bool) {
+	if mode == keypolicy.ModeAll {
+		return true, true
+	}
+	for _, protocol := range protocols {
+		if protocol == keypolicy.ProtocolOpenAIEmbeddings {
+			embeddings = true
+		} else {
+			generation = true
+		}
+	}
+	return generation, embeddings
 }
 
 func keyPolicyOwnerActive(owner keyPolicyOwner, now time.Time) bool {
