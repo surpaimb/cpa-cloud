@@ -122,6 +122,9 @@ func (a *App) beginRouteUpstreamUsage(ctx context.Context, id string, selected r
 	}
 	attempt, err := active.request.beginDispatchedAttemptTx(ctx, tx, selected.AccountID, selected.UpstreamModel, time.Now().UTC(), price, dispatch)
 	if err == nil {
+		err = a.recordAttemptAllocationSnapshotTx(ctx, tx, attempt.id, active.request.publicModel, selected)
+	}
+	if err == nil {
 		err = tx.Commit()
 	}
 	if err == nil {
@@ -183,6 +186,9 @@ func (a *App) commitUsageDispatch(ctx context.Context, tx *sql.Tx, selected rout
 	attempt := &usageLedgerAttempt{request: request, id: request.id + ":1", accountID: selected.AccountID, dispatch: dispatch, startedAt: at, usage: accumulator}
 	start := accounting.AttemptStart{ID: attempt.id, RequestID: request.id, AccountID: selected.AccountID, Provider: request.provider, Dispatch: dispatch, StartedAt: at, Price: price, Protocol: request.protocol, EffectiveModel: selected.UpstreamModel, Evidence: request.evidence}
 	if err := request.coordinator.ledger.BeginAttemptTx(ctx, tx, start); err != nil {
+		return poolAdmissionFailure(accountPoolStorageUnavailable)
+	}
+	if err := a.recordAttemptAllocationSnapshotTx(ctx, tx, attempt.id, request.publicModel, selected); err != nil {
 		return poolAdmissionFailure(accountPoolStorageUnavailable)
 	}
 	if err := request.coordinator.ledger.MarkAttemptDispatchedTx(ctx, tx, accounting.AttemptDispatch{ID: attempt.id, OperationID: attempt.id + ":dispatch", DispatchedAt: at}); err != nil {
@@ -397,6 +403,9 @@ func (r *usageLedgerRequest) finishWithModelRequest(ctx context.Context, status 
 		}
 		defer tx.Rollback()
 		if attempt != nil {
+			if err := requireAttemptAllocationSnapshotTx(writeCtx, tx, attempt.id, r.coordinator.accountGroupAllocationRequired); err != nil {
+				return err
+			}
 			reasoning, responseID := attempt.usage.ReliableMetadata()
 			if err := r.coordinator.ledger.FinishAttemptTx(writeCtx, tx, accounting.AttemptFinish{
 				ID: attempt.id, Status: snapshot.status, FinishedAt: snapshot.finishedAt, Usage: attempt.finishSnapshot.usage,

@@ -42,21 +42,30 @@ func (a *App) registerAccountingV2Handlers(mux *http.ServeMux) {
 	a.registerBillingV1Handlers(mux)
 }
 
+func (a *App) accountingV2Ledger() *accounting.Ledger {
+	if a != nil && a.accountGroupAllocationRequired {
+		return accounting.NewRequiredAllocationLedger(a.store.db)
+	}
+	return accounting.NewLedger(a.store.db)
+}
+
 type accountingV2ReportView struct {
-	PeriodStart             string           `json:"period_start"`
-	PeriodEnd               string           `json:"period_end"`
-	Currency                string           `json:"currency"`
-	Requests                string           `json:"requests"`
-	Attempts                string           `json:"attempts"`
-	Corrections             string           `json:"corrections"`
-	MissingEvidenceAttempts string           `json:"missing_evidence_attempts"`
-	KnownEstimatedCostMicro string           `json:"known_estimated_cost_micro"`
-	UnknownCostAttempts     string           `json:"unknown_cost_attempts"`
-	InputTokens             usageTokenCounts `json:"input_tokens"`
-	OutputTokens            usageTokenCounts `json:"output_tokens"`
-	CacheReadTokens         usageTokenCounts `json:"cache_read_tokens"`
-	CacheWriteTokens        usageTokenCounts `json:"cache_write_tokens"`
-	ReasoningTokens         usageTokenCounts `json:"reasoning_tokens"`
+	PeriodStart                       string           `json:"period_start"`
+	PeriodEnd                         string           `json:"period_end"`
+	Currency                          string           `json:"currency"`
+	Requests                          string           `json:"requests"`
+	Attempts                          string           `json:"attempts"`
+	Corrections                       string           `json:"corrections"`
+	MissingEvidenceAttempts           string           `json:"missing_evidence_attempts"`
+	KnownEstimatedCostMicro           string           `json:"known_estimated_cost_micro"`
+	UnknownCostAttempts               string           `json:"unknown_cost_attempts"`
+	KnownAdjustedAllocationCostMicro  string           `json:"known_adjusted_allocation_cost_micro"`
+	UnknownAdjustedAllocationAttempts string           `json:"unknown_adjusted_allocation_attempts"`
+	InputTokens                       usageTokenCounts `json:"input_tokens"`
+	OutputTokens                      usageTokenCounts `json:"output_tokens"`
+	CacheReadTokens                   usageTokenCounts `json:"cache_read_tokens"`
+	CacheWriteTokens                  usageTokenCounts `json:"cache_write_tokens"`
+	ReasoningTokens                   usageTokenCounts `json:"reasoning_tokens"`
 }
 
 func (a *App) accountingV2Daily(w http.ResponseWriter, r *http.Request, _ adminSession) {
@@ -75,7 +84,7 @@ func (a *App) accountingV2Report(w http.ResponseWriter, r *http.Request, period 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), usageQueryTimeout)
 	defer cancel()
-	items, err := accounting.NewLedger(a.store.db).AccountingV2Report(ctx, filters, period)
+	items, err := a.accountingV2Ledger().AccountingV2Report(ctx, filters, period)
 	if err != nil {
 		writeAccountingV2Error(w, err)
 		return
@@ -86,6 +95,7 @@ func (a *App) accountingV2Report(w http.ResponseWriter, r *http.Request, period 
 			PeriodStart: item.PeriodStart.Format(time.RFC3339), PeriodEnd: item.PeriodEnd.Format(time.RFC3339), Currency: item.Currency,
 			Requests: decimal(item.Requests), Attempts: decimal(item.Attempts), Corrections: decimal(item.Corrections), MissingEvidenceAttempts: decimal(item.MissingEvidenceAttempts),
 			KnownEstimatedCostMicro: decimal(item.KnownEstimatedCostMicro), UnknownCostAttempts: decimal(item.UnknownCostAttempts),
+			KnownAdjustedAllocationCostMicro: decimal(item.KnownAdjustedAllocationCostMicro), UnknownAdjustedAllocationAttempts: decimal(item.UnknownAdjustedAllocationAttempts),
 			InputTokens: tokenSummaryView(item.InputTokens), OutputTokens: tokenSummaryView(item.OutputTokens), CacheReadTokens: tokenSummaryView(item.CacheReadTokens), CacheWriteTokens: tokenSummaryView(item.CacheWriteTokens), ReasoningTokens: tokenSummaryView(item.ReasoningTokens),
 		})
 	}
@@ -104,18 +114,18 @@ func (a *App) accountingV2Export(w http.ResponseWriter, r *http.Request, _ admin
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), usageQueryTimeout)
 	defer cancel()
-	items, err := accounting.NewLedger(a.store.db).AccountingV2Export(ctx, filters, limit)
+	items, err := a.accountingV2Ledger().AccountingV2Export(ctx, filters, limit)
 	if err != nil {
 		writeAccountingV2Error(w, err)
 		return
 	}
 	var output bytes.Buffer
 	writer := csv.NewWriter(&output)
-	_ = writer.Write([]string{"attempt_id", "request_id", "employee_id", "key_id", "public_model", "effective_model", "account_id", "provider", "protocol", "dispatch_kind", "status", "started_at", "durable_dispatched_at", "finished_at", "event_id", "evidence", "response_id", "task_id", "tool_run_id", "corrections", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "price_version", "currency", "estimated_cost_micro"})
+	_ = writer.Write([]string{"attempt_id", "request_id", "employee_id", "key_id", "public_model", "effective_model", "account_id", "provider", "protocol", "dispatch_kind", "status", "started_at", "durable_dispatched_at", "finished_at", "event_id", "evidence", "response_id", "task_id", "tool_run_id", "corrections", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "price_version", "currency", "estimated_cost_micro", "account_group_id", "allocation_multiplier_version", "allocation_multiplier_ppm", "adjusted_allocation_cost_micro"})
 	for _, item := range items {
 		_ = writer.Write(accountingV2CSVRecord([]string{
 			item.AttemptID, item.RequestID, item.EmployeeID, item.KeyID, item.PublicModel, stringValue(item.EffectiveModel), item.AccountID, string(item.Provider), protocolValue(item.Protocol), string(item.Dispatch), string(item.Status), item.StartedAt.Format(time.RFC3339Nano), timeValue(item.DispatchedAt), item.FinishedAt.Format(time.RFC3339Nano),
-			stringValue(item.EventID), evidenceValue(item.Evidence), stringValue(item.ResponseID), stringValue(item.TaskID), stringValue(item.ToolRunID), decimal(item.CorrectionCount), decimalValue(item.InputTokens), decimalValue(item.OutputTokens), decimalValue(item.CacheReadTokens), decimalValue(item.CacheWriteTokens), decimalValue(item.ReasoningTokens), stringValue(item.PriceVersion), stringValue(item.Currency), decimalValue(item.EstimatedCostMicro),
+			stringValue(item.EventID), evidenceValue(item.Evidence), stringValue(item.ResponseID), stringValue(item.TaskID), stringValue(item.ToolRunID), decimal(item.CorrectionCount), decimalValue(item.InputTokens), decimalValue(item.OutputTokens), decimalValue(item.CacheReadTokens), decimalValue(item.CacheWriteTokens), decimalValue(item.ReasoningTokens), stringValue(item.PriceVersion), stringValue(item.Currency), decimalValue(item.EstimatedCostMicro), stringValue(item.AccountGroupID), stringValue(item.AllocationMultiplierVersion), decimalValue(item.AllocationMultiplierPPM), decimalValue(item.AdjustedAllocationCostMicro),
 		}))
 		writer.Flush()
 		if writer.Error() != nil || output.Len() > accountingV2MaxExportBytes {
@@ -194,7 +204,7 @@ func (a *App) accountingV2Correction(w http.ResponseWriter, r *http.Request, ses
 		}
 		correction.EstimatedCostDeltaMicro = &parsed
 	}
-	if err := accounting.NewLedger(a.store.db).AppendCorrection(r.Context(), correction); err != nil {
+	if err := a.accountingV2Ledger().AppendCorrection(r.Context(), correction); err != nil {
 		writeAccountingV2Error(w, err)
 		return
 	}

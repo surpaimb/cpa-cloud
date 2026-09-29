@@ -1,5 +1,44 @@
 # 集成状态
 
+## 2026-09-29：账号组内部成本分摊倍率第一段
+
+- 按 [账号组内部成本分摊倍率契约](account-group-cost-allocation-contract.md)为既有账号池组增加
+  `1..1_000_000_000 ppm` 的版本化内部倍率、共享组 revision 的 CAS/幂等管理写入、能力门控
+  网页编辑，以及最终实际 `route → channel → group` 在 durable dispatch 事务中的 attempt 快照。
+  原始价格版本、供应商估算成本、四类 token、硬预算、余额和员工钱包均未改写；调整后金额
+  使用独立字段和伴随账本，不冒充供应商账单或员工售价。
+- 首次迁移为旧组建立 1× 版本，并只把迁移事务开始前已经存在的 attempt ID 写入不可变、仅迁移
+  可写的历史标记；不会猜测旧 attempt 的组或倍率。完整 App 启动后强制要求七张组合表，运行中
+  全部/部分表丢失、迁移后的 attempt 缺快照、可靠原始事件/更正缺伴随事实都失败关闭。测试注入
+  已证明缺表时 503 且零上游，缺快照时正常终结、重启恢复和更正均回滚；显式旧历史仍保留
+  NULL 倍率/调整后成本。
+- 独立固定二进制验收在旧 HEAD `501b619` 发现并阻断两项生产缺陷：有价格的 Embeddings 因
+  未报告 output/cache 而错误保留未知成本，以及 App 启动恢复没有调用 V2 恢复去补可靠 base/
+  allocation 事实。后续源码改为按实际协议计算成本（input=2、EUR input rate 3,000,000、1.5x
+  的专项断言为原始 6/调整后 9，同时未报告 bucket 仍为 NULL），并把 durable-dispatch 恢复、
+  `system_terminal` base event 与 NULL allocation event 放入同一启动事务；allocation 写入故障时
+  状态和两类事件全部回滚，删除故障后重试及再次重放保持各一条。旧成本约束升级另覆盖源 schema
+  严格核验、保留行/外键、对象碰撞回滚、重试与幂等重启。`501b619` 的 CI、进程和二进制证据
+  不再作为修复后候选依据。可审核复现固定在
+  `TestOpenAIEmbeddingsPricedInputOnlyUsageAppliesFrozenGroupAllocation`、
+  `TestRequestLedgerRecoveryRollsBackBaseEventWhenAllocationProjectionFails` 和
+  `TestAccountingProtocolCostConstraintMigrationPreservesFactsAndForeignKeys`；新精确 HEAD 的完整回归、
+  CI 与独立固定二进制复验在下轮结果中记录。
+- 当前生产源码的非缓存完整 service 回归 PASS（1001.010s）；其余 Go 包非缓存全量 PASS，其中
+  accounting 96.546s、governance 136.857s、keypolicy 101.282s、backup 46.090s、
+  recoverymaterial 56.392s、financial 21.720s，两个 CLI 及其他包通过。`go vet -p 1 ./...` PASS。
+  Web 19 个文件/146 项测试和 production build PASS；302 个 tracked 本地 Markdown 链接、两个
+  smoke 脚本语法及 `git diff --check` PASS。
+- 修复前旧候选 `501b619` 的真实隔离进程 smoke 曾 PASS：覆盖价格/倍率版本、CAS/幂等、在途冻结、实际
+  账号/模型/组、未知成本、原始/调整后汇总、管理员隔离、CSRF、重启、撤销和落盘敏感值检查。
+  真实 Chrome 的仓库 browser runner 通过桌面与 390×844 窄屏倍率保存、池冲突、权限隔离和映射
+  上游执行，page error 为零；另用 Playwright CLI 实际登录、创建组并把 1× 保存为 1.25×，只有
+  登录前 session 探测的预期 401。这些只是回归背景，不替代修复后精确 HEAD 的进程和独立二进制验收。
+  所有数据均为临时合成凭据、动态非 8787 回环端口，验收后清理。
+- 本机为无 CGO race 环境，不声称本地 race 通过；Linux 完整 race、最终干净 HEAD 程序及 PR
+  checks 以本批实际结果另行记录。未访问真实 provider/会员账号，未实现员工售价倍率、分组预算、
+  供应商发票核对、汇率/多币换算，也未创建部署、tag、安装包或 release。
+
 ## 2026-09-29：PROTO-08 第一段 OpenAI Embeddings 源码集成
 
 - 按 [OpenAI Embeddings 文本子集契约](openai-embeddings-contract.md)新增 `POST /v1/embeddings`，范围严格限定为 `openai-compatible` API Key、文本/string batch、float、非流式。请求和响应均由独立 `internal/embeddingwire` 包做严格字段、大小、索引、维数、有限数、model 与 usage 校验；输入文本和向量不写日志、错误或账本。

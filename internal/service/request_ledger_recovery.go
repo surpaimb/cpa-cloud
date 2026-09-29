@@ -39,6 +39,12 @@ func (a *App) recoverRequestLedgers(ctx context.Context, core *governance.Coordi
 	if _, err := tx.ExecContext(ctx, `UPDATE accounting_attempts SET status='interrupted',finished_at=? WHERE status='pending' AND NOT EXISTS(SELECT 1 FROM background_tasks t WHERE t.request_id=accounting_attempts.request_id AND t.status='queued')`, stamp); err != nil {
 		return errUsageLedgerUnavailable
 	}
+	// Durable dispatch proves that an upstream call may have happened. Append the
+	// unknown system-terminal usage fact and its allocation projection in this
+	// same transaction; a projection failure must roll back the status changes.
+	if _, err := a.usage.ledger.RecoverV2Tx(ctx, tx); err != nil {
+		return errUsageLedgerUnavailable
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE accounting_requests SET status='interrupted',finished_at=? WHERE status='pending' AND NOT EXISTS(SELECT 1 FROM background_tasks t WHERE t.request_id=accounting_requests.id AND t.status='queued')`, stamp); err != nil {
 		return errUsageLedgerUnavailable
 	}

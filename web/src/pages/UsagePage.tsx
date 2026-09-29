@@ -66,6 +66,14 @@ export function formatMicrocurrency(value: string, currency: string) {
   return `${whole}${fraction ? `.${fraction}` : ''} ${currency}`
 }
 
+function formatMultiplierPPM(value: string) {
+  if (!/^[1-9]\d*$/.test(value)) return '未知倍率'
+  const padded = value.padStart(7, '0')
+  const whole = padded.slice(0, -6).replace(/^0+(?=\d)/, '')
+  const fraction = padded.slice(-6).replace(/0+$/, '')
+  return `${whole}${fraction ? `.${fraction}` : ''}×`
+}
+
 function dateLabel(value: string | null) {
   if (!value) return '—'
   const parsed = new Date(value)
@@ -87,6 +95,7 @@ export function UsagePage({ csrf }: { csrf: string }) {
   const [selectedRequest, setSelectedRequest] = useState<UsageRequestItem | null>(null)
   const [options, setOptions] = useState<FilterOptions>({ employees: [], models: [], upstreams: [] })
   const [optionsError, setOptionsError] = useState<string | null>(null)
+  const [allocationEnabled, setAllocationEnabled] = useState(false)
   const sequence = useRef(0)
   const controller = useRef<AbortController | null>(null)
   const retryAction = useRef<(() => void) | null>(null)
@@ -100,12 +109,16 @@ export function UsagePage({ csrf }: { csrf: string }) {
     setLoading(true)
     setError(null)
     try {
-      const [nextSummary, nextPage] = await Promise.all([
+      const [nextSummary, nextPage, status] = await Promise.all([
         api.usageSummary(filters, nextController.signal),
         api.usageRequests(filters, undefined, nextController.signal),
+        api.status(nextController.signal).catch(() => null),
       ])
       if (current !== sequence.current) return
+      const allocation = status?.features?.account_group_cost_allocation === true
+      if (allocation && nextSummary.attempts.some((item) => item.known_adjusted_allocation_cost_micro === undefined || item.unknown_adjusted_allocation_attempts === undefined)) throw new Error('invalid allocation usage summary')
       const pinned = { ...filters, from: nextPage.from, to: nextPage.to }
+      setAllocationEnabled(allocation)
       setActive(pinned)
       setSummary(nextSummary)
       setPage(nextPage)
@@ -216,8 +229,8 @@ export function UsagePage({ csrf }: { csrf: string }) {
     </form>
 
     <PageState loading={loading && !summary} error={error && !summary ? error : null} onRetry={() => retryAction.current?.()} />
-    {summary ? <UsageSummaryCards summary={summary} /> : null}
-    <SettlementReports filters={active} />
+    {summary ? <UsageSummaryCards summary={summary} allocationEnabled={allocationEnabled} /> : null}
+    <SettlementReports filters={active} allocationEnabled={allocationEnabled} />
     <section className="content-panel usage-requests" aria-labelledby="usage-requests-title">
       <header className="section-heading"><div><h2 id="usage-requests-title">员工请求</h2><p>{active ? `${dateLabel(active.from)} 至 ${dateLabel(active.to)} · 固定查询窗口` : '正在准备查询窗口…'}</p></div>{loading && summary ? <span className="subtle-loading">正在更新…</span> : null}</header>
       {error && summary ? <div className="inline-error usage-inline-error" role="alert">{error}<button onClick={() => retryAction.current?.()}>重试</button></div> : null}
@@ -227,11 +240,11 @@ export function UsagePage({ csrf }: { csrf: string }) {
     </section>
 
     <PriceCatalog csrf={csrf} upstreams={options.upstreams} />
-    {selectedRequest ? <AttemptDialog request={selectedRequest} onClose={() => setSelectedRequest(null)} /> : null}
+    {selectedRequest ? <AttemptDialog request={selectedRequest} allocationEnabled={allocationEnabled} onClose={() => setSelectedRequest(null)} /> : null}
   </>
 }
 
-function SettlementReports({ filters }: { filters: UsageFilters | null }) {
+function SettlementReports({ filters, allocationEnabled }: { filters: UsageFilters | null; allocationEnabled: boolean }) {
   const [report, setReport] = useState<UsageSettlementReport | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -243,6 +256,7 @@ function SettlementReports({ filters }: { filters: UsageFilters | null }) {
     setLoading(true); setError(null)
     try {
       const next = granularity === 'day' ? await api.usageSettlementDaily(filters, abort.signal) : await api.usageSettlementMonthly(filters, abort.signal)
+      if (allocationEnabled && next.items.some((item) => item.known_adjusted_allocation_cost_micro === undefined || item.unknown_adjusted_allocation_attempts === undefined)) throw new Error('invalid allocation settlement response')
       if (current === sequence.current) setReport(next)
     } catch (caught) {
       if (current === sequence.current && !abort.signal.aborted) setError(messageFor(caught))
@@ -255,14 +269,14 @@ function SettlementReports({ filters }: { filters: UsageFilters | null }) {
     {loading ? <div className="subtle-loading">正在读取对账汇总…</div> : null}
     <FormError error={error} />
     {!loading && !error && report?.items.length === 0 ? <EmptyState title="没有可汇总的终态尝试" body="这不表示用量为零；可能是筛选窗口为空。" /> : null}
-    {report?.items.length ? <div className="table-scroll"><table className="usage-table"><thead><tr><th>期间</th><th>币种</th><th>请求 / 尝试</th><th>内部估算成本</th><th>未知成本</th><th>缺少证据</th><th>修正</th><th>推理 Token</th></tr></thead><tbody>{report.items.map((item) => <tr key={`${item.period_start}:${item.currency}`}><td>{dateLabel(item.period_start)}<small>至 {dateLabel(item.period_end)}</small></td><td>{item.currency}</td><td>{formatDecimalInteger(item.requests)} / {formatDecimalInteger(item.attempts)}</td><td>{item.currency === 'UNKNOWN' ? '不可估算' : formatMicrocurrency(item.known_estimated_cost_micro, item.currency)}</td><td>{formatDecimalInteger(item.unknown_cost_attempts)}</td><td>{formatDecimalInteger(item.missing_evidence_attempts)}</td><td>{formatDecimalInteger(item.corrections)}</td><td>{formatDecimalInteger(item.reasoning_tokens.known_total)}<small>{formatDecimalInteger(item.reasoning_tokens.unknown_attempts)} 次未知</small></td></tr>)}</tbody></table></div> : null}
+    {report?.items.length ? <div className="table-scroll"><table className="usage-table"><thead><tr><th>期间</th><th>币种</th><th>请求 / 尝试</th><th>供应商价格估算成本</th>{allocationEnabled ? <th>内部调整后分摊成本</th> : null}<th>未知成本</th><th>缺少证据</th><th>修正</th><th>推理 Token</th></tr></thead><tbody>{report.items.map((item) => <tr key={`${item.period_start}:${item.currency}`}><td>{dateLabel(item.period_start)}<small>至 {dateLabel(item.period_end)}</small></td><td>{item.currency}</td><td>{formatDecimalInteger(item.requests)} / {formatDecimalInteger(item.attempts)}</td><td>{item.currency === 'UNKNOWN' ? '不可估算' : formatMicrocurrency(item.known_estimated_cost_micro, item.currency)}</td>{allocationEnabled ? <td>{item.currency === 'UNKNOWN' || item.known_adjusted_allocation_cost_micro === undefined ? '不可估算' : formatMicrocurrency(item.known_adjusted_allocation_cost_micro, item.currency)}<small>{formatDecimalInteger(item.unknown_adjusted_allocation_attempts ?? null)} 次未知</small></td> : null}<td>{formatDecimalInteger(item.unknown_cost_attempts)}</td><td>{formatDecimalInteger(item.missing_evidence_attempts)}</td><td>{formatDecimalInteger(item.corrections)}</td><td>{formatDecimalInteger(item.reasoning_tokens.known_total)}<small>{formatDecimalInteger(item.reasoning_tokens.unknown_attempts)} 次未知</small></td></tr>)}</tbody></table></div> : null}
   </section>
 }
 
-function UsageSummaryCards({ summary }: { summary: UsageSummary }) {
+function UsageSummaryCards({ summary, allocationEnabled }: { summary: UsageSummary; allocationEnabled: boolean }) {
   return <section className="usage-summary" aria-label="用量汇总">
     <article className="usage-card usage-card--requests"><span>员工请求</span><strong>{formatDecimalInteger(summary.requests.total)}</strong><div className="status-breakdown">{(Object.keys(statusLabels) as UsageStatus[]).map((status) => <span key={status}>{statusLabels[status]} <b>{formatDecimalInteger(summary.requests[status])}</b></span>)}</div></article>
-    {summary.attempts.map((attempt) => <article className="usage-card" key={attempt.currency}><header><div><span>{attempt.currency === 'UNKNOWN' ? '未配置价格' : `${attempt.currency} 估算成本`}</span><strong>{attempt.currency === 'UNKNOWN' ? '不可估算' : formatMicrocurrency(attempt.known_cost_micro, attempt.currency)}</strong></div><small>{formatDecimalInteger(attempt.unknown_cost_attempts)} 次成本未知</small></header><div className="token-grid"><TokenMetric label="普通输入" counter={attempt.input_tokens} /><TokenMetric label="输出" counter={attempt.output_tokens} /><TokenMetric label="缓存读取" counter={attempt.cache_read_tokens} /><TokenMetric label="缓存写入" counter={attempt.cache_write_tokens} /></div><footer>{formatDecimalInteger(attempt.total)} 次实际尝试 · 不与其他币种相加</footer></article>)}
+    {summary.attempts.map((attempt) => <article className="usage-card" key={attempt.currency}><header><div><span>{attempt.currency === 'UNKNOWN' ? '未配置价格' : `${attempt.currency} 供应商价格估算成本`}</span><strong>{attempt.currency === 'UNKNOWN' ? '不可估算' : formatMicrocurrency(attempt.known_cost_micro, attempt.currency)}</strong></div><small>{formatDecimalInteger(attempt.unknown_cost_attempts)} 次成本未知</small></header>{allocationEnabled ? <div className="usage-allocation-cost"><span>内部调整后分摊成本</span><strong>{attempt.currency === 'UNKNOWN' || attempt.known_adjusted_allocation_cost_micro === undefined ? '不可估算' : formatMicrocurrency(attempt.known_adjusted_allocation_cost_micro, attempt.currency)}</strong><small>{formatDecimalInteger(attempt.unknown_adjusted_allocation_attempts ?? null)} 次未知 · 不进入员工钱包或预算</small></div> : null}<div className="token-grid"><TokenMetric label="普通输入" counter={attempt.input_tokens} /><TokenMetric label="输出" counter={attempt.output_tokens} /><TokenMetric label="缓存读取" counter={attempt.cache_read_tokens} /><TokenMetric label="缓存写入" counter={attempt.cache_write_tokens} /></div><footer>{formatDecimalInteger(attempt.total)} 次实际尝试 · 不与其他币种相加</footer></article>)}
     {summary.attempts.length === 0 ? <article className="usage-card usage-card--empty"><span>实际尝试</span><strong>暂无数据</strong><p>请求可能在上游执行前已失败，或当前窗口为空。</p></article> : null}
   </section>
 }
@@ -276,7 +290,7 @@ function Status({ value }: { value: UsageStatus }) {
   return <span className={`status status--${tone}`}><i />{statusLabels[value]}</span>
 }
 
-function AttemptDialog({ request, onClose }: { request: UsageRequestItem; onClose: () => void }) {
+function AttemptDialog({ request, allocationEnabled, onClose }: { request: UsageRequestItem; allocationEnabled: boolean; onClose: () => void }) {
   const [items, setItems] = useState<UsageAttempt[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -287,6 +301,7 @@ function AttemptDialog({ request, onClose }: { request: UsageRequestItem; onClos
     setLoading(true); setError(null)
     try {
       const result = await api.usageAttempts(request.id, abort.signal)
+      if (allocationEnabled && result.items.some((item) => item.allocation_multiplier_ppm === undefined || item.adjusted_allocation_cost_micro === undefined || item.account_group_id === undefined || item.allocation_multiplier_version === undefined)) throw new Error('invalid allocation attempt response')
       if (current === sequence.current) setItems(result.items)
     } catch (caught) {
       if (current === sequence.current && !abort.signal.aborted) setError(messageFor(caught))
@@ -294,12 +309,12 @@ function AttemptDialog({ request, onClose }: { request: UsageRequestItem; onClos
       if (current === sequence.current) setLoading(false)
     }
     return () => abort.abort()
-  }, [request.id])
+  }, [allocationEnabled, request.id])
   useEffect(() => { void load(); return () => { sequence.current += 1 } }, [load])
   return <Dialog title="实际尝试详情" description={`请求 ${request.id} · ${request.model_id}`} onClose={onClose} wide>
     <PageState loading={loading} error={error} onRetry={() => void load()} />
     {!loading && !error && items.length === 0 ? <EmptyState title="没有上游尝试" body="该请求在实际执行上游前结束。" /> : null}
-    {items.length ? <div className="attempt-list">{items.map((item) => <article key={item.id}><header><div><strong>{item.account_id}</strong><small>{item.dispatch} · {providerLabels[item.provider] ?? item.provider}</small></div><Status value={item.status} /></header><dl><div><dt>普通输入</dt><dd>{formatDecimalInteger(item.input_tokens)}</dd></div><div><dt>输出</dt><dd>{formatDecimalInteger(item.output_tokens)}</dd></div><div><dt>缓存读取</dt><dd>{formatDecimalInteger(item.cache_read_tokens)}</dd></div><div><dt>缓存写入</dt><dd>{formatDecimalInteger(item.cache_write_tokens)}</dd></div><div><dt>估算成本</dt><dd>{item.cost_micro === null || item.currency === null ? '未知' : formatMicrocurrency(item.cost_micro, item.currency)}</dd></div><div><dt>价格版本</dt><dd>{item.price_version ?? '未配置'}</dd></div></dl><footer>{dateLabel(item.started_at)} → {dateLabel(item.finished_at)}</footer></article>)}</div> : null}
+    {items.length ? <div className="attempt-list">{items.map((item) => <article key={item.id}><header><div><strong>{item.account_id}</strong><small>{item.dispatch} · {providerLabels[item.provider] ?? item.provider}</small></div><Status value={item.status} /></header><dl><div><dt>普通输入</dt><dd>{formatDecimalInteger(item.input_tokens)}</dd></div><div><dt>输出</dt><dd>{formatDecimalInteger(item.output_tokens)}</dd></div><div><dt>缓存读取</dt><dd>{formatDecimalInteger(item.cache_read_tokens)}</dd></div><div><dt>缓存写入</dt><dd>{formatDecimalInteger(item.cache_write_tokens)}</dd></div><div><dt>供应商价格估算成本</dt><dd>{item.cost_micro === null || item.currency === null ? '未知' : formatMicrocurrency(item.cost_micro, item.currency)}</dd></div><div><dt>价格版本</dt><dd>{item.price_version ?? '未配置'}</dd></div>{allocationEnabled ? <><div><dt>内部调整后分摊成本</dt><dd>{item.adjusted_allocation_cost_micro == null || item.currency === null ? '未知' : formatMicrocurrency(item.adjusted_allocation_cost_micro, item.currency)}</dd></div><div><dt>账号组 / 倍率</dt><dd>{item.account_group_id ?? '无账号组（内建 1×）'}<small>{item.allocation_multiplier_ppm ? `${formatMultiplierPPM(item.allocation_multiplier_ppm)} · ${item.allocation_multiplier_ppm} ppm` : '旧历史倍率未知'}</small></dd></div><div><dt>倍率版本</dt><dd>{item.allocation_multiplier_version ?? (item.allocation_multiplier_ppm === '1000000' ? '内建 1×' : '未知')}</dd></div></> : null}</dl><footer>{dateLabel(item.started_at)} → {dateLabel(item.finished_at)}</footer></article>)}</div> : null}
     <div className="dialog__actions"><Button variant="secondary" onClick={onClose}>关闭</Button></div>
   </Dialog>
 }

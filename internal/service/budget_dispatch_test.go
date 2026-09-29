@@ -70,6 +70,15 @@ func TestBudgetDispatchPoolFreezesActualModelPrice(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatal("generation repeated")
 	}
+	var allocationGroup, allocationVersion sql.NullString
+	var allocationPPM int64
+	if err := a.store.db.QueryRow(`SELECT s.account_group_id,s.multiplier_version,s.multiplier_ppm
+		FROM accounting_attempt_allocation_snapshots s JOIN accounting_attempts a ON a.id=s.attempt_id`).Scan(&allocationGroup, &allocationVersion, &allocationPPM); err != nil {
+		t.Fatal(err)
+	}
+	if allocationGroup.Valid || allocationVersion.Valid || allocationPPM != accounting.AllocationMultiplierScale {
+		t.Fatalf("budget allocation snapshot group=%v version=%v ppm=%d", allocationGroup, allocationVersion, allocationPPM)
+	}
 }
 
 func newBudgetHTTPFixture(t *testing.T, limit int64) (*App, *httptest.Server, keyView) {

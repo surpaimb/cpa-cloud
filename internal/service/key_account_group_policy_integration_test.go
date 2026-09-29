@@ -370,10 +370,28 @@ func TestKeyAccountGroupMappingTighteningInterruptsBackgroundBeforeDispatch(t *t
 
 func installAccountGroup(t *testing.T, app *App, groupID, channelID string) {
 	t.Helper()
-	if _, err := app.store.db.Exec(`INSERT INTO account_groups(id,name,revision,created_at) VALUES(?,?,1,?)`, groupID, groupID, utcNow()); err != nil {
+	tx, err := app.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.store.db.Exec(`INSERT INTO account_channels(id,name,group_id,revision,created_at) VALUES(?,?,?,1,?)`, channelID, channelID, groupID, utcNow()); err != nil {
+	defer tx.Rollback()
+	createdAt := time.Now().UTC()
+	if _, err := tx.Exec(`INSERT INTO account_groups(id,name,revision,created_at) VALUES(?,?,1,?)`, groupID, groupID, createdAt.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	var allocationTables int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account_group_allocation_versions'`).Scan(&allocationTables); err != nil {
+		t.Fatal(err)
+	}
+	if allocationTables == 1 {
+		if _, err := createDefaultAccountGroupAllocationTx(context.Background(), tx, groupID, 1, createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO account_channels(id,name,group_id,revision,created_at) VALUES(?,?,?,1,?)`, channelID, channelID, groupID, createdAt.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 }

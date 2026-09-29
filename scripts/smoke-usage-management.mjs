@@ -87,22 +87,44 @@ try {
   assert.equal((await admin(paths[0])).items.find(item => item.upstream_model === 'actual-model').version, second.version, 'Old replay rewound current price');
   const changed = { ...firstBody, price: price(3) }; assert.equal((await admin(paths[0], 'POST', changed, 409)).error.code, 'operation_conflict');
   assert.equal((await admin(paths[0], 'POST', priceBody(0, price(1)), 409)).error.code, 'revision_conflict');
+  const group = await admin('/account-groups', 'POST', { name: 'Synthetic allocation group' }, 201);
+  assert.equal(group.allocation.multiplier_ppm, '1000000');
+  const allocationOperation = randomUUID();
+  const allocationBody = { operation_id: allocationOperation, expected_revision: 1, allocation_multiplier_ppm: '1250000' };
+  const allocation = await admin('/account-groups/' + group.id + '/allocation', 'POST', allocationBody);
+  assert.equal(allocation.allocation_multiplier_ppm, '1250000');
+  assert.equal((await admin('/account-groups/' + group.id + '/allocation', 'POST', allocationBody)).version, allocation.version, 'Allocation operation replay changed version');
+  assert.equal((await admin('/account-groups/' + group.id + '/allocation', 'POST', { ...allocationBody, allocation_multiplier_ppm: '1500000' }, 409)).error.code, 'operation_conflict');
+  const channel = await admin('/channels', 'POST', { name: 'Synthetic allocation channel', group_id: group.id }, 201);
+  await admin('/models/public-model/accounts', 'PUT', { expected_revision: 0, items: [{ upstream_id: primary.id, upstream_model: 'actual-model', wire_protocol: 'legacy-native', priority: 10, weight: 1, max_concurrency: 1, channel_id: channel.id }] });
   const secondID = await request();
+  const currentAllocation = await admin('/account-groups/' + group.id + '/allocation', 'POST', { operation_id: randomUUID(), expected_revision: 2, allocation_multiplier_ppm: '2000000' });
   await admin(paths[0], 'POST', priceBody(2, null)); const disabledID = await request();
   await admin(paths[0], 'POST', priceBody(3, price(1))); partialNext = true; const partialID = await request();
   await admin(paths[1], 'POST', priceBody(0, price(3)));
-  await admin('/models/public-model/accounts', 'PUT', { expected_revision: 0, items: [{ upstream_id: primary.id, upstream_model: 'actual-model', priority: 10, weight: 1, max_concurrency: 1 }, { upstream_id: backup.id, upstream_model: 'actual-model', priority: 1, weight: 1, max_concurrency: 1 }] });
+  await admin('/models/public-model/accounts', 'PUT', { expected_revision: 1, items: [{ upstream_id: primary.id, upstream_model: 'actual-model', wire_protocol: 'legacy-native', priority: 10, weight: 1, max_concurrency: 1, channel_id: channel.id }, { upstream_id: backup.id, upstream_model: 'actual-model', wire_protocol: 'legacy-native', priority: 1, weight: 1, max_concurrency: 1 }] });
   await admin('/upstreams/' + primary.id, 'PATCH', { expected_revision: 1, enabled: false }); const backupID = await request(); assert.equal(received.at(-1).account, 'backup');
-  const check = async (id, cost, version, account) => {
+  const check = async (id, cost, version, account, adjusted, expectedGroup, expectedMultiplier, expectedAllocationVersion) => {
     const detail = (await admin('/usage/requests/' + id + '/attempts')).items; assert.equal(detail.length, 1); assert.equal(detail[0].cost_micro, cost); assert.equal(detail[0].account_id, account);
-    if (version !== undefined) assert.equal(detail[0].price_version, version); return detail[0];
+    if (version !== undefined) assert.equal(detail[0].price_version, version);
+    assert.equal(detail[0].adjusted_allocation_cost_micro, adjusted);
+    assert.equal(detail[0].account_group_id, expectedGroup);
+    assert.equal(detail[0].allocation_multiplier_ppm, expectedMultiplier);
+    assert.equal(detail[0].allocation_multiplier_version, expectedAllocationVersion);
+    return detail[0];
   };
-  await check(firstID, '187', first.version, primary.id); await check(secondID, '374', second.version, primary.id); await check(disabledID, null, null, primary.id); await check(partialID, null, undefined, primary.id); await check(backupID, '561', undefined, backup.id);
+  await check(firstID, '187', first.version, primary.id, '187', null, '1000000', null);
+  await check(secondID, '374', second.version, primary.id, '468', group.id, '1250000', allocation.version);
+  await check(disabledID, null, null, primary.id, null, group.id, '2000000', currentAllocation.version);
+  await check(partialID, null, undefined, primary.id, null, group.id, '2000000', currentAllocation.version);
+  await check(backupID, '561', undefined, backup.id, '561', null, '1000000', null);
   const from = new Date(Math.floor(Date.now() / 1000) * 1000 - 3600000).toISOString().replace('.000Z', 'Z'), to = new Date(Math.floor(Date.now() / 1000) * 1000 + 3600000).toISOString().replace('.000Z', 'Z');
   const window = new URLSearchParams({ from, to, employee_id: employee.id }).toString();
   const summary = await admin('/usage/summary?' + window); assert.equal(summary.requests.total, '5'); assert.equal(summary.requests.succeeded, '5');
   const usd = summary.attempts.find(item => item.currency === 'USD'), unknown = summary.attempts.find(item => item.currency === 'UNKNOWN');
   assert.equal(usd.known_cost_micro, '1122'); assert.equal(usd.unknown_cost_attempts, '1'); assert.equal(unknown.unknown_cost_attempts, '1');
+  assert.equal(usd.known_adjusted_allocation_cost_micro, '1216'); assert.equal(usd.unknown_adjusted_allocation_attempts, '1');
+  assert.equal(unknown.known_adjusted_allocation_cost_micro, '0'); assert.equal(unknown.unknown_adjusted_allocation_attempts, '1');
   const filtered = await admin('/usage/summary?' + window + '&upstream_id=' + backup.id); assert.equal(filtered.requests.total, '1'); assert.equal(filtered.attempts[0].known_cost_micro, '561');
   const ids = []; let cursor = null;
   do { const page = await admin('/usage/requests?' + window + '&limit=2' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '')); ids.push(...page.items.map(item => item.id)); cursor = page.next_cursor; } while (cursor);
@@ -112,13 +134,16 @@ try {
   }
   const oldCsrf = csrf; csrf = 'invalid'; await admin(paths[0], 'POST', priceBody(4, price(1)), 403); csrf = oldCsrf;
   await admin('/usage/summary?' + window + '&status=ok', 'GET', undefined, 400);
-  await stop(); await start(); await check(firstID, '187', first.version, primary.id); await check(secondID, '374', second.version, primary.id);
+  await stop(); await start();
+  assert.equal((await admin('/system/status')).features.account_group_cost_allocation, true);
+  await check(firstID, '187', first.version, primary.id, '187', null, '1000000', null);
+  await check(secondID, '374', second.version, primary.id, '468', group.id, '1250000', allocation.version);
   assert.equal((await admin('/usage/summary?' + window)).requests.total, '5');
   await admin('/keys/' + key.id + '/revoke', 'POST', {});
   const revoked = await fetch(origin + '/v1/chat/completions', { method: 'POST', headers: { Authorization: 'Bearer ' + key.key, 'Content-Type': 'application/json' }, body: '{"model":"public-model","messages":[]}' }); assert.equal(revoked.status, 401); await revoked.text(); assert.equal(received.length, 5);
   assert.deepEqual(mockErrors, []); await stop(); noSecrets(logs);
   for (const entry of await readdir(directory, { withFileTypes: true })) if (entry.isFile()) noSecrets(await readFile(path.join(directory, entry.name)));
-  console.log('PASS: price versions/idempotency/CAS, in-flight snapshot, actual pool account/model, unknown cost, summary/filter/pagination, admin isolation/CSRF, restart, revocation, metadata-only persistence');
+  console.log('PASS: price and account-group allocation versions/idempotency/CAS, in-flight frozen snapshots, actual pool account/model/group, unknown cost, raw/adjusted summary, admin isolation/CSRF, restart, revocation, metadata-only persistence');
 } finally {
   release?.(); await stop(); mock.closeAllConnections(); if (mock.listening) await new Promise(resolve => mock.close(resolve));
   const resolved = path.resolve(directory); assert.ok(path.dirname(resolved) === path.resolve(os.tmpdir()) && path.basename(resolved).startsWith('cpac-usage-')); await rm(resolved, { recursive: true, force: true });

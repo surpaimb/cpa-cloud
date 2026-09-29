@@ -363,6 +363,196 @@ func TestAccountingV2StrictMigrationRollbackAndRetry(t *testing.T) {
 	}
 }
 
+func TestAccountingProtocolCostConstraintMigrationPreservesFactsAndForeignKeys(t *testing.T) {
+	db, ledger := openTestLedger(t, filepath.Join(t.TempDir(), "protocol-cost-migration.db"))
+	defer db.Close()
+	ctx := context.Background()
+	if err := ledger.MigrateV2(ctx); err != nil {
+		t.Fatal(err)
+	}
+	base, _ := seedAccountingV2FinishedAttempt(t, ledger, "cost-migration")
+	downgradeAccountingCostConstraints(t, db)
+	for _, statement := range []string{
+		`CREATE TABLE synthetic_attempt_cost_child(attempt_id TEXT PRIMARY KEY REFERENCES accounting_attempts(id))`,
+		`INSERT INTO synthetic_attempt_cost_child VALUES('attempt-cost-migration')`,
+		`CREATE TABLE synthetic_event_cost_child(event_id TEXT PRIMARY KEY REFERENCES accounting_usage_events(id))`,
+		`INSERT INTO synthetic_event_cost_child VALUES('` + base.ID + `')`,
+		`CREATE TABLE accounting_attempts_cost_migration(marker TEXT)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ledger.Migrate(ctx); err == nil {
+		t.Fatal("attempt cost migration accepted a reserved-object collision")
+	}
+	assertForeignKeysEnabled(t, db)
+	assertSchemaContains(t, db, "accounting_attempts", accountingAttemptLegacyCostCheck, true)
+	if _, err := db.Exec(`DROP TABLE accounting_attempts_cost_migration`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Migrate(ctx); err != nil {
+		t.Fatalf("attempt cost migration: %v", err)
+	}
+	assertSchemaContains(t, db, "accounting_attempts", accountingAttemptCurrentCostCheck, true)
+	if _, err := db.Exec(`CREATE TABLE accounting_usage_events_cost_migration(marker TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.MigrateV2(ctx); err == nil {
+		t.Fatal("usage event cost migration accepted a reserved-object collision")
+	}
+	assertForeignKeysEnabled(t, db)
+	assertSchemaContains(t, db, "accounting_usage_events", accountingUsageEventLegacyCostCheck, true)
+	if _, err := db.Exec(`DROP TABLE accounting_usage_events_cost_migration`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.MigrateV2(ctx); err != nil {
+		t.Fatalf("usage event cost migration: %v", err)
+	}
+	if err := ledger.Migrate(ctx); err != nil {
+		t.Fatalf("attempt migration restart: %v", err)
+	}
+	if err := ledger.MigrateV2(ctx); err != nil {
+		t.Fatalf("usage event migration restart: %v", err)
+	}
+	assertForeignKeysEnabled(t, db)
+	assertSchemaContains(t, db, "accounting_usage_events", accountingUsageEventCurrentCostCheck, true)
+	var preservedAttempt, preservedEvent int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM synthetic_attempt_cost_child WHERE attempt_id='attempt-cost-migration'`).Scan(&preservedAttempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM synthetic_event_cost_child WHERE event_id=?`, base.ID).Scan(&preservedEvent); err != nil {
+		t.Fatal(err)
+	}
+	if preservedAttempt != 1 || preservedEvent != 1 {
+		t.Fatalf("preserved child facts=%d/%d", preservedAttempt, preservedEvent)
+	}
+	violations, err := db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if violations.Next() {
+		violations.Close()
+		t.Fatal("cost migration left a foreign key violation")
+	}
+	if err := violations.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	started := testStart.UTC().Add(time.Hour)
+	request := RequestStart{ID: "request-embedding-cost", EmployeeID: "employee-v2", KeyID: "key-v2", ModelID: "embedding-model", Provider: ProviderOpenAICompatible, StartedAt: started}
+	price := PriceSnapshot{Version: "embedding-price", Currency: "EUR", InputPerMillionMicro: 3_000_000, OutputPerMillionMicro: 9_000_000, CacheReadPerMillionMicro: 9_000_000, CacheWritePerMillionMicro: 9_000_000}
+	attempt := AttemptStart{ID: "attempt-embedding-cost", RequestID: request.ID, AccountID: "embedding-account", Provider: request.Provider, Dispatch: DispatchPrimary, StartedAt: started, Price: &price, Protocol: ProtocolOpenAIEmbeddings, EffectiveModel: "provider-embedding", Evidence: EvidenceProviderResponse}
+	if err := ledger.BeginRequest(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.BeginAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.MarkAttemptDispatched(ctx, AttemptDispatch{ID: attempt.ID, OperationID: "embedding-cost-dispatch", DispatchedAt: started.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	input := int64(2)
+	if err := ledger.FinishAttempt(ctx, AttemptFinish{ID: attempt.ID, Status: StatusSucceeded, FinishedAt: started.Add(2 * time.Second), Usage: Usage{InputTokens: &input}, ReliableUsage: true}); err != nil {
+		t.Fatal(err)
+	}
+	var attemptCost, eventCost int64
+	var output, cacheRead, cacheWrite sql.NullInt64
+	if err := db.QueryRow(`SELECT a.cost_micro,e.estimated_cost_micro,a.output_tokens,a.cache_read_tokens,a.cache_write_tokens FROM accounting_attempts a JOIN accounting_usage_events e ON e.attempt_id=a.id WHERE a.id=?`, attempt.ID).Scan(&attemptCost, &eventCost, &output, &cacheRead, &cacheWrite); err != nil {
+		t.Fatal(err)
+	}
+	if attemptCost != 6 || eventCost != 6 || output.Valid || cacheRead.Valid || cacheWrite.Valid {
+		t.Fatalf("embedding migrated cost=%d/%d buckets=%v/%v/%v", attemptCost, eventCost, output, cacheRead, cacheWrite)
+	}
+	var eventID string
+	if err := db.QueryRow(`SELECT id FROM accounting_usage_events WHERE attempt_id=?`, attempt.ID).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+	delta, costDelta := int64(1), int64(3)
+	if err := ledger.AppendCorrection(ctx, Correction{ID: "embedding-input-correction", AttemptID: attempt.ID, TargetEventID: eventID, OperationID: "embedding-input-correction-operation", Actor: "embedding-admin", Reason: CorrectionAdminReconcile, CorrectedAt: started.Add(3 * time.Second), Currency: "EUR", InputTokens: CorrectionValue{Delta: &delta}, EstimatedCostDeltaMicro: &costDelta}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := ledger.AccountingV2Export(ctx, AccountingV2Filters{From: started.Add(-time.Minute), To: started.Add(time.Minute)}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].EstimatedCostMicro == nil || *rows[0].EstimatedCostMicro != 9 || rows[0].OutputTokens != nil {
+		t.Fatalf("embedding corrected export=%+v", rows)
+	}
+}
+
+func downgradeAccountingCostConstraints(t *testing.T, db *sql.DB) {
+	t.Helper()
+	currentAttempt := `cost_micro IS NULL
+				OR
+				(price_version IS NOT NULL AND input_tokens IS NOT NULL)`
+	legacyAttempt := `(price_version IS NOT NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL AND cache_write_tokens IS NOT NULL AND cost_micro IS NOT NULL)
+				OR
+				((price_version IS NULL OR input_tokens IS NULL OR output_tokens IS NULL OR cache_read_tokens IS NULL OR cache_write_tokens IS NULL) AND cost_micro IS NULL)`
+	legacyAttemptDDL := strings.Replace(accountingAttemptsColumnsDDL, currentAttempt, legacyAttempt, 1)
+	currentEvent := `CHECK(estimated_cost_micro IS NULL OR input_tokens IS NOT NULL)`
+	legacyEvent := `CHECK(estimated_cost_micro IS NULL OR (input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL AND cache_write_tokens IS NOT NULL))`
+	legacyEventDDL := strings.Replace(accountingUsageEventsColumnsDDL, currentEvent, legacyEvent, 1)
+	if legacyAttemptDDL == accountingAttemptsColumnsDDL || legacyEventDDL == accountingUsageEventsColumnsDDL {
+		t.Fatal("test did not locate current cost constraints")
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`DROP TRIGGER accounting_usage_events_no_update`,
+		`DROP TRIGGER accounting_usage_events_no_delete`,
+		`CREATE TABLE accounting_usage_events_legacy ` + legacyEventDDL,
+		`INSERT INTO accounting_usage_events_legacy SELECT * FROM accounting_usage_events`,
+		`DROP TABLE accounting_usage_events`,
+		`ALTER TABLE accounting_usage_events_legacy RENAME TO accounting_usage_events`,
+		`CREATE INDEX accounting_usage_events_finished_idx ON accounting_usage_events(finished_at,id)`,
+		`CREATE TRIGGER accounting_usage_events_no_update BEFORE UPDATE ON accounting_usage_events BEGIN SELECT RAISE(ABORT,'accounting v2 facts are immutable'); END`,
+		`CREATE TRIGGER accounting_usage_events_no_delete BEFORE DELETE ON accounting_usage_events BEGIN SELECT RAISE(ABORT,'accounting v2 facts are immutable'); END`,
+		`CREATE TABLE accounting_attempts_legacy ` + legacyAttemptDDL,
+		`INSERT INTO accounting_attempts_legacy SELECT * FROM accounting_attempts`,
+		`DROP TABLE accounting_attempts`,
+		`ALTER TABLE accounting_attempts_legacy RENAME TO accounting_attempts`,
+		`CREATE INDEX accounting_attempts_request_idx ON accounting_attempts(request_id, started_at)`,
+		`CREATE INDEX accounting_attempts_account_idx ON accounting_attempts(account_id, started_at)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertSchemaContains(t *testing.T, db *sql.DB, table, fragment string, want bool) {
+	t.Helper()
+	var definition string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&definition); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Contains(normalizePriceSQL(definition), fragment); got != want {
+		t.Fatalf("schema %s fragment present=%v, want %v: %s", table, got, want, definition)
+	}
+}
+
+func assertForeignKeysEnabled(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var enabled int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&enabled); err != nil || enabled != 1 {
+		t.Fatalf("foreign_keys=%d err=%v", enabled, err)
+	}
+}
+
 func TestAccountingV2StrictSchemaRejectsFakeIndexTriggerAndMissingCheck(t *testing.T) {
 	for _, testCase := range []struct {
 		name   string

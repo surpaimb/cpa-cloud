@@ -3,6 +3,7 @@ package service
 // Synthetic pending records exercise startup transactions without an upstream.
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
@@ -37,7 +38,13 @@ func seedJointRecovery(t *testing.T) (*App, time.Time) {
 	if err := a.usage.ledger.BeginRequestTx(ctx, tx, accounting.RequestStart{ID: "joint-recovery", EmployeeID: f.auth1.EmployeeID, KeyID: f.auth1.KeyID, ModelID: "synthetic-model", Provider: accounting.ProviderOpenAICompatible, StartedAt: at}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.usage.ledger.BeginAttemptTx(ctx, tx, accounting.AttemptStart{ID: "joint-recovery:1", RequestID: "joint-recovery", AccountID: "synthetic-account", Provider: accounting.ProviderOpenAICompatible, Dispatch: accounting.DispatchPrimary, StartedAt: at.Add(time.Second)}); err != nil {
+	if err := a.usage.ledger.BeginAttemptTx(ctx, tx, accounting.AttemptStart{ID: "joint-recovery:1", RequestID: "joint-recovery", AccountID: "synthetic-account", Provider: accounting.ProviderOpenAICompatible, Dispatch: accounting.DispatchPrimary, StartedAt: at.Add(time.Second), Protocol: accounting.ProtocolOpenAIChatCompletions, EffectiveModel: "synthetic-model", Evidence: accounting.EvidenceProviderResponse}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO accounting_attempt_allocation_snapshots(attempt_id,multiplier_ppm) VALUES('joint-recovery:1',?)`, accounting.AllocationMultiplierScale); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.usage.ledger.MarkAttemptDispatchedTx(ctx, tx, accounting.AttemptDispatch{ID: "joint-recovery:1", OperationID: "joint-recovery-dispatch", DispatchedAt: at.Add(time.Second)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO model_requests(id,employee_id,key_id,model_id,started_at,outcome) VALUES('joint-recovery',?,?,'synthetic-model',?,'running')`, f.auth1.EmployeeID, f.auth1.KeyID, at.Format(time.RFC3339Nano)); err != nil {
@@ -77,6 +84,7 @@ func TestRequestLedgerJointRecoveryRollbackRetryAndClockRollback(t *testing.T) {
 				t.Fatal("accepted partial recovery")
 			}
 			assertJointRecoveryStatuses(t, a, "pending")
+			assertJointRecoveryEventCounts(t, a, 0, 0)
 			if _, err := a.store.db.Exec(`DROP TRIGGER reject_joint_recovery`); err != nil {
 				t.Fatal(err)
 			}
@@ -86,6 +94,7 @@ func TestRequestLedgerJointRecoveryRollbackRetryAndClockRollback(t *testing.T) {
 				}
 				assertJointRecoveryStatuses(t, a, "interrupted")
 			}
+			assertJointRecoveryEventCounts(t, a, 1, 1)
 			var finished string
 			var input *int64
 			if err := a.store.db.QueryRow(`SELECT finished_at,input_tokens FROM accounting_attempts WHERE id='joint-recovery:1'`).Scan(&finished, &input); err != nil {
@@ -100,6 +109,43 @@ func TestRequestLedgerJointRecoveryRollbackRetryAndClockRollback(t *testing.T) {
 				t.Fatal("recovery discarded original lease")
 			}
 		})
+	}
+}
+
+func TestRequestLedgerRecoveryRollsBackBaseEventWhenAllocationProjectionFails(t *testing.T) {
+	a, _ := seedJointRecovery(t)
+	if _, err := a.store.db.Exec(`CREATE TRIGGER reject_recovery_allocation BEFORE INSERT ON accounting_usage_allocation_events BEGIN SELECT RAISE(ABORT,'synthetic allocation rejection'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.recoverRequestLedgers(context.Background(), a.governance.core); err == nil {
+		t.Fatal("accepted recovery without allocation projection")
+	}
+	assertJointRecoveryStatuses(t, a, "pending")
+	assertJointRecoveryEventCounts(t, a, 0, 0)
+	if _, err := a.store.db.Exec(`DROP TRIGGER reject_recovery_allocation`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := a.recoverRequestLedgers(context.Background(), a.governance.core); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertJointRecoveryStatuses(t, a, "interrupted")
+	assertJointRecoveryEventCounts(t, a, 1, 1)
+}
+
+func assertJointRecoveryEventCounts(t *testing.T, a *App, wantBase, wantAllocation int) {
+	t.Helper()
+	var base, allocation int
+	var evidence sql.NullString
+	if err := a.store.db.QueryRow(`SELECT COUNT(*),MAX(evidence) FROM accounting_usage_events WHERE attempt_id='joint-recovery:1'`).Scan(&base, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_usage_allocation_events WHERE attempt_id='joint-recovery:1'`).Scan(&allocation); err != nil {
+		t.Fatal(err)
+	}
+	if base != wantBase || allocation != wantAllocation || wantBase == 1 && (!evidence.Valid || evidence.String != string(accounting.EvidenceSystemTerminal)) {
+		t.Fatalf("recovery facts base=%d allocation=%d evidence=%v, want %d/%d/system_terminal", base, allocation, evidence, wantBase, wantAllocation)
 	}
 }
 
@@ -124,4 +170,5 @@ func TestRequestLedgerRecoveryOwnedByAppStartup(t *testing.T) {
 	}
 	defer restarted.Close()
 	assertJointRecoveryStatuses(t, restarted, "interrupted")
+	assertJointRecoveryEventCounts(t, restarted, 1, 1)
 }

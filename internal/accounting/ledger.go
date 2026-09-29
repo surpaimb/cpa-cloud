@@ -17,6 +17,10 @@ var (
 	ErrConflict = errors.New("accounting conflict")
 	ErrInvalid  = errors.New("invalid accounting metadata")
 	ErrNotFound = errors.New("accounting record not found")
+	// ErrAllocationUnavailable indicates that the composed allocation
+	// projection is absent or internally incomplete. Service callers map it to
+	// a fixed storage-unavailable response rather than a client input error.
+	ErrAllocationUnavailable = errors.New("accounting allocation projection unavailable")
 )
 
 type Provider string
@@ -166,35 +170,11 @@ type AttemptSummary struct {
 const UnknownCurrency = "UNKNOWN"
 
 type Ledger struct {
-	db *sql.DB
+	db                          *sql.DB
+	requireAllocationProjection bool
 }
 
-func NewLedger(db *sql.DB) *Ledger {
-	return &Ledger{db: db}
-}
-
-func (l *Ledger) Migrate(ctx context.Context) error {
-	if l == nil || l.db == nil {
-		return ErrInvalid
-	}
-	tx, err := l.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS accounting_requests (
-			id TEXT PRIMARY KEY,
-			employee_id TEXT NOT NULL,
-			key_id TEXT NOT NULL,
-			model_id TEXT NOT NULL,
-			provider TEXT NOT NULL CHECK(provider IN ('openai','openai-compatible','anthropic','gemini','codex')),
-			started_at TEXT NOT NULL,
-			finished_at TEXT,
-			status TEXT NOT NULL CHECK(status IN ('pending','succeeded','failed','cancelled','interrupted')),
-			CHECK((status='pending' AND finished_at IS NULL) OR (status<>'pending' AND finished_at IS NOT NULL))
-		)`,
-		`CREATE TABLE IF NOT EXISTS accounting_attempts (
+const accountingAttemptsColumnsDDL = `(
 			id TEXT PRIMARY KEY,
 			request_id TEXT NOT NULL REFERENCES accounting_requests(id),
 			account_id TEXT NOT NULL,
@@ -225,11 +205,53 @@ func (l *Ledger) Migrate(ctx context.Context) error {
 				(status<>'pending' AND finished_at IS NOT NULL)
 			),
 			CHECK(
-				(price_version IS NOT NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL AND cache_write_tokens IS NOT NULL AND cost_micro IS NOT NULL)
+				cost_micro IS NULL
 				OR
-				((price_version IS NULL OR input_tokens IS NULL OR output_tokens IS NULL OR cache_read_tokens IS NULL OR cache_write_tokens IS NULL) AND cost_micro IS NULL)
+				(price_version IS NOT NULL AND input_tokens IS NOT NULL)
 			)
+		)`
+
+const (
+	accountingAttemptLegacyCostCheck  = "check((price_versionisnotnullandinput_tokensisnotnullandoutput_tokensisnotnullandcache_read_tokensisnotnullandcache_write_tokensisnotnullandcost_microisnotnull)or((price_versionisnullorinput_tokensisnulloroutput_tokensisnullorcache_read_tokensisnullorcache_write_tokensisnull)andcost_microisnull))"
+	accountingAttemptCurrentCostCheck = "check(cost_microisnullor(price_versionisnotnullandinput_tokensisnotnull))"
+)
+
+func NewLedger(db *sql.DB) *Ledger {
+	return &Ledger{db: db}
+}
+
+// NewRequiredAllocationLedger composes the accounting ledger inside a fully
+// migrated service. Unlike the package-isolated ledger, it fails closed when
+// the account-group allocation projection is absent or incomplete.
+func NewRequiredAllocationLedger(db *sql.DB) *Ledger {
+	return &Ledger{db: db, requireAllocationProjection: true}
+}
+
+func (l *Ledger) Migrate(ctx context.Context) error {
+	if l == nil || l.db == nil {
+		return ErrInvalid
+	}
+	if err := l.migrateAccountingAttemptCostConstraint(ctx); err != nil {
+		return err
+	}
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS accounting_requests (
+			id TEXT PRIMARY KEY,
+			employee_id TEXT NOT NULL,
+			key_id TEXT NOT NULL,
+			model_id TEXT NOT NULL,
+			provider TEXT NOT NULL CHECK(provider IN ('openai','openai-compatible','anthropic','gemini','codex')),
+			started_at TEXT NOT NULL,
+			finished_at TEXT,
+			status TEXT NOT NULL CHECK(status IN ('pending','succeeded','failed','cancelled','interrupted')),
+			CHECK((status='pending' AND finished_at IS NULL) OR (status<>'pending' AND finished_at IS NOT NULL))
 		)`,
+		`CREATE TABLE IF NOT EXISTS accounting_attempts ` + accountingAttemptsColumnsDDL,
 		`CREATE INDEX IF NOT EXISTS accounting_requests_employee_idx ON accounting_requests(employee_id, started_at)`,
 		`CREATE INDEX IF NOT EXISTS accounting_requests_model_idx ON accounting_requests(model_id, started_at)`,
 		`CREATE INDEX IF NOT EXISTS accounting_attempts_request_idx ON accounting_attempts(request_id, started_at)`,
@@ -405,7 +427,7 @@ func (l *Ledger) FinishAttempt(ctx context.Context, input AttemptFinish) error {
 		return err
 	}
 	defer tx.Rollback()
-	if err := finishAttemptTx(ctx, tx, input, finishedAt); err != nil {
+	if err := l.finishAttemptTx(ctx, tx, input, finishedAt); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -421,10 +443,10 @@ func (l *Ledger) FinishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptF
 	if err != nil {
 		return err
 	}
-	return finishAttemptTx(ctx, tx, input, finishedAt)
+	return l.finishAttemptTx(ctx, tx, input, finishedAt)
 }
 
-func finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finishedAt string) error {
+func (l *Ledger) finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finishedAt string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE accounting_attempts SET status=status WHERE id=?`, input.ID); err != nil {
 		return err
 	}
@@ -435,7 +457,15 @@ func finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finis
 	if err := requireNotBefore(input.FinishedAt, row.startedAt); err != nil {
 		return err
 	}
-	cost, err := calculateCost(input.Usage, row.price)
+	protocol := UsageProtocol("")
+	if input.ReliableUsage {
+		if err := tx.QueryRowContext(ctx, `SELECT protocol FROM accounting_attempt_contexts WHERE attempt_id=?`, input.ID).Scan(&protocol); errors.Is(err, sql.ErrNoRows) {
+			return ErrInvalid
+		} else if err != nil {
+			return err
+		}
+	}
+	cost, err := calculateCost(protocol, input.Usage, row.price)
 	if err != nil {
 		return err
 	}
@@ -444,7 +474,7 @@ func finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finis
 			return fmt.Errorf("%w: attempt finish differs", ErrConflict)
 		}
 		if input.ReliableUsage {
-			return recordUsageBaseTx(ctx, tx, input, cost)
+			return l.recordUsageBaseTx(ctx, tx, input, cost)
 		}
 		return nil
 	}
@@ -463,7 +493,7 @@ func finishAttemptTx(ctx context.Context, tx *sql.Tx, input AttemptFinish, finis
 		return fmt.Errorf("%w: attempt was already finished", ErrConflict)
 	}
 	if input.ReliableUsage {
-		return recordUsageBaseTx(ctx, tx, input, cost)
+		return l.recordUsageBaseTx(ctx, tx, input, cost)
 	}
 	return nil
 }
@@ -664,6 +694,10 @@ type ledgerColumn struct {
 }
 
 func validateLedgerSchema(ctx context.Context, tx *sql.Tx) error {
+	return validateLedgerSchemaWithAttemptCostCheck(ctx, tx, accountingAttemptCurrentCostCheck)
+}
+
+func validateLedgerSchemaWithAttemptCostCheck(ctx context.Context, tx *sql.Tx, costCheck string) error {
 	requestColumns := []ledgerColumn{
 		{name: "id", kind: "TEXT", primary: true},
 		{name: "employee_id", kind: "TEXT", notNull: true},
@@ -719,7 +753,7 @@ func validateLedgerSchema(ctx context.Context, tx *sql.Tx) error {
 		"check(cost_microisnullorcost_micro>=0)",
 		"check((price_versionisnullandcurrencyisnullandinput_rateisnullandoutput_rateisnullandcache_read_rateisnullandcache_write_rateisnull)or(price_versionisnotnullandcurrencyisnotnullandinput_rateisnotnullandoutput_rateisnotnullandcache_read_rateisnotnullandcache_write_rateisnotnull))",
 		"check((status='pending'andfinished_atisnullandinput_tokensisnullandoutput_tokensisnullandcache_read_tokensisnullandcache_write_tokensisnullandcost_microisnull)or(status<>'pending'andfinished_atisnotnull))",
-		"check((price_versionisnotnullandinput_tokensisnotnullandoutput_tokensisnotnullandcache_read_tokensisnotnullandcache_write_tokensisnotnullandcost_microisnotnull)or((price_versionisnullorinput_tokensisnulloroutput_tokensisnullorcache_read_tokensisnullorcache_write_tokensisnull)andcost_microisnull))",
+		costCheck,
 	}
 	if err := validateLedgerTable(ctx, tx, "accounting_attempts", attemptColumns, attemptChecks); err != nil {
 		return err
@@ -748,6 +782,120 @@ func validateLedgerSchema(ctx context.Context, tx *sql.Tx) error {
 		return errors.New("invalid accounting attempt foreign key")
 	}
 	return nil
+}
+
+func accountingAttemptNeedsCostMigration(ctx context.Context, query baseEventScanner) (bool, error) {
+	var definition string
+	if err := query.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='accounting_attempts'`).Scan(&definition); errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	return strings.Contains(normalizePriceSQL(definition), accountingAttemptLegacyCostCheck), nil
+}
+
+func (l *Ledger) migrateAccountingAttemptCostConstraint(ctx context.Context) error {
+	needsMigration, err := accountingAttemptNeedsCostMigration(ctx, l.db)
+	if err != nil || !needsMigration {
+		return err
+	}
+	conn, err := l.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	foreignKeysRestored := false
+	defer func() {
+		if !foreignKeysRestored {
+			_ = restoreAccountingForeignKeys(conn)
+		}
+	}()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		if restoreErr := restoreAccountingForeignKeys(conn); restoreErr != nil {
+			return fmt.Errorf("%v; restore accounting foreign keys: %w", err, restoreErr)
+		}
+		foreignKeysRestored = true
+		return err
+	}
+	fail := func(cause error) error {
+		_ = tx.Rollback()
+		if restoreErr := restoreAccountingForeignKeys(conn); restoreErr != nil {
+			return fmt.Errorf("%v; restore accounting foreign keys: %w", cause, restoreErr)
+		}
+		foreignKeysRestored = true
+		return cause
+	}
+	if err := validateLedgerSchemaWithAttemptCostCheck(ctx, tx, accountingAttemptLegacyCostCheck); err != nil {
+		return fail(err)
+	}
+	if err := migrateAccountingAttemptCostConstraintTx(ctx, tx); err != nil {
+		return fail(err)
+	}
+	if err := validateLedgerSchema(ctx, tx); err != nil {
+		return fail(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fail(err)
+	}
+	if err := restoreAccountingForeignKeys(conn); err != nil {
+		return err
+	}
+	foreignKeysRestored = true
+	return nil
+}
+
+func restoreAccountingForeignKeys(conn *sql.Conn) error {
+	cleanupContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := conn.ExecContext(cleanupContext, `PRAGMA foreign_keys=ON`); err != nil {
+		return err
+	}
+	var enabled int
+	if err := conn.QueryRowContext(cleanupContext, `PRAGMA foreign_keys`).Scan(&enabled); err != nil {
+		return err
+	}
+	if enabled != 1 {
+		return errors.New("accounting foreign key enforcement was not restored")
+	}
+	return nil
+}
+
+func migrateAccountingAttemptCostConstraintTx(ctx context.Context, tx *sql.Tx) error {
+	const temporary = "accounting_attempts_cost_migration"
+	var conflicts int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name=?`, temporary).Scan(&conflicts); err != nil {
+		return err
+	}
+	if conflicts != 0 {
+		return errors.New("accounting attempt cost migration object exists")
+	}
+	statements := []string{
+		`CREATE TABLE ` + temporary + ` ` + accountingAttemptsColumnsDDL,
+		`INSERT INTO ` + temporary + `(id,request_id,account_id,provider,dispatch,started_at,finished_at,status,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,price_version,currency,input_rate,output_rate,cache_read_rate,cache_write_rate,cost_micro)
+			SELECT id,request_id,account_id,provider,dispatch,started_at,finished_at,status,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,price_version,currency,input_rate,output_rate,cache_read_rate,cache_write_rate,cost_micro FROM accounting_attempts`,
+		`DROP TABLE accounting_attempts`,
+		`ALTER TABLE ` + temporary + ` RENAME TO accounting_attempts`,
+		`CREATE INDEX accounting_attempts_request_idx ON accounting_attempts(request_id, started_at)`,
+		`CREATE INDEX accounting_attempts_account_idx ON accounting_attempts(account_id, started_at)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate accounting attempt cost constraint: %w", err)
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("accounting attempt cost migration foreign key violation")
+	}
+	return rows.Err()
 }
 
 func validateLedgerTable(ctx context.Context, tx *sql.Tx, table string, expected []ledgerColumn, checks []string) error {
@@ -1030,9 +1178,22 @@ func loadAttemptFinish(ctx context.Context, tx *sql.Tx, id string) (storedAttemp
 	return row, nil
 }
 
-func calculateCost(usage Usage, price *PriceSnapshot) (*int64, error) {
+func calculateCost(protocol UsageProtocol, usage Usage, price *PriceSnapshot) (*int64, error) {
 	if price == nil {
 		return nil, nil
+	}
+	if protocol == ProtocolOpenAIEmbeddings {
+		if usage.InputTokens == nil {
+			return nil, nil
+		}
+		cost, err := calculateKnownCost(
+			[4]int64{*usage.InputTokens, 0, 0, 0},
+			[4]int64{price.InputPerMillionMicro, price.OutputPerMillionMicro, price.CacheReadPerMillionMicro, price.CacheWritePerMillionMicro},
+		)
+		if err != nil {
+			return nil, err
+		}
+		return &cost, nil
 	}
 	values := []*int64{usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens}
 	for _, value := range values {

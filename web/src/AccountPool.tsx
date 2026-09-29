@@ -17,6 +17,22 @@ function validText(value: string, maxBytes: number) {
   return value.length > 0 && value === value.trim() && encoder.encode(value).length <= maxBytes && !/\p{Cc}/u.test(value)
 }
 
+function validMultiplierPPM(value: unknown): value is string {
+  return typeof value === 'string' && /^[1-9]\d*$/.test(value) && (value.length < 10 || value.length === 10 && value <= '1000000000')
+}
+
+function multiplierLabel(value: string) {
+  if (!validMultiplierPPM(value)) return '无效倍率'
+  const padded = value.padStart(7, '0')
+  const whole = padded.slice(0, -6).replace(/^0+(?=\d)/, '')
+  const fraction = padded.slice(-6).replace(/0+$/, '')
+  return `${whole}${fraction ? `.${fraction}` : ''}×`
+}
+
+function validAllocationGroup(group: AccountGroup) {
+  return Boolean(group.allocation && typeof group.allocation.version === 'string' && group.allocation.version.length > 0 && validMultiplierPPM(group.allocation.multiplier_ppm) && typeof group.allocation.created_at === 'string' && !Number.isNaN(Date.parse(group.allocation.created_at)))
+}
+
 function directoryError(error: unknown, action: 'create' | 'rename') {
   if (error instanceof ApiError) {
     if (error.status === 409 || error.code === 'revision_conflict') return action === 'rename' ? '分组已被其他管理员修改。当前输入已保留，请重新加载列表后再编辑。' : '名称或数据发生冲突，请重新加载列表后确认。'
@@ -43,7 +59,7 @@ function isConflict(error: unknown) {
   return error instanceof ApiError && (error.status === 409 || error.code === 'revision_conflict')
 }
 
-export function AccountPoolDirectory({ csrf, onClose }: { csrf: string; onClose: () => void }) {
+export function AccountPoolDirectory({ csrf, allocationEnabled = false, onClose }: { csrf: string; allocationEnabled?: boolean; onClose: () => void }) {
   const [groups, setGroups] = useState<AccountGroup[]>([])
   const [channels, setChannels] = useState<AccountChannel[]>([])
   const [loading, setLoading] = useState(true)
@@ -52,6 +68,7 @@ export function AccountPoolDirectory({ csrf, onClose }: { csrf: string; onClose:
   const [channelName, setChannelName] = useState('')
   const [channelGroup, setChannelGroup] = useState('')
   const [renames, setRenames] = useState<Record<string, string>>({})
+  const [multipliers, setMultipliers] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [needsReload, setNeedsReload] = useState(false)
@@ -71,9 +88,11 @@ export function AccountPoolDirectory({ csrf, onClose }: { csrf: string; onClose:
         api.accountChannels(controller.signal),
       ])
       if (requestVersion.current !== version) return
+      if (allocationEnabled && nextGroups.items.some((item) => !validAllocationGroup(item))) throw new Error('invalid account group allocation response')
       setGroups(nextGroups.items)
       setChannels(nextChannels.items)
       setRenames(Object.fromEntries(nextGroups.items.map((item) => [item.id, item.name])))
+      setMultipliers(Object.fromEntries(nextGroups.items.map((item) => [item.id, item.allocation?.multiplier_ppm ?? '1000000'])))
       setNeedsReload(false)
       setError(null)
     } catch (caught) {
@@ -83,7 +102,7 @@ export function AccountPoolDirectory({ csrf, onClose }: { csrf: string; onClose:
     } finally {
       if (requestVersion.current === version) setLoading(false)
     }
-  }, [])
+  }, [allocationEnabled])
 
   useEffect(() => {
     void reload()
@@ -97,8 +116,12 @@ export function AccountPoolDirectory({ csrf, onClose }: { csrf: string; onClose:
     setBusy('create-group'); setError(null)
     try {
       const created = await api.createAccountGroup({ name }, csrf)
+      if (allocationEnabled && !validAllocationGroup(created)) throw new Error('invalid account group allocation response')
       setGroups((items) => [...items, created])
       setRenames((items) => ({ ...items, [created.id]: created.name }))
+      if (allocationEnabled) {
+        setMultipliers((items) => ({ ...items, [created.id]: created.allocation!.multiplier_ppm }))
+      }
       setGroupName('')
     } catch (caught) {
       setError(directoryError(caught, 'create'))
@@ -128,8 +151,26 @@ export function AccountPoolDirectory({ csrf, onClose }: { csrf: string; onClose:
     setBusy(`rename-${item.id}`); setError(null)
     try {
       const updated = await api.updateAccountGroup(item.id, { expected_revision: item.revision, name }, csrf)
+      if (allocationEnabled && !validAllocationGroup(updated)) throw new Error('invalid account group allocation response')
       setGroups((items) => items.map((group) => group.id === item.id ? updated : group))
       setRenames((items) => ({ ...items, [item.id]: updated.name }))
+    } catch (caught) {
+      setError(directoryError(caught, 'rename'))
+      if (isConflict(caught) || isUncertain(caught)) setNeedsReload(true)
+    } finally { setBusy(null) }
+  }
+
+  async function updateMultiplier(item: AccountGroup) {
+    const multiplier = multipliers[item.id] ?? ''
+    if (!validMultiplierPPM(multiplier)) return setError('内部成本分摊倍率必须是 1–1000000000 ppm 的规范正整数。')
+    setBusy(`allocation-${item.id}`); setError(null)
+    try {
+      const updated = await api.updateAccountGroupAllocation(item.id, { operation_id: crypto.randomUUID(), expected_revision: item.revision, allocation_multiplier_ppm: multiplier }, csrf)
+      if (updated.group_id !== item.id || updated.revision !== item.revision + 1 || updated.allocation_multiplier_ppm !== multiplier) throw new Error('invalid account group allocation response')
+      const next: AccountGroup = { ...item, revision: updated.revision, allocation: { version: updated.version, multiplier_ppm: updated.allocation_multiplier_ppm, created_at: updated.created_at } }
+      if (!validAllocationGroup(next)) throw new Error('invalid account group allocation response')
+      setGroups((items) => items.map((group) => group.id === item.id ? next : group))
+      setMultipliers((items) => ({ ...items, [item.id]: updated.allocation_multiplier_ppm }))
     } catch (caught) {
       setError(directoryError(caught, 'rename'))
       if (isConflict(caught) || isUncertain(caught)) setNeedsReload(true)
@@ -149,6 +190,7 @@ export function AccountPoolDirectory({ csrf, onClose }: { csrf: string; onClose:
           <label htmlFor={`group-${item.id}`}>分组名称</label>
           <input id={`group-${item.id}`} value={renames[item.id] ?? item.name} onChange={(event) => setRenames((names) => ({ ...names, [item.id]: event.target.value }))} />
           <Button type="button" variant="secondary" disabled={busy !== null || needsReload || renames[item.id] === item.name} onClick={() => void renameGroup(item)}>{busy === `rename-${item.id}` ? '保存中…' : '重命名'}</Button>
+          {allocationEnabled ? <><label htmlFor={`allocation-${item.id}`}>内部成本倍率（ppm）</label><input id={`allocation-${item.id}`} inputMode="numeric" value={multipliers[item.id] ?? item.allocation?.multiplier_ppm ?? '1000000'} onChange={(event) => setMultipliers((values) => ({ ...values, [item.id]: event.target.value }))} /><span>{multiplierLabel(multipliers[item.id] ?? item.allocation?.multiplier_ppm ?? '1000000')} · 当前版本 {item.allocation?.version ?? '未知'}</span><Button type="button" variant="secondary" disabled={busy !== null || needsReload || !validMultiplierPPM(multipliers[item.id] ?? '') || multipliers[item.id] === item.allocation?.multiplier_ppm} onClick={() => void updateMultiplier(item)}>{busy === `allocation-${item.id}` ? '保存中…' : '保存倍率'}</Button></> : null}
         </div>) : <p className="muted-copy">还没有分组。渠道也可以不归属任何分组。</p>}</div>
       </section>
       <section className="pool-section">

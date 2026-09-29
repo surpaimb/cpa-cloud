@@ -2,13 +2,17 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"cpacloud.local/server/internal/accounting"
 )
 
 func TestOpenAIEmbeddingsExplicitModelRoutePolicyAndUsage(t *testing.T) {
@@ -247,6 +251,99 @@ func TestOpenAIEmbeddingsExplicitModelRoutePolicyAndUsage(t *testing.T) {
 	}
 	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempts`).Scan(&attempts); err != nil || attempts != 5 {
 		t.Fatalf("strict budget persisted attempt count=%d err=%v", attempts, err)
+	}
+}
+
+func TestOpenAIEmbeddingsPricedInputOnlyUsageAppliesFrozenGroupAllocation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/embeddings" {
+			t.Errorf("upstream path=%q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"model":"provider-priced-embedding","usage":{"prompt_tokens":2,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	app, server, cookie, csrf := newModelAdmissionApp(t, false)
+	account := createModelAdmissionUpstream(t, server.URL, cookie, csrf, "priced-embedding", "openai-compatible", upstream.URL, "synthetic-embedding-secret")
+	groupResponse := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/account-groups", `{"name":"Embedding allocation"}`, cookie, csrf, server.URL)
+	var group accountGroupView
+	decodeResponse(t, groupResponse, &group)
+	groupResponse.Body.Close()
+	allocationResponse := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/account-groups/"+group.ID+"/allocation", `{"operation_id":"7a82705f-d6ae-420e-9853-cd87a759e3fd","expected_revision":1,"allocation_multiplier_ppm":"1500000"}`, cookie, csrf, server.URL)
+	if allocationResponse.StatusCode != http.StatusOK {
+		t.Fatalf("allocation status=%d body=%s", allocationResponse.StatusCode, readBody(allocationResponse))
+	}
+	var allocation accountGroupAllocationVersionView
+	decodeResponse(t, allocationResponse, &allocation)
+	allocationResponse.Body.Close()
+	channelResponse := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/channels", fmt.Sprintf(`{"name":"Embedding channel","group_id":%q}`, group.ID), cookie, csrf, server.URL)
+	var channel accountChannelView
+	decodeResponse(t, channelResponse, &channel)
+	channelResponse.Body.Close()
+
+	create := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/models", marshalTestJSON(t, map[string]any{
+		"id": "priced-embedding", "model_kind": "embedding", "upstream_id": account.ID, "upstream_model": "provider-priced-embedding",
+	}), cookie, csrf, server.URL)
+	if create.StatusCode != http.StatusCreated {
+		t.Fatalf("create model status=%d body=%s", create.StatusCode, readBody(create))
+	}
+	create.Body.Close()
+	pool := requestJSON(t, http.MethodPut, server.URL+"/admin/api/v1/models/priced-embedding/accounts", marshalTestJSON(t, map[string]any{
+		"expected_revision": 0,
+		"items":             []map[string]any{{"upstream_id": account.ID, "upstream_model": "provider-priced-embedding", "wire_protocol": "openai-embeddings", "priority": 0, "weight": 1, "max_concurrency": 1, "channel_id": channel.ID}},
+	}), cookie, csrf, server.URL)
+	if pool.StatusCode != http.StatusOK {
+		t.Fatalf("configure pool status=%d body=%s", pool.StatusCode, readBody(pool))
+	}
+	pool.Body.Close()
+	employee := createModelAdmissionEmployee(t, server.URL, cookie, csrf, "Priced Embedding Employee")
+	keyResponse := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/employees/"+employee.ID+"/keys", marshalTestJSON(t, map[string]any{
+		"name": "Priced embedding key", "operation_id": "priced-embedding-key", "policy": map[string]any{"protocol_mode": "selected", "protocols": []string{"openai-embeddings"}, "model_mode": "all", "models": []string{}},
+	}), cookie, csrf, server.URL)
+	if keyResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create key status=%d body=%s", keyResponse.StatusCode, readBody(keyResponse))
+	}
+	var key keyView
+	decodeResponse(t, keyResponse, &key)
+	keyResponse.Body.Close()
+
+	catalog := accounting.NewPriceCatalog(app.store.db)
+	priceVersion, err := catalog.Save(context.Background(), accounting.PriceSave{
+		AccountID: account.ID, ActualModel: "provider-priced-embedding", OperationID: "8b45439f-f735-43b8-8cdf-013eff06bb25", ExpectedRevision: 0,
+		Price: &accounting.PriceSnapshot{Currency: "EUR", InputPerMillionMicro: 3_000_000, OutputPerMillionMicro: 9_000_000, CacheReadPerMillionMicro: 9_000_000, CacheWritePerMillionMicro: 9_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := embeddingEmployeeRequest(t, server.URL, key.Key, `{"model":"priced-embedding","input":"cost me"}`)
+	body := readBody(response)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("embedding status=%d body=%s", response.StatusCode, body)
+	}
+
+	var input, rawAttempt, rawEvent, adjusted sql.NullInt64
+	var output, cacheRead, cacheWrite sql.NullInt64
+	var storedGroup, storedVersion, storedPrice string
+	var ppm int64
+	if err := app.store.db.QueryRow(`SELECT a.input_tokens,a.output_tokens,a.cache_read_tokens,a.cache_write_tokens,a.cost_micro,e.estimated_cost_micro,ae.adjusted_cost_micro,s.account_group_id,s.multiplier_version,s.multiplier_ppm,a.price_version
+		FROM accounting_attempts a JOIN accounting_usage_events e ON e.attempt_id=a.id JOIN accounting_usage_allocation_events ae ON ae.event_id=e.id JOIN accounting_attempt_allocation_snapshots s ON s.attempt_id=a.id
+		ORDER BY a.started_at DESC,a.id DESC LIMIT 1`).Scan(&input, &output, &cacheRead, &cacheWrite, &rawAttempt, &rawEvent, &adjusted, &storedGroup, &storedVersion, &ppm, &storedPrice); err != nil {
+		t.Fatal(err)
+	}
+	if !input.Valid || input.Int64 != 2 || output.Valid || cacheRead.Valid || cacheWrite.Valid || !rawAttempt.Valid || rawAttempt.Int64 != 6 || !rawEvent.Valid || rawEvent.Int64 != 6 || !adjusted.Valid || adjusted.Int64 != 9 {
+		t.Fatalf("usage input/output/read/write=%v/%v/%v/%v raw=%v/%v adjusted=%v", input, output, cacheRead, cacheWrite, rawAttempt, rawEvent, adjusted)
+	}
+	if storedGroup != group.ID || storedVersion != allocation.Version || ppm != 1_500_000 || storedPrice != priceVersion.Version {
+		t.Fatalf("snapshot group/version/ppm/price=%q/%q/%d/%q", storedGroup, storedVersion, ppm, storedPrice)
+	}
+	reports, err := accounting.NewRequiredAllocationLedger(app.store.db).AccountingV2Report(context.Background(), accounting.AccountingV2Filters{From: time.Now().UTC().Add(-time.Hour), To: time.Now().UTC().Add(time.Hour)}, accounting.AccountingV2Day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 1 || reports[0].Currency != "EUR" || reports[0].KnownEstimatedCostMicro != 6 || reports[0].KnownAdjustedAllocationCostMicro != 9 || reports[0].UnknownCostAttempts != 0 || reports[0].OutputTokens.UnknownAttempts != 1 {
+		t.Fatalf("embedding allocation report=%+v", reports)
 	}
 }
 

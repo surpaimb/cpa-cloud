@@ -4,17 +4,17 @@
 
 ## 当前执行批次
 
-当前增量按 [OpenAI Embeddings 文本子集契约](openai-embeddings-contract.md)实施 `PROTO-08` 第一段：新增 `POST /v1/embeddings` 的 OpenAI-compatible API Key、文本输入、float、非流式子集，独立 `embedding` 模型类型、显式账号池 wire、Key 协议授权、严格响应校验和实际 wire 用量归因。旧 Key 与省略策略的新 Key 保持原四协议，不自动获得 Embeddings。token 数组、base64、dimensions、user、真实 provider/CLI/会员兼容和通用 Token/成本上界均未完成；命中 strict 预算但无法证明输入上界时须零派发拒绝。
+当前增量按 [账号组内部成本分摊倍率契约](account-group-cost-allocation-contract.md)实施 `ACCT-02/BILL-02` 第一段：既有账号池组获得有界 ppm 倍率、不可变版本、共享 revision/CAS、最终派发事务快照，以及与可靠用量、更正、日/月报表、CSV 和管理网页分离的“内部调整后分摊成本”。原供应商估算成本、价格版本、预算、余额和员工钱包保持原义；本段不是员工售价、供应商账单、多币兑换或员工身份组费率。
 
 请求治理已进入源码集成：员工、Key 与独立治理组的 RPM/并发硬限制默认关闭，管理网页和持久幂等操作已接线；旧库升级、关闭/开启、超限零派发、取消、重启及撤销的隔离进程验收通过。完整回归结果以[集成状态](integration-status.md)为准。TPM/成本只读 shadow 观测已通过进程、浏览器及 Linux CI 验收；新增默认关闭的固定模型硬预算已完成管理、持久预留、最终派发、原子结算及恢复接线，本批证据见[预算集成进度](budget-service-integration-progress.md)。这仍是有限模型/请求范围的实验，不能把统计或局部上界证明当成通用预算完成。来源与边界见[治理总契约](governance-contract.md)和[管理契约](governance-management-contract.md)。
 
 Responses 首批、Claude/Gemini API Key 原生协议、Codex 网页 OAuth 与会员模型目录已合入当前源码。Codex 共享生命周期现已包含后台自动刷新、请求前刷新和手动刷新，合成测试覆盖来源/client binding 锁定、暂停与修复恢复；该能力仍是默认关闭的源码实验，供应商侧撤销、真实账号及第三方 OAuth 注册均未验收。
 
-四类凭据批量导入及网页已通过真实 Go 服务与浏览器验收。账号分组、渠道、网页池编辑器、权重/优先级、账号级容量、持久化租约、固定 cooldown 和四协议执行已接线；`scripts/smoke-account-pool.mjs` 与 `scripts/smoke-account-pool-ui.cjs` 的真实进程验收通过，该批网页测试为 58 项通过。HMAC 会话按 employee、Key、公开模型和协议入口隔离，账号全局并发与租约重启恢复已有子集测试。派发前一次安全换号和生成恢复已接线；供应商配额仍待实现，通用 TPM/成本上界仍未完成；出站代理首批子集见下文。这些结果使用合成凭据和模拟上游。
+四类凭据批量导入及网页已通过真实 Go 服务与浏览器验收。账号分组、渠道、网页池编辑器、权重/优先级、账号级容量、版本化内部成本倍率、持久化租约、固定 cooldown 和四协议执行已接线；倍率按最终实际 route→channel→group 在 durable dispatch 事务冻结，旧单路由/无组使用内建 1×。HMAC 会话按 employee、Key、公开模型和协议入口隔离，账号全局并发与租约重启恢复已有子集测试。派发前一次安全换号和生成恢复已接线；供应商配额仍待实现，通用 TPM/成本上界仍未完成；出站代理首批子集见下文。这些结果使用合成凭据和模拟上游。
 
-用量账本核心、服务协调器与四协议 hook 已接入源码；HTTP 用量、SQL 写入失败回滚、取消、重启恢复及完整 Go 回归通过。管理员用量查询、请求/尝试明细、按账号/实际模型的不可变价格版本、派发前价格快照、余额与日/月结算首批、CSV 导出以及网页“用量与成本/账单”均已合入。进程验收覆盖版本幂等、在途改价、账号池实际账号、未知费用、分页与重启。固定模型预算使用共享事务结算；这些仍是内部计量与单实例账务，不等于生产售价体系、真实充值/支付或支付回调验收。接口见 [用量与价格契约](usage-management-contract.md)；完整证据见 [集成状态](integration-status.md)。Claude/Gemini 会员保持明确阻塞记录，不能用 API Key 原生通路替代会员支持。
+用量账本核心、服务协调器与四协议 hook 已接入源码；HTTP 用量、SQL 写入失败回滚、取消和重启恢复已有回归。管理员用量查询、请求/尝试明细、按账号/实际模型的不可变价格版本、派发前价格快照、原始与调整后两套成本、余额与日/月结算首批、CSV 导出以及网页“用量与成本/账单”均已接线。倍率更正使用 attempt 冻结版本，不读当前组版本；未知与已知零保持分离。固定模型预算仍按原始成本共享事务结算；这些仍是内部计量与单实例账务，不等于生产售价体系、真实充值/支付或支付回调验收。接口见 [用量与价格契约](usage-management-contract.md)；完整证据见 [集成状态](integration-status.md)。Claude/Gemini 会员保持明确阻塞记录，不能用 API Key 原生通路替代会员支持。
 
-普通自助注册、员工身份组、成本倍率、套餐、订阅、充值、兑换、支付、员工门户、代理池和运维扩展继续按 [功能矩阵](feature-parity-plan.md) 推进。默认内部企业模式仍关闭对外注册和商业化入口；启用商业流程前必须完成身份、金额账本、回调安全及恢复验收。严格多租户、租户域名、SSO、管理员密码重置命令和提示词/响应正文审计不在实现范围内。
+普通自助注册、员工身份组、员工售价倍率、套餐、订阅、充值、兑换、支付、员工门户、代理池和运维扩展继续按 [功能矩阵](feature-parity-plan.md) 推进。默认内部企业模式仍关闭对外注册和商业化入口；启用商业流程前必须完成身份、金额账本、回调安全及恢复验收。严格多租户、租户域名、SSO、管理员密码重置命令和提示词/响应正文审计不在实现范围内。
 
 当前 `main` 已依次合入 Chat↔Responses、Messages↔Responses、Gemini v1beta `streamGenerateContent`↔Responses 的严格文本/function SSE、每 Key 客户端协议/公开模型策略、同 revision/CAS 的真实 socket peer 来源限制和显式可信代理解析；Messages→Responses 在 usage 只于终态可知时有界全流延迟，Gemini 身份不齐时有界暂存，均不能描述为一般供应商兼容。当前增量按 [Key 与账号池分组绑定契约](key-account-group-policy-contract.md)把 Key 只读收窄到既有账号池 `account_groups`：旧 Key 默认 `all`，`selected + []` 拒绝全部，目录/预检换号/租约/后台资源/最终派发共同失败关闭。员工身份组、计费组、thinking/cache/media/citations、托管工具、跨协议有状态/后台转换、通用反向代理部署、通用 TPM 上界、自助门户和真实支付仍不在本批。
 

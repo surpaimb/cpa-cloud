@@ -83,6 +83,45 @@ describe('account pool configuration', () => {
     expect(screen.getByRole('button', { name: '重新加载列表' })).toBeInTheDocument()
   })
 
+  it('edits canonical allocation ppm only when the capability is enabled', async () => {
+    const writes: unknown[] = []
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('550e8400-e29b-41d4-a716-446655440000')
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/account-groups') && !init?.method) return response({ body: { items: [{ id: 'group-1', name: '生产组', revision: 1, allocation: { version: 'agalloc-1', multiplier_ppm: '1250000', created_at: '2026-09-29T01:00:00Z' } }] } })
+      if (url.endsWith('/channels') && !init?.method) return response({ body: { items: [] } })
+      if (url.endsWith('/account-groups/group-1/allocation') && init?.method === 'POST') {
+        writes.push(JSON.parse(String(init.body)))
+        return response({ body: { group_id: 'group-1', version: 'agalloc-2', revision: 2, allocation_multiplier_ppm: '1500000', created_at: '2026-09-29T02:00:00Z' } })
+      }
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AccountPoolDirectory csrf="csrf-token" allocationEnabled onClose={() => undefined} />)
+
+    const multiplier = await screen.findByLabelText('内部成本倍率（ppm）')
+    expect(multiplier).toHaveValue('1250000')
+    expect(screen.getByText(/1\.25× · 当前版本 agalloc-1/)).toBeInTheDocument()
+    await userEvent.clear(multiplier)
+    await userEvent.type(multiplier, '1500000')
+    await userEvent.click(screen.getByRole('button', { name: '保存倍率' }))
+    await waitFor(() => expect(writes).toEqual([{ operation_id: '550e8400-e29b-41d4-a716-446655440000', expected_revision: 1, allocation_multiplier_ppm: '1500000' }]))
+    expect(new Headers((fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/allocation') && (init as RequestInit | undefined)?.method === 'POST')?.[1] as RequestInit).headers).get('X-CSRF-Token')).toBe('csrf-token')
+    expect(await screen.findByText(/1\.5× · 当前版本 agalloc-2/)).toBeInTheDocument()
+  })
+
+  it('fails closed when a capable service omits allocation fields', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/account-groups')) return response({ body: { items: [{ id: 'group-1', name: '生产组', revision: 1 }] } })
+      if (url.endsWith('/channels')) return response({ body: { items: [] } })
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<AccountPoolDirectory csrf="csrf" allocationEnabled onClose={() => undefined} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('无法读取分组与渠道')
+    expect(screen.queryByLabelText('内部成本倍率（ppm）')).not.toBeInTheDocument()
+  })
+
   it('keeps revision zero read-only until explicit save and sends the exact CAS revision', async () => {
     const accounts = { model_id: 'public-model', revision: 0, items: [{ upstream_id: 'up-1', upstream_model: 'provider-model', wire_protocol: 'openai-responses' as const, priority: 0, weight: 1, max_concurrency: 1 }] }
     const fetchMock = editorFetch(accounts)

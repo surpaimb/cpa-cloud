@@ -34,6 +34,9 @@ type usageLedgerCoordinator struct {
 	budgetCommit func(*sql.Tx) error
 	// Package-private fault injection for the non-budget dispatch barrier.
 	dispatchCommit func(*sql.Tx) error
+	// Full App instances require the composed allocation schema. Isolated
+	// package fixtures leave this false and retain the legacy optional boundary.
+	accountGroupAllocationRequired bool
 }
 
 type usageRequestStart struct {
@@ -103,7 +106,7 @@ func newUsageLedgerCoordinator(db *sql.DB) *usageLedgerCoordinator {
 // previous process as interrupted. A caller must treat any returned error as a
 // startup failure for usage accounting.
 func (c *usageLedgerCoordinator) start(ctx context.Context) error {
-	if c == nil || c.ledger == nil || c.now == nil || ctx == nil {
+	if c == nil || c.db == nil || c.ledger == nil || c.now == nil || ctx == nil {
 		return errUsageLedgerUnavailable
 	}
 	if err := c.ledger.Migrate(ctx); err != nil {
@@ -112,10 +115,18 @@ func (c *usageLedgerCoordinator) start(ctx context.Context) error {
 	if err := c.ledger.MigrateV2(ctx); err != nil {
 		return classifyUsageLedgerError(err)
 	}
-	if _, err := c.ledger.RecoverInterrupted(ctx, c.now().UTC()); err != nil {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
 		return classifyUsageLedgerError(err)
 	}
-	return nil
+	defer tx.Rollback()
+	if _, err := c.ledger.RecoverInterruptedTx(ctx, tx, c.now().UTC()); err != nil {
+		return classifyUsageLedgerError(err)
+	}
+	if _, err := c.ledger.RecoverV2Tx(ctx, tx); err != nil {
+		return classifyUsageLedgerError(err)
+	}
+	return classifyUsageLedgerError(tx.Commit())
 }
 
 // beginRequest records the employee-visible request after route selection has
