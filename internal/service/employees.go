@@ -364,9 +364,14 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request, _ adminSession) 
 	replacement := keypolicy.Replacement{
 		ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeAll, Models: []string{},
+		SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
 	}
 	if input.Policy != nil {
 		replacement = *input.Policy
+		if replacement.SourceMode == "" && replacement.SourceCIDRs == nil {
+			replacement.SourceMode = keypolicy.ModeAll
+			replacement.SourceCIDRs = []string{}
+		}
 	}
 	normalizedPolicy, err := keypolicy.Normalize(replacement)
 	if err != nil {
@@ -503,7 +508,7 @@ func keyCreateRetryMatches(prior keyView, storedFingerprint string, input create
 	if storedFingerprint != "" {
 		return storedFingerprint == requestedFingerprint
 	}
-	legacyAll := policy.ProtocolMode == keypolicy.ModeAll && len(policy.Protocols) == 0 && policy.ModelMode == keypolicy.ModeAll && len(policy.Models) == 0
+	legacyAll := policy.ProtocolMode == keypolicy.ModeAll && len(policy.Protocols) == 0 && policy.ModelMode == keypolicy.ModeAll && len(policy.Models) == 0 && policy.SourceMode == keypolicy.ModeAll && len(policy.SourceCIDRs) == 0
 	return legacyAll && prior.Name == input.Name && sameOptionalString(prior.ExpiresAt, input.ExpiresAt)
 }
 

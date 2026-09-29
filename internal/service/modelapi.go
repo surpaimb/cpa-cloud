@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ type employeeAuth struct {
 	Mode           string
 	Policy         keypolicy.Policy
 	ClientProtocol keypolicy.ClientProtocol
+	SourceAddr     netip.Addr
 }
 type route struct {
 	egress          *routeEgress
@@ -41,6 +43,11 @@ type route struct {
 func (a *App) listModels(w http.ResponseWriter, r *http.Request) {
 	auth, ok := a.authenticateEmployee(w, r)
 	if !ok {
+		return
+	}
+	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	if sourceFailure != nil {
+		writeModelError(w, sourceFailure.status, sourceFailure.code, sourceFailure.message, requestID(r.Context()))
 		return
 	}
 	if !keyPolicyAllowsProtocol(auth.Policy, keypolicy.ProtocolOpenAIChat) && !keyPolicyAllowsProtocol(auth.Policy, keypolicy.ProtocolOpenAIResponses) {
@@ -176,6 +183,11 @@ func (a *App) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	r = withUsageStreamEvidence(r, stream)
 	auth, ok := a.authenticateEmployee(w, r)
 	if !ok {
+		return
+	}
+	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	if sourceFailure != nil {
+		writeModelError(w, sourceFailure.status, sourceFailure.code, sourceFailure.message, requestID(r.Context()))
 		return
 	}
 	auth, policyFailure := authorizeKeyPolicy(auth, keypolicy.ProtocolOpenAIChat, model)

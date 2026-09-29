@@ -52,6 +52,11 @@ func TestSystemStatusReportsBackupCapabilities(t *testing.T) {
 			t.Fatalf("expected %s capability: %+v", feature, response.Features)
 		}
 	}
+	for _, feature := range []string{"key_access_policy", "key_source_policy"} {
+		if !response.Features[feature] {
+			t.Fatalf("expected %s capability: %+v", feature, response.Features)
+		}
+	}
 	if response.Features["managed_tools"] || response.Features["responses_stateful_resources"] || response.Features["responses_background_tasks"] {
 		t.Fatalf("unexpected default Responses features: %+v", response.Features)
 	}

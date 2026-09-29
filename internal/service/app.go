@@ -434,6 +434,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"codex_membership_auto_refresh":   a.refresh != nil && a.refresh.enabled(),
 			"account_lifecycle_management":    true,
 			"key_access_policy":               true,
+			"key_source_policy":               true,
 		},
 		"limitations": limitations,
 	})

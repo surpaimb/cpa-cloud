@@ -71,6 +71,11 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 	if !ok {
 		return
 	}
+	auth, sourceFailure := authorizeKeySource(auth, r.RemoteAddr)
+	if sourceFailure != nil {
+		writeAnthropicError(w, sourceFailure.status, anthropicAdmissionType(sourceFailure.status), sourceFailure.message, requestID(r.Context()))
+		return
+	}
 	auth, policyFailure := authorizeKeyPolicy(auth, keypolicy.ProtocolAnthropicMessages, model)
 	if policyFailure != nil {
 		writeAnthropicError(w, policyFailure.status, anthropicAdmissionType(policyFailure.status), policyFailure.message, requestID(r.Context()))

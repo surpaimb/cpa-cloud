@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -52,7 +53,7 @@ func TestKeyPolicyAdminGetPutCASAndEffectiveView(t *testing.T) {
 	}
 	var view keyPolicyView
 	decodeResponse(t, get, &view)
-	if view.Revision != 1 || view.ProtocolMode != keypolicy.ModeAll || len(view.Protocols) != 0 || len(view.EffectiveProtocols) != 4 || len(view.EffectiveModels) != 1 || view.EffectiveModels[0] != "public-a" {
+	if view.Revision != 1 || view.ProtocolMode != keypolicy.ModeAll || len(view.Protocols) != 0 || view.SourceMode != keypolicy.ModeAll || len(view.SourceCIDRs) != 0 || len(view.EffectiveProtocols) != 4 || len(view.EffectiveModels) != 1 || view.EffectiveModels[0] != "public-a" {
 		t.Fatalf("default view=%#v", view)
 	}
 
@@ -65,6 +66,9 @@ func TestKeyPolicyAdminGetPutCASAndEffectiveView(t *testing.T) {
 		`{"expected_revision":1,"protocol_mode":"selected","protocols":["unknown"],"model_mode":"all","models":[]}`,
 		`{"expected_revision":1,"protocol_mode":"selected","protocols":["openai-chat","openai-chat"],"model_mode":"all","models":[]}`,
 		`{"expected_revision":1,"protocol_mode":"all","protocols":[],"model_mode":"selected","models":["public-b"]}`,
+		`{"expected_revision":1,"protocol_mode":"all","protocols":[],"model_mode":"all","models":[],"source_mode":"selected"}`,
+		`{"expected_revision":1,"protocol_mode":"all","protocols":[],"model_mode":"all","models":[],"source_cidrs":["192.0.2.0/24"]}`,
+		`{"expected_revision":1,"protocol_mode":"all","protocols":[],"model_mode":"all","models":[],"source_mode":"selected","source_cidrs":["invalid"]}`,
 	} {
 		response := requestJSON(t, http.MethodPut, fixture.server.URL+"/admin/api/v1/keys/key-one/policy", body, fixture.cookie, fixture.csrf, fixture.server.URL)
 		assertAdminErrorCode(t, response, http.StatusBadRequest, "invalid_key_policy")
@@ -90,6 +94,35 @@ func TestKeyPolicyAdminGetPutCASAndEffectiveView(t *testing.T) {
 		t.Fatalf("reset view=%#v", view)
 	}
 
+	restrictSource := requestJSON(t, http.MethodPut, fixture.server.URL+"/admin/api/v1/keys/key-one/policy",
+		`{"expected_revision":3,"protocol_mode":"all","protocols":[],"model_mode":"all","models":[],"source_mode":"selected","source_cidrs":["2001:0db8::9/48","192.0.2.9"]}`, fixture.cookie, fixture.csrf, fixture.server.URL)
+	if restrictSource.StatusCode != http.StatusOK {
+		t.Fatalf("source restriction status=%d body=%s", restrictSource.StatusCode, readBody(restrictSource))
+	}
+	decodeResponse(t, restrictSource, &view)
+	if view.Revision != 4 || view.SourceMode != keypolicy.ModeSelected || !slices.Equal(view.SourceCIDRs, []string{"192.0.2.9/32", "2001:db8::/48"}) {
+		t.Fatalf("source restriction view=%#v", view)
+	}
+
+	preserveSource := requestJSON(t, http.MethodPut, fixture.server.URL+"/admin/api/v1/keys/key-one/policy",
+		`{"expected_revision":4,"protocol_mode":"selected","protocols":["openai-responses"],"model_mode":"all","models":[]}`, fixture.cookie, fixture.csrf, fixture.server.URL)
+	if preserveSource.StatusCode != http.StatusOK {
+		t.Fatalf("preserve source status=%d body=%s", preserveSource.StatusCode, readBody(preserveSource))
+	}
+	decodeResponse(t, preserveSource, &view)
+	if view.Revision != 5 || view.SourceMode != keypolicy.ModeSelected || !slices.Equal(view.SourceCIDRs, []string{"192.0.2.9/32", "2001:db8::/48"}) {
+		t.Fatalf("omitted source fields changed source restriction: %#v", view)
+	}
+	resetSource := requestJSON(t, http.MethodPut, fixture.server.URL+"/admin/api/v1/keys/key-one/policy",
+		`{"expected_revision":5,"protocol_mode":"selected","protocols":["openai-responses"],"model_mode":"all","models":[],"source_mode":"all","source_cidrs":[]}`, fixture.cookie, fixture.csrf, fixture.server.URL)
+	if resetSource.StatusCode != http.StatusOK {
+		t.Fatalf("reset source status=%d body=%s", resetSource.StatusCode, readBody(resetSource))
+	}
+	decodeResponse(t, resetSource, &view)
+	if view.Revision != 6 || view.SourceMode != keypolicy.ModeAll || len(view.SourceCIDRs) != 0 {
+		t.Fatalf("source reset view=%#v", view)
+	}
+
 	stale := requestJSON(t, http.MethodPut, fixture.server.URL+"/admin/api/v1/keys/key-one/policy",
 		`{"expected_revision":1,"protocol_mode":"selected","protocols":[],"model_mode":"selected","models":[]}`, fixture.cookie, fixture.csrf, fixture.server.URL)
 	assertAdminErrorCode(t, stale, http.StatusConflict, "revision_conflict")
@@ -100,12 +133,12 @@ func TestKeyPolicyAdminGetPutCASAndEffectiveView(t *testing.T) {
 		t.Fatal(err)
 	}
 	revokedUpdate := requestJSON(t, http.MethodPut, fixture.server.URL+"/admin/api/v1/keys/key-one/policy",
-		`{"expected_revision":3,"protocol_mode":"selected","protocols":["openai-responses"],"model_mode":"selected","models":["public-a"]}`, fixture.cookie, fixture.csrf, fixture.server.URL)
+		`{"expected_revision":6,"protocol_mode":"selected","protocols":["openai-responses"],"model_mode":"selected","models":["public-a"]}`, fixture.cookie, fixture.csrf, fixture.server.URL)
 	if revokedUpdate.StatusCode != http.StatusOK {
 		t.Fatalf("revoked update status=%d body=%s", revokedUpdate.StatusCode, readBody(revokedUpdate))
 	}
 	decodeResponse(t, revokedUpdate, &view)
-	if view.Revision != 4 || len(view.EffectiveProtocols) != 0 || len(view.EffectiveModels) != 0 {
+	if view.Revision != 7 || len(view.EffectiveProtocols) != 0 || len(view.EffectiveModels) != 0 || view.SourceMode != keypolicy.ModeAll {
 		t.Fatalf("revoked key policy restored access: %#v", view)
 	}
 }

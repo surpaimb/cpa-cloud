@@ -19,6 +19,8 @@ type keyPolicyView struct {
 	Protocols          []keypolicy.ClientProtocol `json:"protocols"`
 	ModelMode          keypolicy.Mode             `json:"model_mode"`
 	Models             []string                   `json:"models"`
+	SourceMode         keypolicy.Mode             `json:"source_mode"`
+	SourceCIDRs        []string                   `json:"source_cidrs"`
 	EffectiveProtocols []keypolicy.ClientProtocol `json:"effective_protocols"`
 	EffectiveModels    []string                   `json:"effective_models"`
 }
@@ -29,6 +31,8 @@ type replaceKeyPolicyRequest struct {
 	Protocols        *[]keypolicy.ClientProtocol `json:"protocols"`
 	ModelMode        *keypolicy.Mode             `json:"model_mode"`
 	Models           *[]string                   `json:"models"`
+	SourceMode       *keypolicy.Mode             `json:"source_mode"`
+	SourceCIDRs      *[]string                   `json:"source_cidrs"`
 }
 
 type keyPolicyOwner struct {
@@ -57,6 +61,10 @@ func (a *App) putKeyPolicy(w http.ResponseWriter, r *http.Request, _ adminSessio
 		writeAdminError(w, http.StatusBadRequest, "invalid_key_policy", "Invalid key policy.")
 		return
 	}
+	if (input.SourceMode == nil) != (input.SourceCIDRs == nil) {
+		writeAdminError(w, http.StatusBadRequest, "invalid_key_policy", "Invalid key policy.")
+		return
+	}
 	protocols := make([]keypolicy.ClientProtocol, len(*input.Protocols))
 	copy(protocols, *input.Protocols)
 	models := make([]string, len(*input.Models))
@@ -66,6 +74,12 @@ func (a *App) putKeyPolicy(w http.ResponseWriter, r *http.Request, _ adminSessio
 		Protocols:    protocols,
 		ModelMode:    *input.ModelMode,
 		Models:       models,
+	}
+	if input.SourceMode != nil {
+		sourceCIDRs := make([]string, len(*input.SourceCIDRs))
+		copy(sourceCIDRs, *input.SourceCIDRs)
+		replacement.SourceMode = *input.SourceMode
+		replacement.SourceCIDRs = sourceCIDRs
 	}
 
 	// Employee grants, model lifecycle, and policy CAS must share one database
@@ -83,6 +97,15 @@ func (a *App) putKeyPolicy(w http.ResponseWriter, r *http.Request, _ adminSessio
 	if err != nil {
 		writeKeyPolicyAdminError(w, err)
 		return
+	}
+	if input.SourceMode == nil {
+		current, err := keypolicy.LoadTx(r.Context(), tx, r.PathValue("id"))
+		if err != nil {
+			writeKeyPolicyAdminError(w, err)
+			return
+		}
+		replacement.SourceMode = current.SourceMode
+		replacement.SourceCIDRs = append([]string{}, current.SourceCIDRs...)
 	}
 	if err := a.validateKeyPolicyModelsTx(r.Context(), tx, owner, replacement); err != nil {
 		writeKeyPolicyAdminError(w, err)
@@ -137,7 +160,7 @@ func readKeyPolicyViewTx(ctx context.Context, tx *sql.Tx, a *App, keyID string) 
 func readKeyPolicyViewTxWithPolicy(ctx context.Context, tx *sql.Tx, a *App, keyID string, owner keyPolicyOwner, policy keypolicy.Policy) (keyPolicyView, error) {
 	view := keyPolicyView{
 		Revision: policy.Revision, ProtocolMode: policy.ProtocolMode, Protocols: policy.Protocols,
-		ModelMode: policy.ModelMode, Models: policy.Models,
+		ModelMode: policy.ModelMode, Models: policy.Models, SourceMode: policy.SourceMode, SourceCIDRs: policy.SourceCIDRs,
 		EffectiveProtocols: []keypolicy.ClientProtocol{}, EffectiveModels: []string{},
 	}
 	if !keyPolicyOwnerActive(owner, time.Now().UTC()) {

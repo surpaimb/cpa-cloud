@@ -10,18 +10,25 @@ import (
 )
 
 const (
-	policiesTable         = "access_key_policies"
-	protocolsTable        = "access_key_policy_protocols"
-	modelsTable           = "access_key_policy_models"
-	migrationStateTable   = "access_key_policy_migration_state"
-	migrationStateVersion = 1
+	policiesTable               = "access_key_policies"
+	protocolsTable              = "access_key_policy_protocols"
+	modelsTable                 = "access_key_policy_models"
+	migrationStateTable         = "access_key_policy_migration_state"
+	migrationStateVersion       = 1
+	sourceMigrationStateTable   = "access_key_policy_source_migration_state"
+	sourceMigrationStateVersion = 1
+	sourceCIDRIndex             = "access_key_policy_source_cidrs_cidr_idx"
 )
 
 func Migrate(ctx context.Context, db *sql.DB) error {
-	return migrate(ctx, db, nil)
+	return migrateWithHooks(ctx, db, nil, nil)
 }
 
 func migrate(ctx context.Context, db *sql.DB, afterSchema func(*sql.Tx) error) error {
+	return migrateWithHooks(ctx, db, afterSchema, nil)
+}
+
+func migrateWithHooks(ctx context.Context, db *sql.DB, afterSchema, beforeSourceMarker func(*sql.Tx) error) error {
 	if db == nil {
 		return ErrInvalidSchema
 	}
@@ -49,6 +56,9 @@ func migrate(ctx context.Context, db *sql.DB, afterSchema func(*sql.Tx) error) e
 			return err
 		}
 		if err := verifyCoverage(ctx, tx); err != nil {
+			return err
+		}
+		if err := migrateSourcePolicy(ctx, tx, beforeSourceMarker); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
@@ -111,10 +121,194 @@ func migrate(ctx context.Context, db *sql.DB, afterSchema func(*sql.Tx) error) e
 	if err := verifyMigrationState(ctx, tx); err != nil {
 		return err
 	}
+	if err := migrateSourcePolicy(ctx, tx, beforeSourceMarker); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit key policy migration: %w", err)
 	}
 	return nil
+}
+
+func migrateSourcePolicy(ctx context.Context, tx *sql.Tx, beforeMarker func(*sql.Tx) error) error {
+	anyPresent, markerPresent, err := sourceMigrationObjectsPresent(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if anyPresent && !markerPresent {
+		return fmt.Errorf("%w: unmarked or partial key policy source schema", ErrInvalidSchema)
+	}
+	if markerPresent {
+		if err := verifySourceSchema(ctx, tx); err != nil {
+			return err
+		}
+		if err := verifySourceMigrationState(ctx, tx); err != nil {
+			return err
+		}
+		return verifySourceCoverage(ctx, tx)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE access_key_policy_source_migration_state (
+			singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
+			version INTEGER NOT NULL CHECK(version=1),
+			completed_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE access_key_policy_sources (
+			key_id TEXT PRIMARY KEY NOT NULL REFERENCES access_key_policies(key_id) ON DELETE CASCADE,
+			source_mode TEXT NOT NULL CHECK(source_mode IN ('all','selected'))
+		)`,
+		`CREATE TABLE access_key_policy_source_cidrs (
+			key_id TEXT NOT NULL REFERENCES access_key_policy_sources(key_id) ON DELETE CASCADE,
+			cidr TEXT NOT NULL CHECK(length(cidr) BETWEEN 1 AND 64),
+			PRIMARY KEY(key_id,cidr)
+		)`,
+		`CREATE INDEX access_key_policy_source_cidrs_cidr_idx ON access_key_policy_source_cidrs(cidr,key_id)`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("create key policy source schema: %w", err)
+		}
+	}
+	if err := verifySourceSchema(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO access_key_policy_sources(key_id,source_mode)
+		SELECT key_id,'all' FROM access_key_policies`); err != nil {
+		return fmt.Errorf("backfill key policy sources: %w", err)
+	}
+	if err := verifySourceCoverage(ctx, tx); err != nil {
+		return err
+	}
+	if beforeMarker != nil {
+		if err := beforeMarker(tx); err != nil {
+			return err
+		}
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO access_key_policy_source_migration_state(singleton,version,completed_at) VALUES(1,?,?)`, sourceMigrationStateVersion, stamp); err != nil {
+		return fmt.Errorf("write key policy source migration marker: %w", err)
+	}
+	return verifySourceMigrationState(ctx, tx)
+}
+
+func sourceMigrationObjectsPresent(ctx context.Context, tx *sql.Tx) (anyPresent bool, markerPresent bool, err error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE name IN (
+		'access_key_policy_source_migration_state','access_key_policy_sources','access_key_policy_source_cidrs',
+		'access_key_policy_source_cidrs_cidr_idx'
+	)`)
+	if err != nil {
+		return false, false, fmt.Errorf("%w: inspect key policy source migration objects", ErrInvalidSchema)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, false, fmt.Errorf("%w: inspect key policy source migration objects", ErrInvalidSchema)
+		}
+		anyPresent = true
+		if name == sourceMigrationStateTable {
+			markerPresent = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, false, fmt.Errorf("%w: inspect key policy source migration objects", ErrInvalidSchema)
+	}
+	return anyPresent, markerPresent, nil
+}
+
+func verifySourceMigrationState(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT singleton,version,completed_at FROM access_key_policy_source_migration_state`)
+	if err != nil {
+		return fmt.Errorf("%w: read key policy source migration marker", ErrInvalidSchema)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+		var singleton, version int
+		var completedAt string
+		if err := rows.Scan(&singleton, &version, &completedAt); err != nil || singleton != 1 || version != sourceMigrationStateVersion {
+			return fmt.Errorf("%w: invalid key policy source migration marker", ErrInvalidSchema)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, completedAt); err != nil {
+			return fmt.Errorf("%w: invalid key policy source migration timestamp", ErrInvalidSchema)
+		}
+	}
+	if err := rows.Err(); err != nil || count != 1 {
+		return fmt.Errorf("%w: invalid key policy source migration marker count", ErrInvalidSchema)
+	}
+	return nil
+}
+
+func verifySourceCoverage(ctx context.Context, tx *sql.Tx) error {
+	var missing, orphaned, orphanedCIDRs int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_key_policies p LEFT JOIN access_key_policy_sources s ON s.key_id=p.key_id WHERE s.key_id IS NULL`).Scan(&missing); err != nil {
+		return fmt.Errorf("verify key policy source coverage: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_key_policy_sources s LEFT JOIN access_key_policies p ON p.key_id=s.key_id WHERE p.key_id IS NULL`).Scan(&orphaned); err != nil {
+		return fmt.Errorf("verify key policy source ownership: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_key_policy_source_cidrs c LEFT JOIN access_key_policy_sources s ON s.key_id=c.key_id WHERE s.key_id IS NULL`).Scan(&orphanedCIDRs); err != nil {
+		return fmt.Errorf("verify key policy source CIDR ownership: %w", err)
+	}
+	if missing != 0 || orphaned != 0 || orphanedCIDRs != 0 {
+		return fmt.Errorf("%w: incomplete key policy source coverage", ErrInvalidSchema)
+	}
+	return nil
+}
+
+func verifySourceSchema(ctx context.Context, tx *sql.Tx) error {
+	expectedColumns := map[string]map[string]columnSpec{
+		sourceMigrationStateTable: {
+			"singleton": {"INTEGER", true, 1}, "version": {"INTEGER", true, 0}, "completed_at": {"TEXT", true, 0},
+		},
+		sourcesTable: {
+			"key_id": {"TEXT", true, 1}, "source_mode": {"TEXT", true, 0},
+		},
+		sourceCIDRsTable: {
+			"key_id": {"TEXT", true, 1}, "cidr": {"TEXT", true, 2},
+		},
+	}
+	for table, expected := range expectedColumns {
+		actual, err := readColumns(ctx, tx, table)
+		if err != nil {
+			return err
+		}
+		if len(actual) != len(expected) {
+			return fmt.Errorf("%w: unexpected columns on %s", ErrInvalidSchema, table)
+		}
+		for name, want := range expected {
+			if got, ok := actual[name]; !ok || got != want {
+				return fmt.Errorf("%w: invalid column %s.%s", ErrInvalidSchema, table, name)
+			}
+		}
+	}
+	checks := map[string][]string{
+		sourceMigrationStateTable: {"check(singleton=1)", "check(version=1)"},
+		sourcesTable:              {"check(source_modein('all','selected'))"},
+		sourceCIDRsTable:          {"check(length(cidr)between1and64)"},
+	}
+	for table, fragments := range checks {
+		var raw string
+		if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&raw); err != nil {
+			return fmt.Errorf("%w: read table %s", ErrInvalidSchema, table)
+		}
+		normalized := normalizeDDL(raw)
+		for _, fragment := range fragments {
+			if !strings.Contains(normalized, fragment) {
+				return fmt.Errorf("%w: missing constraint on %s", ErrInvalidSchema, table)
+			}
+		}
+	}
+	if err := verifyForeignKeys(ctx, tx, sourceMigrationStateTable, []foreignKeySpec{}); err != nil {
+		return err
+	}
+	if err := verifyForeignKeys(ctx, tx, sourcesTable, []foreignKeySpec{{"key_id", policiesTable, "key_id", "CASCADE"}}); err != nil {
+		return err
+	}
+	if err := verifyForeignKeys(ctx, tx, sourceCIDRsTable, []foreignKeySpec{{"key_id", sourcesTable, "key_id", "CASCADE"}}); err != nil {
+		return err
+	}
+	return verifyIndex(ctx, tx, sourceCIDRIndex, []string{"cidr", "key_id"})
 }
 
 func migrationObjectsPresent(ctx context.Context, tx *sql.Tx) (anyPresent bool, markerPresent bool, err error) {

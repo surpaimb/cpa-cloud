@@ -33,6 +33,7 @@ func TestKeyPolicyDeniesEveryProtocolBeforeAdmission(t *testing.T) {
 	_, err := keypolicy.Replace(context.Background(), fixture.app.store.db, fixture.key.ID, 1, keypolicy.Replacement{
 		ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeAll, Models: []string{},
+		SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
 	}, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +83,87 @@ func TestKeyPolicyDeniesEveryProtocolBeforeAdmission(t *testing.T) {
 		if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("%s count=%d err=%v", table, count, err)
 		}
+	}
+}
+
+func TestKeySourcePolicyUsesOnlySocketPeerAcrossProtocolsAndCatalogs(t *testing.T) {
+	var calls atomic.Int32
+	fixture := newExplicitWireFixture(t, string(wireProtocolResponses), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	_, err := keypolicy.Replace(context.Background(), fixture.app.store.db, fixture.key.ID, 1, keypolicy.Replacement{
+		ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
+		ModelMode: keypolicy.ModeAll, Models: []string{},
+		SourceMode: keypolicy.ModeSelected, SourceCIDRs: []string{"203.0.113.0/24"},
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := func(method, path, body, authHeader, keyHeader string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(method, fixture.server.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if authHeader != "" {
+			req.Header.Set("Authorization", authHeader+fixture.key.Key)
+		}
+		if keyHeader != "" {
+			req.Header.Set(keyHeader, fixture.key.Key)
+		}
+		if path == "/v1/messages" {
+			req.Header.Set("Anthropic-Version", "2023-06-01")
+		}
+		req.Header.Set("Forwarded", "for=203.0.113.10")
+		req.Header.Set("X-Forwarded-For", "203.0.113.10")
+		req.Header.Set("X-Real-IP", "203.0.113.10")
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	tests := []struct {
+		name, method, path, body, authHeader, keyHeader string
+	}{
+		{"chat", http.MethodPost, "/v1/chat/completions", `{"model":"wire-model","messages":[{"role":"user","content":"hi"}]}`, "Bearer ", ""},
+		{"responses", http.MethodPost, "/v1/responses", `{"model":"wire-model","input":"hi"}`, "Bearer ", ""},
+		{"anthropic", http.MethodPost, "/v1/messages", `{"model":"wire-model","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`, "", "X-API-Key"},
+		{"gemini", http.MethodPost, "/v1beta/models/wire-model:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, "", "X-Goog-Api-Key"},
+		{"openai catalog", http.MethodGet, "/v1/models", "", "Bearer ", ""},
+		{"gemini catalog", http.MethodGet, "/v1beta/models", "", "", "X-Goog-Api-Key"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := request(test.method, test.path, test.body, test.authHeader, test.keyHeader)
+			body := readBody(response)
+			if response.StatusCode != http.StatusForbidden || !strings.Contains(body, keyPolicyDeniedMessage) {
+				t.Fatalf("status=%d body=%s", response.StatusCode, body)
+			}
+		})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("source-denied policy made %d upstream calls", calls.Load())
+	}
+	for _, table := range []string{"governance_requests", "accounting_requests", "accounting_attempts", "model_requests"} {
+		var count int
+		if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s count=%d err=%v", table, count, err)
+		}
+	}
+
+	direct := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	direct.RemoteAddr = ""
+	direct.Header.Set("Authorization", "Bearer "+fixture.key.Key)
+	direct.Header.Set("X-Forwarded-For", "203.0.113.10")
+	recorder := httptest.NewRecorder()
+	fixture.app.Handler().ServeHTTP(recorder, direct)
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), keyPolicyDeniedMessage) {
+		t.Fatalf("missing socket peer status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
