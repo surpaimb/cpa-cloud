@@ -11,8 +11,8 @@
 | 已实现 | 尚未实现或验证 |
 | --- | --- |
 | 网页后台、管理员会话、员工启停、模型权限 | 明确排除：多租户、员工 SSO、管理员密码重置命令 |
-| 一人多个 Key、默认永久有效、可选到期、撤销、独立协议/公开模型及真实 socket peer IP/CIDR 策略；源码提供 Codex 网页授权和自动刷新 | 可信代理链、Claude/Gemini 会员接入及真实账号验证 |
-| OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路；显式 Chat↔Responses 与 Messages↔Responses 文本/function SSE 转换 | Messages→Responses 在 usage 仅终态可知时有界全流延迟；Gemini SSE 和未列出的协议字段仍不支持 |
+| 一人多个 Key、默认永久有效、可选到期、撤销、独立协议/公开模型/IP/CIDR 策略；源码支持显式可信代理的严格 X-Forwarded-For 来源解析及 Codex 网页授权/刷新 | 通用反向代理/TLS 终止部署、Claude/Gemini 会员接入及真实账号验证 |
+| OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路；显式 Chat↔Responses、Messages↔Responses 与 Gemini↔Responses 文本/function SSE 转换 | Messages→Responses 的终态 usage 延迟、Gemini identity-bearing 子集及未列出的协议字段限制仍存在 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
 | 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE；默认关闭的加密有状态资源与后台任务 | 托管工具、后台流续传/游标与完整客户端兼容性 |
 | SQLite 持久化、上游凭据加密、多账号路由；可靠用量/通用预算、单实例财务账本、Windows DPAPI 自动备份 | 生产支付渠道、跨机/非 Windows 密钥托管与对象存储 |
@@ -432,7 +432,9 @@ unset CPA_EMPLOYEE_KEY
 
 服务账户需能读程序、网页、证书，并能写数据目录；保护 TLS 私钥和数据目录不被其他普通用户读取。一个实例只使用一个数据目录，不启动多个进程共享同一 SQLite 数据库。
 
-这里使用服务自身提供 TLS。当前没有可信反向代理配置；不要仅在代理终止 HTTPS 后转明文 HTTP，否则 Origin 校验与安全 Cookie 可能不匹配。仓库暂未提供 systemd、Windows 服务或 Docker Compose 安装方案；配置常驻运行前先完成前台启动验收。
+这里使用服务自身提供 TLS。最新源码的 `--trusted-proxy-cidr` **只影响员工 Key 请求的来源 IP 解析**，不会配置反向代理、TLS 终止、管理端 Origin、安全 Cookie、PROXY protocol 或网络访问控制。若在代理终止 HTTPS，仍须单独保证外部 Origin/协议与管理会话安全；本仓库尚无完整反向代理部署方案，也未提供 systemd、Windows 服务或 Docker Compose 安装方案。
+
+启用该参数时，代理必须删除客户端自带的转发头，并写入恰好一个物理 `X-Forwarded-For` 头。服务仅在实际 socket peer 命中显式 CIDR 时读取它，从右向左取第一个不可信 hop；缺失、重复头行、非法/超限或全可信链均返回 403，不回退到代理地址。未命中可信 CIDR 的 peer 所带头会全部忽略；`Forwarded` 与 `X-Real-IP` 始终忽略。`0.0.0.0/0` 或 `::/0` 会信任对应地址族的每个 peer 和 hop，通常使安全边界失去意义并让全可信链失败关闭，不应作为便捷默认值。
 
 ## 7. 参数、数据与维护
 
@@ -443,12 +445,15 @@ unset CPA_EMPLOYEE_KEY
 | `--web-dir` | 空；不设置则没有网页 |
 | `--init` | 读取 stdin 初始化，然后退出 |
 | `--tls-cert` / `--tls-key` | 必须成对设置；非回环监听必需 |
+| `--trusted-proxy-cidr` | 仅最新源码；默认无可信代理，可重复提供显式数值 IP/CIDR，只用于员工来源解析 |
 | `--experimental-codex-membership` | 仅最新源码；默认关闭 Codex 文件导入、会员请求及 OAuth 实验 |
 | `--codex-oauth-client-id` / `--codex-oauth-redirect-uri` | 仅最新源码；同时设置才启用网页 OAuth 与自动/手动刷新，另需开启会员实验 |
 | `--allow-loopback-upstream` | 默认关闭，仅本机开发测试 |
 | `--scheduled-tests-enabled` | 默认关闭；启用已保存的本地凭据/目录定时测试 worker |
 
 用 `cpa-cloud --help` 查看二进制参数。
+
+可信代理集合在进程启动时规范化并冻结；修改参数后须重启。可信集合改变后，按旧信任 revision 创建但尚未派发的后台任务会在零上游请求下中断，而不会用新规则静默重解释原来源。
 
 数据目录包含 `cpa-cloud.db`、可能存在的 WAL/SHM 文件和 **`master.key`**。员工 Key 保存为带密钥摘要，上游凭据加密保存；主机管理员仍能访问运行中的秘密。丢失或替换 `master.key` 会破坏已有凭据的可用性。
 

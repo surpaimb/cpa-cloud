@@ -1,6 +1,6 @@
 # 第一版产品与架构计划
 
-状态：开发预览，2026-09-25 更新。用户已要求将适合本项目边界的参考产品能力纳入 CPA Cloud 实现范围，不能把最小 API Key 预览当作产品完成。分期需求与验收见 [完整功能对齐计划](feature-parity-plan.md)，实际验证与未完成项见 [集成状态](integration-status.md)。
+状态：开发预览，2026-09-29 更新。用户已要求将适合本项目边界的参考产品能力纳入 CPA Cloud 实现范围，不能把最小 API Key 预览当作产品完成。分期需求与验收见 [完整功能对齐计划](feature-parity-plan.md)，实际验证与未完成项见 [集成状态](integration-status.md)。
 
 ## 产品范围
 
@@ -48,7 +48,7 @@ React 网页构建产物由服务通过 --web-dir 提供；SQLite 用于预览�
 不是一次宣称全部兼容：每种协议需单独覆盖流式、工具调用、错误、取消和模型支持范围。
 优先同协议上游转发；跨协议转换须有独立规格和测试，不静默丢弃不能表达的能力。
 
-当前 `main` 已包含六个非流式显式 wire 方向、Chat/Responses、Messages/Responses 两组文本/function SSE、每 Key 公共入口协议/公开模型策略，以及真实 socket peer IP/CIDR 限制；其中 Messages→Responses 在 usage 仅终态可知时有界全流延迟。本增量继续接入 Gemini v1beta `streamGenerateContent`↔OpenAI Responses SSE 的严格文本/function 子集；身份字段晚到时有界延迟，终态仍缺身份则在成功终态前失败关闭。可信代理链、媒体和托管工具仍需独立实现及验收。
+当前 `main` 已包含六个非流式显式 wire 方向、Chat/Responses、Messages/Responses 与 Gemini v1beta `streamGenerateContent`/Responses 三组文本/function SSE、每 Key 公共入口协议/公开模型策略，以及真实 socket peer IP/CIDR 限制；其中 Messages→Responses 在 usage 仅终态可知时有界全流延迟，Gemini 身份字段晚到时有界暂存且终态仍缺身份会失败关闭。本增量增加默认关闭的显式可信代理来源解析：只有实际 peer 命中管理员 CIDR 时才严格解析一条 X-Forwarded-For 链，并把来源与信任 revision 带到后台恢复和最终派发事务。媒体、托管工具、通用反向代理/TLS 终止部署编排仍需独立实现及验收。
 
 ## 首轮详细设计
 

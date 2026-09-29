@@ -11,8 +11,8 @@ A self-hosted AI access platform for internal enterprise use. Administrators man
 | Implemented | Not yet implemented or validated |
 | --- | --- |
 | Web console, administrator sessions, employee enable/disable, model permissions | Explicitly out of scope: multi-tenancy, employee SSO, administrator password-reset command |
-| Multiple keys per employee, no expiration by default, optional expiration, revocation, and per-key protocol/public-model/real-socket-peer IP/CIDR policy; source adds Codex web authorization and automatic refresh | Trusted-proxy chains, Claude/Gemini membership integration, and real-account validation remain unavailable |
-| OpenAI-compatible API-key upstreams, presets and discovery; source adds native Claude/Gemini API-key routes and explicit Chat↔Responses and Messages↔Responses text/function SSE conversion | Messages→Responses is bounded full-stream delayed when usage is known only at the terminal event; Gemini cross-protocol SSE and fields outside the documented subset remain unsupported |
+| Multiple keys per employee, no expiration by default, optional expiration, revocation, and per-key protocol/public-model/IP/CIDR policy; source adds strict X-Forwarded-For source resolution for explicitly trusted proxies plus Codex web authorization/refresh | General reverse-proxy/TLS-termination deployment, Claude/Gemini membership integration, and real-account validation remain unavailable |
+| OpenAI-compatible API-key upstreams, presets and discovery; source adds native Claude/Gemini API-key routes and explicit Chat↔Responses, Messages↔Responses, and Gemini↔Responses text/function SSE conversion | Messages→Responses terminal-usage delay, the Gemini identity-bearing subset, and undocumented protocol fields remain limited |
 | `/v1/models`, non-streaming and SSE Chat Completions | Complete compatibility testing with CC Switch and real AI tools |
 | Latest source: `POST /v1/responses`, function calls/results, non-streaming JSON and SSE; opt-in encrypted state and background tasks | Hosted tools, background stream resume/cursors, and full client compatibility |
 | SQLite persistence, encrypted upstream credentials, account-pool routing; reliable usage/general budgets, a single-instance financial ledger, and Windows DPAPI automated backups | Production payment providers, cross-machine/non-Windows key custody, and object storage |
@@ -432,7 +432,9 @@ Open `https://ai.example.com:8787`; the employee Base URL is `https://ai.example
 
 The service account must be able to read the executable, web files, and certificates and write the data directory. Protect the TLS private key and data directory from other unprivileged users. Use one data directory for one service instance; do not run multiple processes against the same SQLite database.
 
-This example uses TLS provided directly by the service. Trusted reverse-proxy configuration is not currently implemented. Do not terminate HTTPS at a proxy and forward plain HTTP without a supported configuration, because Origin validation and secure cookies may no longer match. The repository does not yet provide systemd, Windows Service, or Docker Compose installation. Complete a foreground startup test before configuring long-running operation.
+This example uses TLS provided directly by the service. In the latest source, `--trusted-proxy-cidr` **only affects employee-key source-IP resolution**; it does not configure a reverse proxy, TLS termination, administrator Origin handling, secure cookies, PROXY protocol, or network access control. If a proxy terminates HTTPS, separately preserve the external origin/scheme and administrator-session security. The repository still has no complete reverse-proxy deployment guide and does not provide systemd, Windows Service, or Docker Compose installation.
+
+When enabled, the proxy must remove client-supplied forwarding headers and write exactly one physical `X-Forwarded-For` header. The service reads it only when the actual socket peer matches an explicit CIDR, then walks right to left to the first untrusted hop. A missing header, duplicate physical lines, invalid/oversized input, or an all-trusted chain returns 403 without falling back to the proxy address. Headers from an untrusted peer are ignored; `Forwarded` and `X-Real-IP` are always ignored. `0.0.0.0/0` or `::/0` trusts every peer and hop in that address family, usually destroying the useful trust boundary and causing all-trusted chains to fail closed, so it is not a safe shortcut.
 
 ## 7. Flags, data, and maintenance
 
@@ -443,12 +445,15 @@ This example uses TLS provided directly by the service. Trusted reverse-proxy co
 | `--web-dir` | Empty; the web console is unavailable when this flag is not set |
 | `--init` | Initialize from stdin and then exit |
 | `--tls-cert` / `--tls-key` | Must be set together; required for a non-loopback listener |
+| `--trusted-proxy-cidr` | Latest source only; no proxies are trusted by default; repeat with explicit numeric IPs/CIDRs for employee-source resolution only |
 | `--experimental-codex-membership` | Latest source only; Codex file import, membership requests, and OAuth experiments are disabled by default |
 | `--codex-oauth-client-id` / `--codex-oauth-redirect-uri` | Latest source only; set both to enable web authorization and automatic/manual refresh, with the membership experiment enabled |
 | `--allow-loopback-upstream` | Disabled by default; local development testing only |
 | `--scheduled-tests-enabled` | Disabled by default; runs saved local-credential/catalog test plans |
 
 Run `cpa-cloud --help` to see the binary flags.
+
+The trusted set is canonicalized and frozen at process startup; changing the flags requires a restart. A background task created under an older trust revision but not yet dispatched is interrupted with zero upstream requests instead of silently reinterpreting its stored source under the new rules.
 
 The data directory contains `cpa-cloud.db`, possible WAL/SHM files, and **`master.key`**. Employee keys are stored as keyed digests, and upstream credentials are encrypted. The host administrator can still access secrets used by the running service. Losing or replacing `master.key` makes existing encrypted credentials unusable.
 
