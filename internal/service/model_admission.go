@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -79,6 +80,9 @@ func (a *App) selectModelRoute(r *http.Request, auth employeeAuth, model string,
 		}
 	}
 	if legacy {
+		if auth.Policy.AccountGroupMode == keypolicy.ModeSelected {
+			return route{}, nil, poolAdmissionFailure(accountPoolNoCompatible)
+		}
 		a.admission.RLock()
 		var failure *modelAdmissionError
 		selected, failure = a.legacyEmployeeRoute(r.Context(), auth, model, providers)
@@ -246,19 +250,20 @@ func (a *App) releaseModelLease(lease *accountPoolLease, reqID string, record bo
 // request path. Explicit pools replace the legacy primary, including when that
 // primary is disabled. Busy/cooling accounts remain listed, since availability
 // is temporary and neither state changes employee authorization.
+func (a *App) eligibleUpstreamSQL(alias string, geminiOnly bool) string {
+	condition := alias + ".enabled=1 AND " + alias + ".archived=0"
+	if geminiOnly {
+		return condition + " AND " + alias + ".provider_kind='gemini-api-key'"
+	}
+	if !a.cfg.ExperimentalCodexMembership {
+		return condition + " AND " + alias + ".provider_kind<>'codex-membership'"
+	}
+	return condition + " AND (" + alias + ".provider_kind<>'codex-membership' OR " + alias + ".credential_state<>'reauth_required')"
+}
+
 func (a *App) availableModelRouteSQL(geminiOnly bool) string {
-	eligible := func(alias string) string {
-		condition := alias + ".enabled=1 AND " + alias + ".archived=0"
-		if geminiOnly {
-			return condition + " AND " + alias + ".provider_kind='gemini-api-key'"
-		}
-		if !a.cfg.ExperimentalCodexMembership {
-			return condition + " AND " + alias + ".provider_kind<>'codex-membership'"
-		}
-		return condition + " AND (" + alias + ".provider_kind<>'codex-membership' OR " + alias + ".credential_state<>'reauth_required')"
-	}
 	if a.accountPool == nil {
-		return "(" + eligible("u") + ")"
+		return "(" + a.eligibleUpstreamSQL("u", geminiOnly) + ")"
 	}
-	return "((NOT EXISTS(SELECT 1 FROM model_account_pool_configs pc WHERE pc.model_id=m.id) AND " + eligible("u") + ") OR EXISTS(SELECT 1 FROM model_account_pool_routes pr JOIN upstreams pu ON pu.id=pr.upstream_id WHERE pr.model_id=m.id AND " + eligible("pu") + "))"
+	return "((NOT EXISTS(SELECT 1 FROM model_account_pool_configs pc WHERE pc.model_id=m.id) AND " + a.eligibleUpstreamSQL("u", geminiOnly) + ") OR EXISTS(SELECT 1 FROM model_account_pool_routes pr JOIN upstreams pu ON pu.id=pr.upstream_id WHERE pr.model_id=m.id AND " + a.eligibleUpstreamSQL("pu", geminiOnly) + "))"
 }

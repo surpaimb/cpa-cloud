@@ -4,7 +4,7 @@
 
 ## 独立实现与术语
 
-本批依据 CPA Cloud 自有功能规格、Go `database/sql` 与 SQLite 公共行为独立实现；不复制、翻译或移植 CLIProxyAPI、Sub2API、归档 CPA 或相邻参考工作区的源码、测试、迁移、资产和文档。本批不新增第三方依赖；既有依赖及许可证记录继续适用。
+本批依据 CPA Cloud 自有功能规格、Go [`database/sql`](https://pkg.go.dev/database/sql) 公共事务接口，以及 SQLite 的[事务](https://www.sqlite.org/lang_transaction.html)、[外键](https://www.sqlite.org/foreignkeys.html)与 [`PRAGMA`](https://www.sqlite.org/pragma.html) 文档独立实现；不复制、翻译或移植 CLIProxyAPI、Sub2API、归档 CPA 或相邻参考工作区的源码、测试、迁移、资产和文档。本批不新增第三方依赖；既有依赖及许可证记录继续适用。
 
 本文的“账号池分组”只指既有关系：
 
@@ -88,6 +88,8 @@ Key 创建、加载和替换必须与账号分组行在同一 `*sql.Tx` 中完�
 ## 管理界面与安全边界
 
 网页 Key 创建和编辑器提供“全部账号池分组 / 指定账号池分组”选择，清楚区分 `selected + []` 的拒绝全部语义。保存采用同一 revision CAS；冲突保留未提交草稿并要求刷新。创建成功只展示一次 Key 明文。旧服务不具备该能力时，网页必须以固定提示禁用保存，不得静默丢弃字段。桌面宽度和 390px 视口均须可操作。
+
+`GET /system/status` 以独立只读能力位 `features.key_account_group_policy` 声明完整后端接线。旧服务即使已有 `key_access_policy=true` 但缺少该能力位，新网页仍可编辑协议、模型和已声明的来源策略，却不读取、不发送也不假保存账号组字段。新服务声明能力后，Key 列表或策略 GET 缺少任一账号组字段、返回 `null`、未知 mode 或错误成员类型时，网页失败关闭并禁用保存，不能把畸形值默认为 `all`。
 
 审计与错误只记录固定 action、操作者、Key/目标 ID、成功结果和时间等最小元数据；不得记录请求正文、Key、Authorization、Cookie、上游凭据、提示或模型响应。运行日志同样不得出现这些内容。TLS 校验、员工凭据不上游及现有密钥摘要/上游凭据加密要求保持不变。
 

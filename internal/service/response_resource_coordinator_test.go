@@ -133,6 +133,7 @@ func TestResponseResourcePolicyNarrowingBlocksBodyButPreservesCancelAndDelete(t 
 		ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeSelected, Models: []string{},
 		SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{},
 	}, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +178,7 @@ func TestResponseResourceSourceNarrowingBlocksBodyButPreservesCancelAndDelete(t 
 		ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeAll, Models: []string{},
 		SourceMode: keypolicy.ModeSelected, SourceCIDRs: []string{"203.0.113.0/24"},
+		AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{},
 	}, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -213,6 +215,7 @@ func TestBackgroundResponseCapturedSourceRevisionAndMissingContextFailClosed(t *
 		ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeAll, Models: []string{},
 		SourceMode: keypolicy.ModeSelected, SourceCIDRs: []string{"127.0.0.1/32"},
+		AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{},
 	}, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -308,6 +311,7 @@ func TestBackgroundResponsePolicyNarrowingInterruptsBeforeDispatch(t *testing.T)
 		ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeSelected, Models: []string{},
 		SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{},
 	}, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +487,7 @@ func TestStoredResponseTerminalWriteSurvivesClientCancellation(t *testing.T) {
 	coordinator, db := newResponseResourceTestCoordinator(t)
 	now := time.Date(2026, 9, 24, 8, 30, 0, 0, time.UTC)
 	plan := &responsePersistencePlan{
-		coordinator: coordinator, auth: employeeAuth{EmployeeID: "emp_one", KeyID: "key_one", SourceAddr: netip.MustParseAddr("127.0.0.1"), Policy: keypolicy.Policy{Revision: 1}},
+		coordinator: coordinator, auth: employeeAuth{EmployeeID: "emp_one", KeyID: "key_one", SourceAddr: netip.MustParseAddr("127.0.0.1"), Policy: keypolicy.Policy{Revision: 1, ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{}, ModelMode: keypolicy.ModeAll, Models: []string{}, SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{}, AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{}}},
 		model: "model_one", operationID: "op_cancelled_client_terminal", createdAt: now,
 		items: []responseStateItem{{Type: "message", Payload: []byte(`{"type":"message","role":"user","content":"secret"}`)}},
 	}

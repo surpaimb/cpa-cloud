@@ -58,10 +58,12 @@ export type KeyAccessPolicy = {
   models: string[]
   source_mode?: 'all' | 'selected'
   source_cidrs?: string[]
+  account_group_mode?: 'all' | 'selected'
+  account_group_ids?: string[]
   effective_protocols: ClientProtocol[]
   effective_models: string[]
 }
-export type KeyPolicyInput = Pick<KeyAccessPolicy, 'protocol_mode' | 'protocols' | 'model_mode' | 'models' | 'source_mode' | 'source_cidrs'>
+export type KeyPolicyInput = Pick<KeyAccessPolicy, 'protocol_mode' | 'protocols' | 'model_mode' | 'models' | 'source_mode' | 'source_cidrs' | 'account_group_mode' | 'account_group_ids'>
 export type EmployeeKey = {
   id: string
   name: string
@@ -315,6 +317,7 @@ export type SystemStatus = {
     single_instance_billing?: boolean
     key_access_policy?: boolean
     key_source_policy?: boolean
+    key_account_group_policy?: boolean
     trusted_proxy_source?: boolean
   }
 }

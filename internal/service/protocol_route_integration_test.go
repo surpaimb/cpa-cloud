@@ -34,6 +34,7 @@ func TestKeyPolicyDeniesEveryProtocolBeforeAdmission(t *testing.T) {
 		ProtocolMode: keypolicy.ModeSelected, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeAll, Models: []string{},
 		SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{},
 	}, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
@@ -95,6 +96,7 @@ func TestKeySourcePolicyUsesOnlySocketPeerAcrossProtocolsAndCatalogs(t *testing.
 		ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeAll, Models: []string{},
 		SourceMode: keypolicy.ModeSelected, SourceCIDRs: []string{"203.0.113.0/24"},
+		AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{},
 	}, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)

@@ -76,6 +76,13 @@ func (a *App) loadKeyPolicySnapshot(ctx context.Context, keyID string, protocol 
 	if policy.Revision != expectedRevision || !keypolicy.Allows(policy, protocol, publicModel) || !keypolicy.AllowsSource(policy, sourceAddr) {
 		return keypolicy.Policy{}, keypolicy.ErrInvalidPolicy
 	}
+	eligible, err := a.keyAccountGroupModelEligibleTx(ctx, tx, policy, keyID, publicModel, protocol == keypolicy.ProtocolGeminiGenerate)
+	if err != nil {
+		return keypolicy.Policy{}, err
+	}
+	if !eligible {
+		return keypolicy.Policy{}, keypolicy.ErrInvalidPolicy
+	}
 	if err := tx.Commit(); err != nil {
 		return keypolicy.Policy{}, err
 	}

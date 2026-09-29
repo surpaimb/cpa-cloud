@@ -6,11 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"cpacloud.local/server/internal/accounting"
+	"cpacloud.local/server/internal/keypolicy"
 	"cpacloud.local/server/internal/scheduling"
 )
 
@@ -26,6 +28,21 @@ func TestModelPreflightCoordinator(t *testing.T) {
 			model, id := "preflight-"+name, "request-"+name
 			auth := employeeAuth{EmployeeID: "employee-" + name, KeyID: "key-" + name, Mode: "selected"}
 			f.insertEmployee(t, auth)
+			tx, err := a.store.db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			auth.Policy, err = keypolicy.LoadTx(context.Background(), tx, auth.KeyID)
+			if err != nil {
+				tx.Rollback()
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			auth.ClientProtocol = keypolicy.ProtocolOpenAIChat
+			auth.SourceAddr = netip.MustParseAddr("127.0.0.1")
+			auth.SourceTrustRevision = a.trustedProxies.Revision()
 			first, second, third := "first-"+name, "second-"+name, "third-"+name
 			for _, account := range []string{first, second, third} {
 				f.insertAccount(t, account, true)

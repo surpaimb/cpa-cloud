@@ -350,7 +350,7 @@ type createKeyRequest struct {
 	Policy      *keypolicy.Replacement `json:"policy"`
 }
 
-func (a *App) createKey(w http.ResponseWriter, r *http.Request, _ adminSession) {
+func (a *App) createKey(w http.ResponseWriter, r *http.Request, session adminSession) {
 	var input createKeyRequest
 	if !decodeJSON(w, r, adminMaxBody, &input) {
 		return
@@ -365,12 +365,17 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request, _ adminSession) 
 		ProtocolMode: keypolicy.ModeAll, Protocols: []keypolicy.ClientProtocol{},
 		ModelMode: keypolicy.ModeAll, Models: []string{},
 		SourceMode: keypolicy.ModeAll, SourceCIDRs: []string{},
+		AccountGroupMode: keypolicy.ModeAll, AccountGroupIDs: []string{},
 	}
 	if input.Policy != nil {
 		replacement = *input.Policy
 		if replacement.SourceMode == "" && replacement.SourceCIDRs == nil {
 			replacement.SourceMode = keypolicy.ModeAll
 			replacement.SourceCIDRs = []string{}
+		}
+		if replacement.AccountGroupMode == "" && replacement.AccountGroupIDs == nil {
+			replacement.AccountGroupMode = keypolicy.ModeAll
+			replacement.AccountGroupIDs = []string{}
 		}
 	}
 	normalizedPolicy, err := keypolicy.Normalize(replacement)
@@ -475,6 +480,10 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request, _ adminSession) 
 		writeKeyPolicyAdminError(w, err)
 		return
 	}
+	if err := recordAccountPoolAudit(r.Context(), tx, session.AdminID, "key_policy.create", "access_key", id); err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -508,7 +517,7 @@ func keyCreateRetryMatches(prior keyView, storedFingerprint string, input create
 	if storedFingerprint != "" {
 		return storedFingerprint == requestedFingerprint
 	}
-	legacyAll := policy.ProtocolMode == keypolicy.ModeAll && len(policy.Protocols) == 0 && policy.ModelMode == keypolicy.ModeAll && len(policy.Models) == 0 && policy.SourceMode == keypolicy.ModeAll && len(policy.SourceCIDRs) == 0
+	legacyAll := policy.ProtocolMode == keypolicy.ModeAll && len(policy.Protocols) == 0 && policy.ModelMode == keypolicy.ModeAll && len(policy.Models) == 0 && policy.SourceMode == keypolicy.ModeAll && len(policy.SourceCIDRs) == 0 && policy.AccountGroupMode == keypolicy.ModeAll && len(policy.AccountGroupIDs) == 0
 	return legacyAll && prior.Name == input.Name && sameOptionalString(prior.ExpiresAt, input.ExpiresAt)
 }
 
