@@ -129,14 +129,19 @@ JSON number，并严格位于 `1..9_007_199_254_740_991`。
 
 ## 7. 安全与隐私
 
-允许字段固定为 `source,event_id,actor_id,action,target_type,target_id,result,revision,occurred_at`。测试和进程验收必须扫描
-HTTP 响应、服务日志和临时数据库，证明它们不包含：
+允许字段固定为 `source,event_id,actor_id,action,target_type,target_id,result,revision,occurred_at`。测试和进程验收必须
+扫描审计 HTTP 响应与服务日志，确认生成的敏感值和下列正文/内部字段不从审计读路径泄露：
 
 - 管理员密码、session cookie、CSRF token；
 - 员工 Key 明文/摘要、Authorization/Proxy-Authorization；
 - 上游 API/OAuth 凭据、恢复材料或支付 secret；
 - prompt、请求正文、模型响应、工具参数/输出；
 - operation payload digest 或原始 SQL 错误。
+
+持久化验收另核四源事实未因本只读功能被改写，并扫描临时数据库及 WAL 中合成的管理员密码、员工 Key 明文、
+上游凭据明文和 session cookie。既有员工 Key 摘要及治理 operation payload digest 在其他持久化表中有其原有用途，
+不能把“整库无摘要”作为本接口承诺。现有 `sessions.csrf_token` 在数据库中明文持久化；本段不改动会话存储，
+也不声称整库没有 CSRF token。验收须确认审计响应与服务日志不暴露该 token，且审计读路径不新增其持久化副本。
 
 actor/action/target 本身是既有管理元数据；管理员不得把秘密或正文放入 ID/名称字段。本页不额外解析、扩展或链接
 target 所指资源的正文。
@@ -153,7 +158,7 @@ target 所指资源的正文。
 6. 未知/重复/空/恶意参数、时间反转、31 天越界、limit 越界与过长元数据；
 7. 逐一删除四源、用 view/错列/错约束替换、注入查询失败/取消，均为 503 且零部分 items；修复后可重试；
 8. 旧库由现有严格迁移升级后可查，不额外改写审计行；已有保留数量与事务回滚测试不退化；
-9. 响应/日志/DB 敏感值扫描，以及超时、取消、并发查询和 SQLite 连接池回归。
+9. 按第 7 节区分审计响应/日志与既有数据库字段的敏感值扫描，以及超时、取消、并发查询和 SQLite 连接池回归。
 
 ### 网页、进程与 CI
 
