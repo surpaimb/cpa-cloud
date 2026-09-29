@@ -40,6 +40,9 @@ func seedJointRecovery(t *testing.T) (*App, time.Time) {
 	if err := a.usage.ledger.BeginAttemptTx(ctx, tx, accounting.AttemptStart{ID: "joint-recovery:1", RequestID: "joint-recovery", AccountID: "synthetic-account", Provider: accounting.ProviderOpenAICompatible, Dispatch: accounting.DispatchPrimary, StartedAt: at.Add(time.Second)}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO accounting_attempt_allocation_snapshots(attempt_id,multiplier_ppm) VALUES('joint-recovery:1',?)`, accounting.AllocationMultiplierScale); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO model_requests(id,employee_id,key_id,model_id,started_at,outcome) VALUES('joint-recovery',?,?,'synthetic-model',?,'running')`, f.auth1.EmployeeID, f.auth1.KeyID, at.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
