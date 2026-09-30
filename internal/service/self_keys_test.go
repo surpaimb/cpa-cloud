@@ -55,13 +55,26 @@ func TestSelfKeyInventoryDefaultOffAndRoles(t *testing.T) {
 
 	f := newSelfPasswordFixture(t)
 	key := createTestKey(t, f.server.URL, f.id, "self-keys-role", f.adminCookie, f.adminCSRF)
-	for name, cookie := range map[string]*http.Cookie{"anonymous": nil, "admin": f.adminCookie, "api-key": {Name: "Authorization", Value: key.Key}} {
+	for name, cookie := range map[string]*http.Cookie{"anonymous": nil, "admin": f.adminCookie} {
 		r = selfKeysRequest(t, f.server.URL, "", cookie)
 		if r.StatusCode != 401 || r.Header.Get("Cache-Control") != "no-store" {
 			t.Fatalf("%s inventory=%d cache=%q", name, r.StatusCode, r.Header.Get("Cache-Control"))
 		}
 		r.Body.Close()
 	}
+	bearerRequest, err := http.NewRequest("GET", f.server.URL+"/self/api/v1/keys", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearerRequest.Header.Set("Authorization", "Bearer "+key.Key)
+	r, err = http.DefaultClient.Do(bearerRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.StatusCode != 401 || r.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("employee API Key authenticated self inventory: %d", r.StatusCode)
+	}
+	r.Body.Close()
 	r = selfKeysRequest(t, f.server.URL, "", f.cookie)
 	page := readSelfKeys(t, r)
 	if len(page.Items) != 1 || page.Items[0].ID != key.ID || page.Items[0].Status != "active" {
