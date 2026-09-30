@@ -64,7 +64,7 @@ Claude、Gemini 会员的具体接入条件和官方来源见 [会员接入阻�
 | PROTO-05 | Gemini `v1beta` models/generateContent/streamGenerateContent、工具与多模态 | API Key 原生子集、分页发现及有界 SSE 已集成并通过隔离进程验收；会员接入及真实供应商未验证 | MEM-04, KEY-01 | M1 | REST/SSE、function call/response、图片输入、用量和安全错误 |
 | PROTO-06 | WebSocket/Realtime 与会话侧带控制 | 待实现 | ACCT-04, LIMIT-01 | M4 | 握手鉴权、双向帧、断线取消、会话计费、并发释放、秘密头隔离 |
 | PROTO-07 | 协议转换与能力协商，不可表达字段明确拒绝 | 部分实现：显式 wire 六方向非流式，以及 Chat↔Responses、Messages↔Responses、Gemini `streamGenerateContent`↔Responses 文本/function SSE 已进入源码；Messages→Responses 在 usage 仅终态可知时有界全流延迟，Gemini 身份字段使用有界暂存。媒体、托管工具和有状态/后台跨协议仍拒绝 | PROTO-02..06 | M4 | 黄金契约、一次 durable dispatch、有界拆包、原始 usage、终态/取消/背压与无静默丢失 |
-| PROTO-08 | Embeddings 标准接口、模型授权、向量响应与计量 | 部分实现：OpenAI-compatible API Key 的文本/string batch 与整数 token-array/同类 batch、float、非流式子集已进入源码，含独立模型类型、显式池 wire、Key 授权、严格向量/usage 校验与实际 wire 计量；base64、dimensions、user、其他 provider/会员、真实客户端和通用预算上界仍缺 | PROTO-01, BILL-01 | M2-M4 | 输入类型/批量上限、维度与编码、模型权限、取消、用量未知及脱敏 |
+| PROTO-08 | Embeddings 标准接口、模型授权、向量响应与计量 | 部分实现：OpenAI-compatible API Key 的文本/string batch 与整数 token-array/同类 batch、float、非流式子集已进入源码，含独立模型类型、显式池 wire、Key 授权、实际 `text-embedding-3-small|large` 的显式 dimensions、严格向量/usage 校验与实际 wire 计量；base64、user、其他模型的 dimensions、其他 provider/会员、真实客户端和通用预算上界仍缺 | PROTO-01, BILL-01 | M2-M4 | 输入类型/批量上限、维度与编码、模型权限、取消、用量未知及脱敏 |
 | PROTO-09 | 可配置协议兼容与错误处理规则 | 部分实现：固定字段拒绝和脱敏错误已存在，管理规则、版本及运行时变更待实现 | PROTO-02..05, AUDIT-01 | M2-M4 | 配置版本一致、错误映射稳定；不记录正文、不泄露上游秘密或放宽不安全重试 |
 | MEDIA-01 | 图片生成/编辑、异步任务、批量任务与对象内容 | 待实现 | PROTO-01, STORE-01 | M4 | 上传大小/类型、轮询/取消、授权下载、生命周期与费用 |
 | MEDIA-02 | 视频生成/编辑/扩展、语音 TTS/STT、自定义声音 | 待实现/需协议核实 | STORE-01, BILL-01 | M4 | 每个提供商单独能力矩阵；异步状态、取消、内容清理和成本 |

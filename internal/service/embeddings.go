@@ -2,8 +2,10 @@ package service
 
 // The embeddings entry is intentionally separate from the generation
 // conversion runtime. It accepts only the independently documented text and
-// token-array float subset and can dispatch only an explicit embedding model through an explicit
-// openai-embeddings account-pool route.
+// token-array float subset, including explicit dimensions for two verified
+// upstream model names, and can dispatch only an explicit embedding model
+// through an explicit openai-embeddings account-pool route. Dimensions follow
+// the public OpenAI Create embeddings reference and guide checked 2026-09-30.
 import (
 	"context"
 	"errors"
@@ -95,6 +97,9 @@ func (a *App) embeddings(w http.ResponseWriter, r *http.Request) {
 		if candidate.ProviderKind != "openai-compatible" || candidate.WireProtocol != wireProtocolEmbeddings || candidate.ModelKind != "embedding" || candidate.KeyVersion != 1 {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailurePermanent)
 		}
+		if !embeddingwire.DimensionsAllowed(request.Dimensions, candidate.UpstreamModel) {
+			return route{}, requestPreflightFailure(http.StatusBadRequest, "unsupported_feature", "The embedding request uses a feature outside the supported subset.")
+		}
 		credential, err := a.secrets.decryptCredential(candidate.AccountID, candidate.Ciphertext)
 		if err != nil {
 			return route{}, accountPreflightFailure(http.StatusServiceUnavailable, "no_available_route", "No available route for this model.", scheduling.FailureAuth)
@@ -132,7 +137,9 @@ func (a *App) embeddings(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(lease.Context())
 	}
 	defer a.releaseModelLease(lease, modelRequestID, true)
-	client, dispatchFailure := a.dispatchModelRoute(r, auth, request.Model, selected, lease, true, upstreamRequest)
+	client, dispatchFailure := a.dispatchModelRouteGuarded(r, auth, request.Model, selected, lease, true, func(current route) bool {
+		return current.ProviderKind == "openai-compatible" && current.WireProtocol == wireProtocolEmbeddings && current.ModelKind == "embedding" && embeddingwire.DimensionsAllowed(request.Dimensions, current.UpstreamModel)
+	}, upstreamRequest)
 	if dispatchFailure != nil {
 		if a.finishDispatchFailure(r, modelRequestID, true) {
 			writeModelError(w, dispatchFailure.status, dispatchFailure.code, dispatchFailure.message, modelRequestID)
@@ -181,7 +188,11 @@ func (a *App) embeddings(w http.ResponseWriter, r *http.Request) {
 	}
 	parsed, err := embeddingwire.DecodeResponse(raw)
 	if err == nil {
-		_, err = embeddingwire.ValidateResponse(parsed, selected.UpstreamModel, request.Input.Count())
+		var dimension int
+		dimension, err = embeddingwire.ValidateResponse(parsed, selected.UpstreamModel, request.Input.Count())
+		if err == nil && request.Dimensions != nil && dimension != *request.Dimensions {
+			err = embeddingwire.ErrInvalidResponse
+		}
 	}
 	if err != nil {
 		a.finishRequest(modelRequestID, "failed", response.StatusCode)

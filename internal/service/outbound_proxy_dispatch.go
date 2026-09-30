@@ -90,6 +90,12 @@ func egressAdmissionFailure(err error) *modelAdmissionError {
 // network runs under admission. The accounting write precedes MayHaveSent;
 // failures here cannot start an upstream attempt or trigger a second account.
 func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model string, selected route, lease *accountPoolLease, record bool, wire ...*http.Request) (upstreamHTTPDoer, *modelAdmissionError) {
+	return a.dispatchModelRouteGuarded(r, auth, model, selected, lease, record, nil, wire...)
+}
+
+// guard is evaluated after the exact selected route is rechecked in the same
+// transaction and before any durable dispatch marker or upstream network call.
+func (a *App) dispatchModelRouteGuarded(r *http.Request, auth employeeAuth, model string, selected route, lease *accountPoolLease, record bool, guard func(route) bool, wire ...*http.Request) (upstreamHTTPDoer, *modelAdmissionError) {
 	if lease != nil {
 		lease.mu.Lock()
 		defer lease.mu.Unlock()
@@ -178,6 +184,9 @@ func (a *App) dispatchModelRoute(r *http.Request, auth employeeAuth, model strin
 	}
 	if matches != 1 {
 		return nil, poolAdmissionFailure(accountPoolConfigurationChanged)
+	}
+	if guard != nil && !guard(selected) {
+		return nil, &modelAdmissionError{http.StatusBadRequest, "unsupported_feature", "The embedding request uses a feature outside the supported subset."}
 	}
 	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM account_recovery_states WHERE account_id=?`, selected.AccountID).Scan(&matches); err != nil {
 		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)
