@@ -20,7 +20,7 @@
 
 员工 Key 正常重启后仍有效；撤销、员工停用、可选到期时间及权限限制仍会生效。员工无需知道上游供应商 Key。
 
-最新源码提供默认关闭的员工自助入口第一阶段：启动时显式添加 `--employee-self-service-enabled`，管理员可在“员工与 Key”为已启用、尚未开通的员工签发一次性 15 分钟开通码，员工从 `/self/` 设置密码、登录并只查看自己的 ID、姓名、部门和状态。停用员工会同时清除该入口的密码与会话，重新启用后需重新开通。管理员会话、员工自助会话和 API Key 彼此不能代用。本功能不包含自助注册、密码找回、SSO、Key/用量/账单查看，也不在 preview.3 下载包中；GOV-02 尚未完成，生产使用前须确定内部告知、删除和备份留存边界。详见[员工自助第一阶段契约](docs/employee-self-service-foundation-contract.md)。
+最新源码提供默认关闭的员工自助入口：启动时显式添加 `--employee-self-service-enabled`，管理员可在“员工与 Key”为已启用、尚未开通的员工签发一次性 15 分钟开通码。员工从 `/self/` 设置密码、登录后可查看个人资料、本人已有 Key 的基本信息，以及最近 24 小时的本人请求活动；Key 明文、策略、用量和账单不会在这里显示。停用员工会同时清除该入口的密码与会话，重新启用后需重新开通。管理员会话、员工自助会话和 API Key 彼此不能代用。本功能不包含自助注册、密码找回、SSO、Key 自助创建或撤销，也不在 preview.3 下载包中；GOV-02 尚未完成，生产使用前须确定内部告知、删除和备份留存边界。详见[员工自助基础契约](docs/employee-self-service-foundation-contract.md)、[Key 列表契约](docs/employee-self-key-inventory-contract.md)和[请求记录契约](docs/employee-self-request-history-contract.md)。
 
 ## Codex 会员文件导入实验（仅最新源码）
 

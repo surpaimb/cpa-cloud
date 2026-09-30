@@ -741,6 +741,24 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-key-list dt { color: var(--muted); }
 .self-key-list dd { min-width: 0; overflow-wrap: anywhere; color: var(--navy); }
 .self-keys > .button { width: 100%; }
+/* Independently authored for docs/employee-self-request-history-contract.md. */
+.self-history { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.self-history h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
+.self-history > p { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.self-history > p[role="alert"] { color: #a52132; }
+.self-history-list { display: grid; gap: 10px; padding: 0; margin: 0 0 14px; list-style: none; }
+.self-history-list li { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: #fafcfd; }
+.self-history-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.self-history-top strong { min-width: 0; overflow-wrap: anywhere; color: var(--navy); font-size: 14px; }
+.self-history-status { flex: none; border-radius: 99px; padding: 3px 8px; font-size: 11px; font-weight: 700; background: #e7eef5; color: var(--navy); }
+.self-history-status--succeeded { background: #e1f4e8; color: #236347; }
+.self-history-status--failed, .self-history-status--cancelled, .self-history-status--interrupted { background: #f7e6e8; color: #9c2b3a; }
+.self-history-list dl { display: grid; gap: 6px; margin: 0; }
+.self-history-list dl div { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 8px; }
+.self-history-list dt, .self-history-list dd { margin: 0; font-size: 12px; line-height: 1.5; }
+.self-history-list dt { color: var(--muted); }
+.self-history-list dd { min-width: 0; overflow-wrap: anywhere; color: var(--navy); }
+.self-history > .button { width: 100%; }
 .self-secret { padding: 14px; background: #f2f9f6; border: 1px solid #bfe3d5; border-radius: 8px; }
 .self-secret dl { margin: 12px 0; }
 .self-secret dt { color: var(--muted); font-size: 12px; }
