@@ -166,6 +166,16 @@ func (a *App) updateEmployee(w http.ResponseWriter, r *http.Request, _ adminSess
 		writeAdminError(w, 409, "revision_conflict", "The object was changed by another request.")
 		return
 	}
+	if item.Status == "disabled" {
+		if _, err := tx.ExecContext(r.Context(), `DELETE FROM employee_self_sessions WHERE employee_id=?`, id); err != nil {
+			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+		if _, err := tx.ExecContext(r.Context(), `DELETE FROM employee_self_credentials WHERE employee_id=?`, id); err != nil {
+			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return

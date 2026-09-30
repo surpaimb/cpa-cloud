@@ -60,6 +60,8 @@ type App struct {
 	trustedProxies                 keypolicy.TrustedProxySet
 	loginMu                        sync.Mutex
 	logins                         map[string]*loginAttempt
+	selfLoginMu                    sync.Mutex
+	selfLogins                     map[string]*loginAttempt
 	catalogMu                      sync.Mutex
 	catalogs                       map[string]codexCatalogCacheEntry
 	codexCatalog                   codexCatalogLister
@@ -106,11 +108,15 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		s.close()
 		return nil, err
 	}
+	if err := s.migrateSelfService(ctx); err != nil {
+		s.close()
+		return nil, fmt.Errorf("migrate employee self service: %w", err)
+	}
 	client := newUpstreamClient(cfg.AllowLoopbackUpstream)
 	app := &App{
 		cfg: cfg, store: s, secrets: sec, http: client,
 		oauthHTTP: newCodexOAuthHTTPClient(), codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(),
-		logins: make(map[string]*loginAttempt), trustedProxies: trustedProxies,
+		logins: make(map[string]*loginAttempt), selfLogins: make(map[string]*loginAttempt), trustedProxies: trustedProxies,
 	}
 	opened := false
 	defer func() {
@@ -332,6 +338,12 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("DELETE /admin/api/v1/sessions", a.requireAdmin(a.logout, true))
 	mux.HandleFunc("GET /admin/api/v1/session", a.requireAdmin(a.sessionInfo, false))
 	mux.HandleFunc("GET /admin/api/v1/employees", a.requireAdmin(a.listEmployees, false))
+	if a.cfg.EmployeeSelfServiceEnabled {
+		mux.HandleFunc("POST /admin/api/v1/employees/{id}/self-enrollment", a.requireAdmin(a.issueSelfEnrollment, true))
+		a.registerSelfHandlers(mux)
+	} else {
+		mux.HandleFunc("POST /admin/api/v1/employees/{id}/self-enrollment", http.NotFound)
+	}
 	mux.HandleFunc("POST /admin/api/v1/employees", a.requireAdmin(a.createEmployee, true))
 	mux.HandleFunc("PATCH /admin/api/v1/employees/{id}", a.requireAdmin(a.updateEmployee, true))
 	mux.HandleFunc("PUT /admin/api/v1/employees/{id}/model-policy", a.requireAdmin(a.updateModelPolicy, true))
@@ -372,7 +384,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1beta/models", a.listGeminiModels)
 	mux.HandleFunc("POST /v1beta/models/{operation}", a.geminiGenerateContent)
 	if strings.TrimSpace(a.cfg.WebDir) != "" {
-		mux.HandleFunc("GET /", a.serveWeb)
+		mux.HandleFunc("/self/", a.serveWeb)
+		mux.HandleFunc("/", a.serveWeb)
 	}
 	return requestMiddleware(mux)
 }
@@ -435,6 +448,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"ready":   true,
 		"storage": "sqlite-wal",
 		"features": map[string]bool{
+			"employee_self_service":            a.cfg.EmployeeSelfServiceEnabled,
 			"codex_membership_import":          a.cfg.ExperimentalCodexMembership,
 			"responses_api":                    true,
 			"openai_embeddings":                true,
@@ -514,6 +528,24 @@ func writeModelError(w http.ResponseWriter, status int, code, message, reqID str
 }
 
 func (a *App) serveWeb(w http.ResponseWriter, r *http.Request) {
+	selfPath := r.URL.Path == "/self" || strings.HasPrefix(r.URL.Path, "/self/")
+	if selfPath && !a.cfg.EmployeeSelfServiceEnabled {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Path == "/self" {
+		http.Redirect(w, r, "/self/", http.StatusPermanentRedirect)
+		return
+	}
+	if selfPath {
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+	}
 	clean := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
 	if clean == "." {
 		clean = "index.html"

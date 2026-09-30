@@ -32,6 +32,7 @@ type Config struct {
 	AutomatedBackupsOutputDir   string
 	BackupKeyProviderStoreDir   string
 	ExperimentalCodexMembership bool
+	EmployeeSelfServiceEnabled  bool
 	ResponsesStatefulResources  bool
 	ResponsesBackgroundTasks    bool
 	CodexOAuthClientID          string

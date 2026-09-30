@@ -322,6 +322,7 @@ export type SystemStatus = {
   storage: string
   limitations: string[]
   features?: {
+	  employee_self_service?: boolean
 	  scheduled_tests_configuration?: boolean
 	  scheduled_tests_running?: boolean
 	  scheduled_tests_daily_local?: boolean
@@ -972,6 +973,8 @@ export const api = {
     request<Employee>('/employees', { method: 'POST', body: JSON.stringify(body) }, csrf),
   updateEmployee: (id: string, body: Record<string, unknown>, csrf: string) =>
     request<Employee>(`/employees/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+  issueSelfEnrollment: (id: string, csrf: string) =>
+    request<{ employee_id: string; enrollment_secret: string; expires_at: string }>(`/employees/${encodeURIComponent(id)}/self-enrollment`, { method: 'POST', body: '{}' }, csrf),
   updateModelPolicy: (id: string, body: Record<string, unknown>, csrf: string) =>
     request<Employee>(`/employees/${encodeURIComponent(id)}/model-policy`, { method: 'PUT', body: JSON.stringify(body) }, csrf),
   keys: (employeeId: string) => request<{ items: EmployeeKey[] }>(`/employees/${encodeURIComponent(employeeId)}/keys`),

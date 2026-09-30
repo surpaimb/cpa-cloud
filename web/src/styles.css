@@ -703,7 +703,30 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
   .billing-confirm-list div { grid-template-columns: 1fr; gap: 5px; }
 }
 .recovery-panel td { overflow-wrap: anywhere; }
+.self-screen { min-height: 100vh; display: grid; place-items: center; padding: 32px 18px; background: linear-gradient(145deg, #e9f2f4, #f6f8fb 60%, #e7edf5); }
+.self-card { width: min(100%, 470px); padding: 36px; background: white; border: 1px solid var(--border); border-radius: 18px; box-shadow: 0 18px 55px rgb(13 42 65 / .1); }
+.self-card header { margin: 32px 0 24px; }
+.self-card h1 { margin: 6px 0 8px; color: var(--navy); font-size: clamp(26px, 6vw, 34px); }
+.self-card header p, .self-footnote { color: var(--muted); font-size: 13px; line-height: 1.65; }
+.self-kicker { color: var(--teal); font-size: 11px; font-weight: 800; letter-spacing: .13em; }
+.self-form { display: grid; gap: 16px; }
+.self-form .button { width: 100%; margin-top: 4px; }
+.self-mode { margin-top: 20px; }
+.self-footnote { margin: 28px 0 0; }
+.self-profile { display: grid; gap: 0; margin: 0 0 25px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.self-profile div { display: grid; grid-template-columns: 95px minmax(0, 1fr); gap: 12px; padding: 13px 16px; }
+.self-profile div + div { border-top: 1px solid var(--border); }
+.self-profile dt { color: var(--muted); font-size: 12px; }
+.self-profile dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--navy); font-size: 14px; font-weight: 650; }
+.self-secret { padding: 14px; background: #f2f9f6; border: 1px solid #bfe3d5; border-radius: 8px; }
+.self-secret dl { margin: 12px 0; }
+.self-secret dt { color: var(--muted); font-size: 12px; }
+.self-secret dd { margin: 3px 0 12px; overflow-wrap: anywhere; }
+.self-secret code { font-size: 13px; }
 @media (max-width: 540px) {
+  .self-screen { padding: 16px; align-items: start; }
+  .self-card { padding: 25px 20px; }
+  .self-profile div { grid-template-columns: 80px minmax(0, 1fr); }
   .audit-filter-grid, .audit-window, .audit-event__grid { grid-template-columns: 1fr; }
   .audit-filter-actions { align-items: stretch; flex-direction: column; }
   .audit-filter-actions .button { width: 100%; }
