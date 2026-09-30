@@ -8,6 +8,8 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
   const { data, loading, error, reload } = useResource(load)
   const [creating, setCreating] = useState(false)
   const [selected, setSelected] = useState<Employee | null>(null)
+  const [enrolling, setEnrolling] = useState<Employee | null>(null)
+  const [selfService, setSelfService] = useState(false)
   const [policy, setPolicy] = useState<Employee | null>(null)
   const [keyPolicyCapability, setKeyPolicyCapability] = useState<boolean | null>(null)
   const [keySourcePolicyCapability, setKeySourcePolicyCapability] = useState<boolean | null>(null)
@@ -24,6 +26,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
         setKeyAccountGroupPolicyCapability(status.features?.key_account_group_policy === true)
         setTrustedProxySource(status.features?.trusted_proxy_source === true)
         setOpenAIEmbeddings(status.features?.openai_embeddings === true)
+        setSelfService(status.features?.employee_self_service === true)
       }
     }).catch(() => {
       if (active) {
@@ -32,6 +35,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
         setKeyAccountGroupPolicyCapability(false)
         setTrustedProxySource(false)
         setOpenAIEmbeddings(false)
+        setSelfService(false)
       }
     })
     return () => { active = false }
@@ -50,14 +54,26 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
           <td><span className={`status status--${employee.status}`}><i />{employee.status === 'active' ? '启用' : '已停用'}</span></td>
           <td><button className="link-button" onClick={() => setPolicy(employee)}>{employee.model_mode === 'all' ? '全部可用模型' : `${employee.models.length} 个指定模型`}</button></td>
           <td><button className="link-button" onClick={() => setSelected(employee)}><Icon name="key" />管理 Key</button></td>
-          <td><div className="row-actions"><ToggleEmployee employee={employee} csrf={csrf} onDone={() => void reload()} /></div></td>
+          <td><div className="row-actions">{selfService && employee.status === 'active' ? <button className="link-button" onClick={() => setEnrolling(employee)}>开通自助入口</button> : null}<ToggleEmployee employee={employee} csrf={csrf} onDone={() => void reload()} /></div></td>
         </tr>)}</tbody>
       </table></div> : null}
     </div>
     {creating ? <CreateEmployee csrf={csrf} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void reload() }} /> : null}
     {selected ? <KeysDialog employee={selected} csrf={csrf} keyPolicyCapability={keyPolicyCapability} sourcePolicyCapability={keySourcePolicyCapability} accountGroupPolicyCapability={keyAccountGroupPolicyCapability} trustedProxySource={trustedProxySource} openAIEmbeddings={openAIEmbeddings} onClose={() => setSelected(null)} /> : null}
+    {enrolling ? <EnrollmentDialog employee={enrolling} csrf={csrf} onClose={() => setEnrolling(null)} /> : null}
     {policy ? <PolicyDialog employee={policy} csrf={csrf} onClose={() => setPolicy(null)} onSaved={() => { setPolicy(null); void reload() }} /> : null}
   </>
+}
+
+function EnrollmentDialog({ employee, csrf, onClose }: { employee: Employee; csrf: string; onClose: () => void }) {
+  const [issued, setIssued] = useState<{ enrollment_secret: string; expires_at: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  return <Dialog title={`${employee.name} 的自助入口`} description="仅限已创建且启用的员工。重新签发会立即使旧开通码失效。" onClose={onClose}>
+    {issued ? <div className="self-secret" role="status"><p>开通码只显示这一次，请通过内部安全渠道交给员工。</p><dl><dt>员工 ID</dt><dd><code>{employee.id}</code></dd><dt>开通码</dt><dd><code>{issued.enrollment_secret}</code></dd><dt>截止时间</dt><dd>{new Date(issued.expires_at).toLocaleString('zh-CN')}</dd></dl><p>员工入口：<a href="/self/">/self/</a></p></div> : <p>开通后，员工可以设置密码并查看自己的姓名、部门与状态；不会开放 Key 或用量数据。</p>}
+    <FormError error={error} />
+    <div className="dialog__actions"><Button variant="secondary" onClick={onClose}>关闭</Button>{!issued ? <Button disabled={busy} onClick={async () => { setBusy(true); setError(null); try { setIssued(await api.issueSelfEnrollment(employee.id, csrf)) } catch (caught) { setError(messageFor(caught)) } finally { setBusy(false) } }}>{busy ? '正在签发…' : '签发一次性开通码'}</Button> : null}</div>
+  </Dialog>
 }
 
 export function PageHeader({ title, description, children }: { title: string; description: string; children?: React.ReactNode }) {

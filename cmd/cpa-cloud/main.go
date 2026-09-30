@@ -66,6 +66,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.StringVar(&cfg.AutomatedBackupsOutputDir, "automated-backups-output-dir", "", "encrypted backup package directory (default: a sibling of the data directory)")
 	flags.StringVar(&cfg.BackupKeyProviderStoreDir, "backup-key-provider-store-dir", "", "host-protected backup key directory (default: a separate sibling of the data directory)")
 	flags.BoolVar(&cfg.ExperimentalCodexMembership, "experimental-codex-membership", false, "enable experimental Codex membership credential import and routing")
+	flags.BoolVar(&cfg.EmployeeSelfServiceEnabled, "employee-self-service-enabled", false, "enable the development-preview employee self-service page and API")
 	flags.BoolVar(&cfg.ResponsesStatefulResources, "responses-stateful-resources", false, "enable encrypted employee-owned Responses resources (development preview)")
 	flags.BoolVar(&cfg.ResponsesBackgroundTasks, "responses-background-tasks", false, "enable durable background Responses tasks; requires --responses-stateful-resources")
 	flags.StringVar(&cfg.CodexOAuthClientID, "codex-oauth-client-id", "", "registered OAuth client ID for the experimental Codex membership lifecycle")
