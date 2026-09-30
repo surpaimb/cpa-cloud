@@ -47,7 +47,51 @@ func TestDecodeAndMarshalRequestPreservesInputShape(t *testing.T) {
 			if string(root["input"]) != test.wantInput {
 				t.Fatalf("input shape changed: %s", encoded)
 			}
+			if _, present := root["dimensions"]; present {
+				t.Fatalf("omitted dimensions changed legacy wire: %s", encoded)
+			}
 		})
+	}
+}
+
+func TestExplicitDimensionsPreserveInputShapeAndSelectedModelRules(t *testing.T) {
+	for _, input := range []string{`"hello"`, `["hello","world"]`, `[0,12]`, `[[12,34],[56]]`} {
+		request, err := DecodeRequest([]byte(`{"model":"public-alias","input":` + input + `,"dimensions":3}`))
+		if err != nil || request.Dimensions == nil || *request.Dimensions != 3 {
+			t.Fatalf("input=%s request=%+v err=%v", input, request, err)
+		}
+		encoded, err := MarshalRequest(request, "text-embedding-3-small")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var root map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &root); err != nil {
+			t.Fatal(err)
+		}
+		if string(root["input"]) != input || string(root["dimensions"]) != "3" || string(root["model"]) != `"text-embedding-3-small"` {
+			t.Fatalf("explicit dimensions wire changed: %s", encoded)
+		}
+	}
+	for _, test := range []struct {
+		model string
+		value int
+		want  bool
+	}{
+		{"text-embedding-3-small", 1, true},
+		{"text-embedding-3-small", 1536, true},
+		{"text-embedding-3-small", 1537, false},
+		{"text-embedding-3-large", 1, true},
+		{"text-embedding-3-large", 3072, true},
+		{"text-embedding-3-large", 3073, false},
+		{"text-embedding-3-small-v2", 3, false},
+		{"text-embedding-ada-002", 3, false},
+	} {
+		if got := DimensionsAllowed(&test.value, test.model); got != test.want {
+			t.Errorf("DimensionsAllowed(%d, %q)=%v want %v", test.value, test.model, got, test.want)
+		}
+		if !DimensionsAllowed(nil, test.model) {
+			t.Errorf("omission rejected model %q", test.model)
+		}
 	}
 }
 
@@ -62,7 +106,16 @@ func TestDecodeRequestRejectsInvalidAndUnsupportedValues(t *testing.T) {
 		{"second value", []byte(`{} {}`), ErrInvalidRequest},
 		{"duplicate", []byte(`{"model":"m","model":"n","input":"x"}`), ErrInvalidRequest},
 		{"unknown", []byte(`{"model":"m","input":"x","extra":true}`), ErrUnsupportedFeature},
-		{"dimensions", []byte(`{"model":"m","input":"x","dimensions":3}`), ErrUnsupportedFeature},
+		{"zero dimensions", []byte(`{"model":"m","input":"x","dimensions":0}`), ErrInvalidRequest},
+		{"negative zero dimensions", []byte(`{"model":"m","input":"x","dimensions":-0}`), ErrInvalidRequest},
+		{"negative dimensions", []byte(`{"model":"m","input":"x","dimensions":-1}`), ErrInvalidRequest},
+		{"fractional dimensions", []byte(`{"model":"m","input":"x","dimensions":1.0}`), ErrInvalidRequest},
+		{"exponent dimensions", []byte(`{"model":"m","input":"x","dimensions":1e0}`), ErrInvalidRequest},
+		{"overflow dimensions", []byte(`{"model":"m","input":"x","dimensions":2147483648}`), ErrInvalidRequest},
+		{"boolean dimensions", []byte(`{"model":"m","input":"x","dimensions":true}`), ErrInvalidRequest},
+		{"string dimensions", []byte(`{"model":"m","input":"x","dimensions":"3"}`), ErrInvalidRequest},
+		{"null dimensions", []byte(`{"model":"m","input":"x","dimensions":null}`), ErrInvalidRequest},
+		{"duplicate dimensions", []byte(`{"model":"m","input":"x","dimensions":2,"dimensions":3}`), ErrInvalidRequest},
 		{"user", []byte(`{"model":"m","input":"x","user":"u"}`), ErrUnsupportedFeature},
 		{"stream", []byte(`{"model":"m","input":"x","stream":false}`), ErrUnsupportedFeature},
 		{"base64", []byte(`{"model":"m","input":"x","encoding_format":"base64"}`), ErrUnsupportedFeature},

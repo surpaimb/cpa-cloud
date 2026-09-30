@@ -2,6 +2,8 @@
 
 状态：2026-09-29 已从首轮预览进入持续功能对齐。以 [功能矩阵](feature-parity-plan.md) 分批交付符合 CPA Cloud 产品边界的能力，不以打包数量或最小文本请求替代产品验收。
 
+`PROTO-08` 第三段候选按[显式 dimensions 增量契约](openai-embeddings-dimensions-contract.md)限制到 OpenAI-compatible API Key、非流式 float 和最终实际 `text-embedding-3-small|large`，并在派发事务重核。省略字段不改变旧 wire；base64、user、其他模型/供应商、真实客户端与通用预算上界仍待验证。精确提交的 CI 与固定二进制验收须单独记录，不借用前两段证据。
+
 ## 当前执行批次
 
 `OBS-01` 第一段按[本机账号池容量与持久预留观测契约](account-pool-runtime-observation-contract.md)提供管理员单模型只读快照和手动刷新网页；全局容量取账号在所有启用模型路由的最小配置上限，预留只计本机持久化且未到期的请求/维护租约。旧无池模型、停用模型和冷却/恢复阻塞分开表达。此段不提供实时流量、供应商配额/余额、告警或派发成功保证。

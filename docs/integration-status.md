@@ -108,6 +108,11 @@
   checks 以本批实际结果另行记录。未访问真实 provider/会员账号，未实现员工售价倍率、分组预算、
   供应商发票核对、汇率/多币换算，也未创建部署、tag、安装包或 release。
 
+## 2026-09-30：PROTO-08 第三段显式 dimensions 候选
+
+- 独立[dimensions 增量契约](openai-embeddings-dimensions-contract.md)先行单独提交。仅在现有 OpenAI-compatible API Key 非流式 float 子集内，按最终实际 `text-embedding-3-small|large` 分别允许正整数 `1..1536`/`1..3072`；省略参数保留旧 wire，所有成功向量必须精确匹配请求维数。
+- 预检和最终派发事务都校验该资格；非法值、不合格模型、重复键在派发前拒绝，坏响应按旧脱敏失败 attempt 处理。旧 Key 授权、严格预算、取消、未知提交和重启语义不变。此处仅记录候选源码与合成测试范围，最终 Go/Web/CI race、固定二进制及独立验收证据须按精确 SHA 后续补录；不宣称真实 provider 或完整 Embeddings 支持。
+
 ## 2026-09-30：PROTO-08 第二段 token-array 输入候选
 
 - 独立 [token-array 输入增量契约](openai-embeddings-token-input-contract.md)先行提交；在原 OpenAI-compatible API Key 非流式 float 子集内增加单个整数 token 数组和同类批次，保持上游 JSON 形状与顺序。单数组计为一个输入，批次按外层长度校验向量 index。ID `0..2147483647`、每序列 2048、整批 65536 和既有 4 MiB 请求体为本地防护，不是 tokenizer 或供应商限额证明。

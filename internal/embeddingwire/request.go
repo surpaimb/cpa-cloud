@@ -41,14 +41,15 @@ type Request struct {
 	Model          string
 	Input          Input
 	EncodingFormat EncodingFormat
+	Dimensions     *int
 }
 
 var requestFields = map[string]bool{
-	"model": true, "input": true, "encoding_format": true,
+	"model": true, "input": true, "encoding_format": true, "dimensions": true,
 }
 
 var explicitlyUnsupportedRequestFields = map[string]bool{
-	"dimensions": true, "user": true, "stream": true,
+	"user": true, "stream": true,
 }
 
 func DecodeRequest(raw []byte) (Request, error) {
@@ -92,8 +93,28 @@ func DecodeRequest(raw []byte) (Request, error) {
 			return Request{}, invalid(ErrUnsupportedFeature, "encoding_format", "only float is supported")
 		}
 	}
+	var dimensions *int
+	if rawDimensions, present := root["dimensions"]; present {
+		// Independently specified from the public Create embeddings reference:
+		// do not coerce a JSON number through float64 or accept exponent syntax.
+		literal := bytes.TrimSpace(rawDimensions)
+		if len(literal) == 0 || literal[0] < '1' || literal[0] > '9' {
+			return Request{}, invalid(ErrInvalidRequest, "dimensions", "expected a positive decimal integer")
+		}
+		for _, digit := range literal {
+			if digit < '0' || digit > '9' {
+				return Request{}, invalid(ErrInvalidRequest, "dimensions", "expected a positive decimal integer")
+			}
+		}
+		value, err := strconv.ParseInt(string(literal), 10, 32)
+		if err != nil {
+			return Request{}, invalid(ErrInvalidRequest, "dimensions", "integer is out of range")
+		}
+		converted := int(value)
+		dimensions = &converted
+	}
 
-	request := Request{Model: model, Input: input, EncodingFormat: format}
+	request := Request{Model: model, Input: input, EncodingFormat: format, Dimensions: dimensions}
 	if err := ValidateRequest(request); err != nil {
 		return Request{}, err
 	}
@@ -200,6 +221,9 @@ func ValidateRequest(request Request) error {
 	if request.EncodingFormat != EncodingFloat {
 		return invalid(ErrUnsupportedFeature, "encoding_format", "only float is supported")
 	}
+	if request.Dimensions != nil && (*request.Dimensions < 1 || int64(*request.Dimensions) > 2147483647) {
+		return invalid(ErrInvalidRequest, "dimensions", "expected a positive decimal integer")
+	}
 	if request.Input.tokens != nil || request.Input.tokenBatch != nil {
 		if request.Input.single || request.Input.texts != nil || request.Input.tokens != nil && request.Input.tokenBatch != nil {
 			return invalid(ErrInvalidRequest, "input", "mixed input shapes")
@@ -295,7 +319,8 @@ func MarshalRequest(request Request, upstreamModel string) ([]byte, error) {
 		Model          string         `json:"model"`
 		Input          any            `json:"input"`
 		EncodingFormat EncodingFormat `json:"encoding_format"`
-	}{Model: upstreamModel, Input: input, EncodingFormat: EncodingFloat}
+		Dimensions     *int           `json:"dimensions,omitempty"`
+	}{Model: upstreamModel, Input: input, EncodingFormat: EncodingFloat, Dimensions: request.Dimensions}
 	encoded, err := json.Marshal(wire)
 	if err != nil {
 		return nil, invalid(ErrInvalidRequest, "body", "could not encode request")
@@ -304,4 +329,21 @@ func MarshalRequest(request Request, upstreamModel string) ([]byte, error) {
 		return nil, limited("body")
 	}
 	return encoded, nil
+}
+
+// DimensionsAllowed applies the intentionally narrow CPA Cloud preview
+// whitelist to the selected actual upstream model, never to the public alias.
+// It is checked at candidate preflight and again inside durable dispatch.
+func DimensionsAllowed(dimensions *int, upstreamModel string) bool {
+	if dimensions == nil {
+		return true
+	}
+	switch upstreamModel {
+	case "text-embedding-3-small":
+		return *dimensions >= 1 && *dimensions <= 1536
+	case "text-embedding-3-large":
+		return *dimensions >= 1 && *dimensions <= 3072
+	default:
+		return false
+	}
 }
