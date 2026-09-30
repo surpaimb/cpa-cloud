@@ -47,6 +47,8 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /self/api/v1/profile", a.requireSelf(a.selfProfileInfo, false))
 	// Independently authored for docs/employee-self-key-inventory-contract.md.
 	mux.HandleFunc("GET /self/api/v1/keys", a.requireSelf(a.selfListKeys, false))
+	// Independently authored for docs/employee-self-key-revocation-contract.md.
+	mux.HandleFunc("POST /self/api/v1/keys/{id}/revoke", a.requireSelfReleased(a.selfRevokeKey, true))
 	// Independently authored for docs/employee-self-request-history-contract.md.
 	mux.HandleFunc("GET /self/api/v1/usage/requests", a.requireSelf(a.selfRequestHistory, false))
 	// Independently authored for docs/employee-self-token-summary-contract.md.
@@ -413,6 +415,16 @@ func (a *App) selfLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) requireSelf(next func(http.ResponseWriter, *http.Request, selfSession), write bool) http.HandlerFunc {
+	return a.requireSelfWithLock(next, write, true)
+}
+
+// Mutations needing admission.Lock must finish initial session validation before
+// releasing the read lock; their final transaction revalidates that session.
+func (a *App) requireSelfReleased(next func(http.ResponseWriter, *http.Request, selfSession), write bool) http.HandlerFunc {
+	return a.requireSelfWithLock(next, write, false)
+}
+
+func (a *App) requireSelfWithLock(next func(http.ResponseWriter, *http.Request, selfSession), write, holdLock bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if len(r.Header.Values("Origin")) > 1 || !validOptionalOrigin(r, a.cfg.TLSCert != "") {
 			selfError(w, 403, "request_rejected")
@@ -429,7 +441,12 @@ func (a *App) requireSelf(next func(http.ResponseWriter, *http.Request, selfSess
 			return
 		}
 		a.admission.RLock()
-		defer a.admission.RUnlock()
+		locked := true
+		defer func() {
+			if locked {
+				a.admission.RUnlock()
+			}
+		}()
 		var session selfSession
 		var stored []byte
 		var expires string
@@ -456,6 +473,10 @@ func (a *App) requireSelf(next func(http.ResponseWriter, *http.Request, selfSess
 				selfError(w, 403, "csrf_rejected")
 				return
 			}
+		}
+		if !holdLock {
+			a.admission.RUnlock()
+			locked = false
 		}
 		next(w, r, session)
 	}

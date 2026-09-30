@@ -3,6 +3,7 @@
 // docs/employee-self-key-inventory-contract.md.
 // docs/employee-self-request-history-contract.md.
 // docs/employee-self-token-summary-contract.md.
+// docs/employee-self-key-revocation-contract.md.
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -194,6 +195,92 @@ describe('employee self-service page', () => {
     expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
     resolveKeys?.(new Response(JSON.stringify({ items: [{ id: 'key_old', name: 'Old account Key' }], next_cursor: null }), { status: 200 }))
     await waitFor(() => expect(screen.queryByText('Old account Key')).not.toBeInTheDocument())
+  })
+
+  it('requires a second explicit step and current password before revoking an owned Key', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const key = { id: 'key_one', name: 'Editor', created_at: '2026-10-01T01:00:00Z', expires_at: null, revoked_at: null, status: 'active' }
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/keys')) {
+        reads++
+        return reply(200, { items: [{ ...key, revoked_at: reads > 1 ? '2026-10-01T02:00:00Z' : null, status: reads > 1 ? 'revoked' : 'active' }], next_cursor: null })
+      }
+      if (url.endsWith('/keys/key_one/revoke') && init?.method === 'POST') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    await userEvent.click(await screen.findByRole('button', { name: '撤销 Editor' }))
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/revoke'))).toHaveLength(0)
+    const field = screen.getByLabelText('当前密码（撤销确认）') as HTMLInputElement
+    expect(field.type).toBe('password')
+    await userEvent.type(field, 'a-long-self-password')
+    await userEvent.click(screen.getByRole('button', { name: '确认撤销 Key' }))
+    await waitFor(() => expect(screen.getByText('已撤销')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: '撤销 Editor' })).not.toBeInTheDocument()
+    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/keys/key_one/revoke'))
+    expect(String(call?.[0])).toBe('/self/api/v1/keys/key_one/revoke')
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ current_password: 'a-long-self-password' })
+    expect(new Headers(call?.[1]?.headers).get('X-CSRF-Token')).toBe('self-csrf')
+    expect(new Headers(call?.[1]?.headers).get('X-Self-Request')).toBe('1')
+    expect(reads).toBe(2)
+  })
+
+  it('clears a failed revocation password and does not optimistically change Key state', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const key = { id: 'key_one', name: 'Editor', created_at: '2026-10-01T01:00:00Z', expires_at: null, revoked_at: null, status: 'active' }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/keys')) return reply(200, { items: [key], next_cursor: null })
+      if (url.endsWith('/keys/key_one/revoke')) return reply(503, { error: { code: 'storage_unavailable' } })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<SelfApp />)
+    await userEvent.click(await screen.findByRole('button', { name: '撤销 Editor' }))
+    const field = screen.getByLabelText('当前密码（撤销确认）') as HTMLInputElement
+    await userEvent.type(field, 'a-long-self-password')
+    await userEvent.click(screen.getByRole('button', { name: '确认撤销 Key' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('结果未确认'))
+    expect(field.value).toBe('')
+    expect(screen.getByText('有效')).toBeInTheDocument()
+    expect(screen.queryByText('a-long-self-password')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByLabelText('当前密码（撤销确认）')).not.toBeInTheDocument()
+  })
+
+  it('unmounts and clears a pending revocation when the employee logs out', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const key = { id: 'key_one', name: 'Editor', created_at: '2026-10-01T01:00:00Z', expires_at: null, revoked_at: null, status: 'active' }
+    let resolveRevoke: ((response: Response) => void) | undefined
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/keys')) return reply(200, { items: [key], next_cursor: null })
+      if (url.endsWith('/keys/key_one/revoke')) return new Promise<Response>((resolve) => { resolveRevoke = resolve })
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<SelfApp />)
+    await userEvent.click(await screen.findByRole('button', { name: '撤销 Editor' }))
+    const field = screen.getByLabelText('当前密码（撤销确认）') as HTMLInputElement
+    await userEvent.type(field, 'a-long-self-password')
+    await userEvent.click(screen.getByRole('button', { name: '确认撤销 Key' }))
+    expect(field.value).toBe('')
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    resolveRevoke?.(new Response(null, { status: 204 }))
+    await waitFor(() => expect(screen.queryByText('Editor')).not.toBeInTheDocument())
+    expect(screen.queryByLabelText('当前密码（撤销确认）')).not.toBeInTheDocument()
   })
 
   it('shows only own request projection and clears all pages after a failed read', async () => {
