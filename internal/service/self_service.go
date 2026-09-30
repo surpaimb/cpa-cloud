@@ -47,6 +47,8 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /self/api/v1/profile", a.requireSelf(a.selfProfileInfo, false))
 	// Independently authored for docs/employee-self-key-inventory-contract.md.
 	mux.HandleFunc("GET /self/api/v1/keys", a.requireSelf(a.selfListKeys, false))
+	// Independently authored for docs/employee-self-request-history-contract.md.
+	mux.HandleFunc("GET /self/api/v1/usage/requests", a.requireSelf(a.selfRequestHistory, false))
 	mux.HandleFunc("POST /self/api/v1/password", a.requireSelf(a.selfChangePassword, true))
 	mux.HandleFunc("DELETE /self/api/v1/sessions", a.requireSelf(a.selfLogout, true))
 	mux.HandleFunc("/self/api/", http.NotFound)

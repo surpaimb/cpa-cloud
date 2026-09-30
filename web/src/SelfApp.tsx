@@ -1,6 +1,7 @@
 // Independently authored for docs/employee-self-service-foundation-contract.md
 // docs/employee-self-password-change-contract.md, and
 // docs/employee-self-key-inventory-contract.md.
+// docs/employee-self-request-history-contract.md.
 import { useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
@@ -9,6 +10,8 @@ type Profile = { id: string; name: string; department: string; status: 'active' 
 type SelfSession = { csrf_token: string; profile: Profile }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
+type SelfRequest = { id: string; key_id: string; model_id: string; status: 'pending' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; started_at: string; finished_at: string | null }
+type SelfRequestPage = { items: SelfRequest[]; next_cursor: string | null }
 
 async function selfRequest<T>(path: string, init: RequestInit = {}, csrf?: string): Promise<T> {
   const headers = new Headers(init.headers)
@@ -90,6 +93,70 @@ function SelfKeyInventory() {
   </section>
 }
 
+const requestStatus: Record<SelfRequest['status'], string> = {
+  pending: '进行中', succeeded: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断',
+}
+
+function SelfRequestHistory() {
+  const [items, setItems] = useState<SelfRequest[]>([])
+  const [cursor, setCursor] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  const pendingPage = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    let active = true
+    const controller = new AbortController()
+    void selfRequest<SelfRequestPage>('/usage/requests', { signal: controller.signal }).then((page) => {
+      if (!active) return
+      setItems(page.items)
+      setCursor(page.next_cursor)
+      setError(false)
+    }).catch(() => {
+      if (!active) return
+      setItems([])
+      setCursor(null)
+      setError(true)
+    }).finally(() => { if (active) setLoading(false) })
+    return () => { active = false; controller.abort(); pendingPage.current?.abort() }
+  }, [])
+
+  async function loadMore() {
+    if (!cursor || loading || pendingPage.current) return
+    const controller = new AbortController()
+    pendingPage.current = controller
+    setLoading(true)
+    setError(false)
+    try {
+      const page = await selfRequest<SelfRequestPage>(`/usage/requests?cursor=${encodeURIComponent(cursor)}`, { signal: controller.signal })
+      if (controller.signal.aborted) return
+      setItems((prior) => [...prior, ...page.items])
+      setCursor(page.next_cursor)
+    } catch {
+      if (controller.signal.aborted) return
+      setItems([])
+      setCursor(null)
+      setError(true)
+    } finally {
+      if (!controller.signal.aborted) setLoading(false)
+      if (pendingPage.current === controller) pendingPage.current = null
+    }
+  }
+
+  return <section className="self-history" aria-labelledby="self-history-title">
+    <h2 id="self-history-title">我的请求记录</h2>
+    <p>只显示最近 24 小时的本人请求活动，不包含内容、用量或费用。</p>
+    {loading && items.length === 0 ? <p role="status">正在读取请求记录…</p> : null}
+    {error ? <p role="alert">请求记录暂时无法读取，请稍后重新登录或刷新页面。</p> : null}
+    {!error && !loading && items.length === 0 ? <p>最近 24 小时暂无请求记录。</p> : null}
+    {items.length > 0 ? <ul className="self-history-list">{items.map((item) => <li key={item.id}>
+      <div className="self-history-top"><strong>{item.model_id}</strong><span className={`self-history-status self-history-status--${item.status}`}>{requestStatus[item.status]}</span></div>
+      <dl><div><dt>请求 ID</dt><dd>{item.id}</dd></div><div><dt>Key ID</dt><dd>{item.key_id}</dd></div><div><dt>开始时间</dt><dd><time dateTime={item.started_at}>{selfKeyDate(item.started_at)}</time></dd></div><div><dt>结束时间</dt><dd>{item.finished_at ? <time dateTime={item.finished_at}>{selfKeyDate(item.finished_at)}</time> : '尚未结束'}</dd></div></dl>
+    </li>)}</ul> : null}
+    {cursor && !error ? <Button variant="secondary" disabled={loading} onClick={loadMore}>{loading ? '正在加载…' : '加载更多请求'}</Button> : null}
+  </section>
+}
+
 export function SelfApp() {
   const [checking, setChecking] = useState(true)
   const [session, setSession] = useState<SelfSession | null>(null)
@@ -110,9 +177,10 @@ export function SelfApp() {
     <div className="self-card">
       <div className="brand-lockup"><div className="brand-mark">C</div><div><strong>CPA Cloud</strong><span>员工自助入口</span></div></div>
       {session ? <>
-        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料和已有 API Key 的基本信息；创建、策略与撤销仍由管理员管理。</p></header>
+        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、已有 API Key 的基本信息和本人请求记录；Key 创建、策略与撤销仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
         <SelfKeyInventory key={`${session.profile.id}:${session.csrf_token}`} />
+        <SelfRequestHistory key={`${session.profile.id}:${session.csrf_token}`} />
         {changingPassword ? <form className="self-form self-password-form" onSubmit={async (event) => {
           event.preventDefault()
           const form = event.currentTarget
