@@ -15,7 +15,7 @@
 | OpenAI-compatible API Key 上游、服务商预设、模型同步；源码增加 Claude/Gemini 原生 API Key 通路；显式 Chat↔Responses、Messages↔Responses 与 Gemini↔Responses 文本/function SSE 转换 | Messages→Responses 的终态 usage 延迟、Gemini identity-bearing 子集及未列出的协议字段限制仍存在 |
 | `/v1/models`、Chat Completions 非流式与 SSE | CC Switch 与各实际 AI 工具的完整兼容验收 |
 | 最新源码：`POST /v1/responses`、函数工具调用/结果回传、非流式/SSE；默认关闭的加密有状态资源与后台任务 | 托管工具、后台流续传/游标与完整客户端兼容性 |
-| 最新源码：OpenAI-compatible API Key 的 `POST /v1/embeddings` 文本及 token-array/float 非流式子集、仅两种实际 text-embedding-3 模型的显式 dimensions、独立模型类型和 Key 授权 | base64、user、其他模型的 dimensions、真实 provider/CLI/会员验证及通用 Embeddings 预算上界 |
+| 最新源码：OpenAI-compatible API Key 的 `POST /v1/embeddings` 文本及 token-array/float 非流式子集、仅两种实际 text-embedding-3 模型的显式 dimensions、客户端自选的有界 `user` 提示、独立模型类型和 Key 授权 | base64、其他模型的 dimensions、真实 provider/CLI/会员验证及通用 Embeddings 预算上界 |
 | SQLite 持久化、上游凭据加密、多账号路由；可靠用量/通用预算、单实例财务账本、Windows DPAPI 自动备份 | 生产支付渠道、跨机/非 Windows 密钥托管与对象存储 |
 
 员工 Key 正常重启后仍有效；撤销、员工停用、可选到期时间及权限限制仍会生效。员工无需知道上游供应商 Key。
@@ -72,7 +72,7 @@
 
 `POST /v1/embeddings` 源码子集只支持 `openai-compatible` API Key 上游、非空文本/文本数组或整数 token 数组/同类批次，以及 `encoding_format: "float"`。token ID 限于本地定义的 `0..2147483647`，每序列最多 2048 个 ID、整批最多 65536 个 ID；这是资源防护，不是 tokenizer 或供应商限额验证。管理员必须显式创建 `embedding` 模型、配置账号池的 `openai-embeddings` wire，并为员工 Key 显式开放 Embeddings；旧 Key 和省略策略创建的新 Key 仍固定为原四种协议，不会因升级自动扩权。响应会在返回前有界读取并校验 index、向量维数、有限数、实际上游模型和必需 usage，账本按实际账号、模型和 wire 记录，未知价格保持未知。
 
-显式 `dimensions` 仅当最终实际 `upstream_model` 精确为 `text-embedding-3-small`（1..1536）或 `text-embedding-3-large`（1..3072）时接受；以最终路由为准，所有返回向量都必须精确匹配请求维数。省略字段时原 wire 形状不变。本子集仍不支持 base64、`user`、其他模型的显式维数、流式、多模态、跨协议转换或会员凭据。由于没有受信 tokenizer 和输入 Token 上界，命中 strict token/cost 预算时会在派发前返回 `budget_bound_unavailable`；这不是完整 Embeddings 或通用预算支持。自动验证只使用合成上游和凭据，尚未访问真实 provider 或客户端。详细边界见 [第一段契约](docs/openai-embeddings-contract.md)、[token-array 增量契约](docs/openai-embeddings-token-input-contract.md)和[dimensions 增量契约](docs/openai-embeddings-dimensions-contract.md)。
+显式 `dimensions` 仅当最终实际 `upstream_model` 精确为 `text-embedding-3-small`（1..1536）或 `text-embedding-3-large`（1..3072）时接受；以最终路由为准，所有返回向量都必须精确匹配请求维数。客户端可选 `user` 仅作为未经核验的上游提示转发，限 1..128 个 ASCII 字节 `[A-Za-z0-9_-]`；建议使用不含个人信息的随机或哈希代号。它不是 CPA Cloud 员工身份，不参与授权、路由、治理或计费，也不写入日志和账本。两字段省略时原 wire 形状不变。本子集仍不支持 base64、其他模型的显式维数、流式、多模态、跨协议转换或会员凭据。由于没有受信 tokenizer 和输入 Token 上界，命中 strict token/cost 预算时会在派发前返回 `budget_bound_unavailable`；这不是完整 Embeddings 或通用预算支持。自动验证只使用合成上游和凭据，尚未访问真实 provider 或客户端。详细边界见 [第一段契约](docs/openai-embeddings-contract.md)、[token-array 增量契约](docs/openai-embeddings-token-input-contract.md)、[dimensions 增量契约](docs/openai-embeddings-dimensions-contract.md)和[user 提示增量契约](docs/openai-embeddings-user-contract.md)。
 
 ## Claude / Gemini 原生 API 与批量导入（仅最新源码）
 

@@ -329,7 +329,9 @@ func TestKeyAccountGroupPolicyNarrowsResourcesButPreservesOwnerStop(t *testing.T
 
 func TestKeyAccountGroupMappingTighteningInterruptsBackgroundBeforeDispatch(t *testing.T) {
 	coordinator, db := newResponseResourceTestCoordinator(t)
-	now := time.Date(2026, 9, 29, 8, 15, 0, 0, time.UTC)
+	// claimOne uses the real clock and only claims unexpired tasks. Keep this
+	// queued task live so the test exercises the tightened policy, not TTL.
+	now := time.Now().UTC().Truncate(time.Second)
 	coordinator.now = func() time.Time { return now }
 	installKeyAccountGroupPool(t, coordinator.app, "model_one", "grp_background_allowed", "chn_background_allowed")
 	installAccountGroup(t, coordinator.app, "grp_background_tightened", "chn_background_tightened")

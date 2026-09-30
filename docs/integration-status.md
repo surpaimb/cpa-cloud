@@ -108,6 +108,11 @@
   checks 以本批实际结果另行记录。未访问真实 provider/会员账号，未实现员工售价倍率、分组预算、
   供应商发票核对、汇率/多币换算，也未创建部署、tag、安装包或 release。
 
+## 2026-09-30：PROTO-08 第四段显式 user 提示候选
+
+- 独立 [user 提示增量契约](openai-embeddings-user-contract.md)已先行提交。仅员工 Key 持有人显式提供的 1..128 字节 ASCII `[A-Za-z0-9_-]` 字符串，才会在已合格的 OpenAI-compatible API Key `openai-embeddings` wire 上传递；省略字段不改变旧 wire。它不代表已验证员工身份，也不参与授权、路由、治理、预算、计量、账本或审计身份；建议调用方使用非个人信息代号。
+- 当前候选源码的独立合成测试覆盖四种 input、显式 dimensions/float、非法/重复字段、旧 Key 拒绝、上游 wire 与响应不回显、派发前 0 attempt/0 网络。最终提交的完整 Go/race/Web/CI、固定二进制与进程级验收须按精确 SHA 单独记录；不宣称真实 provider/CLI 或其他模型/会员兼容。
+
 ## 2026-09-30：PROTO-08 第三段显式 dimensions 候选
 
 - 独立[dimensions 增量契约](openai-embeddings-dimensions-contract.md)先行单独提交。仅在现有 OpenAI-compatible API Key 非流式 float 子集内，按最终实际 `text-embedding-3-small|large` 分别允许正整数 `1..1536`/`1..3072`；省略参数保留旧 wire，所有成功向量必须精确匹配请求维数。

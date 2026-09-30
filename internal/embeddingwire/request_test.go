@@ -50,7 +50,74 @@ func TestDecodeAndMarshalRequestPreservesInputShape(t *testing.T) {
 			if _, present := root["dimensions"]; present {
 				t.Fatalf("omitted dimensions changed legacy wire: %s", encoded)
 			}
+			if _, present := root["user"]; present {
+				t.Fatalf("omitted user changed legacy wire")
+			}
 		})
+	}
+}
+
+func TestUserHintFourInputShapesAndOptionalDimensions(t *testing.T) {
+	for _, test := range []struct {
+		input, suffix, wantInput string
+	}{
+		{`"hello"`, `,"user":"a"`, `"hello"`},
+		{`["hello","world"]`, `,"user":"Team_7-Z","encoding_format":"float"`, `["hello","world"]`},
+		{`[0,12]`, `,"user":"\u0061","dimensions":3`, `[0,12]`},
+		{`[[12,34],[56]]`, `,"user":"` + strings.Repeat("x", 128) + `"`, `[[12,34],[56]]`},
+	} {
+		request, err := DecodeRequest([]byte(`{"model":"public-alias","input":` + test.input + test.suffix + `}`))
+		if err != nil || request.UserHint == nil {
+			t.Fatalf("decode user hint err=%v present=%v", err, request.UserHint != nil)
+		}
+		encoded, err := MarshalRequest(request, "text-embedding-3-small")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var root map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &root); err != nil {
+			t.Fatal(err)
+		}
+		var gotUser string
+		if err := json.Unmarshal(root["user"], &gotUser); err != nil || gotUser != *request.UserHint || string(root["input"]) != test.wantInput {
+			t.Fatal("user hint or input changed in upstream wire")
+		}
+		if request.Dimensions != nil && string(root["dimensions"]) != "3" {
+			t.Fatal("user hint changed explicit dimensions")
+		}
+		if string(root["model"]) != `"text-embedding-3-small"` || string(root["encoding_format"]) != `"float"` {
+			t.Fatal("user hint changed model or float encoding")
+		}
+	}
+	request, err := DecodeRequest([]byte(`{"model":"m","input":"x"}`))
+	if err != nil || request.UserHint != nil {
+		t.Fatalf("omitted hint err=%v present=%v", err, request.UserHint != nil)
+	}
+	encoded, err := MarshalRequest(request, "actual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &root); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := root["user"]; present {
+		t.Fatal("omitted hint appeared upstream")
+	}
+}
+
+func TestUserHintProgrammaticValidation(t *testing.T) {
+	request, err := DecodeRequest([]byte(`{"model":"m","input":"x","user":"a"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := "not allowed"
+	request.UserHint = &bad
+	if err := ValidateRequest(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("programmatic invalid hint accepted: %v", err)
+	}
+	if _, err := MarshalRequest(request, "actual"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("programmatic invalid hint marshaled: %v", err)
 	}
 }
 
@@ -116,7 +183,19 @@ func TestDecodeRequestRejectsInvalidAndUnsupportedValues(t *testing.T) {
 		{"string dimensions", []byte(`{"model":"m","input":"x","dimensions":"3"}`), ErrInvalidRequest},
 		{"null dimensions", []byte(`{"model":"m","input":"x","dimensions":null}`), ErrInvalidRequest},
 		{"duplicate dimensions", []byte(`{"model":"m","input":"x","dimensions":2,"dimensions":3}`), ErrInvalidRequest},
-		{"user", []byte(`{"model":"m","input":"x","user":"u"}`), ErrUnsupportedFeature},
+		{"empty user", []byte(`{"model":"m","input":"x","user":""}`), ErrInvalidRequest},
+		{"user null", []byte(`{"model":"m","input":"x","user":null}`), ErrInvalidRequest},
+		{"user number", []byte(`{"model":"m","input":"x","user":123}`), ErrInvalidRequest},
+		{"user bool", []byte(`{"model":"m","input":"x","user":true}`), ErrInvalidRequest},
+		{"user array", []byte(`{"model":"m","input":"x","user":["x"]}`), ErrInvalidRequest},
+		{"user object", []byte(`{"model":"m","input":"x","user":{"x":1}}`), ErrInvalidRequest},
+		{"user space", []byte(`{"model":"m","input":"x","user":"a b"}`), ErrInvalidRequest},
+		{"user email", []byte(`{"model":"m","input":"x","user":"a@b"}`), ErrInvalidRequest},
+		{"user punctuation", []byte(`{"model":"m","input":"x","user":"a.b"}`), ErrInvalidRequest},
+		{"user unicode", []byte(`{"model":"m","input":"x","user":"é"}`), ErrInvalidRequest},
+		{"user escaped unicode", []byte(`{"model":"m","input":"x","user":"\u00e9"}`), ErrInvalidRequest},
+		{"user overlong", []byte(`{"model":"m","input":"x","user":"` + strings.Repeat("x", 129) + `"}`), ErrInvalidRequest},
+		{"duplicate user", []byte(`{"model":"m","input":"x","user":"a","user":"b"}`), ErrInvalidRequest},
 		{"stream", []byte(`{"model":"m","input":"x","stream":false}`), ErrUnsupportedFeature},
 		{"base64", []byte(`{"model":"m","input":"x","encoding_format":"base64"}`), ErrUnsupportedFeature},
 		{"unknown encoding", []byte(`{"model":"m","input":"x","encoding_format":"binary"}`), ErrUnsupportedFeature},
