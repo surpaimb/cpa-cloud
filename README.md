@@ -468,6 +468,8 @@ unset CPA_EMPLOYEE_KEY
 
 用 `cpa-cloud --help` 查看二进制参数。
 
+定时测试既支持原有固定 UTC 间隔，也支持按 IANA 命名时区当地 `HH:mm` 每日执行；两者共用上述默认关闭的 worker。每日计划的春季跳时、秋季重复分钟、旧客户端兼容和固定版本时区数据见[契约](docs/scheduled-tests-daily-timezone-contract.md)。界面展示服务端返回的 UTC 下次运行时间，不以浏览器时区重新推算。
+
 可信代理集合在进程启动时规范化并冻结；修改参数后须重启。可信集合改变后，按旧信任 revision 创建但尚未派发的后台任务会在零上游请求下中断，而不会用新规则静默重解释原来源。
 
 数据目录包含 `cpa-cloud.db`、可能存在的 WAL/SHM 文件和 **`master.key`**。员工 Key 保存为带密钥摘要，上游凭据加密保存；主机管理员仍能访问运行中的秘密。丢失或替换 `master.key` 会破坏已有凭据的可用性。

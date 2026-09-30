@@ -433,6 +433,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"upstream_account_tests":           a.healthTests != nil,
 			"scheduled_tests_configuration":    a.scheduledTests != nil,
 			"scheduled_tests_running":          a.scheduledTests != nil && a.cfg.ScheduledTestsEnabled,
+			"scheduled_tests_daily_local":      a.scheduledTests != nil,
 			"automated_backups_configuration":  a.backupAutomation != nil,
 			"backup_key_provider_ready":        a.backupAutomation != nil && a.backupAutomation.Ready(),
 			"automated_backups_running":        a.backupAutomation != nil && a.backupAutomation.Running(),

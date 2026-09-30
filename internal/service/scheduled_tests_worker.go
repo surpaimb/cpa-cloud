@@ -201,12 +201,14 @@ func (c *scheduledTestCoordinator) claimDue(ctx context.Context) (*scheduledTest
 	}
 	var claim scheduledTestClaim
 	var interval int64
-	claimSQL := `SELECT p.id,p.revision,p.upstream_id,u.revision,p.scope,p.interval_seconds
+	var mode string
+	var zone, local sql.NullString
+	claimSQL := `SELECT p.id,p.revision,p.upstream_id,u.revision,p.scope,p.interval_seconds,p.schedule_mode,p.time_zone,p.local_time
 		FROM scheduled_test_plans p JOIN upstreams u ON u.id=p.upstream_id
 		WHERE p.enabled=1 AND p.archived_at IS NULL AND p.next_run_at<=? AND u.enabled=1 AND u.archived=0
 		  AND NOT EXISTS(SELECT 1 FROM scheduled_test_runs r WHERE r.upstream_id=p.upstream_id AND r.state='running')
 		ORDER BY p.next_run_at,p.id LIMIT 1`
-	err = tx.QueryRowContext(ctx, claimSQL, stamp).Scan(&claim.PlanID, &claim.PlanRevision, &claim.UpstreamID, &claim.UpstreamRevision, &claim.Scope, &interval)
+	err = tx.QueryRowContext(ctx, claimSQL, stamp).Scan(&claim.PlanID, &claim.PlanRevision, &claim.UpstreamID, &claim.UpstreamRevision, &claim.Scope, &interval, &mode, &zone, &local)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -215,7 +217,17 @@ func (c *scheduledTestCoordinator) claimDue(ctx context.Context) (*scheduledTest
 	}
 	claim.OperationID = operationID
 	claim.StartedAt = now
-	next := formatAccountPoolTime(now.Add(time.Duration(interval) * time.Second))
+	schedule := scheduledTestSchedule{mode: mode, interval: interval}
+	if zone.Valid {
+		schedule.zone = &zone.String
+	}
+	if local.Valid {
+		schedule.local = &local.String
+	}
+	next, err := schedule.next(now)
+	if err != nil {
+		return nil, err
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE scheduled_test_plans SET next_run_at=?,updated_at=? WHERE id=? AND revision=? AND enabled=1 AND archived_at IS NULL AND next_run_at<=?`, next, stamp, claim.PlanID, claim.PlanRevision, stamp)
 	if err != nil {
 		return nil, err

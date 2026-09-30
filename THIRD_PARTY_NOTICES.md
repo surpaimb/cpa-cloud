@@ -8,6 +8,8 @@ The evidence review dated 2026-09-22 is recorded in `docs/research/dependency-no
 
 ### Go server
 
+OPS-04 adds a pinned time-zone data asset at `internal/service/tzdata/zoneinfo.zip`, copied without modification from the official Go 1.26.8 distribution's `lib/time/zoneinfo.zip` (IANA tzdb 2025c; SHA-256 `8F55634D05F8BCA1F7BC7C69C5933428C69357E0BDF565E5BA224E3F88FF12E8`). The Go distribution's `lib/time/README` identifies the compiled IANA data and IANA's public-domain assertion; see [IANA tzdb](https://www.iana.org/time-zones). Go's standard-library code and zoneinfo generator retain the Go BSD-3-Clause license and its notice/disclaimer. Distributions embedding this asset must preserve the relevant Go license text and this provenance. No additional Go module is introduced. Future tzdb replacement requires a separate schedule-compatibility review; this asset is not fetched at runtime.
+
 The server source directly imports `golang.org/x/crypto` and `modernc.org/sqlite`. Go dependency code selected by a target build is compiled into the server binary. A binary distribution must reproduce the applicable copyright notices, license conditions, and disclaimers in its documentation or other accompanying material; the final selected graph still has to be verified per target.
 
 | Component | Version | Source | License | Included material / required notice |

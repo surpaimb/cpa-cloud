@@ -60,6 +60,10 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 显式 wire 只支持契约列出的 text/function 子集、严格事件顺序与累计 usage；Chat↔Responses、Messages↔Responses 及 Gemini v1beta `streamGenerateContent`↔Responses SSE 已接入共享单派发执行链，thinking、cache-control、媒体、引用、托管工具、有状态/后台跨协议转换仍拒绝。completed/incomplete/failed 分别结算为成功/中断/失败。Client Messages + wire Responses 在 usage 只于 terminal 可知时有界全流延迟。Gemini 身份可晚到，但语义动作只在 `responseId` 与 `modelVersion` 均冻结后按原序单次释放；终态缺身份、显式空值或冲突不会合成成功事件。合成上游测试不等于真实 Anthropic/Gemini SDK、CLI 或供应商账号兼容验收。
 
+### 命名时区每日定时测试（开发预览增量）
+
+默认关闭的账号定时测试在既有固定 UTC 间隔之外增加 `schedule_mode:"daily_local"`、IANA `time_zone` 和 `HH:mm` `local_time`，以 `features.scheduled_tests_daily_local` 门控网页入口。服务端按命名区的当地日历日计算，春季不存在的分钟跳过、秋季重复分钟只执行较早一次；`next_run_at` 始终是 UTC。旧创建 JSON 仍为 interval，旧 interval PATCH 语义不变；每日行保留的 `interval_seconds=86400` 只是数据库兼容占位值。完整输入、迁移、重启和验收边界见[命名时区每日测试契约](scheduled-tests-daily-timezone-contract.md)。此增量不是通用 cron，也不开放真实供应商或收费生成测试。
+
 ### 账号与模型生命周期（开发预览增量）
 
 `PATCH/DELETE /admin/api/v1/models/{id}`、`DELETE /admin/api/v1/upstreams/{id}`、墓碑列表和 CAS 语义见[账号与模型生命周期管理契约](account-lifecycle-management-contract.md)。归档不是物理删除：模型 ID 不可重建，上游可恢复凭据被销毁，历史账本关联保留。网页只在 `features.account_lifecycle_management=true` 时显示入口。

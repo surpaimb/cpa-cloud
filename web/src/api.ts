@@ -324,6 +324,7 @@ export type SystemStatus = {
   features?: {
 	  scheduled_tests_configuration?: boolean
 	  scheduled_tests_running?: boolean
+	  scheduled_tests_daily_local?: boolean
 	  automated_backups_configuration?: boolean
 	  automated_backups_running?: boolean
 	  backup_key_provider_ready?: boolean
@@ -406,6 +407,7 @@ export type BillingPage<T> = { items: T[]; next_cursor: string | null }
 export type BillingPlanWrite = { operation_id: string; name: string; currency: string; price_micro: string; credit_micro: string; interval: BillingPlan['interval']; enabled: boolean }
 
 export type ScheduledTestScope = 'local_credential' | 'catalog'
+export type ScheduledTestScheduleMode = 'interval' | 'daily_local'
 export type ScheduledTestRun = {
   plan_revision: number
   operation_id: string
@@ -422,6 +424,9 @@ export type ScheduledTestPlan = {
   upstream_id: string
   scope: ScheduledTestScope
   interval_seconds: number
+  schedule_mode?: ScheduledTestScheduleMode
+  time_zone?: string | null
+  local_time?: string | null
   enabled: boolean
   revision: number
   next_run_at: string | null
@@ -433,9 +438,11 @@ export type ScheduledTestInput = {
   name: string
   upstream_id: string
   scope: ScheduledTestScope
-  interval_seconds: number
   enabled: boolean
-}
+} & (
+  { schedule_mode?: 'interval'; interval_seconds: number; time_zone?: never; local_time?: never } |
+  { schedule_mode: 'daily_local'; time_zone: string; local_time: string; interval_seconds?: never }
+)
 export type ScheduledTestRunsPage = { items: ScheduledTestRun[]; next_cursor: string | null }
 
 export type BackupKeyProvider = {

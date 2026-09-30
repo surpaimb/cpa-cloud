@@ -8,7 +8,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"time"
 )
 
 func (a *App) registerScheduledTestHandlers(mux *http.ServeMux) {
@@ -67,17 +66,21 @@ func (a *App) getScheduledTest(w http.ResponseWriter, r *http.Request, _ adminSe
 
 func (a *App) createScheduledTest(w http.ResponseWriter, r *http.Request, session adminSession) {
 	object, err := decodeUniqueJSONObject(w, r, adminMaxBody)
-	if err != nil || !exactJSONKeys(object, "name", "upstream_id", "scope", "interval_seconds", "enabled") {
+	if err != nil || !scheduledTestCreateKeys(object) {
 		writeScheduledTestError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	name, nameOK := object["name"].(string)
 	upstreamID, upstreamOK := object["upstream_id"].(string)
 	scope, scopeOK := object["scope"].(string)
-	interval, intervalOK := strictJSONInt64Range(object["interval_seconds"], scheduledTestMinInterval, scheduledTestMaxInterval)
 	enabled, enabledOK := object["enabled"].(bool)
-	if !nameOK || !validText(name, 1, 120) || !upstreamOK || !validIdentifier(upstreamID, 128) || !scopeOK || !validScheduledTestScope(scope) || !intervalOK || !enabledOK {
+	if !nameOK || !validText(name, 1, 120) || !upstreamOK || !validIdentifier(upstreamID, 128) || !scopeOK || !validScheduledTestScope(scope) || !enabledOK {
 		writeScheduledTestError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	schedule, err := parseScheduledTestCreateSchedule(object)
+	if err != nil {
+		writeScheduledTestScheduleError(w, err)
 		return
 	}
 	id, err := newID("sch")
@@ -85,18 +88,22 @@ func (a *App) createScheduledTest(w http.ResponseWriter, r *http.Request, sessio
 		writeScheduledTestError(w, http.StatusServiceUnavailable, "storage_unavailable")
 		return
 	}
-	now := a.scheduledTests.now().UTC()
-	stamp := formatAccountPoolTime(now)
-	var next any
-	if enabled {
-		next = formatAccountPoolTime(now.Add(time.Duration(interval) * time.Second))
-	}
 	tx, err := a.store.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeScheduledTestError(w, http.StatusServiceUnavailable, "storage_unavailable")
 		return
 	}
 	defer tx.Rollback()
+	now := a.scheduledTests.now().UTC()
+	stamp := formatAccountPoolTime(now)
+	var next any
+	if enabled {
+		next, err = schedule.next(now)
+		if err != nil {
+			writeScheduledTestScheduleError(w, err)
+			return
+		}
+	}
 	upstreamExists, err := scheduledTestUpstreamExists(r.Context(), tx, upstreamID)
 	if err != nil {
 		writeScheduledTestError(w, http.StatusServiceUnavailable, "storage_unavailable")
@@ -115,7 +122,7 @@ func (a *App) createScheduledTest(w http.ResponseWriter, r *http.Request, sessio
 		writeScheduledTestError(w, http.StatusConflict, "plan_limit")
 		return
 	}
-	if _, err := tx.ExecContext(r.Context(), `INSERT INTO scheduled_test_plans(id,name,upstream_id,scope,interval_seconds,enabled,revision,next_run_at,created_by_admin_id,updated_by_admin_id,created_at,updated_at,archived_at) VALUES(?,?,?,?,?,?,1,?,?,?,?,?,NULL)`, id, name, upstreamID, scope, interval, boolInt(enabled), next, session.AdminID, session.AdminID, stamp, stamp); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO scheduled_test_plans(id,name,upstream_id,scope,interval_seconds,enabled,revision,next_run_at,created_by_admin_id,updated_by_admin_id,created_at,updated_at,archived_at,schedule_mode,time_zone,local_time) VALUES(?,?,?,?,?,?,1,?,?,?,?,?,NULL,?,?,?)`, id, name, upstreamID, scope, schedule.interval, boolInt(enabled), next, session.AdminID, session.AdminID, stamp, stamp, schedule.mode, scheduledNullableString(schedule.zone), scheduledNullableString(schedule.local)); err != nil {
 		writeScheduledTestError(w, http.StatusServiceUnavailable, "storage_unavailable")
 		return
 	}
@@ -196,14 +203,6 @@ func (a *App) updateScheduledTest(w http.ResponseWriter, r *http.Request, sessio
 		}
 		updated.Scope = text
 	}
-	if value, exists := object["interval_seconds"]; exists {
-		interval, ok := strictJSONInt64Range(value, scheduledTestMinInterval, scheduledTestMaxInterval)
-		if !ok {
-			writeScheduledTestError(w, http.StatusBadRequest, "invalid_request")
-			return
-		}
-		updated.IntervalSeconds = interval
-	}
 	if value, exists := object["enabled"]; exists {
 		enabled, ok := value.(bool)
 		if !ok {
@@ -212,13 +211,23 @@ func (a *App) updateScheduledTest(w http.ResponseWriter, r *http.Request, sessio
 		}
 		updated.Enabled = enabled
 	}
+	schedule, err := applyScheduledTestPatchSchedule(object, current)
+	if err != nil {
+		writeScheduledTestScheduleError(w, err)
+		return
+	}
+	updated.ScheduleMode, updated.IntervalSeconds, updated.TimeZone, updated.LocalTime = schedule.mode, schedule.interval, schedule.zone, schedule.local
 	now := a.scheduledTests.now().UTC()
 	stamp := formatAccountPoolTime(now)
 	var next any
 	if updated.Enabled {
-		next = formatAccountPoolTime(now.Add(time.Duration(updated.IntervalSeconds) * time.Second))
+		next, err = schedule.next(now)
+		if err != nil {
+			writeScheduledTestScheduleError(w, err)
+			return
+		}
 	}
-	result, err := tx.ExecContext(r.Context(), `UPDATE scheduled_test_plans SET name=?,upstream_id=?,scope=?,interval_seconds=?,enabled=?,revision=revision+1,next_run_at=?,updated_by_admin_id=?,updated_at=? WHERE id=? AND revision=? AND archived_at IS NULL`, updated.Name, updated.UpstreamID, updated.Scope, updated.IntervalSeconds, boolInt(updated.Enabled), next, session.AdminID, stamp, updated.ID, expected)
+	result, err := tx.ExecContext(r.Context(), `UPDATE scheduled_test_plans SET name=?,upstream_id=?,scope=?,interval_seconds=?,enabled=?,revision=revision+1,next_run_at=?,updated_by_admin_id=?,updated_at=?,schedule_mode=?,time_zone=?,local_time=? WHERE id=? AND revision=? AND archived_at IS NULL`, updated.Name, updated.UpstreamID, updated.Scope, updated.IntervalSeconds, boolInt(updated.Enabled), next, session.AdminID, stamp, updated.ScheduleMode, scheduledNullableString(updated.TimeZone), scheduledNullableString(updated.LocalTime), updated.ID, expected)
 	if err != nil {
 		writeScheduledTestError(w, http.StatusServiceUnavailable, "storage_unavailable")
 		return
@@ -360,10 +369,10 @@ func (a *App) listScheduledTestRuns(w http.ResponseWriter, r *http.Request, _ ad
 }
 
 func scheduledTestPatchKeys(object map[string]any) bool {
-	if len(object) < 2 || len(object) > 6 {
+	if len(object) < 2 || len(object) > 9 {
 		return false
 	}
-	allowed := map[string]bool{"expected_revision": true, "name": true, "upstream_id": true, "scope": true, "interval_seconds": true, "enabled": true}
+	allowed := map[string]bool{"expected_revision": true, "name": true, "upstream_id": true, "scope": true, "interval_seconds": true, "schedule_mode": true, "time_zone": true, "local_time": true, "enabled": true}
 	for key := range object {
 		if !allowed[key] {
 			return false
@@ -371,6 +380,14 @@ func scheduledTestPatchKeys(object map[string]any) bool {
 	}
 	_, expected := object["expected_revision"]
 	return expected
+}
+
+func writeScheduledTestScheduleError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errScheduledTimeZoneUnavailable) {
+		writeScheduledTestError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	writeScheduledTestError(w, http.StatusBadRequest, "invalid_request")
 }
 
 func strictJSONInt64Range(value any, minimum, maximum int64) (int64, bool) {

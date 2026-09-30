@@ -1,5 +1,11 @@
 # 集成状态
 
+## 2026-09-30：OPS-04 命名时区每日账号测试（草稿 PR #20）
+
+- 按[每日计划契约](scheduled-tests-daily-timezone-contract.md)，在已合入的固定 UTC interval 计划之外新增显式 `daily_local`。时区来自嵌入的 Go 1.26.8 官方 `zoneinfo.zip`（IANA tzdb 2025c），不依赖宿主机时区；新列由旧结构在单一事务内严格迁移，旧计划 revision、下次运行及历史保留。春季缺失分钟跳过当天，秋季重复分钟只取较早的 UTC 瞬时，停机漏过多个日历日只补一次。旧 interval JSON 默认和客户端时序语义不变。
+- 本地专项 Go 测试覆盖 API/CAS/CSRF/Origin、旧库迁移/部分迁移失败关闭、DST 与日历边界、单次 catch-up/时钟回拨、重启不重放、每日计划取消与归档；Web 组件测试、类型检查、production build 通过。动态非 8787 回环真实 Go 进程仅用合成账号/目录，验证默认关闭零上游调用、启用后单次目录运行及重启。真实 Go + Chrome Playwright 在桌面及 390px 验证每日创建、服务端 UTC 展示、能力门控、无页面错误/横向溢出；浏览器只访问本地假上游，未运行真实供应商或收费生成请求。
+- [草稿 PR #20](https://github.com/surpaimb/cpa-cloud/pull/20) 的 GitHub Code validation #82 已触发；全 Go、CGO race、双 CLI 编译、Web 与进程 smoke 的最终结果应按精确 PR HEAD 和该 run 实际结论记录，不把本地候选二进制或跳过的平台发布 job 算作已验证。仍缺通用 cron、通知/告警、渠道聚合监控、真实 provider/会员验收；未合并、部署或发布。
+
 ## 2026-09-30：管理员本机账号池容量与持久预留观测（本分支）
 
 - 按[独立观测契约](account-pool-runtime-observation-contract.md)新增管理员单模型只读 API：单一 SQLite 快照内读取最多 64 条显式路由、跨启用模型的账号容量最小值、未到期请求/维护租约、冷却和恢复阻塞；无池与停用模型不推测可派发能力。响应不读取或返回员工、Key、凭据、端点、租约 ID、提示词或模型内容，存储结构/时间/取消错误在输出前统一失败关闭。
