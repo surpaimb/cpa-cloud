@@ -2,7 +2,7 @@ name: Code validation
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/ci-stream-key-policy]
     paths-ignore: ['**.md', 'docs/**']
   pull_request:
     paths-ignore: ['**.md', 'docs/**']
