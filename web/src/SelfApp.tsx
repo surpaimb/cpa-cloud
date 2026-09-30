@@ -1,11 +1,14 @@
 // Independently authored for docs/employee-self-service-foundation-contract.md
-// and docs/employee-self-password-change-contract.md.
-import { useEffect, useState } from 'react'
+// docs/employee-self-password-change-contract.md, and
+// docs/employee-self-key-inventory-contract.md.
+import { useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
 type SelfSession = { csrf_token: string; profile: Profile }
+type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
+type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 
 async function selfRequest<T>(path: string, init: RequestInit = {}, csrf?: string): Promise<T> {
   const headers = new Headers(init.headers)
@@ -20,6 +23,71 @@ async function selfRequest<T>(path: string, init: RequestInit = {}, csrf?: strin
   }
   if (response.status === 204) return undefined as T
   return await response.json() as T
+}
+
+function selfKeyDate(value: string) {
+  return new Date(value).toLocaleString('zh-CN')
+}
+
+function SelfKeyInventory() {
+  const [items, setItems] = useState<SelfKey[]>([])
+  const [cursor, setCursor] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  const pendingPage = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    let active = true
+    const controller = new AbortController()
+    void selfRequest<SelfKeyPage>('/keys', { signal: controller.signal }).then((page) => {
+      if (!active) return
+      setItems(page.items)
+      setCursor(page.next_cursor)
+      setError(false)
+    }).catch(() => {
+      if (!active) return
+      setItems([])
+      setCursor(null)
+      setError(true)
+    }).finally(() => { if (active) setLoading(false) })
+    return () => { active = false; controller.abort(); pendingPage.current?.abort() }
+  }, [])
+
+  async function loadMore() {
+    if (!cursor || loading || pendingPage.current) return
+    const controller = new AbortController()
+    pendingPage.current = controller
+    setLoading(true)
+    setError(false)
+    try {
+      const page = await selfRequest<SelfKeyPage>(`/keys?cursor=${encodeURIComponent(cursor)}`, { signal: controller.signal })
+      if (controller.signal.aborted) return
+      setItems((prior) => [...prior, ...page.items])
+      setCursor(page.next_cursor)
+    } catch {
+      if (controller.signal.aborted) return
+      // A failed page cannot leave a potentially stale partial inventory visible.
+      setItems([])
+      setCursor(null)
+      setError(true)
+    } finally {
+      if (!controller.signal.aborted) setLoading(false)
+      if (pendingPage.current === controller) pendingPage.current = null
+    }
+  }
+
+  return <section className="self-keys" aria-labelledby="self-keys-title">
+    <h2 id="self-keys-title">我的 API Key</h2>
+    <p>仅显示你已有 Key 的名称、时间和状态；Key 明文只在管理员创建时显示一次。</p>
+    {loading && items.length === 0 ? <p role="status">正在读取 Key 列表…</p> : null}
+    {error ? <p role="alert">Key 列表暂时无法读取，请稍后重新登录或刷新页面。</p> : null}
+    {!error && !loading && items.length === 0 ? <p>暂无 API Key。</p> : null}
+    {items.length > 0 ? <ul className="self-key-list">{items.map((item) => <li key={item.id}>
+      <div className="self-key-top"><strong>{item.name}</strong><span className={`self-key-status self-key-status--${item.status}`}>{item.status === 'active' ? '有效' : item.status === 'expired' ? '已到期' : '已撤销'}</span></div>
+      <dl><div><dt>Key ID</dt><dd>{item.id}</dd></div><div><dt>创建时间</dt><dd><time dateTime={item.created_at}>{selfKeyDate(item.created_at)}</time></dd></div><div><dt>到期时间</dt><dd>{item.expires_at ? <time dateTime={item.expires_at}>{selfKeyDate(item.expires_at)}</time> : '永不过期'}</dd></div>{item.revoked_at ? <div><dt>撤销时间</dt><dd><time dateTime={item.revoked_at}>{selfKeyDate(item.revoked_at)}</time></dd></div> : null}</dl>
+    </li>)}</ul> : null}
+    {cursor && !error ? <Button variant="secondary" disabled={loading} onClick={loadMore}>{loading ? '正在加载…' : '加载更多'}</Button> : null}
+  </section>
 }
 
 export function SelfApp() {
@@ -42,8 +110,9 @@ export function SelfApp() {
     <div className="self-card">
       <div className="brand-lockup"><div className="brand-mark">C</div><div><strong>CPA Cloud</strong><span>员工自助入口</span></div></div>
       {session ? <>
-        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>这里只显示你的基本资料。API Key 和使用量仍由管理员管理。</p></header>
+        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料和已有 API Key 的基本信息；创建、策略与撤销仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
+        <SelfKeyInventory key={`${session.profile.id}:${session.csrf_token}`} />
         {changingPassword ? <form className="self-form self-password-form" onSubmit={async (event) => {
           event.preventDefault()
           const form = event.currentTarget

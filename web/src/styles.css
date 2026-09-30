@@ -723,6 +723,24 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-profile div + div { border-top: 1px solid var(--border); }
 .self-profile dt { color: var(--muted); font-size: 12px; }
 .self-profile dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--navy); font-size: 14px; font-weight: 650; }
+/* Independently authored for docs/employee-self-key-inventory-contract.md. */
+.self-keys { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.self-keys h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
+.self-keys > p { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.self-keys > p[role="alert"] { color: #a52132; }
+.self-key-list { display: grid; gap: 10px; padding: 0; margin: 0 0 14px; list-style: none; }
+.self-key-list li { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: #fafcfd; }
+.self-key-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.self-key-top strong { min-width: 0; overflow-wrap: anywhere; color: var(--navy); font-size: 14px; }
+.self-key-status { flex: none; border-radius: 99px; padding: 3px 8px; font-size: 11px; font-weight: 700; background: #e7eef5; color: var(--navy); }
+.self-key-status--active { background: #e1f4e8; color: #236347; }
+.self-key-status--expired, .self-key-status--revoked { background: #f7e6e8; color: #9c2b3a; }
+.self-key-list dl { display: grid; gap: 6px; margin: 0; }
+.self-key-list dl div { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 8px; }
+.self-key-list dt, .self-key-list dd { margin: 0; font-size: 12px; line-height: 1.5; }
+.self-key-list dt { color: var(--muted); }
+.self-key-list dd { min-width: 0; overflow-wrap: anywhere; color: var(--navy); }
+.self-keys > .button { width: 100%; }
 .self-secret { padding: 14px; background: #f2f9f6; border: 1px solid #bfe3d5; border-radius: 8px; }
 .self-secret dl { margin: 12px 0; }
 .self-secret dt { color: var(--muted); font-size: 12px; }
