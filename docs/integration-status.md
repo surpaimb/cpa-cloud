@@ -108,6 +108,12 @@
   checks 以本批实际结果另行记录。未访问真实 provider/会员账号，未实现员工售价倍率、分组预算、
   供应商发票核对、汇率/多币换算，也未创建部署、tag、安装包或 release。
 
+## 2026-09-30：PROTO-08 第二段 token-array 输入候选
+
+- 独立 [token-array 输入增量契约](openai-embeddings-token-input-contract.md)先行提交；在原 OpenAI-compatible API Key 非流式 float 子集内增加单个整数 token 数组和同类批次，保持上游 JSON 形状与顺序。单数组计为一个输入，批次按外层长度校验向量 index。ID `0..2147483647`、每序列 2048、整批 65536 和既有 4 MiB 请求体为本地防护，不是 tokenizer 或供应商限额证明。
+- 旧文本输入、Key 显式授权和旧 Key 不扩权、实际 wire usage/价格、strict 预算派发前拒绝、取消及响应验证规则不变。非法数值、空/混合形状、重复键和超限均失败关闭；不记录 token ID、Key 或上游凭据。base64、dimensions、user、其他 provider/会员和真实客户端仍未实现或验证。本增量不增加依赖、DDL、管理配置或真实外部调用。
+- 当前候选工作树的非缓存 `go test -p 1 -count=1 -timeout=20m ./...` PASS（service 818.778s），Embeddings wire/服务专项另行 PASS；`go vet -p 1 ./...` PASS。Web 类型检查、21 文件 172 项测试及生产构建 PASS；修改文档的 114 个本地相对链接和 diff 检查 PASS。从当时候选干净克隆构建的双 CLI 带 `vcs.modified=false`，Key 策略、账号池、预览三项固定程序 smoke PASS。浏览器在动态回环端口走通合成上游、Embedding 模型、显式池和 390px Key 协议文案/勾选；既有 `smoke-key-policy-ui.cjs` 在旧 CAS 冲突提示断言处超时，不能记为整条 PASS。最终 SHA 的固定程序、race、GitHub CI 与独立验收须另行记录，不能借用第一段或较早 SHA 的证据。本批不创建安装包、tag、部署或 release。
+
 ## 2026-09-29：PROTO-08 第一段 OpenAI Embeddings 源码集成
 
 - 按 [OpenAI Embeddings 文本子集契约](openai-embeddings-contract.md)新增 `POST /v1/embeddings`，范围严格限定为 `openai-compatible` API Key、文本/string batch、float、非流式。请求和响应均由独立 `internal/embeddingwire` 包做严格字段、大小、索引、维数、有限数、model 与 usage 校验；输入文本和向量不写日志、错误或账本。
