@@ -162,6 +162,22 @@ func TestChannelMonitorSummaryRejectsUnexpectedSchema(t *testing.T) {
 	}
 }
 
+func TestChannelMonitorSummaryMissingRunTableIsStorageFailure(t *testing.T) {
+	f := newChannelMonitorFixture(t)
+	plan := createChannelMonitorPlanForTest(t, f, false)
+	if _, err := f.app.store.db.Exec(`DROP TABLE channel_monitor_runs`); err != nil {
+		t.Fatal(err)
+	}
+	response := requestJSON(t, http.MethodGet, f.base+"/admin/api/v1/channel-monitors/"+plan.ID+"/summary", "", f.cookie, "", "")
+	if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("missing run table status=%d body=%s", response.StatusCode, readBody(response))
+	}
+	body := readBody(response)
+	if !strings.Contains(body, `"code":"storage_unavailable"`) || strings.Contains(body, `"counts"`) || strings.Contains(body, "channel_monitor_runs") {
+		t.Fatalf("unsafe missing-table response=%s", body)
+	}
+}
+
 func TestChannelMonitorSummaryConcurrentWritesStayAtOneWatermark(t *testing.T) {
 	f := newChannelMonitorFixture(t)
 	created := createChannelMonitorPlanForTest(t, f, false)

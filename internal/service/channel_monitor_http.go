@@ -33,7 +33,7 @@ func (a *App) getChannelMonitorSummary(w http.ResponseWriter, r *http.Request, _
 		return
 	}
 	result, err := loadChannelMonitorSummary(r.Context(), a.store.db, r.PathValue("id"), time.Now().UTC())
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, errChannelMonitorSummaryPlanNotFound) {
 		writeChannelMonitorError(w, http.StatusNotFound, "not_found")
 		return
 	}

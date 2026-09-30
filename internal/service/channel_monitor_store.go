@@ -31,6 +31,10 @@ var channelMonitorSummaryCodes = [...]string{
 	"test_in_progress", "capacity_exceeded", "storage_unavailable", "internal_failure",
 }
 
+// Only an absent plan is a 404. Missing schema objects also surface as
+// sql.ErrNoRows, but must remain storage failures at the HTTP boundary.
+var errChannelMonitorSummaryPlanNotFound = errors.New("channel monitor summary plan not found")
+
 func newChannelMonitorSummary(id string, now time.Time) channelMonitorSummary {
 	result := channelMonitorSummary{PlanID: id, AsOf: now.UTC().Format(time.RFC3339Nano), Counts: make(map[string]map[string]int, 2)}
 	for _, scope := range []string{"local_credential", "catalog"} {
@@ -66,6 +70,9 @@ func loadChannelMonitorSummary(ctx context.Context, db *sql.DB, id string, now t
 		return channelMonitorSummary{}, err
 	}
 	if _, err := loadChannelMonitorPlan(ctx, tx, id, true); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return channelMonitorSummary{}, errChannelMonitorSummaryPlanNotFound
+		}
 		return channelMonitorSummary{}, err
 	}
 	var highWater sql.NullInt64
