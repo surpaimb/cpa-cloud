@@ -759,6 +759,24 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-history-list dt { color: var(--muted); }
 .self-history-list dd { min-width: 0; overflow-wrap: anywhere; color: var(--navy); }
 .self-history > .button { width: 100%; }
+/* Independently authored for docs/employee-self-token-summary-contract.md. */
+.self-summary { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.self-summary h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
+.self-summary > p { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.self-summary > p[role="alert"] { color: #a52132; }
+.self-summary-window { overflow-wrap: anywhere; }
+.self-summary-counts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 14px; }
+.self-summary-counts div { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: #fafcfd; }
+.self-summary-counts dt, .self-summary-counts dd { margin: 0; overflow-wrap: anywhere; }
+.self-summary-counts dt { color: var(--muted); font-size: 11px; }
+.self-summary-counts dd { margin-top: 3px; color: var(--navy); font-size: 16px; font-weight: 750; }
+.self-summary-tokens { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
+.self-summary-tokens li { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 9px; }
+.self-summary-tokens strong { display: block; margin-bottom: 8px; color: var(--navy); font-size: 13px; }
+.self-summary-tokens dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.self-summary-tokens dt, .self-summary-tokens dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.self-summary-tokens dt { color: var(--muted); font-size: 11px; }
+.self-summary-tokens dd { margin-top: 3px; color: var(--navy); font-size: 15px; font-weight: 700; }
 .self-secret { padding: 14px; background: #f2f9f6; border: 1px solid #bfe3d5; border-radius: 8px; }
 .self-secret dl { margin: 12px 0; }
 .self-secret dt { color: var(--muted); font-size: 12px; }

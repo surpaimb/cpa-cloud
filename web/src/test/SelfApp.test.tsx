@@ -2,12 +2,18 @@
 // docs/employee-self-password-change-contract.md, and
 // docs/employee-self-key-inventory-contract.md.
 // docs/employee-self-request-history-contract.md.
+// docs/employee-self-token-summary-contract.md.
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SelfApp } from '../SelfApp'
 
 const reply = (status: number, body: unknown) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
+const emptyTokenSummary = {
+  from: '2026-09-30T00:00:00Z', to: '2026-10-01T00:00:00Z',
+  requests: { total: '0', pending: '0', succeeded: '0', failed: '0', cancelled: '0', interrupted: '0' },
+  attempts: { total: '0', pending: '0', input_tokens: { known_total: '0', unknown_attempts: '0' }, output_tokens: { known_total: '0', unknown_attempts: '0' }, cache_read_tokens: { known_total: '0', unknown_attempts: '0' }, cache_write_tokens: { known_total: '0', unknown_attempts: '0' } },
+}
 
 describe('employee self-service page', () => {
   beforeEach(() => vi.restoreAllMocks())
@@ -22,6 +28,7 @@ describe('employee self-service page', () => {
       if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
       if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
       if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
       throw new Error(`Unexpected request: ${url}`)
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -39,6 +46,7 @@ describe('employee self-service page', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: '员工登录' })).toBeInTheDocument())
     expect(screen.queryByRole('heading', { name: '我的 API Key' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '我的请求记录' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '我的 Token 用量' })).not.toBeInTheDocument()
     const logout = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/sessions') && init?.method === 'DELETE')
     expect(new Headers(logout?.[1]?.headers).get('X-CSRF-Token')).toBe('self-csrf')
   })
@@ -50,6 +58,7 @@ describe('employee self-service page', () => {
       if (url.endsWith('/enroll') && init?.method === 'POST') return reply(200, { csrf_token: 'self-csrf', profile: { id: 'emp-1', name: 'Alice', department: '', status: 'active' } })
       if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
       if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
       throw new Error(`Unexpected request: ${url}`)
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -73,6 +82,7 @@ describe('employee self-service page', () => {
       if (url.endsWith('/password') && init?.method === 'POST') return Promise.resolve(new Response(null, { status: 204 }))
       if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
       if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
       throw new Error(`Unexpected request: ${url}`)
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -100,6 +110,7 @@ describe('employee self-service page', () => {
       ? reply(200, { csrf_token: 'self-csrf', profile })
       : String(input).endsWith('/keys') ? reply(200, { items: [], next_cursor: null })
       : String(input).endsWith('/usage/requests') ? reply(200, { items: [], next_cursor: null })
+      : String(input).endsWith('/usage/summary') ? reply(200, emptyTokenSummary)
       : reply(401, { error: { code: 'invalid_credentials', message: 'Invalid credentials or enrollment secret.' } })))
     render(<SelfApp />)
     await userEvent.click(await screen.findByRole('button', { name: '修改密码' }))
@@ -120,6 +131,7 @@ describe('employee self-service page', () => {
       ? reply(200, { csrf_token: 'self-csrf', profile })
       : String(input).endsWith('/keys') ? reply(200, { items: [], next_cursor: null })
       : String(input).endsWith('/usage/requests') ? reply(200, { items: [], next_cursor: null })
+      : String(input).endsWith('/usage/summary') ? reply(200, emptyTokenSummary)
       : reply(503, { error: { code: 'storage_unavailable' } })))
     render(<SelfApp />)
     await userEvent.click(await screen.findByRole('button', { name: '修改密码' }))
@@ -141,6 +153,7 @@ describe('employee self-service page', () => {
       if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
       if (url.endsWith('/keys')) return reply(200, { items: [first], next_cursor: 'v1.cursor' })
       if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
       if (url.endsWith('/keys?cursor=v1.cursor')) return reply(200, { items: [second], next_cursor: 'v1.next' })
       if (url.endsWith('/keys?cursor=v1.next') && failNext) return reply(503, { error: { code: 'storage_unavailable' } })
       throw new Error(`Unexpected request: ${url}`)
@@ -170,6 +183,7 @@ describe('employee self-service page', () => {
       if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
       if (url.endsWith('/keys')) return new Promise<Response>((resolve) => { resolveKeys = resolve })
       if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
       if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
       throw new Error(`Unexpected request: ${url}`)
     })
@@ -191,6 +205,7 @@ describe('employee self-service page', () => {
       if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
       if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
       if (url.endsWith('/usage/requests')) return reply(200, { items: [first], next_cursor: 'cursor.one' })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
       if (url.endsWith('/usage/requests?cursor=cursor.one')) return reply(200, { items: [second], next_cursor: 'cursor.two' })
       if (url.endsWith('/usage/requests?cursor=cursor.two')) return reply(503, { error: { code: 'storage_unavailable' } })
       throw new Error(`Unexpected request: ${url}`)
@@ -221,6 +236,7 @@ describe('employee self-service page', () => {
       if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
       if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
       if (url.endsWith('/usage/requests')) return new Promise<Response>((resolve) => { resolveHistory = resolve })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
       if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
       throw new Error(`Unexpected request: ${url}`)
     }))
@@ -230,5 +246,74 @@ describe('employee self-service page', () => {
     expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
     resolveHistory?.(new Response(JSON.stringify({ items: [{ id: 'req_old', model_id: 'old-model' }], next_cursor: null }), { status: 200 }))
     await waitFor(() => expect(screen.queryByText('old-model')).not.toBeInTheDocument())
+  })
+
+  it('renders only known upstream-attempt Token sums and unknown attempt counts as strings', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const summary = {
+      ...emptyTokenSummary,
+      requests: { total: '3', pending: '1', succeeded: '1', failed: '1', cancelled: '0', interrupted: '0' },
+      attempts: { ...emptyTokenSummary.attempts, total: '4', pending: '1', input_tokens: { known_total: '9007199254740993', unknown_attempts: '2' }, output_tokens: { known_total: '0', unknown_attempts: '1' }, provider: 'private-provider', account_id: 'private-account', cost_micro: '999' },
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, summary)
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    expect(await screen.findByText('9007199254740993')).toBeInTheDocument()
+    const section = screen.getByRole('region', { name: '我的 Token 用量' })
+    expect(section).toHaveTextContent('已知 Token（上游尝试）')
+    expect(section).toHaveTextContent('未知尝试')
+    expect(section).toHaveTextContent('不是完整用量，也不是账单')
+    expect(section).toHaveTextContent('待结束尝试')
+    expect(screen.queryByText('private-provider')).not.toBeInTheDocument()
+    expect(screen.queryByText('private-account')).not.toBeInTheDocument()
+    expect(screen.queryByText('999')).not.toBeInTheDocument()
+    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/usage/summary'))
+    expect(String(call?.[0])).toBe('/self/api/v1/usage/summary')
+    expect(new Headers(call?.[1]?.headers).get('X-Self-Request')).toBe('1')
+  })
+
+  it('does not retain failed or late summary data after logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let resolveSummary: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return new Promise<Response>((resolve) => { resolveSummary = resolve })
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    expect(await screen.findByText('正在读取 Token 汇总…')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    resolveSummary?.(new Response(JSON.stringify({ ...emptyTokenSummary, attempts: { ...emptyTokenSummary.attempts, input_tokens: { known_total: 'secret-late', unknown_attempts: '0' } } }), { status: 200 }))
+    await waitFor(() => expect(screen.queryByText('secret-late')).not.toBeInTheDocument())
+    expect(screen.queryByRole('heading', { name: '我的 Token 用量' })).not.toBeInTheDocument()
+  })
+
+  it('clears the Token summary on a failed read', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(503, { error: { code: 'storage_unavailable' } })
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    const { container } = render(<SelfApp />)
+    expect(await screen.findByText('Token 汇总暂时无法读取，请稍后重新登录或刷新页面。')).toBeInTheDocument()
+    expect(container.querySelector('.self-summary-counts')).toBeNull()
+    expect(container.querySelector('.self-summary-tokens')).toBeNull()
   })
 })

@@ -2,6 +2,7 @@
 // docs/employee-self-password-change-contract.md, and
 // docs/employee-self-key-inventory-contract.md.
 // docs/employee-self-request-history-contract.md.
+// docs/employee-self-token-summary-contract.md.
 import { useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
@@ -12,6 +13,12 @@ type SelfKey = { id: string; name: string; created_at: string; expires_at: strin
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfRequest = { id: string; key_id: string; model_id: string; status: 'pending' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; started_at: string; finished_at: string | null }
 type SelfRequestPage = { items: SelfRequest[]; next_cursor: string | null }
+type SelfTokenCounts = { known_total: string; unknown_attempts: string }
+type SelfTokenSummary = {
+  from: string; to: string
+  requests: { total: string; pending: string; succeeded: string; failed: string; cancelled: string; interrupted: string }
+  attempts: { total: string; pending: string; input_tokens: SelfTokenCounts; output_tokens: SelfTokenCounts; cache_read_tokens: SelfTokenCounts; cache_write_tokens: SelfTokenCounts }
+}
 
 async function selfRequest<T>(path: string, init: RequestInit = {}, csrf?: string): Promise<T> {
   const headers = new Headers(init.headers)
@@ -157,6 +164,58 @@ function SelfRequestHistory() {
   </section>
 }
 
+function SelfTokenSummaryPanel() {
+  const [summary, setSummary] = useState<SelfTokenSummary | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    const controller = new AbortController()
+    void selfRequest<SelfTokenSummary>('/usage/summary', { signal: controller.signal }).then((value) => {
+      if (!active) return
+      setSummary(value)
+      setError(false)
+    }).catch(() => {
+      if (!active) return
+      setSummary(null)
+      setError(true)
+    }).finally(() => { if (active) setLoading(false) })
+    return () => { active = false; controller.abort() }
+  }, [])
+
+  const tokenRows = summary ? [
+    ['输入', summary.attempts.input_tokens],
+    ['输出', summary.attempts.output_tokens],
+    ['缓存读取', summary.attempts.cache_read_tokens],
+    ['缓存写入', summary.attempts.cache_write_tokens],
+  ] as const : []
+
+  return <section className="self-summary" aria-labelledby="self-summary-title">
+    <h2 id="self-summary-title">我的 Token 用量</h2>
+    <p>按上游尝试统计已知值；存在未知尝试时，已知合计不是完整用量，也不是账单。</p>
+    {loading ? <p role="status">正在读取 Token 汇总…</p> : null}
+    {error ? <p role="alert">Token 汇总暂时无法读取，请稍后重新登录或刷新页面。</p> : null}
+    {summary && !error ? <>
+      <p className="self-summary-window">统计时间：<time dateTime={summary.from}>{selfKeyDate(summary.from)}</time> 至 <time dateTime={summary.to}>{selfKeyDate(summary.to)}</time>（不含结束时刻）</p>
+      <dl className="self-summary-counts">
+        <div><dt>本人请求</dt><dd>{summary.requests.total}</dd></div>
+        <div><dt>进行中</dt><dd>{summary.requests.pending}</dd></div>
+        <div><dt>已完成</dt><dd>{summary.requests.succeeded}</dd></div>
+        <div><dt>失败</dt><dd>{summary.requests.failed}</dd></div>
+        <div><dt>已取消</dt><dd>{summary.requests.cancelled}</dd></div>
+        <div><dt>已中断</dt><dd>{summary.requests.interrupted}</dd></div>
+        <div><dt>上游尝试</dt><dd>{summary.attempts.total}</dd></div>
+        <div><dt>待结束尝试</dt><dd>{summary.attempts.pending}</dd></div>
+      </dl>
+      <ul className="self-summary-tokens">{tokenRows.map(([label, counts]) => <li key={label}>
+        <strong>{label}</strong>
+        <dl><div><dt>已知 Token（上游尝试）</dt><dd>{counts.known_total}</dd></div><div><dt>未知尝试</dt><dd>{counts.unknown_attempts}</dd></div></dl>
+      </li>)}</ul>
+    </> : null}
+  </section>
+}
+
 export function SelfApp() {
   const [checking, setChecking] = useState(true)
   const [session, setSession] = useState<SelfSession | null>(null)
@@ -177,9 +236,10 @@ export function SelfApp() {
     <div className="self-card">
       <div className="brand-lockup"><div className="brand-mark">C</div><div><strong>CPA Cloud</strong><span>员工自助入口</span></div></div>
       {session ? <>
-        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、已有 API Key 的基本信息和本人请求记录；Key 创建、策略与撤销仍由管理员管理。</p></header>
+        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、已有 API Key 的基本信息、本人请求记录和已知 Token 汇总；Key 创建、策略与撤销仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
         <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}`} />
+        <SelfTokenSummaryPanel key={`summary:${session.profile.id}:${session.csrf_token}`} />
         <SelfRequestHistory key={`requests:${session.profile.id}:${session.csrf_token}`} />
         {changingPassword ? <form className="self-form self-password-form" onSubmit={async (event) => {
           event.preventDefault()
