@@ -465,10 +465,13 @@ unset CPA_EMPLOYEE_KEY
 | `--codex-oauth-client-id` / `--codex-oauth-redirect-uri` | 仅最新源码；同时设置才启用网页 OAuth 与自动/手动刷新，另需开启会员实验 |
 | `--allow-loopback-upstream` | 默认关闭，仅本机开发测试 |
 | `--scheduled-tests-enabled` | 默认关闭；启用已保存的本地凭据/目录定时测试 worker |
+| `--channel-monitors-enabled` | 仅最新源码，默认关闭；启用绑定到现有渠道及显式账号池路由的凭据/目录监控 worker |
 
 用 `cpa-cloud --help` 查看二进制参数。
 
 定时测试既支持原有固定 UTC 间隔，也支持按 IANA 命名时区当地 `HH:mm` 每日执行；两者共用上述默认关闭的 worker。每日计划的春季跳时、秋季重复分钟、旧客户端兼容和固定版本时区数据见[契约](docs/scheduled-tests-daily-timezone-contract.md)。界面展示服务端返回的 UTC 下次运行时间，不以浏览器时区重新推算。
+
+“渠道监控”是独立的源码预览首段：先在“模型路由”保存带渠道的显式账号池路由，再选择渠道、公开模型及该路由的具体上游账号建立固定 UTC 间隔计划。凭据检查零出站，目录检查只读取供应商模型目录；配置版本变化后旧结果不再代表当前绑定，管理员须显式重新绑定。最多 100 个活动计划、每计划保留最近 200 条已完成记录；这不是渠道可用率聚合、告警或生成能力验证。管理 API、默认关闭与重启边界见[独立渠道监控契约](docs/channel-monitor-contract.md)。此功能不在 preview.3 下载包中。
 
 可信代理集合在进程启动时规范化并冻结；修改参数后须重启。可信集合改变后，按旧信任 revision 创建但尚未派发的后台任务会在零上游请求下中断，而不会用新规则静默重解释原来源。
 

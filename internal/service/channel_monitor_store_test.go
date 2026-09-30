@@ -30,3 +30,23 @@ func TestChannelMonitorMigrationCreatesExactTablesAndRejectsPartialSchema(t *tes
 		t.Fatalf("failed migration changed unrelated plan table: count=%d err=%v", count, err)
 	}
 }
+
+func TestChannelMonitorMigrationRejectsUnexpectedSchemaObjects(t *testing.T) {
+	app, _, _, _ := newModelAdmissionApp(t, false)
+	now := time.Date(2026, 9, 30, 1, 2, 3, 0, time.UTC)
+	if _, err := app.store.db.Exec(`CREATE TRIGGER channel_monitor_plans_untrusted AFTER INSERT ON channel_monitor_plans BEGIN SELECT 1; END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateChannelMonitors(context.Background(), app.store.db, now); err == nil {
+		t.Fatal("unexpected channel monitor trigger was accepted")
+	}
+	if _, err := app.store.db.Exec(`DROP TRIGGER channel_monitor_plans_untrusted`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.db.Exec(`CREATE INDEX channel_monitor_plans_untrusted ON channel_monitor_plans(name)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateChannelMonitors(context.Background(), app.store.db, now); err == nil {
+		t.Fatal("unexpected channel monitor index was accepted")
+	}
+}

@@ -309,7 +309,11 @@ func (c *channelMonitorCoordinator) start(claim channelMonitorClaim) {
 func (c *channelMonitorCoordinator) executeClaim(ctx context.Context, claim channelMonitorClaim) {
 	valid, err := c.claimStillValid(ctx, claim)
 	if err != nil {
-		c.finishClaim(claim, "storage_unavailable")
+		if ctx.Err() != nil {
+			c.finishClaim(claim, "cancelled")
+		} else {
+			c.finishClaim(claim, "storage_unavailable")
+		}
 		return
 	}
 	if !valid {
@@ -318,7 +322,9 @@ func (c *channelMonitorCoordinator) executeClaim(ctx context.Context, claim chan
 	}
 	view, status, code, err := c.execute(ctx, claim.Plan.UpstreamID, claim.OperationID, claim.Plan.Binding.UpstreamRevision, claim.Plan.Scope)
 	resultCode := "internal_failure"
-	if err != nil {
+	if ctx.Err() != nil {
+		resultCode = "cancelled"
+	} else if err != nil {
 		resultCode = "storage_unavailable"
 	} else if code != "" {
 		switch code {
@@ -333,8 +339,6 @@ func (c *channelMonitorCoordinator) executeClaim(ctx context.Context, claim chan
 		}
 	} else if status == http.StatusOK && view.ResultCode != nil {
 		resultCode = *view.ResultCode
-	} else if ctx.Err() != nil {
-		resultCode = "cancelled"
 	}
 	c.finishClaim(claim, resultCode)
 }

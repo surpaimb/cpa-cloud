@@ -409,7 +409,8 @@ func (a *App) listChannelMonitorRuns(w http.ResponseWriter, r *http.Request, _ a
 		}
 	}
 	limit := int64(50)
-	if value := queryValues.Get("limit"); value != "" {
+	if values, exists := queryValues["limit"]; exists {
+		value := values[0]
 		parsed, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || parsed < 1 || parsed > 100 {
 			writeChannelMonitorError(w, 400, "invalid_request")
@@ -418,7 +419,8 @@ func (a *App) listChannelMonitorRuns(w http.ResponseWriter, r *http.Request, _ a
 		limit = parsed
 	}
 	var cursor int64
-	if value := queryValues.Get("cursor"); value != "" {
+	if values, exists := queryValues["cursor"]; exists {
+		value := values[0]
 		var valid bool
 		cursor, valid = decodeScheduledRunCursor(value)
 		if !valid {

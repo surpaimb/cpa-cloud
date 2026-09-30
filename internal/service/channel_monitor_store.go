@@ -107,6 +107,9 @@ func migrateChannelMonitors(ctx context.Context, db *sql.DB, now time.Time) erro
 			return err
 		}
 	}
+	if err := verifyChannelMonitorObjects(ctx, tx); err != nil {
+		return err
+	}
 	if err := verifyChannelMonitorRows(ctx, tx); err != nil {
 		return err
 	}
@@ -125,18 +128,19 @@ func migrateChannelMonitors(ctx context.Context, db *sql.DB, now time.Time) erro
 	if broken {
 		return errors.New("channel monitor foreign key violation")
 	}
-	interruptedRows, err := tx.QueryContext(ctx, `SELECT DISTINCT p.id,p.interval_seconds FROM channel_monitor_plans p JOIN channel_monitor_runs r ON r.plan_id=p.id WHERE r.state='running' AND p.enabled=1 AND p.archived_at IS NULL`)
+	interruptedRows, err := tx.QueryContext(ctx, `SELECT DISTINCT p.id,p.interval_seconds,p.enabled FROM channel_monitor_plans p JOIN channel_monitor_runs r ON r.plan_id=p.id WHERE r.state='running'`)
 	if err != nil {
 		return err
 	}
 	type interruptedPlan struct {
 		id       string
 		interval int64
+		enabled  int
 	}
 	var interrupted []interruptedPlan
 	for interruptedRows.Next() {
 		var item interruptedPlan
-		if err := interruptedRows.Scan(&item.id, &item.interval); err != nil {
+		if err := interruptedRows.Scan(&item.id, &item.interval, &item.enabled); err != nil {
 			interruptedRows.Close()
 			return err
 		}
@@ -154,7 +158,12 @@ func migrateChannelMonitors(ctx context.Context, db *sql.DB, now time.Time) erro
 		return err
 	}
 	for _, item := range interrupted {
-		if _, err := tx.ExecContext(ctx, `UPDATE channel_monitor_plans SET next_run_at=?,updated_at=? WHERE id=? AND enabled=1 AND archived_at IS NULL`, formatAccountPoolTime(now.UTC().Add(time.Duration(item.interval)*time.Second)), stamp, item.id); err != nil {
+		if item.enabled == 1 {
+			if _, err := tx.ExecContext(ctx, `UPDATE channel_monitor_plans SET next_run_at=?,updated_at=? WHERE id=? AND enabled=1 AND archived_at IS NULL`, formatAccountPoolTime(now.UTC().Add(time.Duration(item.interval)*time.Second)), stamp, item.id); err != nil {
+				return err
+			}
+		}
+		if err := trimChannelMonitorHistory(ctx, tx, item.id); err != nil {
 			return err
 		}
 	}
@@ -198,6 +207,29 @@ func verifyChannelMonitorDDL(ctx context.Context, tx *sql.Tx, kind, name, expect
 	return nil
 }
 
+func verifyChannelMonitorObjects(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT type,name FROM sqlite_master WHERE tbl_name IN ('channel_monitor_plans','channel_monitor_runs') AND type IN ('index','trigger')`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var kind, name string
+		if err := rows.Scan(&kind, &name); err != nil {
+			rows.Close()
+			return err
+		}
+		if kind == "trigger" || !strings.HasPrefix(name, "sqlite_autoindex_channel_monitor_") && channelMonitorIndexes[name] == "" {
+			rows.Close()
+			return errors.New("unexpected channel monitor schema object")
+		}
+	}
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil {
+		return iterationErr
+	}
+	return closeErr
+}
+
 func verifyChannelMonitorRows(ctx context.Context, tx *sql.Tx) error {
 	var bad int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_monitor_plans WHERE
@@ -220,6 +252,40 @@ func verifyChannelMonitorRows(ctx context.Context, tx *sql.Tx) error {
 	}
 	if bad != 0 {
 		return errors.New("invalid channel monitor runs")
+	}
+	planRows, err := tx.QueryContext(ctx, channelMonitorPlanSelect)
+	if err != nil {
+		return err
+	}
+	for planRows.Next() {
+		if _, err := scanChannelMonitorPlan(planRows); err != nil {
+			planRows.Close()
+			return err
+		}
+	}
+	iterationErr, closeErr := planRows.Err(), planRows.Close()
+	if iterationErr != nil {
+		return iterationErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	runRows, err := tx.QueryContext(ctx, channelMonitorRunSelect)
+	if err != nil {
+		return err
+	}
+	for runRows.Next() {
+		if _, err := scanChannelMonitorRun(runRows); err != nil {
+			runRows.Close()
+			return err
+		}
+	}
+	iterationErr, closeErr = runRows.Err(), runRows.Close()
+	if iterationErr != nil {
+		return iterationErr
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	return nil
 }

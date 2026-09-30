@@ -34,6 +34,8 @@ Responses 首批、Claude/Gemini API Key 原生协议、Codex 网页 OAuth 与�
 
 [OPS-04 命名时区每日计划](scheduled-tests-daily-timezone-contract.md)作为上述首批的增量接入：旧固定 UTC 间隔仍为默认；新 `daily_local` 使用固定版本的 IANA 时区数据按当地日历日计算，下次运行仍持久化为 UTC。春季不存在的分钟跳过、秋季重复分钟只取较早一次。默认关闭、检查范围、并发和历史边界保持不变；通用 cron、通知、渠道聚合监控和收费生成测试仍未实现。该批精确代码/CI 与浏览器验收证据另见[集成状态](integration-status.md)。
 
+[OBS-02 独立渠道监控首段](channel-monitor-contract.md)在源码开发预览中加入现有渠道、模型、显式账号池路由的精确绑定，默认关闭的凭据/目录调度及冻结绑定历史。修改路由或账号版本后需人工重绑；不以目录成功推断生成可用。渠道聚合可用率、告警、通知及真实会员账号监控仍未实现；最终测试与 CI 以[集成状态](integration-status.md)的精确提交证据为准。
+
 [账号与模型生命周期管理](account-lifecycle-management-contract.md)已接入 revision/CAS、墓碑、默认隐藏和上游凭据销毁；上游归档与定时计划停用同事务提交，提交后取消在途定时检查。独立的[加密备份 CLI](backup-restore.md)已覆盖活动 WAL 一致快照、认证加密、只读校验和新目录恢复；恢复材料、双版本路径和合成跨机验证已合入，但仍不是自动备份、真实第二环境演练或生产灾备编排。
 
 [出站代理首批](outbound-proxy-contract.md)已接入 API Key 生成/目录/测试/恢复与网页，包含版本绑定及持久化仅握手检查；独立证据见[集成状态](integration-status.md)。Codex 全生命周期出口、其他代理协议与自动轮换仍未实现。
