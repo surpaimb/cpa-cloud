@@ -340,6 +340,7 @@ export type SystemStatus = {
     account_pool_routing?: boolean
     channel_monitor_configuration?: boolean
     channel_monitor_running?: boolean
+    channel_monitor_retained_summary?: boolean
     account_group_cost_allocation?: boolean
     openai_embeddings?: boolean
     account_lifecycle_management?: boolean
@@ -478,6 +479,18 @@ export type ChannelMonitorPlan = {
 }
 export type ChannelMonitorInput = Pick<ChannelMonitorPlan, 'name' | 'channel_id' | 'model_id' | 'upstream_id' | 'scope' | 'interval_seconds' | 'enabled'>
 export type ChannelMonitorRunsPage = { items: ChannelMonitorRun[]; next_cursor: string | null }
+// Independently authored for docs/channel-monitor-summary-contract.md.
+export type ChannelMonitorSummary = {
+  plan_id: string
+  as_of: string
+  through_sequence: number
+  retained_completed: number
+  retained_window_full: boolean
+  running: number
+  earliest_finished_at: string | null
+  latest_finished_at: string | null
+  counts: Record<ScheduledTestScope, Record<string, number>>
+}
 
 export type BackupKeyProvider = {
   id: string
@@ -1172,6 +1185,7 @@ export const api = {
     if (cursor) query.set('cursor', cursor)
     return request<ChannelMonitorRunsPage>(`/channel-monitors/${encodeURIComponent(id)}/runs?${query}`, { signal })
   },
+  channelMonitorSummary: (id: string, signal?: AbortSignal) => request<ChannelMonitorSummary>(`/channel-monitors/${encodeURIComponent(id)}/summary`, { signal }),
   accountRecovery: () => request<AccountRecoveryStatus>('/account-recovery'),
   accountRecoveryAccounts: () => request<{items: AccountRecoveryState[]; server_time: string}>('/account-recovery/accounts'),
   setAccountRecovery: (enabled: boolean, revision: number, csrf: string) =>

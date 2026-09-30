@@ -47,6 +47,7 @@ try {
   const features = (await admin.request('/system/status')).features;
   assert.equal(features.channel_monitor_configuration, true);
   assert.equal(features.channel_monitor_running, false);
+  assert.equal(features.channel_monitor_retained_summary, true);
   const account = await admin.request('/upstreams', 'POST', {
     name: 'Synthetic channel account', provider_kind: 'openai-compatible', endpoint: `http://127.0.0.1:${upstream.address().port}`, api_key: credential,
   }, 201);
@@ -60,6 +61,10 @@ try {
   assert.equal(plan.binding_state, 'valid');
   assert.ok(Date.parse(plan.next_run_at) > Date.now());
   assert.equal(plan.latest_result, null);
+  const emptySummary = await admin.request(`/channel-monitors/${plan.id}/summary`);
+  assert.equal(emptySummary.retained_completed, 0);
+  assert.equal(emptySummary.running, 0);
+  assert.equal(emptySummary.earliest_finished_at, null);
   assert.equal(catalogCalls, 0);
   assert.equal(generationCalls, 0);
   await stopServer(serviceProcess); serviceProcess = undefined;
@@ -85,6 +90,13 @@ try {
   assert.equal(run.pool_revision, 1);
   assert.equal(catalogCalls, 1);
   assert.equal(generationCalls, 0);
+  const completedSummary = await admin.request(`/channel-monitors/${plan.id}/summary`);
+  assert.equal(completedSummary.retained_completed, 1);
+  assert.equal(completedSummary.running, 0);
+  assert.equal(completedSummary.counts.catalog.catalog_ok, 1);
+  assert.equal(completedSummary.retained_window_full, false);
+  assert.ok(completedSummary.through_sequence > 0);
+  assert.ok(!JSON.stringify(completedSummary).includes(credential) && !JSON.stringify(completedSummary).includes(privateBody));
   const current = await admin.request(`/channel-monitors/${plan.id}`);
   assert.equal(current.latest_result.operation_id, run.operation_id);
   assert.ok(!JSON.stringify(current).includes(privateBody));
@@ -107,10 +119,16 @@ try {
   assert.equal(rebound.latest_result, null);
   const history = await admin.request(`/channel-monitors/${plan.id}/runs?limit=10`);
   assert.equal(history.items[0].operation_id, run.operation_id);
+  const reboundSummary = await admin.request(`/channel-monitors/${plan.id}/summary`);
+  assert.equal(reboundSummary.retained_completed, 1, 'Rebind erased or reattributed old retained history');
+  assert.equal(reboundSummary.counts.catalog.catalog_ok, 1);
+  await admin.request(`/channel-monitors/${plan.id}`, 'DELETE', { expected_revision: rebound.revision });
+  const archivedSummary = await admin.request(`/channel-monitors/${plan.id}/summary`);
+  assert.equal(archivedSummary.retained_completed, 1, 'Archive erased retained history');
   assert.equal(generationCalls, 0);
   assert.ok(!serviceProcess.output().includes(credential) && !serviceProcess.output().includes(privateBody), 'Sensitive data reached service logs');
   await stopServer(serviceProcess); serviceProcess = undefined;
-  console.log('PASS: channel monitor default-off, bounded synthetic catalog execution, exact binding history, restart no-replay, stale/rebind, no generation or secret leakage');
+  console.log('PASS: channel monitor default-off, bounded synthetic catalog, retained summary through rebind/archive, restart no-replay, no generation or secret leakage');
 } finally {
   await stopServer(serviceProcess);
   upstream.closeAllConnections();

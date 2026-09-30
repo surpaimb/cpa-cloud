@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 func (a *App) registerChannelMonitorHandlers(mux *http.ServeMux) {
@@ -15,6 +16,32 @@ func (a *App) registerChannelMonitorHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /admin/api/v1/channel-monitors/{id}", a.requireAdmin(a.updateChannelMonitor, true))
 	mux.HandleFunc("DELETE /admin/api/v1/channel-monitors/{id}", a.requireAdmin(a.deleteChannelMonitor, true))
 	mux.HandleFunc("GET /admin/api/v1/channel-monitors/{id}/runs", a.requireAdmin(a.listChannelMonitorRuns, false))
+	mux.HandleFunc("GET /admin/api/v1/channel-monitors/{id}/summary", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		a.requireAdmin(a.getChannelMonitorSummary, false)(w, r)
+	})
+}
+
+// Independently authored for docs/channel-monitor-summary-contract.md.
+func (a *App) getChannelMonitorSummary(w http.ResponseWriter, r *http.Request, _ adminSession) {
+	if r.URL.RawQuery != "" || r.ContentLength > 0 || len(r.TransferEncoding) != 0 || !validIdentifier(r.PathValue("id"), 128) {
+		writeChannelMonitorError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !validOptionalOrigin(r, a.cfg.TLSCert != "") {
+		writeAdminError(w, http.StatusForbidden, "origin_rejected", "Request origin is not allowed.")
+		return
+	}
+	result, err := loadChannelMonitorSummary(r.Context(), a.store.db, r.PathValue("id"), time.Now().UTC())
+	if errors.Is(err, sql.ErrNoRows) {
+		writeChannelMonitorError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if err != nil {
+		writeChannelMonitorError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func writeChannelMonitorError(w http.ResponseWriter, status int, code string) {

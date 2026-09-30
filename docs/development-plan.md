@@ -36,6 +36,8 @@ Responses 首批、Claude/Gemini API Key 原生协议、Codex 网页 OAuth 与�
 
 [OBS-02 独立渠道监控首段](channel-monitor-contract.md)在源码开发预览中加入现有渠道、模型、显式账号池路由的精确绑定，默认关闭的凭据/目录调度及冻结绑定历史。修改路由或账号版本后需人工重绑；不以目录成功推断生成可用。渠道聚合可用率、告警、通知及真实会员账号监控仍未实现；最终测试与 CI 以[集成状态](integration-status.md)的精确提交证据为准。
 
+[OBS-02 第二段只读摘要](channel-monitor-summary-contract.md)只对每计划当前已保留的至多 200 条完成历史做同一 SQLite 快照统计，含旧绑定版本、running 数和固定结果码；网页由独立能力门控。满窗不证明窗外事实，不计算可用率或判断供应商健康。最终通过项仍以[集成状态](integration-status.md)的精确提交证据为准。
+
 [账号与模型生命周期管理](account-lifecycle-management-contract.md)已接入 revision/CAS、墓碑、默认隐藏和上游凭据销毁；上游归档与定时计划停用同事务提交，提交后取消在途定时检查。独立的[加密备份 CLI](backup-restore.md)已覆盖活动 WAL 一致快照、认证加密、只读校验和新目录恢复；恢复材料、双版本路径和合成跨机验证已合入，但仍不是自动备份、真实第二环境演练或生产灾备编排。
 
 [出站代理首批](outbound-proxy-contract.md)已接入 API Key 生成/目录/测试/恢复与网页，包含版本绑定及持久化仅握手检查；独立证据见[集成状态](integration-status.md)。Codex 全生命周期出口、其他代理协议与自动轮换仍未实现。

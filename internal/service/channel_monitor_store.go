@@ -11,6 +11,141 @@ import (
 	"time"
 )
 
+// Independently authored retained-window read model for
+// docs/channel-monitor-summary-contract.md. It is never persisted.
+type channelMonitorSummary struct {
+	PlanID             string                    `json:"plan_id"`
+	AsOf               string                    `json:"as_of"`
+	ThroughSequence    int64                     `json:"through_sequence"`
+	RetainedCompleted  int                       `json:"retained_completed"`
+	RetainedWindowFull bool                      `json:"retained_window_full"`
+	Running            int                       `json:"running"`
+	EarliestFinishedAt *string                   `json:"earliest_finished_at"`
+	LatestFinishedAt   *string                   `json:"latest_finished_at"`
+	Counts             map[string]map[string]int `json:"counts"`
+}
+
+var channelMonitorSummaryCodes = [...]string{
+	"local_credential_ok", "catalog_ok", "authentication_failed", "rate_limited", "unsupported",
+	"timeout", "invalid_response", "configuration_changed", "stale", "cancelled", "interrupted",
+	"test_in_progress", "capacity_exceeded", "storage_unavailable", "internal_failure",
+}
+
+func newChannelMonitorSummary(id string, now time.Time) channelMonitorSummary {
+	result := channelMonitorSummary{PlanID: id, AsOf: now.UTC().Format(time.RFC3339Nano), Counts: make(map[string]map[string]int, 2)}
+	for _, scope := range []string{"local_credential", "catalog"} {
+		result.Counts[scope] = make(map[string]int, len(channelMonitorSummaryCodes))
+		for _, code := range channelMonitorSummaryCodes {
+			result.Counts[scope][code] = 0
+		}
+	}
+	return result
+}
+
+// loadChannelMonitorSummary takes one SQLite snapshot and scans only the
+// bounded retained history for this plan. In particular, it never fetches
+// upstream credentials, endpoints or probe payloads.
+func loadChannelMonitorSummary(ctx context.Context, db *sql.DB, id string, now time.Time) (channelMonitorSummary, error) {
+	result := newChannelMonitorSummary(id, now)
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return channelMonitorSummary{}, err
+	}
+	defer tx.Rollback()
+	for name, ddl := range map[string]string{"channel_monitor_plans": channelMonitorPlanDDL, "channel_monitor_runs": channelMonitorRunDDL} {
+		if err := verifyChannelMonitorDDL(ctx, tx, "table", name, ddl); err != nil {
+			return channelMonitorSummary{}, err
+		}
+	}
+	for name, ddl := range channelMonitorIndexes {
+		if err := verifyChannelMonitorDDL(ctx, tx, "index", name, ddl); err != nil {
+			return channelMonitorSummary{}, err
+		}
+	}
+	if err := verifyChannelMonitorObjects(ctx, tx); err != nil {
+		return channelMonitorSummary{}, err
+	}
+	if _, err := loadChannelMonitorPlan(ctx, tx, id, true); err != nil {
+		return channelMonitorSummary{}, err
+	}
+	var highWater sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(sequence) FROM channel_monitor_runs WHERE plan_id=?`, id).Scan(&highWater); err != nil {
+		return channelMonitorSummary{}, err
+	}
+	if highWater.Valid {
+		if highWater.Int64 < 1 {
+			return channelMonitorSummary{}, errors.New("invalid channel monitor sequence")
+		}
+		result.ThroughSequence = highWater.Int64
+	}
+	rows, err := tx.QueryContext(ctx, channelMonitorRunSelect+` WHERE plan_id=? AND sequence<=? ORDER BY sequence DESC LIMIT ?`, id, result.ThroughSequence, channelMonitorMaxHistory+channelMonitorMaxRunning+1)
+	if err != nil {
+		return channelMonitorSummary{}, err
+	}
+	var earliest, latest time.Time
+	seen := 0
+	for rows.Next() {
+		seen++
+		if seen > channelMonitorMaxHistory+channelMonitorMaxRunning {
+			rows.Close()
+			return channelMonitorSummary{}, errors.New("channel monitor history limit exceeded")
+		}
+		run, err := scanChannelMonitorRun(rows)
+		if err != nil || run.Sequence < 1 || run.Sequence > result.ThroughSequence || !validIdentifier(run.OperationID, 128) || run.ChannelID == "" || run.ModelID == "" || run.UpstreamID == "" || run.RouteUpstreamModel == "" || run.RouteWireProtocol == "" || run.LatencyMS != nil && *run.LatencyMS < 0 {
+			rows.Close()
+			return channelMonitorSummary{}, errors.New("invalid channel monitor summary row")
+		}
+		if run.State == "running" {
+			result.Running++
+			if result.Running > channelMonitorMaxRunning {
+				rows.Close()
+				return channelMonitorSummary{}, errors.New("multiple running channel monitor rows")
+			}
+			continue
+		}
+		result.RetainedCompleted++
+		if result.RetainedCompleted > channelMonitorMaxHistory {
+			rows.Close()
+			return channelMonitorSummary{}, errors.New("channel monitor completion limit exceeded")
+		}
+		if _, ok := result.Counts[run.Scope][*run.ResultCode]; !ok {
+			rows.Close()
+			return channelMonitorSummary{}, errors.New("invalid channel monitor summary code")
+		}
+		result.Counts[run.Scope][*run.ResultCode]++
+		started, _ := parseTime(run.StartedAt)
+		finished, _ := parseTime(*run.FinishedAt)
+		if finished.Before(started) {
+			rows.Close()
+			return channelMonitorSummary{}, errors.New("invalid channel monitor completion time")
+		}
+		if earliest.IsZero() || finished.Before(earliest) {
+			earliest = finished
+		}
+		if latest.IsZero() || finished.After(latest) {
+			latest = finished
+		}
+	}
+	iterationErr, closeErr := rows.Err(), rows.Close()
+	if iterationErr != nil {
+		return channelMonitorSummary{}, iterationErr
+	}
+	if closeErr != nil {
+		return channelMonitorSummary{}, closeErr
+	}
+	if !earliest.IsZero() {
+		earliestValue := earliest.UTC().Format(time.RFC3339Nano)
+		latestValue := latest.UTC().Format(time.RFC3339Nano)
+		result.EarliestFinishedAt = &earliestValue
+		result.LatestFinishedAt = &latestValue
+	}
+	result.RetainedWindowFull = result.RetainedCompleted == channelMonitorMaxHistory
+	if err := tx.Commit(); err != nil {
+		return channelMonitorSummary{}, err
+	}
+	return result, nil
+}
+
 const (
 	channelMonitorMaxPlans    = 100
 	channelMonitorMaxHistory  = 200

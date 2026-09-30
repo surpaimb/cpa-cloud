@@ -68,6 +68,8 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 `features.channel_monitor_configuration` 门控管理员 API 和网页入口；`--channel-monitors-enabled` 默认关闭，开启后 `features.channel_monitor_running=true`。计划只绑定一个现有渠道、公开模型和该模型显式池中的一个具体上游路由，支持固定 UTC 间隔的本地凭据或目录检查、有界历史和人工重绑；配置变化不得把旧结果归因于新路由。完整权限、迁移、并发、取消和恢复边界见[独立渠道监控契约](channel-monitor-contract.md)。此段不含生成请求、聚合可用率、通知、告警或真实供应商/会员验收，也不在 preview.3 下载包中。
 
+第二段以独立 `features.channel_monitor_retained_summary` 门控[每计划已保留历史只读摘要](channel-monitor-summary-contract.md)：同一 SQLite 快照内统计最多 200 条已完成结果、当前运行数和两 scope/固定结果码，不写新事实。已归档或重绑计划的旧绑定历史仍计入；满 200 条只表示保留窗口已满，不能推断更早结果或当前渠道健康。旧服务缺能力时网页不请求摘要。此段同样不在 preview.3 下载包中。
+
 ### 账号与模型生命周期（开发预览增量）
 
 `PATCH/DELETE /admin/api/v1/models/{id}`、`DELETE /admin/api/v1/upstreams/{id}`、墓碑列表和 CAS 语义见[账号与模型生命周期管理契约](account-lifecycle-management-contract.md)。归档不是物理删除：模型 ID 不可重建，上游可恢复凭据被销毁，历史账本关联保留。网页只在 `features.account_lifecycle_management=true` 时显示入口。

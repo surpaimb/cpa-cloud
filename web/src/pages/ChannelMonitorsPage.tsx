@@ -1,6 +1,6 @@
 // Independently authored from docs/channel-monitor-contract.md.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, ApiError, type AccountChannel, type ChannelMonitorInput, type ChannelMonitorPlan, type ChannelMonitorRun, type ModelAccount, type ModelRoute, type ScheduledTestScope, type Upstream } from '../api'
+import { api, ApiError, type AccountChannel, type ChannelMonitorInput, type ChannelMonitorPlan, type ChannelMonitorRun, type ChannelMonitorSummary, type ModelAccount, type ModelRoute, type ScheduledTestScope, type Upstream } from '../api'
 import { messageFor } from '../hooks'
 import { Button, Dialog, EmptyState, Field, FormError, Icon, PageState, submitHandler } from '../ui'
 import { PageHeader } from './EmployeesPage'
@@ -32,6 +32,7 @@ export function ChannelMonitorsPage({ csrf }: { csrf: string }) {
   const [plans, setPlans] = useState<ChannelMonitorPlan[]>([])
   const [directory, setDirectory] = useState<Directory>({ channels: [], models: [], upstreams: [] })
   const [running, setRunning] = useState(false)
+  const [summarySupported, setSummarySupported] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editor, setEditor] = useState<ChannelMonitorPlan | 'create' | null>(null)
@@ -50,6 +51,7 @@ export function ChannelMonitorsPage({ csrf }: { csrf: string }) {
       ])
       if (current !== sequence.current) return
       setRunning(status.features?.channel_monitor_running === true)
+      setSummarySupported(status.features?.channel_monitor_retained_summary === true)
       setDirectory({ channels: channels.items, models: models.items, upstreams: upstreams.items })
       setPlans(plansPage.items)
     } catch (caught) {
@@ -98,7 +100,7 @@ export function ChannelMonitorsPage({ csrf }: { csrf: string }) {
       {actionError ? <div className="inline-error" role="alert">{actionError}<button onClick={() => { setActionError(null); void reload() }}>重新加载</button></div> : null}
     </div>
     {editor ? <PlanEditor key={editor === 'create' ? 'create' : editor.id} plan={editor} directory={directory} csrf={csrf} onClose={() => setEditor(null)} onSaved={() => { setEditor(null); void reload() }} /> : null}
-    {history ? <RunHistory plan={history} onClose={() => setHistory(null)} /> : null}
+    {history ? <RunHistory plan={history} summarySupported={summarySupported} onClose={() => setHistory(null)} /> : null}
     {archiving ? <ArchivePlan plan={archiving} csrf={csrf} onClose={() => setArchiving(null)} onArchived={() => { setArchiving(null); void reload() }} /> : null}
   </>
 }
@@ -162,12 +164,15 @@ function PlanEditor({ plan, directory, csrf, onClose, onSaved }: { plan: Channel
   </Dialog>
 }
 
-function RunHistory({ plan, onClose }: { plan: ChannelMonitorPlan; onClose: () => void }) {
+function RunHistory({ plan, summarySupported, onClose }: { plan: ChannelMonitorPlan; summarySupported: boolean; onClose: () => void }) {
   const [items, setItems] = useState<ChannelMonitorRun[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [moreLoading, setMoreLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [summary, setSummary] = useState<ChannelMonitorSummary | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
   const load = useCallback(async () => {
     setLoading(true); setError(null)
     try { const page = await api.channelMonitorRuns(plan.id); setItems(page.items); setCursor(page.next_cursor) }
@@ -175,6 +180,13 @@ function RunHistory({ plan, onClose }: { plan: ChannelMonitorPlan; onClose: () =
     finally { setLoading(false) }
   }, [plan.id])
   useEffect(() => { void load() }, [load])
+  const loadSummary = useCallback(async () => {
+    setSummaryLoading(true); setSummaryError(null); setSummary(null)
+    try { setSummary(await api.channelMonitorSummary(plan.id)) }
+    catch (caught) { setSummaryError(messageFor(caught)) }
+    finally { setSummaryLoading(false) }
+  }, [plan.id])
+  useEffect(() => { if (summarySupported) void loadSummary() }, [summarySupported, loadSummary])
   async function loadMore() {
     if (!cursor || moreLoading) return
     setMoreLoading(true); setError(null)
@@ -183,6 +195,25 @@ function RunHistory({ plan, onClose }: { plan: ChannelMonitorPlan; onClose: () =
     finally { setMoreLoading(false) }
   }
   return <Dialog title={`${plan.name} · 运行历史`} description="最多保留 200 条已完成记录；只存结果码、绑定快照与时长，不保存凭据或响应正文。" onClose={onClose} wide>
+    {summarySupported ? <section className="monitor-summary" aria-label="已保留历史摘要">
+      <h3>已保留历史摘要</h3>
+      <p>仅统计当前保留的完成记录，可能包含旧计划版本和旧绑定；不表示当前渠道或供应商状态。</p>
+      {summaryLoading ? <p>正在读取摘要…</p> : null}
+      {summaryError ? <div className="inline-error" role="alert">{summaryError}<button onClick={() => void loadSummary()}>重试摘要</button></div> : null}
+      {summary ? <>
+        <dl className="monitor-summary__facts">
+          <div><dt>已完成</dt><dd>{summary.retained_completed}</dd></div>
+          <div><dt>正在运行</dt><dd>{summary.running}</dd></div>
+          <div><dt>最早完成 UTC</dt><dd>{utc(summary.earliest_finished_at)}</dd></div>
+          <div><dt>最近完成 UTC</dt><dd>{utc(summary.latest_finished_at)}</dd></div>
+        </dl>
+        {summary.retained_window_full ? <p className="monitor-summary__notice">已保留窗口达到 200 条；不能据此推断更早运行的次数或结果。</p> : null}
+        <div className="monitor-summary__scopes">{(['local_credential', 'catalog'] as const).map((scope) => {
+          const nonzero = Object.entries(summary.counts[scope] ?? {}).filter(([, count]) => count > 0)
+          return <div key={scope}><strong>{scopeLabels[scope]}</strong><ul>{nonzero.length ? nonzero.map(([code, count]) => <li key={code}>{resultLabels[code] ?? code}：{count}</li>) : <li>无已完成记录</li>}</ul></div>
+        })}</div>
+      </> : null}
+    </section> : null}
     <PageState loading={loading} error={error && items.length === 0 ? error : null} onRetry={() => void load()} />
     {!loading && items.length === 0 ? <EmptyState title="尚无运行记录" body="计划到期并执行后会显示在这里。" /> : null}
     {items.length > 0 ? <div className="scheduled-history">{items.map((run) => <article key={run.operation_id}><header><strong>{resultLabel(run)}</strong><span>{scopeLabels[run.scope]}</span></header><dl><div><dt>开始 UTC</dt><dd>{utc(run.started_at)}</dd></div><div><dt>结束 UTC</dt><dd>{utc(run.finished_at)}</dd></div><div><dt>耗时</dt><dd>{run.latency_ms === null ? '—' : `${run.latency_ms} ms`}</dd></div><div><dt>计划版本</dt><dd>{run.plan_revision}</dd></div></dl><small>渠道 {run.channel_id} · 模型 {run.model_id} · 上游 {run.upstream_id} · 路由 {run.route_upstream_model} ({run.route_wire_protocol})</small></article>)}</div> : null}
