@@ -42,14 +42,17 @@ type Request struct {
 	Input          Input
 	EncodingFormat EncodingFormat
 	Dimensions     *int
+	// UserHint is a caller-supplied, unverified upstream hint. It is never an
+	// employee identity. See the public Create embeddings API (2026-09-30).
+	UserHint *string
 }
 
 var requestFields = map[string]bool{
-	"model": true, "input": true, "encoding_format": true, "dimensions": true,
+	"model": true, "input": true, "encoding_format": true, "dimensions": true, "user": true,
 }
 
 var explicitlyUnsupportedRequestFields = map[string]bool{
-	"user": true, "stream": true,
+	"stream": true,
 }
 
 func DecodeRequest(raw []byte) (Request, error) {
@@ -113,8 +116,16 @@ func DecodeRequest(raw []byte) (Request, error) {
 		converted := int(value)
 		dimensions = &converted
 	}
+	var userHint *string
+	if rawUser, present := root["user"]; present {
+		value, err := requireJSONString(rawUser, ErrInvalidRequest, "user")
+		if err != nil {
+			return Request{}, err
+		}
+		userHint = &value
+	}
 
-	request := Request{Model: model, Input: input, EncodingFormat: format, Dimensions: dimensions}
+	request := Request{Model: model, Input: input, EncodingFormat: format, Dimensions: dimensions, UserHint: userHint}
 	if err := ValidateRequest(request); err != nil {
 		return Request{}, err
 	}
@@ -224,6 +235,9 @@ func ValidateRequest(request Request) error {
 	if request.Dimensions != nil && (*request.Dimensions < 1 || int64(*request.Dimensions) > 2147483647) {
 		return invalid(ErrInvalidRequest, "dimensions", "expected a positive decimal integer")
 	}
+	if request.UserHint != nil && !validUserHint(*request.UserHint) {
+		return invalid(ErrInvalidRequest, "user", "expected a bounded ASCII hint")
+	}
 	if request.Input.tokens != nil || request.Input.tokenBatch != nil {
 		if request.Input.single || request.Input.texts != nil || request.Input.tokens != nil && request.Input.tokenBatch != nil {
 			return invalid(ErrInvalidRequest, "input", "mixed input shapes")
@@ -277,6 +291,23 @@ func ValidateRequest(request Request) error {
 	return nil
 }
 
+// The local character policy is intentionally narrower than the official
+// optional string field. It avoids accidental email syntax and control bytes,
+// but does not prove that a caller-chosen value is non-identifying.
+func validUserHint(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func validateTokenSequence(tokens []int64, field string) error {
 	if len(tokens) == 0 {
 		return invalid(ErrInvalidRequest, field, "token array must not be empty")
@@ -320,7 +351,8 @@ func MarshalRequest(request Request, upstreamModel string) ([]byte, error) {
 		Input          any            `json:"input"`
 		EncodingFormat EncodingFormat `json:"encoding_format"`
 		Dimensions     *int           `json:"dimensions,omitempty"`
-	}{Model: upstreamModel, Input: input, EncodingFormat: EncodingFloat, Dimensions: request.Dimensions}
+		User           *string        `json:"user,omitempty"`
+	}{Model: upstreamModel, Input: input, EncodingFormat: EncodingFloat, Dimensions: request.Dimensions, User: request.UserHint}
 	encoded, err := json.Marshal(wire)
 	if err != nil {
 		return nil, invalid(ErrInvalidRequest, "body", "could not encode request")

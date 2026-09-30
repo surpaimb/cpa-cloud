@@ -2,7 +2,7 @@
 
 状态：2026-09-29 已从首轮预览进入持续功能对齐。以 [功能矩阵](feature-parity-plan.md) 分批交付符合 CPA Cloud 产品边界的能力，不以打包数量或最小文本请求替代产品验收。
 
-`PROTO-08` 第三段候选按[显式 dimensions 增量契约](openai-embeddings-dimensions-contract.md)限制到 OpenAI-compatible API Key、非流式 float 和最终实际 `text-embedding-3-small|large`，并在派发事务重核。省略字段不改变旧 wire；base64、user、其他模型/供应商、真实客户端与通用预算上界仍待验证。精确提交的 CI 与固定二进制验收须单独记录，不借用前两段证据。
+`PROTO-08` 第四段候选按[显式 user 提示增量契约](openai-embeddings-user-contract.md)仅在已合格的 OpenAI-compatible API Key 非流式 float Embeddings wire 上，转发员工 Key 持有人自行提供的有界提示。它不是 CPA Cloud 身份，也不参与授权、账本或计费；省略时旧 wire 不变。base64、其他模型的 dimensions、其他供应商、真实客户端与通用预算上界仍待验证。精确提交的 CI 与固定二进制验收须单独记录，不借用前三段证据。
 
 ## 当前执行批次
 
