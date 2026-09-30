@@ -185,9 +185,6 @@ func (a *App) dispatchModelRouteGuarded(r *http.Request, auth employeeAuth, mode
 	if matches != 1 {
 		return nil, poolAdmissionFailure(accountPoolConfigurationChanged)
 	}
-	if guard != nil && !guard(selected) {
-		return nil, &modelAdmissionError{http.StatusBadRequest, "unsupported_feature", "The embedding request uses a feature outside the supported subset."}
-	}
 	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM account_recovery_states WHERE account_id=?`, selected.AccountID).Scan(&matches); err != nil {
 		return nil, poolAdmissionFailure(accountPoolStorageUnavailable)
 	}
@@ -200,6 +197,9 @@ func (a *App) dispatchModelRouteGuarded(r *http.Request, auth employeeAuth, mode
 	}
 	if !sameRouteEgress(selected.egress, current) {
 		return nil, poolAdmissionFailure(accountPoolAccountChanged)
+	}
+	if guard != nil && !guard(selected) {
+		return nil, &modelAdmissionError{http.StatusBadRequest, "unsupported_feature", "The embedding request uses a feature outside the supported subset."}
 	}
 	// Return the originally frozen client, not a newly read configuration.
 	if budgetState != nil {
