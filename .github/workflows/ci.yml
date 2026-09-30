@@ -44,7 +44,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - run: go test ./... -count=1 -timeout=5m
+      # internal/service contains the full non-cached integration matrix. It
+      # passed in 238s on one PR run and reached the 5m package limit on the
+      # next runner; retain full coverage within the 90m core job limit.
+      - run: go test ./... -count=1 -timeout=15m
       - name: Race-check service
         env:
           CGO_ENABLED: '1'
