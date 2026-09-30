@@ -453,6 +453,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"scheduled_tests_daily_local":      a.scheduledTests != nil,
 			"channel_monitor_configuration":    a.channelMonitors != nil,
 			"channel_monitor_running":          a.channelMonitors != nil && a.cfg.ChannelMonitorsEnabled,
+			"channel_monitor_retained_summary": a.channelMonitors != nil,
 			"automated_backups_configuration":  a.backupAutomation != nil,
 			"backup_key_provider_ready":        a.backupAutomation != nil && a.backupAutomation.Ready(),
 			"automated_backups_running":        a.backupAutomation != nil && a.backupAutomation.Running(),

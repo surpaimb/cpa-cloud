@@ -92,4 +92,51 @@ describe('channel monitors page', () => {
     const call = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/channel-monitors/mon-1') && (init as RequestInit)?.method === 'PATCH')
     expect(JSON.parse(String((call?.[1] as RequestInit).body))).toMatchObject({ expected_revision: 1, rebind: true, channel_id: channel.id, model_id: model.id, upstream_id: upstream.id })
   })
+
+  it('does not probe the summary API when an older service omits its separate capability', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response({ features: { channel_monitor_configuration: true } })
+      if (url.endsWith('/channels')) return response({ items: [channel] })
+      if (url.endsWith('/models')) return response({ items: [model] })
+      if (url.endsWith('/upstreams')) return response({ items: [upstream] })
+      if (url.endsWith('/channel-monitors')) return response({ items: [plan] })
+      if (url.includes('/channel-monitors/mon-1/runs')) return response({ items: [], next_cursor: null })
+      throw Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ChannelMonitorsPage csrf="csrf" />)
+    await userEvent.click(await screen.findByRole('button', { name: '历史' }))
+    expect(await screen.findByText('尚无运行记录')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '已保留历史摘要' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/summary'))).toBe(false)
+  })
+
+  it('shows only retained facts and a full-window caveat when capability is present', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response({ features: { channel_monitor_configuration: true, channel_monitor_retained_summary: true } })
+      if (url.endsWith('/channels')) return response({ items: [channel] })
+      if (url.endsWith('/models')) return response({ items: [model] })
+      if (url.endsWith('/upstreams')) return response({ items: [upstream] })
+      if (url.endsWith('/channel-monitors')) return response({ items: [plan] })
+      if (url.includes('/channel-monitors/mon-1/runs')) return response({ items: [], next_cursor: null })
+      if (url.endsWith('/channel-monitors/mon-1/summary')) return response({
+        plan_id: plan.id, as_of: '2026-09-30T12:00:00Z', through_sequence: 208,
+        retained_completed: 200, retained_window_full: true, running: 1,
+        earliest_finished_at: '2026-09-29T12:00:00Z', latest_finished_at: '2026-09-30T11:00:00Z',
+        counts: { local_credential: { local_credential_ok: 80 }, catalog: { catalog_ok: 120 } },
+      })
+      throw Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ChannelMonitorsPage csrf="csrf" />)
+    await userEvent.click(await screen.findByRole('button', { name: '历史' }))
+    const region = await screen.findByRole('region', { name: '已保留历史摘要' })
+    expect(await within(region).findByText('已保留窗口达到 200 条；不能据此推断更早运行的次数或结果。')).toBeInTheDocument()
+    expect(within(region).getByText('凭据检查通过：80')).toBeInTheDocument()
+    expect(within(region).getByText('模型目录可达：120')).toBeInTheDocument()
+    expect(within(region).queryByText(/成功率|可用率|健康评级/)).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/summary'))).toHaveLength(1)
+  })
 })
