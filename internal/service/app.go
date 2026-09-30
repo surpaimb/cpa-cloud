@@ -342,7 +342,7 @@ func (a *App) Handler() http.Handler {
 		mux.HandleFunc("POST /admin/api/v1/employees/{id}/self-enrollment", a.requireAdmin(a.issueSelfEnrollment, true))
 		a.registerSelfHandlers(mux)
 	} else {
-		mux.HandleFunc("POST /admin/api/v1/employees/{id}/self-enrollment", http.NotFound)
+		mux.HandleFunc("/admin/api/v1/employees/{id}/self-enrollment", http.NotFound)
 	}
 	mux.HandleFunc("POST /admin/api/v1/employees", a.requireAdmin(a.createEmployee, true))
 	mux.HandleFunc("PATCH /admin/api/v1/employees/{id}", a.requireAdmin(a.updateEmployee, true))
@@ -384,6 +384,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1beta/models", a.listGeminiModels)
 	mux.HandleFunc("POST /v1beta/models/{operation}", a.geminiGenerateContent)
 	if strings.TrimSpace(a.cfg.WebDir) != "" {
+		mux.HandleFunc("/self", a.serveWeb)
 		mux.HandleFunc("/self/", a.serveWeb)
 		mux.HandleFunc("/", a.serveWeb)
 	}

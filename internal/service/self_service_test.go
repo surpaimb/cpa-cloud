@@ -118,6 +118,13 @@ func TestSelfServiceDefaultOffAndIsolation(t *testing.T) {
 		}
 		r.Body.Close()
 	}
+	for _, target := range []string{"/self", "/self/api/v1/sessions", "/admin/api/v1/employees/" + item.ID + "/self-enrollment"} {
+		r := requestJSON(t, "POST", server.URL+target, `{}`, nil, "", "")
+		if r.StatusCode != 404 {
+			t.Fatalf("default-off POST %s: %d", target, r.StatusCode)
+		}
+		r.Body.Close()
+	}
 	r := requestJSON(t, "POST", server.URL+"/admin/api/v1/employees/"+item.ID+"/self-enrollment", `{}`, adminCookie, adminCSRF, server.URL)
 	if r.StatusCode != 404 {
 		t.Fatalf("default-off issue: %d", r.StatusCode)
@@ -329,6 +336,16 @@ func TestSelfTimeOrderingAcrossSecondPrecision(t *testing.T) {
 	base := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	if !(selfTime(base) < selfTime(base.Add(100*time.Millisecond))) || !(selfTime(base.Add(100*time.Millisecond)) < selfTime(base.Add(time.Second))) {
 		t.Fatal("self-service timestamps must sort chronologically across second and fraction boundaries")
+	}
+}
+
+func TestSelfCookieSecureWhenTLSConfigured(t *testing.T) {
+	app := &App{cfg: Config{TLSCert: "configured-cert"}}
+	w := httptest.NewRecorder()
+	app.setSelfCookie(w, "selector", "verifier")
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].Path != "/self/" || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("self cookie security attributes: %+v", cookies)
 	}
 }
 
