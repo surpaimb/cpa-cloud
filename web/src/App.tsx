@@ -14,8 +14,9 @@ import { BackupsPage } from './pages/BackupsPage'
 import { AuditPage } from './pages/AuditPage'
 
 const BillingPage = lazy(() => import('./pages/BillingPage').then((module) => ({ default: module.BillingPage })))
+const ChannelMonitorsPage = lazy(() => import('./pages/ChannelMonitorsPage').then((module) => ({ default: module.ChannelMonitorsPage })))
 
-type Page = 'employees' | 'upstreams' | 'proxies' | 'models' | 'scheduled-tests' | 'backups' | 'governance' | 'usage' | 'audit' | 'billing' | 'status'
+type Page = 'employees' | 'upstreams' | 'proxies' | 'models' | 'scheduled-tests' | 'channel-monitors' | 'backups' | 'governance' | 'usage' | 'audit' | 'billing' | 'status'
 
 const navigation: { id: Page; label: string; icon: 'people' | 'link' | 'route' | 'status' | 'settings' }[] = [
   { id: 'employees', label: '员工与 Key', icon: 'people' },
@@ -23,6 +24,7 @@ const navigation: { id: Page; label: string; icon: 'people' | 'link' | 'route' |
   { id: 'proxies', label: '出站代理', icon: 'route' },
   { id: 'models', label: '模型路由', icon: 'route' },
   { id: 'scheduled-tests', label: '定时测试', icon: 'status' },
+  { id: 'channel-monitors', label: '渠道监控', icon: 'status' },
   { id: 'backups', label: '自动备份', icon: 'settings' },
   { id: 'governance', label: '请求治理', icon: 'settings' },
   { id: 'usage', label: '用量与成本', icon: 'status' },
@@ -82,6 +84,7 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
   const [loggingOut, setLoggingOut] = useState(false)
   const [backupConfiguration, setBackupConfiguration] = useState(false)
   const [billingCapability, setBillingCapability] = useState(false)
+  const [channelMonitorCapability, setChannelMonitorCapability] = useState(false)
   const [auditCapability, setAuditCapability] = useState(false)
   const [auditFinancialSource, setAuditFinancialSource] = useState(false)
   const [auditCSVExport, setAuditCSVExport] = useState(false)
@@ -91,24 +94,26 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
     api.status().then((status) => {
       if (active) setBackupConfiguration(status.features?.automated_backups_configuration === true)
       if (active) setBillingCapability(status.features?.single_instance_billing === true)
+      if (active) setChannelMonitorCapability(status.features?.channel_monitor_configuration === true)
       if (active) setAuditCapability(status.features?.admin_audit_overview === true)
       if (active) setAuditFinancialSource(status.features?.admin_audit_overview === true && status.features?.admin_audit_financial_source === true)
       if (active) setAuditCSVExport(status.features?.admin_audit_overview === true && status.features?.admin_audit_csv_export === true)
-    }).catch(() => { if (active) { setBackupConfiguration(false); setBillingCapability(false); setAuditCapability(false); setAuditFinancialSource(false); setAuditCSVExport(false) } })
+    }).catch(() => { if (active) { setBackupConfiguration(false); setBillingCapability(false); setChannelMonitorCapability(false); setAuditCapability(false); setAuditFinancialSource(false); setAuditCSVExport(false) } })
     return () => { active = false }
   }, [])
 
   useEffect(() => {
-    if ((page === 'backups' && !backupConfiguration) || (page === 'billing' && !billingCapability) || (page === 'audit' && !auditCapability)) setPage('employees')
-  }, [auditCapability, backupConfiguration, billingCapability, page])
+    if ((page === 'backups' && !backupConfiguration) || (page === 'billing' && !billingCapability) || (page === 'audit' && !auditCapability) || (page === 'channel-monitors' && !channelMonitorCapability)) setPage('employees')
+  }, [auditCapability, backupConfiguration, billingCapability, channelMonitorCapability, page])
 
-  const visibleNavigation = navigation.filter((item) => (item.id !== 'backups' || backupConfiguration) && (item.id !== 'billing' || billingCapability) && (item.id !== 'audit' || auditCapability))
+  const visibleNavigation = navigation.filter((item) => (item.id !== 'backups' || backupConfiguration) && (item.id !== 'billing' || billingCapability) && (item.id !== 'audit' || auditCapability) && (item.id !== 'channel-monitors' || channelMonitorCapability))
   const content = {
     employees: <EmployeesPage csrf={session.csrf_token} />,
     upstreams: <UpstreamsPage csrf={session.csrf_token} />,
     proxies: <ProxiesPage csrf={session.csrf_token} />,
     models: <ModelsPage csrf={session.csrf_token} />,
     'scheduled-tests': <ScheduledTestsPage csrf={session.csrf_token} />,
+    'channel-monitors': <Suspense fallback={<div className="loading" role="status"><span />正在加载渠道监控…</div>}><ChannelMonitorsPage csrf={session.csrf_token} /></Suspense>,
     backups: <BackupsPage csrf={session.csrf_token} />,
     governance: <GovernancePage csrf={session.csrf_token} />,
     usage: <UsagePage csrf={session.csrf_token} />,

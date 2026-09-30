@@ -71,6 +71,13 @@ jobs:
         run: node scripts/smoke-outbound-proxy.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test upstream health with isolated synthetic providers
         run: node scripts/smoke-upstream-health.mjs "$RUNNER_TEMP/cpa-cloud"
+      - name: Test opt-in channel monitors with an isolated synthetic catalog
+        env:
+          CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/channel-monitors
+          CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
+        run: |
+          mkdir -p "$CPA_CLOUD_ACCEPTANCE_TEMP_ROOT"
+          node scripts/smoke-channel-monitors.mjs "$RUNNER_TEMP/cpa-cloud" "$GITHUB_WORKSPACE/web"
       - name: Test recovery storage and isolation without an automatic generation worker
         run: node scripts/smoke-recovery-foundations.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in automatic recovery with isolated synthetic providers

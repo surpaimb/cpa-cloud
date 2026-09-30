@@ -338,6 +338,8 @@ export type SystemStatus = {
     account_pool_configuration?: boolean
     account_pool_runtime_observation?: boolean
     account_pool_routing?: boolean
+    channel_monitor_configuration?: boolean
+    channel_monitor_running?: boolean
     account_group_cost_allocation?: boolean
     openai_embeddings?: boolean
     account_lifecycle_management?: boolean
@@ -444,6 +446,38 @@ export type ScheduledTestInput = {
   { schedule_mode: 'daily_local'; time_zone: string; local_time: string; interval_seconds?: never }
 )
 export type ScheduledTestRunsPage = { items: ScheduledTestRun[]; next_cursor: string | null }
+
+// Independently authored for docs/channel-monitor-contract.md.
+export type ChannelMonitorRun = ScheduledTestRun & {
+  channel_id: string
+  channel_revision: number
+  model_id: string
+  model_revision: number
+  pool_revision: number
+  upstream_id: string
+  upstream_revision: number
+  route_upstream_model: string
+  route_wire_protocol: string
+  route_position: number
+}
+export type ChannelMonitorPlan = {
+  id: string
+  name: string
+  channel_id: string
+  model_id: string
+  upstream_id: string
+  scope: ScheduledTestScope
+  interval_seconds: number
+  enabled: boolean
+  revision: number
+  next_run_at: string | null
+  created_at: string
+  updated_at: string
+  binding_state: 'valid' | 'stale'
+  latest_result: ChannelMonitorRun | null
+}
+export type ChannelMonitorInput = Pick<ChannelMonitorPlan, 'name' | 'channel_id' | 'model_id' | 'upstream_id' | 'scope' | 'interval_seconds' | 'enabled'>
+export type ChannelMonitorRunsPage = { items: ChannelMonitorRun[]; next_cursor: string | null }
 
 export type BackupKeyProvider = {
   id: string
@@ -1127,6 +1161,17 @@ export const api = {
 	  if (cursor) query.set('cursor', cursor)
 	  return request<ScheduledTestRunsPage>(`/scheduled-tests/${encodeURIComponent(id)}/runs?${query}`, { signal })
 	},
+  channelMonitors: (signal?: AbortSignal) => request<{ items: ChannelMonitorPlan[] }>('/channel-monitors', { signal }),
+  createChannelMonitor: (body: ChannelMonitorInput, csrf: string) => request<ChannelMonitorPlan>('/channel-monitors', { method: 'POST', body: JSON.stringify(body) }, csrf),
+  updateChannelMonitor: (id: string, body: { expected_revision: number; rebind?: true } & Partial<ChannelMonitorInput>, csrf: string) =>
+    request<ChannelMonitorPlan>(`/channel-monitors/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }, csrf),
+  deleteChannelMonitor: (id: string, revision: number, csrf: string) =>
+    request<{ result: 'archived' | 'already_archived'; id: string; revision: number }>(`/channel-monitors/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ expected_revision: revision }) }, csrf),
+  channelMonitorRuns: (id: string, cursor?: string, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: '50' })
+    if (cursor) query.set('cursor', cursor)
+    return request<ChannelMonitorRunsPage>(`/channel-monitors/${encodeURIComponent(id)}/runs?${query}`, { signal })
+  },
   accountRecovery: () => request<AccountRecoveryStatus>('/account-recovery'),
   accountRecoveryAccounts: () => request<{items: AccountRecoveryState[]; server_time: string}>('/account-recovery/accounts'),
   setAccountRecovery: (enabled: boolean, revision: number, csrf: string) =>

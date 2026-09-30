@@ -342,6 +342,9 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request, session adm
 		return
 	}
 	a.notifyAccountPoolChanged()
+	if a.channelMonitors != nil {
+		a.channelMonitors.cancelUpstream(id)
+	}
 	if err := a.decorateUpstreamOAuthRefresh(r.Context(), &item); err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return

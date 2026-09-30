@@ -158,6 +158,9 @@ func (a *App) updateModel(w http.ResponseWriter, r *http.Request, session adminS
 		return
 	}
 	a.notifyAccountPoolChanged()
+	if a.channelMonitors != nil {
+		a.channelMonitors.cancelModel(item.ID)
+	}
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -212,6 +215,9 @@ func (a *App) archiveModel(w http.ResponseWriter, r *http.Request, session admin
 	}
 	item.Enabled, item.Archived, item.ArchivedAt, item.Revision, item.ArchiveResult = false, true, &archivedAt, item.Revision+1, "archived"
 	a.notifyAccountPoolChanged()
+	if a.channelMonitors != nil {
+		a.channelMonitors.cancelModel(item.ID)
+	}
 	writeJSON(w, http.StatusOK, item)
 }
 

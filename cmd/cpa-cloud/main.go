@@ -61,6 +61,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.BoolVar(&cfg.AllowLoopbackUpstream, "allow-loopback-upstream", false, "allow loopback upstream endpoints for local development tests")
 	flags.BoolVar(&cfg.AccountRecoveryEnabled, "allow-account-recovery", false, "permit administrator-enabled background generation recovery probes (may consume upstream usage)")
 	flags.BoolVar(&cfg.ScheduledTestsEnabled, "scheduled-tests-enabled", false, "run saved local credential and model catalog test plans in the background")
+	flags.BoolVar(&cfg.ChannelMonitorsEnabled, "channel-monitors-enabled", false, "run saved channel-bound credential and catalog monitor plans in the background")
 	flags.BoolVar(&cfg.AutomatedBackupsEnabled, "automated-backups-enabled", false, "run configured encrypted backup plans in the background")
 	flags.StringVar(&cfg.AutomatedBackupsOutputDir, "automated-backups-output-dir", "", "encrypted backup package directory (default: a sibling of the data directory)")
 	flags.StringVar(&cfg.BackupKeyProviderStoreDir, "backup-key-provider-store-dir", "", "host-protected backup key directory (default: a separate sibling of the data directory)")

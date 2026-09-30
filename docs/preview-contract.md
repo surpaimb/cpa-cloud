@@ -64,6 +64,10 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 默认关闭的账号定时测试在既有固定 UTC 间隔之外增加 `schedule_mode:"daily_local"`、IANA `time_zone` 和 `HH:mm` `local_time`，以 `features.scheduled_tests_daily_local` 门控网页入口。服务端按命名区的当地日历日计算，春季不存在的分钟跳过、秋季重复分钟只执行较早一次；`next_run_at` 始终是 UTC。旧创建 JSON 仍为 interval，旧 interval PATCH 语义不变；每日行保留的 `interval_seconds=86400` 只是数据库兼容占位值。完整输入、迁移、重启和验收边界见[命名时区每日测试契约](scheduled-tests-daily-timezone-contract.md)。此增量不是通用 cron，也不开放真实供应商或收费生成测试。
 
+### 独立渠道监控首段（源码开发预览）
+
+`features.channel_monitor_configuration` 门控管理员 API 和网页入口；`--channel-monitors-enabled` 默认关闭，开启后 `features.channel_monitor_running=true`。计划只绑定一个现有渠道、公开模型和该模型显式池中的一个具体上游路由，支持固定 UTC 间隔的本地凭据或目录检查、有界历史和人工重绑；配置变化不得把旧结果归因于新路由。完整权限、迁移、并发、取消和恢复边界见[独立渠道监控契约](channel-monitor-contract.md)。此段不含生成请求、聚合可用率、通知、告警或真实供应商/会员验收，也不在 preview.3 下载包中。
+
 ### 账号与模型生命周期（开发预览增量）
 
 `PATCH/DELETE /admin/api/v1/models/{id}`、`DELETE /admin/api/v1/upstreams/{id}`、墓碑列表和 CAS 语义见[账号与模型生命周期管理契约](account-lifecycle-management-contract.md)。归档不是物理删除：模型 ID 不可重建，上游可恢复凭据被销毁，历史账本关联保留。网页只在 `features.account_lifecycle_management=true` 时显示入口。
