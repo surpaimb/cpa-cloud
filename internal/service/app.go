@@ -62,9 +62,14 @@ type App struct {
 	logins                         map[string]*loginAttempt
 	selfLoginMu                    sync.Mutex
 	selfLogins                     map[string]*loginAttempt
-	catalogMu                      sync.Mutex
-	catalogs                       map[string]codexCatalogCacheEntry
-	codexCatalog                   codexCatalogLister
+	// Independently authored for docs/employee-self-password-change-contract.md.
+	// SQL-boundary hooks exercise uncertain commits and mid-hash revocation.
+	// Production leaves both nil.
+	selfPasswordBeforeTx func()
+	selfPasswordCommit   func(*sql.Tx) error
+	catalogMu            sync.Mutex
+	catalogs             map[string]codexCatalogCacheEntry
+	codexCatalog         codexCatalogLister
 	// Lifecycle integration hooks are SQL-only before commit and non-blocking
 	// after commit. Scheduled-test integration wires these without changing the
 	// account lock -> admission lock -> transaction ordering.

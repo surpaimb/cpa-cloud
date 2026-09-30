@@ -2,6 +2,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"database/sql"
@@ -44,6 +45,7 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("POST /self/api/v1/sessions", a.selfLogin)
 	mux.HandleFunc("GET /self/api/v1/session", a.requireSelf(a.selfSessionInfo, false))
 	mux.HandleFunc("GET /self/api/v1/profile", a.requireSelf(a.selfProfileInfo, false))
+	mux.HandleFunc("POST /self/api/v1/password", a.requireSelf(a.selfChangePassword, true))
 	mux.HandleFunc("DELETE /self/api/v1/sessions", a.requireSelf(a.selfLogout, true))
 	mux.HandleFunc("/self/api/", http.NotFound)
 }
@@ -60,7 +62,12 @@ func selfError(w http.ResponseWriter, status int, code string) {
 // string fields. Token parsing rejects repeated and unknown field names.
 func readSelfFields(w http.ResponseWriter, r *http.Request, expected ...string) (map[string]string, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, selfMaxBody)
-	d := json.NewDecoder(r.Body)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil || !utf8.Valid(raw) {
+		selfError(w, 400, "invalid_request")
+		return nil, false
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
 	first, err := d.Token()
 	if err != nil || first != json.Delim('{') {
 		selfError(w, 400, "invalid_request")
@@ -461,6 +468,94 @@ func (a *App) selfLogout(w http.ResponseWriter, r *http.Request, session selfSes
 		selfError(w, 503, "storage_unavailable")
 		return
 	}
+	http.SetCookie(w, &http.Cookie{Name: selfCookieName, Value: "", Path: "/self/", MaxAge: -1, HttpOnly: true, Secure: a.cfg.TLSCert != "", SameSite: http.SameSiteStrictMode})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Independently authored for docs/employee-self-password-change-contract.md.
+// requireSelf holds admission.RLock through this handler, so administrative
+// disable cannot interleave with the final credential/session transaction.
+func (a *App) selfChangePassword(w http.ResponseWriter, r *http.Request, session selfSession) {
+	peer, ok := a.selfGate(w, r, session.EmployeeID)
+	if !ok {
+		return
+	}
+	input, ok := readSelfFields(w, r, "current_password", "new_password")
+	if !ok {
+		a.selfFailure(peer, session.EmployeeID)
+		return
+	}
+	current, next := input["current_password"], input["new_password"]
+	if !validSelfPassword(next) {
+		a.selfFailure(peer, session.EmployeeID)
+		selfError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !validSelfPassword(current) {
+		a.selfFailure(peer, session.EmployeeID)
+		selfError(w, http.StatusUnauthorized, "invalid_credentials")
+		return
+	}
+	var priorHash []byte
+	err := a.store.db.QueryRowContext(r.Context(), `SELECT password_hash FROM employee_self_credentials WHERE employee_id=?`, session.EmployeeID).Scan(&priorHash)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	comparison := priorHash
+	if len(comparison) == 0 {
+		comparison = selfDummyHash
+	}
+	passwordOK := bcrypt.CompareHashAndPassword(comparison, []byte(current)) == nil
+	if !passwordOK || len(priorHash) == 0 || current == next {
+		a.selfFailure(peer, session.EmployeeID)
+		selfError(w, http.StatusUnauthorized, "invalid_credentials")
+		return
+	}
+	newHash, err := bcrypt.GenerateFromPassword([]byte(next), 12)
+	if err != nil {
+		selfError(w, http.StatusServiceUnavailable, "service_unavailable")
+		return
+	}
+	if a.selfPasswordBeforeTx != nil {
+		a.selfPasswordBeforeTx()
+	}
+	tx, err := a.store.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(r.Context(), `UPDATE employee_self_credentials SET password_hash=?,updated_at=? WHERE employee_id=? AND password_hash=? AND EXISTS (SELECT 1 FROM employees WHERE id=? AND status='active') AND EXISTS (SELECT 1 FROM employee_self_sessions WHERE selector=? AND employee_id=? AND expires_at>?)`, newHash, utcNow(), session.EmployeeID, priorHash, session.EmployeeID, session.Selector, session.EmployeeID, selfTime(time.Now()))
+	if err != nil {
+		selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	if changed != 1 {
+		a.selfFailure(peer, session.EmployeeID)
+		selfError(w, http.StatusUnauthorized, "invalid_credentials")
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM employee_self_sessions WHERE employee_id=?`, session.EmployeeID); err != nil {
+		selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	commit := tx.Commit
+	if a.selfPasswordCommit != nil {
+		commit = func() error { return a.selfPasswordCommit(tx) }
+	}
+	if err := commit(); err != nil {
+		// The commit outcome can be unknown. Never claim success or issue a new
+		// credential; a fresh login determines which password is current.
+		selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	a.clearSelfFailures(peer, session.EmployeeID)
 	http.SetCookie(w, &http.Cookie{Name: selfCookieName, Value: "", Path: "/self/", MaxAge: -1, HttpOnly: true, Secure: a.cfg.TLSCert != "", SameSite: http.SameSiteStrictMode})
 	w.WriteHeader(http.StatusNoContent)
 }
