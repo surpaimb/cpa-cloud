@@ -37,6 +37,8 @@ describe('employee self-service page', () => {
     expect(new Headers(login?.[1]?.headers).get('X-Self-Request')).toBe('1')
     await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: '员工登录' })).toBeInTheDocument())
+    expect(screen.queryByRole('heading', { name: '我的 API Key' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '我的请求记录' })).not.toBeInTheDocument()
     const logout = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/sessions') && init?.method === 'DELETE')
     expect(new Headers(logout?.[1]?.headers).get('X-CSRF-Token')).toBe('self-csrf')
   })

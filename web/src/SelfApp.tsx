@@ -179,8 +179,8 @@ export function SelfApp() {
       {session ? <>
         <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、已有 API Key 的基本信息和本人请求记录；Key 创建、策略与撤销仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
-        <SelfKeyInventory key={`${session.profile.id}:${session.csrf_token}`} />
-        <SelfRequestHistory key={`${session.profile.id}:${session.csrf_token}`} />
+        <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}`} />
+        <SelfRequestHistory key={`requests:${session.profile.id}:${session.csrf_token}`} />
         {changingPassword ? <form className="self-form self-password-form" onSubmit={async (event) => {
           event.preventDefault()
           const form = event.currentTarget
