@@ -44,6 +44,7 @@ type App struct {
 	accountPool                    *accountPoolRuntime
 	healthTests                    *upstreamHealthCoordinator
 	scheduledTests                 *scheduledTestCoordinator
+	channelMonitors                *channelMonitorCoordinator
 	systemProbes                   *accounting.SystemProbeLedger
 	recovery                       *accountRecoveryCoordinator
 	backupAutomation               *backupAutomationCoordinator
@@ -182,15 +183,24 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	app.channelMonitors, err = newChannelMonitorCoordinator(ctx, app)
+	if err != nil {
+		return nil, err
+	}
 	app.archiveUpstreamTxHook = func(ctx context.Context, tx *sql.Tx, upstreamID, adminID, archivedAt string) error {
 		when, err := parseTime(archivedAt)
 		if err != nil {
 			return err
 		}
-		_, err = archiveScheduledTestsForUpstreamTx(ctx, tx, upstreamID, adminID, when)
-		return err
+		if _, err = archiveScheduledTestsForUpstreamTx(ctx, tx, upstreamID, adminID, when); err != nil {
+			return err
+		}
+		return archiveChannelMonitorsForUpstreamTx(ctx, tx, upstreamID, adminID, when)
 	}
-	app.upstreamArchivedHook = app.scheduledTests.cancelUpstream
+	app.upstreamArchivedHook = func(upstreamID string) {
+		app.scheduledTests.cancelUpstream(upstreamID)
+		app.channelMonitors.cancelUpstream(upstreamID)
+	}
 	if err := app.refresh.Start(); err != nil {
 		return nil, err
 	}
@@ -226,6 +236,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		}
 	}
 	if err := app.scheduledTests.Start(); err != nil {
+		return nil, err
+	}
+	if err := app.channelMonitors.Start(); err != nil {
 		return nil, err
 	}
 	opened = true
@@ -269,6 +282,9 @@ func (a *App) Close() error {
 	if a.scheduledTests != nil {
 		a.scheduledTests.Close()
 	}
+	if a.channelMonitors != nil {
+		a.channelMonitors.Close()
+	}
 	if a.governance != nil {
 		a.governance.Close()
 	}
@@ -308,6 +324,7 @@ func (a *App) Handler() http.Handler {
 	a.registerSystemProbeHandlers(mux)
 	a.registerAccountRecoveryHandlers(mux)
 	a.registerScheduledTestHandlers(mux)
+	a.registerChannelMonitorHandlers(mux)
 	a.registerAdminAuditHandlers(mux)
 	registerBackupAutomationHandlers(a, a.backupAutomation, mux)
 	mux.HandleFunc("GET /healthz", a.health)
@@ -434,6 +451,8 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"scheduled_tests_configuration":    a.scheduledTests != nil,
 			"scheduled_tests_running":          a.scheduledTests != nil && a.cfg.ScheduledTestsEnabled,
 			"scheduled_tests_daily_local":      a.scheduledTests != nil,
+			"channel_monitor_configuration":    a.channelMonitors != nil,
+			"channel_monitor_running":          a.channelMonitors != nil && a.cfg.ChannelMonitorsEnabled,
 			"automated_backups_configuration":  a.backupAutomation != nil,
 			"backup_key_provider_ready":        a.backupAutomation != nil && a.backupAutomation.Ready(),
 			"automated_backups_running":        a.backupAutomation != nil && a.backupAutomation.Running(),

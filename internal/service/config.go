@@ -27,6 +27,7 @@ type Config struct {
 	AllowLoopbackUpstream       bool
 	AccountRecoveryEnabled      bool
 	ScheduledTestsEnabled       bool
+	ChannelMonitorsEnabled      bool
 	AutomatedBackupsEnabled     bool
 	AutomatedBackupsOutputDir   string
 	BackupKeyProviderStoreDir   string

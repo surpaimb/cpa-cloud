@@ -759,6 +759,9 @@ func (a *App) putModelAccounts(w http.ResponseWriter, r *http.Request, session a
 		return
 	}
 	a.notifyAccountPoolChanged()
+	if a.channelMonitors != nil {
+		a.channelMonitors.cancelModel(r.PathValue("id"))
+	}
 	writeJSON(w, http.StatusOK, modelAccountsView{ModelID: r.PathValue("id"), Revision: next, Items: input.Items})
 }
 
