@@ -1,8 +1,8 @@
 package service
 
 // The embeddings entry is intentionally separate from the generation
-// conversion runtime. It accepts only the independently documented text/float
-// subset and can dispatch only an explicit embedding model through an explicit
+// conversion runtime. It accepts only the independently documented text and
+// token-array float subset and can dispatch only an explicit embedding model through an explicit
 // openai-embeddings account-pool route.
 import (
 	"context"

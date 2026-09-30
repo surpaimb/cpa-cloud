@@ -16,12 +16,15 @@ const (
 	MaxRequestBytes  = 4 << 20
 	MaxResponseBytes = 32 << 20
 
-	maxJSONDepth       = 16
-	maxModelBytes      = 512
-	maxInputItems      = 2048
-	maxInputTextBytes  = 1 << 20
-	maxVectorDimension = 1 << 16
-	maxTotalValues     = 1 << 20
+	maxJSONDepth          = 16
+	maxModelBytes         = 512
+	maxInputItems         = 2048
+	maxInputTextBytes     = 1 << 20
+	maxInputTokensPerItem = 2048
+	maxTotalInputTokens   = 65536
+	maxTokenID            = 2147483647
+	maxVectorDimension    = 1 << 16
+	maxTotalValues        = 1 << 20
 )
 
 var (

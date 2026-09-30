@@ -10,13 +10,15 @@ import (
 
 func TestDecodeAndMarshalRequestPreservesInputShape(t *testing.T) {
 	tests := []struct {
-		name       string
-		body       string
-		wantCount  int
-		wantSingle bool
+		name      string
+		body      string
+		wantCount int
+		wantInput string
 	}{
-		{"single", `{"model":"public-model","input":"hello"}`, 1, true},
-		{"batch", `{"model":"public-model","input":["hello","world"],"encoding_format":"float"}`, 2, false},
+		{"single text", `{"model":"public-model","input":"hello"}`, 1, `"hello"`},
+		{"text batch", `{"model":"public-model","input":["hello","world"],"encoding_format":"float"}`, 2, `["hello","world"]`},
+		{"single token array", `{"model":"public-model","input":[0,12,2147483647]}`, 1, `[0,12,2147483647]`},
+		{"token-array batch", `{"model":"public-model","input":[[12,34],[56]]}`, 2, `[[12,34],[56]]`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -42,9 +44,7 @@ func TestDecodeAndMarshalRequestPreservesInputShape(t *testing.T) {
 			if err := json.Unmarshal(root["encoding_format"], &format); err != nil || format != "float" {
 				t.Fatalf("float encoding was not normalized: %s", encoded)
 			}
-			var single string
-			isSingle := json.Unmarshal(root["input"], &single) == nil
-			if isSingle != test.wantSingle {
+			if string(root["input"]) != test.wantInput {
 				t.Fatalf("input shape changed: %s", encoded)
 			}
 		})
@@ -68,8 +68,22 @@ func TestDecodeRequestRejectsInvalidAndUnsupportedValues(t *testing.T) {
 		{"base64", []byte(`{"model":"m","input":"x","encoding_format":"base64"}`), ErrUnsupportedFeature},
 		{"unknown encoding", []byte(`{"model":"m","input":"x","encoding_format":"binary"}`), ErrUnsupportedFeature},
 		{"encoding type", []byte(`{"model":"m","input":"x","encoding_format":1}`), ErrInvalidRequest},
-		{"token array", []byte(`{"model":"m","input":[1,2]}`), ErrUnsupportedFeature},
-		{"token batch", []byte(`{"model":"m","input":[[1,2],[3]]}`), ErrUnsupportedFeature},
+		{"negative token", []byte(`{"model":"m","input":[-1]}`), ErrInvalidRequest},
+		{"negative zero", []byte(`{"model":"m","input":[-0]}`), ErrInvalidRequest},
+		{"fractional token", []byte(`{"model":"m","input":[1.0]}`), ErrInvalidRequest},
+		{"exponent token", []byte(`{"model":"m","input":[1e0]}`), ErrInvalidRequest},
+		{"overflow token", []byte(`{"model":"m","input":[2147483648]}`), ErrInvalidRequest},
+		{"huge token", []byte(`{"model":"m","input":[999999999999999999999999999999]}`), ErrInvalidRequest},
+		{"token string", []byte(`{"model":"m","input":[1,"2"]}`), ErrInvalidRequest},
+		{"text and tokens", []byte(`{"model":"m","input":["a",1]}`), ErrInvalidRequest},
+		{"token and batch", []byte(`{"model":"m","input":[1,[2]]}`), ErrInvalidRequest},
+		{"batch and token", []byte(`{"model":"m","input":[[1],2]}`), ErrInvalidRequest},
+		{"batch and text", []byte(`{"model":"m","input":[[1],"x"]}`), ErrInvalidRequest},
+		{"empty token member", []byte(`{"model":"m","input":[[1],[]]}`), ErrInvalidRequest},
+		{"nested token member", []byte(`{"model":"m","input":[[[1]]]}`), ErrInvalidRequest},
+		{"boolean token", []byte(`{"model":"m","input":[true]}`), ErrInvalidRequest},
+		{"null token", []byte(`{"model":"m","input":[[null]]}`), ErrInvalidRequest},
+		{"duplicate with token", []byte(`{"model":"m","input":[1],"input":[2]}`), ErrInvalidRequest},
 		{"empty model", []byte(`{"model":"","input":"x"}`), ErrInvalidRequest},
 		{"missing model", []byte(`{"input":"x"}`), ErrInvalidRequest},
 		{"empty input", []byte(`{"model":"m","input":""}`), ErrInvalidRequest},
@@ -87,6 +101,44 @@ func TestDecodeRequestRejectsInvalidAndUnsupportedValues(t *testing.T) {
 				t.Fatalf("got %v, want error matching %v", err, test.want)
 			}
 		})
+	}
+}
+
+func TestTokenArrayResourceLimitsAndProgrammaticValidation(t *testing.T) {
+	sequence := make([]int64, maxInputTokensPerItem+1)
+	body, err := json.Marshal(map[string]any{"model": "m", "input": sequence})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeRequest(body); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("oversized token sequence: %v", err)
+	}
+
+	sequence = sequence[:maxInputTokensPerItem]
+	batch := make([][]int64, maxTotalInputTokens/maxInputTokensPerItem+1)
+	for index := range batch {
+		batch[index] = sequence
+	}
+	body, err = json.Marshal(map[string]any{"model": "m", "input": batch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeRequest(body); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("oversized token batch: %v", err)
+	}
+
+	request := Request{Model: "m", Input: Input{tokens: []int64{0, maxTokenID}}, EncodingFormat: EncodingFloat}
+	if err := ValidateRequest(request); err != nil {
+		t.Fatal(err)
+	}
+	request.Input.tokens[1] = maxTokenID + 1
+	if err := ValidateRequest(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("programmatic overflow: %v", err)
+	}
+	request.Input.tokens[1] = 1
+	request.Input.texts = []string{"mixed"}
+	if err := ValidateRequest(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("programmatic mixed shape: %v", err)
 	}
 }
 

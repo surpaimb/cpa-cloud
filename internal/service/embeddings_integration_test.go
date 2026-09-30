@@ -39,31 +39,48 @@ func TestOpenAIEmbeddingsExplicitModelRoutePolicyAndUsage(t *testing.T) {
 			t.Errorf("upstream body=%+v", body)
 		}
 		var inputs []string
-		if err := json.Unmarshal(body.Input, &inputs); err != nil {
+		count := 0
+		if json.Unmarshal(body.Input, &inputs) == nil {
+			count = len(inputs)
+		} else {
 			var one string
-			if err := json.Unmarshal(body.Input, &one); err != nil {
-				t.Error(err)
+			var tokens []int64
+			var batch [][]int64
+			switch {
+			case json.Unmarshal(body.Input, &one) == nil:
+				inputs, count = []string{one}, 1
+			case json.Unmarshal(body.Input, &tokens) == nil:
+				count = 1
+			case json.Unmarshal(body.Input, &batch) == nil:
+				count = len(batch)
+			default:
+				t.Errorf("unexpected upstream input shape")
 			}
-			inputs = []string{one}
 		}
-		if inputs[0] == "cancel" {
+		if count == 0 {
+			t.Errorf("empty upstream input")
+		}
+		if len(inputs) == 1 && inputs[0] == "cancel" || string(body.Input) == `[777,888]` {
 			close(cancelStarted)
 			<-r.Context().Done()
 			close(cancelSeen)
 			return
 		}
-		if inputs[0] == "bad-response" {
+		if len(inputs) == 1 && inputs[0] == "bad-response" {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Content-Encoding", "gzip")
 			_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","embedding":["secret-vector"],"index":0}],"model":"provider-embedding","usage":{"prompt_tokens":1,"total_tokens":1}}`))
 			return
 		}
-		data := make([]map[string]any, len(inputs))
-		for index := range inputs {
+		data := make([]map[string]any, count)
+		for index := range data {
 			data[index] = map[string]any{"object": "embedding", "embedding": []float64{float64(index) + 0.25, -0.5}, "index": index}
 		}
+		if string(body.Input) == `[[7,8],[9]]` {
+			data[0], data[1] = data[1], data[0]
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data, "model": "provider-embedding", "usage": map[string]int{"prompt_tokens": len(inputs), "total_tokens": len(inputs)}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data, "model": "provider-embedding", "usage": map[string]int{"prompt_tokens": count, "total_tokens": count}})
 	}))
 	defer upstream.Close()
 
@@ -114,23 +131,72 @@ func TestOpenAIEmbeddingsExplicitModelRoutePolicyAndUsage(t *testing.T) {
 		t.Fatalf("legacy key status=%d calls=%d body=%s", denied.StatusCode, calls.Load(), readBody(denied))
 	}
 	denied.Body.Close()
-
-	for _, body := range []string{
-		`{"model":"company-embedding","input":"hello"}`,
-		`{"model":"company-embedding","input":["hello","world"],"encoding_format":"float"}`,
+	deniedTokens := embeddingEmployeeRequest(t, server.URL, legacyKey.Key, `{"model":"company-embedding","input":[7,8]}`)
+	if deniedTokens.StatusCode != http.StatusForbidden || calls.Load() != 0 {
+		t.Fatalf("legacy key token input status=%d calls=%d body=%s", deniedTokens.StatusCode, calls.Load(), readBody(deniedTokens))
+	}
+	deniedTokens.Body.Close()
+	for _, badInput := range []string{
+		`[]`, `[[]]`, `[1,"2"]`, `[[1],2]`, `[[1],[]]`,
+		`[-1]`, `[-0]`, `[1.0]`, `[1e0]`, `[2147483648]`,
+		`[123456789012345678901234567890]`, `[null]`, `[true]`,
 	} {
+		body := `{"model":"company-embedding","input":` + badInput + `}`
 		response := embeddingEmployeeRequest(t, server.URL, embeddingKey.Key, body)
+		raw := readBody(response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(raw, "invalid_request_error") ||
+			strings.Contains(raw, embeddingKey.Key) || strings.Contains(raw, "123456789012345678901234567890") || calls.Load() != 0 {
+			t.Fatalf("bad token input=%s status=%d calls=%d body=%s", badInput, response.StatusCode, calls.Load(), raw)
+		}
+	}
+	duplicate := embeddingEmployeeRequest(t, server.URL, embeddingKey.Key, `{"model":"company-embedding","input":[7],"input":[8]}`)
+	if duplicate.StatusCode != http.StatusBadRequest || calls.Load() != 0 {
+		t.Fatalf("duplicate input status=%d calls=%d body=%s", duplicate.StatusCode, calls.Load(), readBody(duplicate))
+	}
+	duplicate.Body.Close()
+	var rejectedAttempts int
+	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempts`).Scan(&rejectedAttempts); err != nil || rejectedAttempts != 0 {
+		t.Fatalf("invalid token input persisted attempts=%d err=%v", rejectedAttempts, err)
+	}
+
+	for _, test := range []struct {
+		body  string
+		count int
+	}{
+		{`{"model":"company-embedding","input":"hello"}`, 1},
+		{`{"model":"company-embedding","input":["hello","world"],"encoding_format":"float"}`, 2},
+		{`{"model":"company-embedding","input":[7,8]}`, 1},
+		{`{"model":"company-embedding","input":[[7,8],[9]]}`, 2},
+	} {
+		response := embeddingEmployeeRequest(t, server.URL, embeddingKey.Key, test.body)
 		raw := readBody(response)
 		if response.StatusCode != http.StatusOK || !strings.Contains(raw, `"model":"company-embedding"`) || strings.Contains(raw, "provider-embedding") {
 			t.Fatalf("embedding status=%d body=%s", response.StatusCode, raw)
 		}
+		var result struct {
+			Data []struct {
+				Index int `json:"index"`
+			} `json:"data"`
+			Usage struct {
+				PromptTokens int `json:"prompt_tokens"`
+				TotalTokens  int `json:"total_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(raw), &result); err != nil || len(result.Data) != test.count || result.Usage.PromptTokens != test.count || result.Usage.TotalTokens != test.count {
+			t.Fatalf("embedding count/usage mismatch: %s err=%v", raw, err)
+		}
+		for index, item := range result.Data {
+			if item.Index != index {
+				t.Fatalf("embedding indices not normalized: %s", raw)
+			}
+		}
 	}
-	if calls.Load() != 2 {
+	if calls.Load() != 4 {
 		t.Fatalf("upstream calls=%d", calls.Load())
 	}
 	cancelContext, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cancelRequest, err := http.NewRequestWithContext(cancelContext, http.MethodPost, server.URL+"/v1/embeddings", strings.NewReader(`{"model":"company-embedding","input":"cancel"}`))
+	cancelRequest, err := http.NewRequestWithContext(cancelContext, http.MethodPost, server.URL+"/v1/embeddings", strings.NewReader(`{"model":"company-embedding","input":[777,888]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,12 +243,12 @@ func TestOpenAIEmbeddingsExplicitModelRoutePolicyAndUsage(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if calls.Load() != 3 {
+	if calls.Load() != 5 {
 		t.Fatalf("upstream calls after cancellation=%d", calls.Load())
 	}
 	badResponse := embeddingEmployeeRequest(t, server.URL, embeddingKey.Key, `{"model":"company-embedding","input":"bad-response"}`)
 	badBody := readBody(badResponse)
-	if badResponse.StatusCode != http.StatusBadGateway || !strings.Contains(badBody, "upstream_protocol_error") || strings.Contains(badBody, "secret-vector") || calls.Load() != 4 {
+	if badResponse.StatusCode != http.StatusBadGateway || !strings.Contains(badBody, "upstream_protocol_error") || strings.Contains(badBody, "secret-vector") || calls.Load() != 6 {
 		t.Fatalf("bad upstream response status=%d calls=%d body=%s", badResponse.StatusCode, calls.Load(), badBody)
 	}
 
@@ -196,7 +262,7 @@ func TestOpenAIEmbeddingsExplicitModelRoutePolicyAndUsage(t *testing.T) {
 	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM model_requests WHERE model_id='company-embedding' AND outcome='succeeded'`).Scan(&succeeded); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 4 || embeddingContexts != 4 || succeeded != 2 {
+	if attempts != 6 || embeddingContexts != 6 || succeeded != 4 {
 		t.Fatalf("attempts=%d embedding contexts=%d succeeded=%d", attempts, embeddingContexts, succeeded)
 	}
 	var unknownCost, unknownOutput int
@@ -206,7 +272,7 @@ func TestOpenAIEmbeddingsExplicitModelRoutePolicyAndUsage(t *testing.T) {
 	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_usage_events WHERE input_tokens IS NOT NULL AND output_tokens IS NULL AND cache_read_tokens IS NULL AND cache_write_tokens IS NULL`).Scan(&unknownOutput); err != nil {
 		t.Fatal(err)
 	}
-	if unknownCost != 2 || unknownOutput != 2 {
+	if unknownCost != 4 || unknownOutput != 4 {
 		t.Fatalf("unknown cost events=%d embedding bucket events=%d", unknownCost, unknownOutput)
 	}
 	stamp := time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z")
@@ -236,7 +302,7 @@ func TestOpenAIEmbeddingsExplicitModelRoutePolicyAndUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	notMatched := embeddingEmployeeRequest(t, server.URL, embeddingKey.Key, `{"model":"company-embedding","input":"responses budget must not match"}`)
-	if notMatched.StatusCode != http.StatusOK || calls.Load() != 5 {
+	if notMatched.StatusCode != http.StatusOK || calls.Load() != 7 {
 		t.Fatalf("responses-only budget status=%d calls=%d body=%s", notMatched.StatusCode, calls.Load(), readBody(notMatched))
 	}
 	notMatched.Body.Close()
@@ -244,13 +310,44 @@ func TestOpenAIEmbeddingsExplicitModelRoutePolicyAndUsage(t *testing.T) {
 		VALUES('embedding-strict-budget','employee',?,'openai-embeddings','company-embedding',1,100,'rolling_60s',NULL,'','',1,?,?)`, employee.ID, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	deniedBudget := embeddingEmployeeRequest(t, server.URL, embeddingKey.Key, `{"model":"company-embedding","input":"budget must fail closed"}`)
+	deniedBudget := embeddingEmployeeRequest(t, server.URL, embeddingKey.Key, `{"model":"company-embedding","input":[7,8]}`)
 	deniedBudgetBody := readBody(deniedBudget)
-	if deniedBudget.StatusCode != http.StatusServiceUnavailable || !strings.Contains(deniedBudgetBody, "budget_bound_unavailable") || calls.Load() != 5 {
+	if deniedBudget.StatusCode != http.StatusServiceUnavailable || !strings.Contains(deniedBudgetBody, "budget_bound_unavailable") || calls.Load() != 7 {
 		t.Fatalf("strict budget status=%d calls=%d body=%s", deniedBudget.StatusCode, calls.Load(), deniedBudgetBody)
 	}
-	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempts`).Scan(&attempts); err != nil || attempts != 5 {
+	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempts`).Scan(&attempts); err != nil || attempts != 7 {
 		t.Fatalf("strict budget persisted attempt count=%d err=%v", attempts, err)
+	}
+	config := app.cfg
+	if err := app.store.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storageFailure := embeddingEmployeeRequest(t, server.URL, embeddingKey.Key, `{"model":"company-embedding","input":[7,8]}`)
+	storageFailureBody := readBody(storageFailure)
+	if storageFailure.StatusCode == http.StatusOK || calls.Load() != 7 || strings.Contains(storageFailureBody, embeddingKey.Key) || strings.Contains(storageFailureBody, "embedding-secret") {
+		t.Fatalf("storage failure status=%d calls=%d body=%s", storageFailure.StatusCode, calls.Load(), storageFailureBody)
+	}
+	server.Close()
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	restartedServer := httptest.NewServer(restarted.Handler())
+	defer restartedServer.Close()
+	if _, err := restarted.store.db.Exec(`DELETE FROM governance_general_budget_policies WHERE id='embedding-strict-budget'`); err != nil {
+		t.Fatal(err)
+	}
+	recovered := embeddingEmployeeRequest(t, restartedServer.URL, embeddingKey.Key, `{"model":"company-embedding","input":[7,8]}`)
+	if recovered.StatusCode != http.StatusOK || calls.Load() != 8 {
+		t.Fatalf("restarted token request status=%d calls=%d body=%s", recovered.StatusCode, calls.Load(), readBody(recovered))
+	}
+	recovered.Body.Close()
+	if err := restarted.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempts`).Scan(&attempts); err != nil || attempts != 8 {
+		t.Fatalf("restarted attempt count=%d err=%v", attempts, err)
 	}
 }
 

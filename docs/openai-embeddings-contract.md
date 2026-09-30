@@ -1,6 +1,6 @@
 # OpenAI Embeddings 文本子集契约
 
-状态：2026-09-29 开发预览实施契约。本文只定义 `PROTO-08` 第一段：官方 OpenAI-compatible API Key 路径上的 `POST /v1/embeddings`、文本输入、非流式、float 向量。它不是完整 `PROTO-08`，不代表真实 OpenAI/provider/CLI/会员账号兼容，也不包含 token 数组、base64、可变 dimensions、`user`、多模态、流式、后台任务、跨协议转换或向量存储。
+状态：2026-09-29 开发预览第一段实施契约；2026-09-30 的 [token-array 输入增量契约](openai-embeddings-token-input-contract.md)仅覆盖本文 token-array 拒绝规则，并保留其他边界。本文其余内容仍定义官方 OpenAI-compatible API Key 路径上的 `POST /v1/embeddings`、非流式 float 向量，不代表真实 OpenAI/provider/CLI/会员账号兼容，也不包含 base64、可变 dimensions、`user`、多模态、流式、后台任务、跨协议转换或向量存储。
 
 ## 独立实现、来源与依赖
 
