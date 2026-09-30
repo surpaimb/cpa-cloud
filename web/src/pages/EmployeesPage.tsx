@@ -90,7 +90,7 @@ function ToggleEmployee({ employee, csrf, onDone }: { employee: Employee; csrf: 
 const protocolChoices: Array<{ id: ClientProtocol; label: string }> = [
   { id: 'openai-chat', label: 'OpenAI Chat Completions' },
   { id: 'openai-responses', label: 'OpenAI Responses' },
-  { id: 'openai-embeddings', label: 'OpenAI Embeddings（文本 / float）' },
+  { id: 'openai-embeddings', label: 'OpenAI Embeddings（文本 / token 数组 / float）' },
   { id: 'anthropic-messages', label: 'Anthropic Messages' },
   { id: 'gemini-generate-content', label: 'Gemini generateContent' },
 ]

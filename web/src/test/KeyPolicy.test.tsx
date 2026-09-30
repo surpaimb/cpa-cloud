@@ -111,7 +111,7 @@ describe('access-key policy administration', () => {
     const dialog = await screen.findByRole('dialog')
     expect(dialog).toHaveTextContent('全部协议（含 Embeddings）')
     await userEvent.click(within(dialog).getByLabelText('仅指定协议'))
-    await userEvent.click(within(dialog).getByLabelText('OpenAI Embeddings（文本 / float）'))
+    await userEvent.click(within(dialog).getByLabelText('OpenAI Embeddings（文本 / token 数组 / float）'))
     await userEvent.click(within(dialog).getByRole('button', { name: '生成永久 Key' }))
 
     await waitFor(() => expect(writes).toHaveLength(1))
@@ -258,7 +258,7 @@ describe('access-key policy administration', () => {
     const dialogs = await screen.findAllByRole('dialog')
     const editor = dialogs[dialogs.length - 1]
     expect(await within(editor).findByText('当前服务不支持 Key 来源限制')).toBeInTheDocument()
-    expect(within(editor).queryByLabelText('OpenAI Embeddings（文本 / float）')).not.toBeInTheDocument()
+    expect(within(editor).queryByLabelText('OpenAI Embeddings（文本 / token 数组 / float）')).not.toBeInTheDocument()
     await userEvent.click(within(editor).getByLabelText('仅指定协议'))
     await userEvent.click(within(editor).getByLabelText('OpenAI Chat Completions'))
     await userEvent.click(within(editor).getByRole('button', { name: '保存独立权限' }))
