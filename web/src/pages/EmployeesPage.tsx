@@ -1,3 +1,4 @@
+// Employee self-service copy updated for docs/employee-self-key-inventory-contract.md.
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError, api, type AccountGroup, type ClientProtocol, type Employee, type EmployeeKey, type KeyAccessPolicy, type KeyPolicyInput, type ModelRoute } from '../api'
 import { messageFor, useResource } from '../hooks'
@@ -70,7 +71,7 @@ function EnrollmentDialog({ employee, csrf, onClose }: { employee: Employee; csr
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   return <Dialog title={`${employee.name} 的自助入口`} description="仅限已创建且启用的员工。重新签发会立即使旧开通码失效。" onClose={onClose}>
-    {issued ? <div className="self-secret" role="status"><p>开通码只显示这一次，请通过内部安全渠道交给员工。</p><dl><dt>员工 ID</dt><dd><code>{employee.id}</code></dd><dt>开通码</dt><dd><code>{issued.enrollment_secret}</code></dd><dt>截止时间</dt><dd>{new Date(issued.expires_at).toLocaleString('zh-CN')}</dd></dl><p>员工入口：<a href="/self/">/self/</a></p></div> : <p>开通后，员工可以设置密码并查看自己的姓名、部门与状态；不会开放 Key 或用量数据。</p>}
+    {issued ? <div className="self-secret" role="status"><p>开通码只显示这一次，请通过内部安全渠道交给员工。</p><dl><dt>员工 ID</dt><dd><code>{employee.id}</code></dd><dt>开通码</dt><dd><code>{issued.enrollment_secret}</code></dd><dt>截止时间</dt><dd>{new Date(issued.expires_at).toLocaleString('zh-CN')}</dd></dl><p>员工入口：<a href="/self/">/self/</a></p></div> : <p>开通后，员工可以设置密码，并查看自己的资料及已有 Key 的基本元数据；Key 明文、策略与用量仍不开放。</p>}
     <FormError error={error} />
     <div className="dialog__actions"><Button variant="secondary" onClick={onClose}>关闭</Button>{!issued ? <Button disabled={busy} onClick={async () => { setBusy(true); setError(null); try { setIssued(await api.issueSelfEnrollment(employee.id, csrf)) } catch (caught) { setError(messageFor(caught)) } finally { setBusy(false) } }}>{busy ? '正在签发…' : '签发一次性开通码'}</Button> : null}</div>
   </Dialog>
