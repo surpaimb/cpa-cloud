@@ -1,4 +1,5 @@
-// Independently authored tests for docs/employee-self-service-foundation-contract.md.
+// Independently authored tests for docs/employee-self-service-foundation-contract.md
+// and docs/employee-self-password-change-contract.md.
 package service
 
 import (
@@ -118,7 +119,7 @@ func TestSelfServiceDefaultOffAndIsolation(t *testing.T) {
 		}
 		r.Body.Close()
 	}
-	for _, target := range []string{"/self", "/self/api/v1/sessions", "/admin/api/v1/employees/" + item.ID + "/self-enrollment"} {
+	for _, target := range []string{"/self", "/self/api/v1/sessions", "/self/api/v1/password", "/admin/api/v1/employees/" + item.ID + "/self-enrollment"} {
 		r := requestJSON(t, "POST", server.URL+target, `{}`, nil, "", "")
 		if r.StatusCode != 404 {
 			t.Fatalf("default-off POST %s: %d", target, r.StatusCode)

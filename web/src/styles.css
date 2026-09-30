@@ -711,6 +711,11 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-kicker { color: var(--teal); font-size: 11px; font-weight: 800; letter-spacing: .13em; }
 .self-form { display: grid; gap: 16px; }
 .self-form .button { width: 100%; margin-top: 4px; }
+/* Independently authored for docs/employee-self-password-change-contract.md. */
+.self-password-form { margin-bottom: 18px; padding-top: 20px; border-top: 1px solid var(--border); }
+.self-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.self-actions .button { flex: 1 1 170px; }
+.self-notice { padding: 12px 14px; border: 1px solid #bfe3d5; border-radius: 8px; background: #f2f9f6; color: var(--navy); font-size: 13px; line-height: 1.6; }
 .self-mode { margin-top: 20px; }
 .self-footnote { margin: 28px 0 0; }
 .self-profile { display: grid; gap: 0; margin: 0 0 25px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }

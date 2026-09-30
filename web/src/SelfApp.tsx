@@ -1,4 +1,5 @@
-// Independently authored for docs/employee-self-service-foundation-contract.md.
+// Independently authored for docs/employee-self-service-foundation-contract.md
+// and docs/employee-self-password-change-contract.md.
 import { useEffect, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
@@ -26,6 +27,8 @@ export function SelfApp() {
   const [session, setSession] = useState<SelfSession | null>(null)
   const [mode, setMode] = useState<'login' | 'enroll'>('login')
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [changingPassword, setChangingPassword] = useState(false)
   const [busy, setBusy] = useState(false)
   useEffect(() => { document.title = 'CPA Cloud 员工自助入口' }, [])
   useEffect(() => {
@@ -41,10 +44,50 @@ export function SelfApp() {
       {session ? <>
         <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>这里只显示你的基本资料。API Key 和使用量仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
-        <FormError error={error} />
-        <Button variant="secondary" disabled={busy} onClick={async () => { setBusy(true); setError(null); try { await selfRequest<void>('/sessions', { method: 'DELETE' }, session.csrf_token); setSession(null) } catch { setError('退出失败，请稍后重试。') } finally { setBusy(false) } }}>{busy ? '正在退出…' : '退出登录'}</Button>
+        {changingPassword ? <form className="self-form self-password-form" onSubmit={async (event) => {
+          event.preventDefault()
+          const form = event.currentTarget
+          const values = new FormData(form)
+          const current_password = String(values.get('current_password') ?? '')
+          const new_password = String(values.get('new_password') ?? '')
+          const size = new TextEncoder().encode(new_password).length
+          if (size < 12 || size > 72) {
+            setError('新密码须为 12–72 个 UTF-8 字节。')
+            form.reset()
+            return
+          }
+          setBusy(true)
+          setError(null)
+          try {
+            await selfRequest<void>('/password', { method: 'POST', body: JSON.stringify({ current_password, new_password }) }, session.csrf_token)
+            setSession(null)
+            setChangingPassword(false)
+            setNotice('密码已更新，所有设备均已退出。请使用新密码重新登录。')
+          } catch (caught) {
+            if (caught instanceof ApiError && caught.status === 503) {
+              setSession(null)
+              setChangingPassword(false)
+              setNotice('结果未确认。请重新登录，先尝试新密码，再尝试旧密码；若均失败，请联系管理员。')
+            } else {
+              setError(caught instanceof ApiError && caught.status === 429 ? '尝试次数过多，请稍后再试。' : '当前密码无效或请求未通过，请检查后重试。')
+            }
+          } finally {
+            form.reset()
+            setBusy(false)
+          }
+        }}>
+          <Field label="当前密码"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} /></Field>
+          <Field label="新密码（12–72 字节）"><input name="new_password" type="password" autoComplete="new-password" required minLength={12} /></Field>
+          <FormError error={error} />
+          <div className="self-actions"><Button type="submit" disabled={busy}>{busy ? '正在更新…' : '确认修改密码'}</Button><Button type="button" variant="secondary" disabled={busy} onClick={() => { setChangingPassword(false); setError(null) }}>取消</Button></div>
+        </form> : <FormError error={error} />}
+        <div className="self-actions">
+          {!changingPassword ? <Button variant="secondary" disabled={busy} onClick={() => { setChangingPassword(true); setError(null) }}>修改密码</Button> : null}
+          <Button variant="secondary" disabled={busy} onClick={async () => { setBusy(true); setError(null); try { await selfRequest<void>('/sessions', { method: 'DELETE' }, session.csrf_token); setSession(null); setChangingPassword(false) } catch { setError('退出失败，请稍后重试。') } finally { setBusy(false) } }}>{busy ? '正在退出…' : '退出登录'}</Button>
+        </div>
       </> : <>
         <header><span className="self-kicker">EMPLOYEE ACCESS</span><h1>{mode === 'login' ? '员工登录' : '首次开通'}</h1><p>{mode === 'login' ? '使用员工 ID 和自己设置的密码。' : '输入管理员提供的一次性开通码，设置你的密码。'}</p></header>
+        {notice ? <p className="self-notice" role="status">{notice}</p> : null}
         <form className="self-form" onSubmit={async (event) => {
           event.preventDefault(); setBusy(true); setError(null)
           const form = new FormData(event.currentTarget)
@@ -55,6 +98,7 @@ export function SelfApp() {
               ? await selfRequest<SelfSession>('/sessions', { method: 'POST', body: JSON.stringify({ employee_id, password }) })
               : await selfRequest<SelfSession>('/enroll', { method: 'POST', body: JSON.stringify({ employee_id, enrollment_secret: String(form.get('enrollment_secret') ?? ''), password }) })
             setSession(result)
+            setNotice(null)
           } catch (caught) { setError(caught instanceof ApiError && caught.status === 429 ? '尝试次数过多，请稍后再试。' : '凭据或开通码无效，请检查后重试。') }
           finally { setBusy(false) }
         }}>
