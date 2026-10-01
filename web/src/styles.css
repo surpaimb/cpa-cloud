@@ -741,6 +741,12 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-key-list dt { color: var(--muted); }
 .self-key-list dd { min-width: 0; overflow-wrap: anywhere; color: var(--navy); }
 .self-keys > .button { width: 100%; }
+/* Independently authored for docs/employee-self-key-revocation-contract.md. */
+.self-key-revoke { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.self-key-revoke > .button { width: 100%; }
+.self-key-revoke p { margin: 0 0 10px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.self-key-revoke p[role="alert"] { color: #a52132; }
+.self-key-revoke .self-actions { margin-top: 10px; }
 /* Independently authored for docs/employee-self-request-history-contract.md. */
 .self-history { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
 .self-history h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }

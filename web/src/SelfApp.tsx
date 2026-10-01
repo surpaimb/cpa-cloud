@@ -3,7 +3,8 @@
 // docs/employee-self-key-inventory-contract.md.
 // docs/employee-self-request-history-contract.md.
 // docs/employee-self-token-summary-contract.md.
-import { useEffect, useRef, useState } from 'react'
+// docs/employee-self-key-revocation-contract.md.
+import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
@@ -39,14 +40,20 @@ function selfKeyDate(value: string) {
   return new Date(value).toLocaleString('zh-CN')
 }
 
-function SelfKeyInventory() {
+function SelfKeyInventory({ csrf }: { csrf: string }) {
   const [items, setItems] = useState<SelfKey[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
+  const [confirmID, setConfirmID] = useState<string | null>(null)
+  const [revokeBusy, setRevokeBusy] = useState(false)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
   const pendingPage = useRef<AbortController | null>(null)
+  const pendingRevoke = useRef<AbortController | null>(null)
+  const mounted = useRef(true)
 
   useEffect(() => {
+    mounted.current = true
     let active = true
     const controller = new AbortController()
     void selfRequest<SelfKeyPage>('/keys', { signal: controller.signal }).then((page) => {
@@ -60,8 +67,54 @@ function SelfKeyInventory() {
       setCursor(null)
       setError(true)
     }).finally(() => { if (active) setLoading(false) })
-    return () => { active = false; controller.abort(); pendingPage.current?.abort() }
+    return () => { active = false; mounted.current = false; controller.abort(); pendingPage.current?.abort(); pendingRevoke.current?.abort() }
   }, [])
+
+  async function revoke(event: FormEvent<HTMLFormElement>, id: string) {
+    event.preventDefault()
+    if (revokeBusy) return
+    const form = event.currentTarget
+    let current_password = String(new FormData(form).get('current_password') ?? '')
+    form.reset()
+    const size = new TextEncoder().encode(current_password).length
+    if (size < 12 || size > 72) {
+      current_password = ''
+      setRevokeError('当前密码须为 12–72 个 UTF-8 字节。')
+      return
+    }
+    const controller = new AbortController()
+    pendingRevoke.current = controller
+    setRevokeBusy(true)
+    setRevokeError(null)
+    try {
+      await selfRequest<void>(`/keys/${encodeURIComponent(id)}/revoke`, { method: 'POST', body: JSON.stringify({ current_password }), signal: controller.signal }, csrf)
+      if (!mounted.current || controller.signal.aborted) return
+      setConfirmID(null)
+      try {
+        const page = await selfRequest<SelfKeyPage>('/keys', { signal: controller.signal })
+        if (!mounted.current || controller.signal.aborted) return
+        setItems(page.items)
+        setCursor(page.next_cursor)
+        setError(false)
+      } catch {
+        if (!mounted.current || controller.signal.aborted) return
+        setItems([])
+        setCursor(null)
+        setError(true)
+      }
+    } catch (caught) {
+      if (!mounted.current || controller.signal.aborted) return
+      setRevokeError(caught instanceof ApiError && caught.status === 429
+        ? '尝试次数过多，请稍后再试。'
+        : caught instanceof ApiError && caught.status === 503
+          ? '撤销结果未确认，请刷新列表后重试或联系管理员。'
+          : '撤销未完成，请检查当前密码或稍后重试。')
+    } finally {
+      current_password = ''
+      if (pendingRevoke.current === controller) pendingRevoke.current = null
+      if (mounted.current) setRevokeBusy(false)
+    }
+  }
 
   async function loadMore() {
     if (!cursor || loading || pendingPage.current) return
@@ -95,6 +148,14 @@ function SelfKeyInventory() {
     {items.length > 0 ? <ul className="self-key-list">{items.map((item) => <li key={item.id}>
       <div className="self-key-top"><strong>{item.name}</strong><span className={`self-key-status self-key-status--${item.status}`}>{item.status === 'active' ? '有效' : item.status === 'expired' ? '已到期' : '已撤销'}</span></div>
       <dl><div><dt>Key ID</dt><dd>{item.id}</dd></div><div><dt>创建时间</dt><dd><time dateTime={item.created_at}>{selfKeyDate(item.created_at)}</time></dd></div><div><dt>到期时间</dt><dd>{item.expires_at ? <time dateTime={item.expires_at}>{selfKeyDate(item.expires_at)}</time> : '永不过期'}</dd></div>{item.revoked_at ? <div><dt>撤销时间</dt><dd><time dateTime={item.revoked_at}>{selfKeyDate(item.revoked_at)}</time></dd></div> : null}</dl>
+      {item.status !== 'revoked' ? <div className="self-key-revoke">
+        {confirmID === item.id ? <form onSubmit={(event) => { void revoke(event, item.id) }}>
+          <p>确认撤销“{item.name}”？撤销后此 Key 不能再发起新请求，正在进行的请求不会因此中断。</p>
+          <Field label="当前密码（撤销确认）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} /></Field>
+          {revokeError ? <p role="alert">{revokeError}</p> : null}
+          <div className="self-actions"><Button type="submit" disabled={revokeBusy}>{revokeBusy ? '正在撤销…' : '确认撤销 Key'}</Button><Button type="button" variant="secondary" disabled={revokeBusy} onClick={() => { setConfirmID(null); setRevokeError(null) }}>取消</Button></div>
+        </form> : <Button variant="secondary" disabled={revokeBusy} onClick={() => { setConfirmID(item.id); setRevokeError(null) }} aria-label={`撤销 ${item.name}`}>撤销 Key</Button>}
+      </div> : null}
     </li>)}</ul> : null}
     {cursor && !error ? <Button variant="secondary" disabled={loading} onClick={loadMore}>{loading ? '正在加载…' : '加载更多'}</Button> : null}
   </section>
@@ -236,9 +297,9 @@ export function SelfApp() {
     <div className="self-card">
       <div className="brand-lockup"><div className="brand-mark">C</div><div><strong>CPA Cloud</strong><span>员工自助入口</span></div></div>
       {session ? <>
-        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、已有 API Key 的基本信息、本人请求记录和已知 Token 汇总；Key 创建、策略与撤销仍由管理员管理。</p></header>
+        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、已有 API Key 的基本信息、本人请求记录和已知 Token 汇总，并用当前密码撤销自己的已有 Key；Key 创建与策略仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
-        <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}`} />
+        <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} />
         <SelfTokenSummaryPanel key={`summary:${session.profile.id}:${session.csrf_token}`} />
         <SelfRequestHistory key={`requests:${session.profile.id}:${session.csrf_token}`} />
         {changingPassword ? <form className="self-form self-password-form" onSubmit={async (event) => {
