@@ -37,6 +37,7 @@ func (a *App) registerBillingCommercialHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/api/v1/billing/subscriptions", a.requireAdmin(a.billingCommercialListSubscriptions, false))
 	mux.HandleFunc("GET /admin/api/v1/billing/subscriptions/{id}", a.requireAdmin(a.billingCommercialGetSubscription, false))
 	mux.HandleFunc("POST /admin/api/v1/billing/subscriptions/{id}/cancel", a.requireAdmin(a.billingCommercialCancelSubscription, true))
+	mux.HandleFunc("POST /admin/api/v1/billing/subscriptions/{id}/renew", a.requireAdmin(a.billingCommercialRenewSubscription, true))
 	mux.HandleFunc("POST /admin/api/v1/billing/redemption-codes", a.requireAdmin(a.billingCommercialCreateCode, true))
 	mux.HandleFunc("GET /admin/api/v1/billing/redemption-codes", a.requireAdmin(a.billingCommercialListCodes, false))
 	mux.HandleFunc("POST /admin/api/v1/billing/redemptions", a.requireAdmin(a.billingCommercialRedeem, true))
@@ -402,6 +403,21 @@ func (a *App) billingCommercialCancelSubscription(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusOK, map[string]any{"receipt": billingReceiptView(receipt), "subscription": billingSubscriptionView(item)})
 }
 
+func (a *App) billingCommercialRenewSubscription(w http.ResponseWriter, r *http.Request, session adminSession) {
+	_, operationID, ok := decodeBillingCommercial(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	digest, _ := financial.DigestPayload(struct{ ID string }{id})
+	item, receipt, err := financial.NewCommercial(a.store.db).RenewSubscription(r.Context(), financial.RenewSubscription{Meta: billingWriteMeta(operationID, session.AdminID, digest), ID: id})
+	if err != nil {
+		writeBillingV1Error(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"receipt": billingReceiptView(receipt), "subscription": billingSubscriptionView(item)})
+}
+
 func (a *App) billingCommercialCreateCode(w http.ResponseWriter, r *http.Request, session adminSession) {
 	object, operationID, ok := decodeBillingCommercial(w, r, "currency", "amount_micro", "max_uses", "expires_at")
 	if !ok {
@@ -645,7 +661,14 @@ func billingSubscriptionView(item financial.Subscription) map[string]any {
 	if item.PeriodEndAt != nil {
 		end = item.PeriodEndAt.Format(time.RFC3339Nano)
 	}
-	return map[string]any{"id": item.ID, "plan_id": item.PlanID, "plan_revision": item.PlanRevision, "price_micro": strconv.FormatInt(item.PriceMicro, 10), "credit_micro": strconv.FormatInt(item.CreditMicro, 10), "currency": item.Currency, "interval": item.Interval, "status": item.Status, "revision": item.Revision, "started_at": item.StartedAt.Format(time.RFC3339Nano), "period_end_at": end}
+	var predecessor, successor any
+	if item.PredecessorID != "" {
+		predecessor = item.PredecessorID
+	}
+	if item.SuccessorID != "" {
+		successor = item.SuccessorID
+	}
+	return map[string]any{"id": item.ID, "plan_id": item.PlanID, "plan_revision": item.PlanRevision, "price_micro": strconv.FormatInt(item.PriceMicro, 10), "credit_micro": strconv.FormatInt(item.CreditMicro, 10), "currency": item.Currency, "interval": item.Interval, "status": item.Status, "revision": item.Revision, "started_at": item.StartedAt.Format(time.RFC3339Nano), "period_end_at": end, "predecessor_id": predecessor, "successor_id": successor}
 }
 func billingCodeView(item financial.RedemptionCode) map[string]any {
 	expires := any(nil)

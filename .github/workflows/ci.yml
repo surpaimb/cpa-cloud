@@ -65,6 +65,8 @@ jobs:
       - run: go vet ./...
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud" ./cmd/cpa-cloud
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud-backup" ./cmd/cpa-cloud-backup
+      - name: Test manual monthly renewal against an isolated process
+        run: node scripts/smoke-subscription-renewal.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test local account-pool reservation snapshot with synthetic traffic
         run: node scripts/smoke-account-pool.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test bounded four-source administrator audit overview

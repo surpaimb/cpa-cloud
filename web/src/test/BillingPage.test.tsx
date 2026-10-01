@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../App'
 import { BillingPage } from '../pages/BillingPage'
+import { BillingPlans } from '../billing/BillingPlans'
 
 const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
 const emptyPage = { items: [], next_cursor: null }
@@ -128,5 +129,35 @@ describe('administrator commercial management', () => {
     expect(await screen.findByRole('heading', { name: '商业执行已开启' })).toBeInTheDocument()
     expect(JSON.parse(String(writes[0].body)).expected_revision).toBe(1)
     expect(new Headers(writes[0].headers).get('X-CSRF-Token')).toBe('csrf-settings')
+  })
+
+  it('shows manual renewal links and sends only the predecessor operation ID', async () => {
+    const old = { id: 'renew-old', plan_id: 'plan-month', plan_revision: 1, price_micro: '10', credit_micro: '20', currency: 'USD', interval: 'monthly', status: 'expired', revision: 2, started_at: '2026-01-31T08:00:00Z', period_end_at: '2026-02-28T08:00:00Z', predecessor_id: null, successor_id: null }
+    const next = { ...old, id: 'renew-new', plan_revision: 2, price_micro: '12', credit_micro: '30', status: 'active', revision: 1, started_at: '2026-10-01T08:00:00Z', period_end_at: '2026-11-01T08:00:00Z', predecessor_id: 'renew-old', successor_id: null }
+    const plan = { id: 'plan-month', name: '月套餐', currency: 'USD', price_micro: '12', credit_micro: '30', interval: 'monthly', enabled: true, revision: 2, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' }
+    const writes: RequestInit[] = []
+    let renewed = false
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/billing/plans?')) return json({ items: [plan], next_cursor: null })
+      if (url.includes('/billing/subscriptions?')) return json({ items: renewed ? [{ ...old, successor_id: 'renew-new' }, next] : [old], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions/renew-old/renew') && init?.method === 'POST') {
+        writes.push(init); renewed = true
+        return json({ receipt: { operation_id: JSON.parse(String(init.body)).operation_id, resource_kind: 'subscription', resource_id: 'renew-new', revision: 1, created_at: next.started_at, replay: false }, subscription: next })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<BillingPlans csrf="csrf-renew" commercialEnabled />)
+    await userEvent.click(await screen.findByRole('button', { name: '手工续购一期' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/不补齐过期间隔/)).toBeInTheDocument()
+    expect(within(dialog).getByText('−0.000012 USD')).toBeInTheDocument()
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认续购' }))
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(Object.keys(JSON.parse(String(writes[0].body)))).toEqual(['operation_id'])
+    expect(new Headers(writes[0].headers).get('X-CSRF-Token')).toBe('csrf-renew')
+    expect(await screen.findByText('续购到：')).toBeInTheDocument()
+    expect(screen.getByText('来源：')).toBeInTheDocument()
+    expect(screen.getAllByText('renew-new')).toHaveLength(2)
   })
 })
