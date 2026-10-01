@@ -361,9 +361,11 @@ export type SystemStatus = {
 
 export const adminAuditSources = ['account_pool', 'account_lifecycle', 'governance_management', 'governance_general_budget', 'financial_commercial'] as const
 export type AdminAuditSource = typeof adminAuditSources[number]
+export type AdminAuditActorKind = 'admin' | 'employee' | 'system' | 'legacy_unknown'
 export type AdminAuditEvent = {
   source: AdminAuditSource
   event_id: string
+  actor_kind: AdminAuditActorKind
   actor_id: string | null
   action: string
   target_type: string
@@ -826,7 +828,8 @@ function billingList<T>(path: string, afterId?: string, limit = 50, signal?: Abo
 
 const adminAuditSourceRanks = new Map<AdminAuditSource, number>(adminAuditSources.map((source, index) => [source, index]))
 const adminAuditPageKeys = ['from', 'to', 'snapshot_at', 'sources', 'items', 'next_cursor']
-const adminAuditEventKeys = ['source', 'event_id', 'actor_id', 'action', 'target_type', 'target_id', 'result', 'revision', 'occurred_at']
+const adminAuditEventKeys = ['source', 'event_id', 'actor_kind', 'actor_id', 'action', 'target_type', 'target_id', 'result', 'revision', 'occurred_at']
+const legacyAdminAuditEventKeys = ['source', 'event_id', 'actor_id', 'action', 'target_type', 'target_id', 'result', 'revision', 'occurred_at']
 
 function auditRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -869,7 +872,7 @@ function invalidAdminAuditResponse(): never {
   throw new ApiError(502, 'invalid_response', '审计响应格式无效，未显示任何结果。')
 }
 
-function parseAdminAuditPage(value: unknown): AdminAuditPage {
+function parseAdminAuditPage(value: unknown, allowLegacyActors = false): AdminAuditPage {
   if (!auditRecord(value) || !hasExactKeys(value, adminAuditPageKeys)) invalidAdminAuditResponse()
   const fromKey = auditTimeKey(value.from)
   const toKey = auditTimeKey(value.to)
@@ -892,11 +895,16 @@ function parseAdminAuditPage(value: unknown): AdminAuditPage {
   const seen = new Set<string>()
   let previous: { time: string; rank: number; id: string } | null = null
   for (const raw of value.items) {
-    if (!auditRecord(raw) || !hasExactKeys(raw, adminAuditEventKeys)) invalidAdminAuditResponse()
+    if (!auditRecord(raw)) invalidAdminAuditResponse()
+    const typedActor = hasExactKeys(raw, adminAuditEventKeys)
+    const legacyActor = allowLegacyActors && !sources.includes('financial_commercial') && hasExactKeys(raw, legacyAdminAuditEventKeys)
+    if (!typedActor && !legacyActor) invalidAdminAuditResponse()
     if (typeof raw.source !== 'string' || !sources.includes(raw.source as AdminAuditSource)) invalidAdminAuditResponse()
     const source = raw.source as AdminAuditSource
+    const actorKind = legacyActor ? 'admin' : raw.actor_kind
+    if (actorKind !== 'admin' && (source !== 'financial_commercial' || !['employee', 'system', 'legacy_unknown'].includes(actorKind as string))) invalidAdminAuditResponse()
     const strings = [raw.event_id, raw.action, raw.target_type, raw.target_id]
-    if (!strings.every(auditMetadata) || (raw.actor_id === null ? source !== 'financial_commercial' : !auditMetadata(raw.actor_id)) || raw.result !== 'succeeded') invalidAdminAuditResponse()
+    if (!strings.every(auditMetadata) || (raw.actor_id === null) !== (actorKind === 'legacy_unknown') || (raw.actor_id !== null && !auditMetadata(raw.actor_id)) || raw.result !== 'succeeded') invalidAdminAuditResponse()
     if (raw.revision !== null && (!Number.isSafeInteger(raw.revision) || (raw.revision as number) < 1)) invalidAdminAuditResponse()
     const occurredKey = auditTimeKey(raw.occurred_at)
     if (!occurredKey || occurredKey < fromKey || occurredKey >= toKey) invalidAdminAuditResponse()
@@ -911,6 +919,7 @@ function parseAdminAuditPage(value: unknown): AdminAuditPage {
     items.push({
       source,
       event_id: raw.event_id as string,
+      actor_kind: actorKind as AdminAuditActorKind,
       actor_id: raw.actor_id as string | null,
       action: raw.action as string,
       target_type: raw.target_type as string,
@@ -1125,8 +1134,8 @@ export const api = {
     request<GovernanceReceipt>(`/budgets/operations/${encodeURIComponent(operationId)}`, { signal }),
   governanceObservations: (filters: GovernanceObservationFilters, cursor?: string, signal?: AbortSignal) =>
     request<GovernanceObservationsPage>(`/governance/observations?${governanceObservationSearch(filters, cursor)}`, { signal }),
-  auditEvents: async (filters: AdminAuditFilters, cursor?: string, signal?: AbortSignal) =>
-    parseAdminAuditPage(await request<unknown>(`/audit/events?${adminAuditSearch(filters, cursor)}`, { signal })),
+  auditEvents: async (filters: AdminAuditFilters, cursor?: string, signal?: AbortSignal, allowLegacyActors = false) =>
+    parseAdminAuditPage(await request<unknown>(`/audit/events?${adminAuditSearch(filters, cursor)}`, { signal }), allowLegacyActors),
   auditExport: adminAuditExport,
   saveUpstreamPrice: (upstreamId: string, body: { operation_id: string; expected_revision: number; upstream_model: string; price: PriceRate | null }, csrf: string) =>
     request<UpstreamPrice>(`/upstreams/${encodeURIComponent(upstreamId)}/prices`, { method: 'POST', body: JSON.stringify(body) }, csrf),

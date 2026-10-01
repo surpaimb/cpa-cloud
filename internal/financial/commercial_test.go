@@ -57,6 +57,11 @@ func TestCommercialBillingPaymentRedemptionSubscriptionAndRefund(t *testing.T) {
 	if replay, err := commercial.ApplyPaid(ctx, paidInput); err != nil || replay.PaidEntryID != paid.PaidEntryID {
 		t.Fatalf("callback replay=%+v err=%v", replay, err)
 	}
+	var callbackKind, callbackID string
+	var callbackVersion int
+	if err := db.QueryRow(`SELECT actor_kind,actor_system_id,digest_version FROM financial_operations WHERE operation_id=?`, "webhook:"+connector.ID+":"+paidInput.EventID).Scan(&callbackKind, &callbackID, &callbackVersion); err != nil || callbackKind != "system" || callbackID != "payment_callback" || callbackVersion != 2 {
+		t.Fatalf("callback actor kind=%q id=%q version=%d err=%v", callbackKind, callbackID, callbackVersion, err)
+	}
 	changedEvent := paidInput
 	changedEvent.PayloadDigest = sha256.Sum256([]byte("changed"))
 	if _, err := commercial.ApplyPaid(ctx, changedEvent); !errors.Is(err, ErrConflict) {
@@ -152,7 +157,7 @@ func TestLedgerRefundCreditAndCumulativeLimit(t *testing.T) {
 	if _, err := ledger.Post(ctx, Post{OperationID: "seed-credit", Action: "adjustment", ActorAdminID: "admin-one", ResourceKind: "adjustment", ResourceID: "seed", ObservedAt: financialTestTime, Entries: []EntryInput{{Owner: owner, Currency: "USD", Kind: EntryAdjustmentCredit, AmountMicro: 100, ResourceKind: "adjustment", ResourceID: "seed"}}}); err != nil {
 		t.Fatal(err)
 	}
-	charge, err := ledger.Post(ctx, Post{OperationID: "usage", Action: "usage_charge", ResourceKind: "usage", ResourceID: "usage-one", ObservedAt: financialTestTime.Add(time.Second), RequireNonNegative: true, Entries: []EntryInput{{Owner: owner, Currency: "USD", Kind: EntryUsageCharge, AmountMicro: -20, ResourceKind: "usage", ResourceID: "usage-one"}}})
+	charge, err := ledger.Post(ctx, Post{OperationID: "usage", Action: "usage_charge", ActorAdminID: "admin-one", ResourceKind: "usage", ResourceID: "usage-one", ObservedAt: financialTestTime.Add(time.Second), RequireNonNegative: true, Entries: []EntryInput{{Owner: owner, Currency: "USD", Kind: EntryUsageCharge, AmountMicro: -20, ResourceKind: "usage", ResourceID: "usage-one"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -59,7 +59,7 @@ export function AuditPage({ financialSource = false, csvExport = false }: { fina
     setPageIndex(index)
     setCursorChain(chain)
     try {
-      const page = await api.auditEvents(nextFilters, cursor)
+      const page = await api.auditEvents(nextFilters, cursor, undefined, !financialSource)
       if (sequence !== requestSequence.current) return
       if (page.sources.some((source) => !availableSources.includes(source))
         || (nextFilters.sources && (page.sources.length !== nextFilters.sources.length
@@ -74,7 +74,7 @@ export function AuditPage({ financialSource = false, csvExport = false }: { fina
     } finally {
       if (sequence === requestSequence.current) setLoading(false)
     }
-  }, [availableSources])
+  }, [availableSources, financialSource])
 
   useEffect(() => {
     setSelectedSources(new Set<AdminAuditSource>(availableSources))
@@ -159,13 +159,13 @@ export function AuditPage({ financialSource = false, csvExport = false }: { fina
 
   return <>
     <header className="page-header audit-page-header"><div><h1>管理审计</h1><p>按固定字段查看{financialSource ? '五' : '四'}类现存事务事实，不读取请求正文或敏感凭据。</p></div><div className="page-header__action"><Button variant="secondary" disabled={loading} onClick={retry}>刷新本页</Button>{csvExport ? <Button variant="secondary" disabled={loading || exporting || !data} onClick={() => void exportCSV()}>{exporting ? '正在导出…' : '导出 CSV（最多 1000 行）'}</Button> : null}</div></header>
-    <section className="audit-boundary" aria-label="审计范围说明"><strong>这是现存事实视图，不是完整历史</strong><p>{financialSource ? '包含账号池、账号生命周期、治理管理、通用预算及财务商业操作中仍保留的已提交事务事实；未关联管理员的财务事实明确标注，不代表外部支付完成。' : '仅包含账号池、账号生命周期、治理管理和通用预算中仍保留的成功事实。'}不覆盖登录、备份或全部管理操作，也不改变各来源原有保留规则；不是完整财务或统一审计。</p>{csvExport ? <p>CSV 按当前筛选窗口重新查询全部匹配事实，不限于当前页；超过 1000 行或 2 MiB 会报错，请缩小筛选范围。</p> : null}</section>
+    <section className="audit-boundary" aria-label="审计范围说明"><strong>这是现存事实视图，不是完整历史</strong><p>{financialSource ? '包含账号池、账号生命周期、治理管理、通用预算及财务商业操作中仍保留的已提交事务事实；财务执行者明确区分管理员、员工、系统与历史未知，不代表外部支付完成。' : '仅包含账号池、账号生命周期、治理管理和通用预算中仍保留的成功事实。'}不覆盖登录、备份或全部管理操作，也不改变各来源原有保留规则；不是完整财务或统一审计。</p>{csvExport ? <p>CSV 按当前筛选窗口重新查询全部匹配事实，不限于当前页；超过 1000 行或 2 MiB 会报错，请缩小筛选范围。</p> : null}</section>
     {csvExport ? <FormError error={exportError} /> : null}
     <section className="content-panel audit-panel">
       <form className="audit-filters" onSubmit={submit}>
         <fieldset className="audit-source-options"><legend>事实来源</legend>{availableSources.map((source) => <label key={source}><input type="checkbox" checked={selectedSources.has(source)} onChange={(event) => setSelectedSources((current) => { const next = new Set(current); event.target.checked ? next.add(source) : next.delete(source); return next })} /><span>{sourceLabels[source]}</span></label>)}</fieldset>
         <div className="audit-filter-grid">
-          <Field label="操作人（精确）"><input value={actor} onChange={(event) => setActor(event.target.value)} placeholder="admin_…" /></Field>
+          <Field label="管理员 ID（精确）"><input value={actor} onChange={(event) => setActor(event.target.value)} placeholder="admin_…" /></Field>
           <Field label="动作（精确）"><input value={action} onChange={(event) => setAction(event.target.value)} placeholder="例如 account_group.update" /></Field>
           <Field label="目标类型（精确）"><input value={targetType} onChange={(event) => setTargetType(event.target.value)} placeholder="例如 account_group" /></Field>
           <Field label="目标 ID（精确）"><input value={targetID} onChange={(event) => setTargetID(event.target.value)} placeholder="资源 ID" /></Field>
@@ -183,7 +183,7 @@ export function AuditPage({ financialSource = false, csvExport = false }: { fina
           <header><div><span className="audit-source">{sourceLabels[item.source]}</span><strong>{item.action}</strong></div><span className="audit-result">{item.source === 'financial_commercial' ? '事务已提交' : '成功'}</span></header>
           <dl className="audit-event__grid">
             <div><dt>时间</dt><dd><time dateTime={item.occurred_at}>{formatTime(item.occurred_at)}</time><code>{item.occurred_at}</code></dd></div>
-            <div><dt>操作人</dt><dd>{item.actor_id === null ? <span>未关联管理员</span> : <code>{item.actor_id}</code>}</dd></div>
+            <div><dt>操作人</dt><dd>{item.actor_kind === 'legacy_unknown' ? <span>历史执行者不明</span> : <><span>{item.actor_kind === 'admin' ? '管理员' : item.actor_kind === 'employee' ? '员工' : '系统'}</span><code>{item.actor_id}</code></>}</dd></div>
             <div><dt>目标</dt><dd><span>{item.target_type}</span><code>{item.target_id}</code></dd></div>
             <div><dt>事实 ID / revision</dt><dd><code>{item.event_id}</code><span>{item.revision === null ? '无 revision' : `r${item.revision}`}</span></dd></div>
           </dl>

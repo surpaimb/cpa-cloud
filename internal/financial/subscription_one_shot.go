@@ -509,7 +509,7 @@ func (c *Commercial) processOneShotRenewal(ctx context.Context, id string) (bool
 		return false, ErrSchema
 	}
 	digest, _ := DigestPayload(struct{ ID string }{id})
-	meta := WriteMeta{OperationID: executionID, PayloadDigest: digest, ObservedAt: now}
+	meta := WriteMeta{OperationID: executionID, Actor: Actor{Kind: ActorSystem, ID: "subscription_one_shot_worker"}, PayloadDigest: digest, ObservedAt: now}
 	if _, found, err := existingCommercialOperation(ctx, tx, meta, "subscription.renew"); err != nil {
 		return false, err
 	} else if found {

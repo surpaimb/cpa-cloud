@@ -116,7 +116,7 @@ func TestEmployeeActivityFailsClosedOnSchemaRowCommitAndCancel(t *testing.T) {
 				if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := db.Exec(`INSERT INTO financial_operations(operation_id,action,actor_admin_id,resource_kind,resource_id,payload_digest,created_at) VALUES('activity-bad-op','adjustment','admin-one','adjustment','activity-bad',randomblob(32),?)`, financialTestTime.Format(time.RFC3339Nano)); err != nil {
+				if _, err := db.Exec(`INSERT INTO financial_operations(operation_id,action,actor_kind,actor_admin_id,resource_kind,resource_id,payload_digest,digest_version,created_at) VALUES('activity-bad-op','adjustment','admin','admin-one','adjustment','activity-bad',randomblob(32),2,?)`, financialTestTime.Format(time.RFC3339Nano)); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := db.Exec(`INSERT INTO financial_entries(id,operation_id,account_id,kind,amount_micro,resource_kind,resource_id,created_at) VALUES('activity-bad','activity-bad-op',(SELECT id FROM financial_accounts WHERE owner_kind='employee' AND employee_id='employee-one' AND currency='USD'),'adjustment_credit','bad','adjustment','activity-bad',?)`, financialTestTime.Format(time.RFC3339Nano)); err != nil {

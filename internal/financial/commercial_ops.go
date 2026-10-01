@@ -60,6 +60,7 @@ type Refund struct {
 
 type WriteMeta struct {
 	OperationID, ActorAdminID string
+	Actor                     Actor
 	PayloadDigest             [32]byte
 	ObservedAt                time.Time
 }
@@ -630,7 +631,7 @@ func (c *Commercial) PurchaseSubscription(ctx context.Context, input PurchaseSub
 	if available < plan.PriceMicro {
 		return Subscription{}, CommercialReceipt{}, ErrInsufficient
 	}
-	posted, err := ledger.PostTx(ctx, tx, Post{OperationID: input.Meta.OperationID, Action: "subscription_purchase", ActorAdminID: input.Meta.ActorAdminID, ResourceKind: "subscription", ResourceID: id, ObservedAt: input.Meta.ObservedAt, RequireNonNegative: true, Entries: []EntryInput{{Owner: input.Owner, Currency: plan.Currency, Kind: EntrySubscriptionCharge, AmountMicro: -plan.PriceMicro, ResourceKind: "subscription", ResourceID: id}, {Owner: input.Owner, Currency: plan.Currency, Kind: EntrySubscriptionCredit, AmountMicro: plan.CreditMicro, ResourceKind: "subscription", ResourceID: id}}})
+	posted, err := ledger.PostTx(ctx, tx, Post{OperationID: input.Meta.OperationID, Action: "subscription_purchase", Actor: input.Meta.Actor, ActorAdminID: input.Meta.ActorAdminID, ResourceKind: "subscription", ResourceID: id, ObservedAt: input.Meta.ObservedAt, RequireNonNegative: true, Entries: []EntryInput{{Owner: input.Owner, Currency: plan.Currency, Kind: EntrySubscriptionCharge, AmountMicro: -plan.PriceMicro, ResourceKind: "subscription", ResourceID: id}, {Owner: input.Owner, Currency: plan.Currency, Kind: EntrySubscriptionCredit, AmountMicro: plan.CreditMicro, ResourceKind: "subscription", ResourceID: id}}})
 	if err != nil {
 		return Subscription{}, CommercialReceipt{}, err
 	}
@@ -797,7 +798,7 @@ func (c *Commercial) Redeem(ctx context.Context, input RedeemCode) (Entry, Comme
 	if err != nil {
 		return Entry{}, CommercialReceipt{}, ErrUnavailable
 	}
-	posted, err := NewLedger(c.db).PostTx(ctx, tx, Post{OperationID: input.Meta.OperationID, Action: "redemption", ActorAdminID: input.Meta.ActorAdminID, ResourceKind: "redemption", ResourceID: redemptionID, ObservedAt: input.Meta.ObservedAt, Entries: []EntryInput{{Owner: input.Owner, Currency: currency, Kind: EntryRedemption, AmountMicro: amount, ResourceKind: "redemption", ResourceID: redemptionID}}})
+	posted, err := NewLedger(c.db).PostTx(ctx, tx, Post{OperationID: input.Meta.OperationID, Action: "redemption", Actor: input.Meta.Actor, ActorAdminID: input.Meta.ActorAdminID, ResourceKind: "redemption", ResourceID: redemptionID, ObservedAt: input.Meta.ObservedAt, Entries: []EntryInput{{Owner: input.Owner, Currency: currency, Kind: EntryRedemption, AmountMicro: amount, ResourceKind: "redemption", ResourceID: redemptionID}}})
 	if err != nil {
 		return Entry{}, CommercialReceipt{}, err
 	}
@@ -863,7 +864,7 @@ func (c *Commercial) ApplyPaid(ctx context.Context, input ApplyPayment) (TopUp, 
 		return TopUp{}, err
 	}
 	operationID := "webhook:" + input.ConnectorID + ":" + input.EventID
-	posted, err := NewLedger(c.db).PostTx(ctx, tx, Post{OperationID: operationID, Action: "payment_callback", ResourceKind: "topup", ResourceID: item.ID, ObservedAt: input.ObservedAt, Entries: []EntryInput{{Owner: owner, Currency: item.Currency, Kind: EntryTopUp, AmountMicro: item.AmountMicro, ResourceKind: "topup", ResourceID: item.ID}}})
+	posted, err := NewLedger(c.db).PostTx(ctx, tx, Post{OperationID: operationID, Action: "payment_callback", Actor: Actor{Kind: ActorSystem, ID: "payment_callback"}, ResourceKind: "topup", ResourceID: item.ID, ObservedAt: input.ObservedAt, Entries: []EntryInput{{Owner: owner, Currency: item.Currency, Kind: EntryTopUp, AmountMicro: item.AmountMicro, ResourceKind: "topup", ResourceID: item.ID}}})
 	if err != nil {
 		return TopUp{}, err
 	}
@@ -924,7 +925,7 @@ func (c *Commercial) RefundPayment(ctx context.Context, input CreateRefund) (Ref
 	if err != nil {
 		return Refund{}, CommercialReceipt{}, ErrUnavailable
 	}
-	posted, err := NewLedger(c.db).PostTx(ctx, tx, Post{OperationID: input.Meta.OperationID, Action: "refund", ActorAdminID: input.Meta.ActorAdminID, ResourceKind: "refund", ResourceID: id, ObservedAt: input.Meta.ObservedAt, RequireNonNegative: true, Entries: []EntryInput{{Owner: owner, Currency: item.Currency, Kind: EntryAdjustmentDebit, AmountMicro: -input.AmountMicro, OriginalEntryID: item.PaidEntryID, ResourceKind: "refund", ResourceID: id}}})
+	posted, err := NewLedger(c.db).PostTx(ctx, tx, Post{OperationID: input.Meta.OperationID, Action: "refund", Actor: input.Meta.Actor, ActorAdminID: input.Meta.ActorAdminID, ResourceKind: "refund", ResourceID: id, ObservedAt: input.Meta.ObservedAt, RequireNonNegative: true, Entries: []EntryInput{{Owner: owner, Currency: item.Currency, Kind: EntryAdjustmentDebit, AmountMicro: -input.AmountMicro, OriginalEntryID: item.PaidEntryID, ResourceKind: "refund", ResourceID: id}}})
 	if err != nil {
 		return Refund{}, CommercialReceipt{}, err
 	}
@@ -959,15 +960,17 @@ func (c *Commercial) RefundPayment(ctx context.Context, input CreateRefund) (Ref
 func existingCommercialOperation(ctx context.Context, tx *sql.Tx, meta WriteMeta, expectedAction string) (CommercialReceipt, bool, error) {
 	var receipt CommercialReceipt
 	var digest []byte
-	var action, actor, created string
-	err := tx.QueryRowContext(ctx, `SELECT operation_id,action,COALESCE(actor_admin_id,''),payload_digest,resource_kind,resource_id,revision,created_at FROM financial_commercial_operations WHERE operation_id=?`, meta.OperationID).Scan(&receipt.OperationID, &action, &actor, &digest, &receipt.ResourceKind, &receipt.ResourceID, &receipt.Revision, &created)
+	var action, actorKind, created string
+	var adminID, employeeID, systemID sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT operation_id,action,actor_kind,actor_admin_id,actor_employee_id,actor_system_id,payload_digest,resource_kind,resource_id,revision,created_at FROM financial_commercial_operations WHERE operation_id=?`, meta.OperationID).Scan(&receipt.OperationID, &action, &actorKind, &adminID, &employeeID, &systemID, &digest, &receipt.ResourceKind, &receipt.ResourceID, &receipt.Revision, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommercialReceipt{}, false, nil
 	}
 	if err != nil {
 		return CommercialReceipt{}, false, ErrUnavailable
 	}
-	if action != expectedAction || actor != meta.ActorAdminID || !equalBytes(digest, meta.PayloadDigest[:]) {
+	actor, ok := effectiveActor(meta.Actor, meta.ActorAdminID)
+	if !ok || !validActionActor(actor, expectedAction, true) || action != expectedAction || !actorMatchesColumns(actor, actorKind, adminID, employeeID, systemID) || !equalBytes(digest, meta.PayloadDigest[:]) {
 		return CommercialReceipt{}, false, ErrConflict
 	}
 	receipt.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
@@ -978,11 +981,12 @@ func existingCommercialOperation(ctx context.Context, tx *sql.Tx, meta WriteMeta
 	return receipt, true, nil
 }
 func insertCommercialOperation(ctx context.Context, tx *sql.Tx, meta WriteMeta, action string, receipt CommercialReceipt) error {
-	actor := any(nil)
-	if meta.ActorAdminID != "" {
-		actor = meta.ActorAdminID
+	actor, ok := effectiveActor(meta.Actor, meta.ActorAdminID)
+	if !ok || !validActionActor(actor, action, true) {
+		return ErrInvalid
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_commercial_operations(operation_id,action,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at) VALUES(?,?,?,?,?,?,?,?)`, meta.OperationID, action, actor, meta.PayloadDigest[:], receipt.ResourceKind, receipt.ResourceID, receipt.Revision, formatCommercialTime(meta.ObservedAt)); err != nil {
+	adminID, employeeID, systemID := actorColumns(actor)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_commercial_operations(operation_id,action,actor_kind,actor_admin_id,actor_employee_id,actor_system_id,payload_digest,resource_kind,resource_id,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, meta.OperationID, action, actor.Kind, adminID, employeeID, systemID, meta.PayloadDigest[:], receipt.ResourceKind, receipt.ResourceID, receipt.Revision, formatCommercialTime(meta.ObservedAt)); err != nil {
 		return ErrUnavailable
 	}
 	return nil
@@ -998,7 +1002,8 @@ func requireCommercialEnabled(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 func validMeta(meta WriteMeta) bool {
-	return validCommercialText(meta.OperationID, 128) && (meta.ActorAdminID == "" || validCommercialText(meta.ActorAdminID, 256)) && meta.ObservedAt.Location() == time.UTC
+	_, validActor := effectiveActor(meta.Actor, meta.ActorAdminID)
+	return validCommercialText(meta.OperationID, 128) && validActor && meta.ObservedAt.Location() == time.UTC
 }
 func boolInt(value bool) int {
 	if value {

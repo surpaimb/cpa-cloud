@@ -13,9 +13,10 @@ func ValidateCommercialAuditSource(ctx context.Context, tx *sql.Tx) error {
 		return ErrSchema
 	}
 	objects := map[string]struct{ kind, table, ddl string }{
-		"financial_commercial_operations":           {"table", "financial_commercial_operations", commercialOperationsDDL},
-		"financial_commercial_operations_no_update": {"trigger", "financial_commercial_operations", commercialOperationsNoUpdateDDL},
-		"financial_commercial_operations_no_delete": {"trigger", "financial_commercial_operations", commercialOperationsNoDeleteDDL},
+		"financial_commercial_operations":                   {"table", "financial_commercial_operations", commercialOperationsDDL},
+		"financial_commercial_operations_no_update":         {"trigger", "financial_commercial_operations", commercialOperationsNoUpdateDDL},
+		"financial_commercial_operations_no_delete":         {"trigger", "financial_commercial_operations", commercialOperationsNoDeleteDDL},
+		"financial_commercial_operations_no_unknown_insert": {"trigger", "financial_commercial_operations", commercialOperationsNoUnknownInsertDDL},
 	}
 	for name, expected := range objects {
 		var kind, table, actual string
@@ -24,7 +25,7 @@ func ValidateCommercialAuditSource(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	var triggers int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='financial_commercial_operations'`).Scan(&triggers); err != nil || triggers != 2 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='financial_commercial_operations'`).Scan(&triggers); err != nil || triggers != 3 {
 		return ErrSchema
 	}
 	return nil

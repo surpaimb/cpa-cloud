@@ -2,6 +2,8 @@
 
 状态：AUDIT-01 第三段开发契约，2026-09-30。沿用[只读总览契约](admin-audit-overview-contract.md)及[财务第五源增量](admin-audit-financial-source-contract.md)的事实范围、鉴权、筛选、时间、排序、schema 校验和隐私边界；本文件只规定导出增量。实现依据本仓自有规格、Go 标准库 HTTP/CSV 与现有 SQLite 接口，无新依赖、外部协议或参考项目代码。
 
+后续[财务 actor provenance v1 契约](financial-actor-provenance-contract.md)覆盖本文件的 CSV actor 列序和空值解释：升级后在 `actor_id` 前增加 `actor_kind`；仅 `legacy_unknown` 的 `actor_id` 为空，employee/system ID 不得伪称管理员。本文件旧列序仅描述升级前导出。
+
 ## 范围与 HTTP
 
 `GET /admin/api/v1/audit/events/export.csv` 是独立的管理员会话只读接口；员工 Key、匿名请求无权访问。沿用管理员 GET 的可选同源 `Origin` 检查，错误 Origin 为 403；不要求 CSRF token。所有成功与错误响应均 `Cache-Control: no-store`，错误为既有固定脱敏 JSON，不包含 SQL、行内容或秘密。新增 `features.admin_audit_csv_export=true` 仅表示本接口可用；网页必须同时具备 `admin_audit_overview=true` 才显示导出控件，缺失时不发送导出请求。第五源筛选仍由独立的 `admin_audit_financial_source` 能力决定，旧服务能力缺失时不得发送第五源 token。

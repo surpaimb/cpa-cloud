@@ -40,9 +40,11 @@ func openStore(dataDir string) (*store, error) {
 
 func (s *store) initialize(ctx context.Context) error {
 	statements := []string{
+		// The timeout must be installed before journal_mode or schema DDL:
+		// either may encounter a briefly locked database during restart.
+		`PRAGMA busy_timeout = 5000`,
 		`PRAGMA journal_mode = WAL`,
 		`PRAGMA foreign_keys = ON`,
-		`PRAGMA busy_timeout = 5000`,
 		`CREATE TABLE IF NOT EXISTS admins (
 			id TEXT PRIMARY KEY,
 			username TEXT NOT NULL UNIQUE,

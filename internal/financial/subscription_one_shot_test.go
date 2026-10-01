@@ -114,9 +114,12 @@ func TestOneShotDueCurrentPlanAtomicAndRestart(t *testing.T) {
 	if err := c.db.QueryRow(`SELECT COUNT(*) FROM financial_entries WHERE operation_id=?`, operationID).Scan(&entries); err != nil || entries != 2 {
 		t.Fatalf("money entries=%d err=%v", entries, err)
 	}
-	var actor any
-	if err := c.db.QueryRow(`SELECT actor_admin_id FROM financial_commercial_operations WHERE operation_id=?`, operationID).Scan(&actor); err != nil || actor != nil {
-		t.Fatalf("worker actor=%v err=%v", actor, err)
+	for _, table := range []string{"financial_commercial_operations", "financial_operations"} {
+		var kind, actorID string
+		var adminID, employeeID any
+		if err := c.db.QueryRow(`SELECT actor_kind,actor_admin_id,actor_employee_id,actor_system_id FROM `+table+` WHERE operation_id=?`, operationID).Scan(&kind, &adminID, &employeeID, &actorID); err != nil || kind != "system" || actorID != "subscription_one_shot_worker" || adminID != nil || employeeID != nil {
+			t.Fatalf("worker %s actor kind=%q id=%q admin=%v employee=%v err=%v", table, kind, actorID, adminID, employeeID, err)
+		}
 	}
 	if count, err := c.ProcessDueOneShotRenewals(ctx, due.Add(time.Hour)); err != nil || count != 0 {
 		t.Fatalf("replay count=%d err=%v", count, err)
@@ -260,7 +263,7 @@ func TestOneShotConcurrentWorkersAtMostOneSuccess(t *testing.T) {
 	}
 }
 
-func TestOneShotMigrationPreservesExistingManualRenewalLink(t *testing.T) {
+func TestOneShotMixedGenerationMigrationFailsClosed(t *testing.T) {
 	for _, malformed := range []bool{false, true} {
 		name := "valid"
 		if malformed {
@@ -284,7 +287,7 @@ func TestOneShotMigrationPreservesExistingManualRenewalLink(t *testing.T) {
 			}
 			defer tx.Rollback()
 			for _, statement := range []string{
-				`CREATE TEMP TABLE prior_ops AS SELECT * FROM financial_commercial_operations`,
+				`CREATE TEMP TABLE prior_ops AS SELECT operation_id,action,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at FROM financial_commercial_operations`,
 				`CREATE TEMP TABLE prior_links AS SELECT * FROM financial_subscription_renewals`,
 				`DROP TABLE financial_subscription_one_shot_renewals`,
 				`DROP TABLE financial_subscription_renewals`,
@@ -319,29 +322,20 @@ func TestOneShotMigrationPreservesExistingManualRenewalLink(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = NewCommercial(c.db).Migrate(ctx)
-			if malformed {
-				if !errors.Is(err, ErrSchema) {
-					t.Fatalf("malformed migration=%v", err)
-				}
-				var schema string
-				if err := c.db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='financial_commercial_operations'`).Scan(&schema); err != nil || normalize(schema) != normalize(storedDDL(commercialOperationsBeforeOneShotDDL)) {
-					t.Fatalf("migration changed old schema on failure: %v", err)
-				}
-				var reservations int
-				if err := c.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='financial_subscription_one_shot_renewals'`).Scan(&reservations); err != nil || reservations != 0 {
-					t.Fatalf("partial reservation table count=%d err=%v", reservations, err)
-				}
-				return
+			if !errors.Is(err, ErrSchema) {
+				t.Fatalf("L2/C2 mixed generation accepted: %v", err)
 			}
-			if err != nil {
-				t.Fatalf("upgrade with manual link=%v", err)
+			var schema string
+			if err := c.db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='financial_commercial_operations'`).Scan(&schema); err != nil || normalize(schema) != normalize(storedDDL(commercialOperationsBeforeOneShotDDL)) {
+				t.Fatalf("migration changed old schema on failure: %v", err)
 			}
-			if err := NewCommercial(c.db).Migrate(ctx); err != nil {
-				t.Fatalf("idempotent reopen=%v", err)
+			var reservations int
+			if err := c.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='financial_subscription_one_shot_renewals'`).Scan(&reservations); err != nil || reservations != 0 {
+				t.Fatalf("partial reservation table count=%d err=%v", reservations, err)
 			}
 			var linkedSuccessor string
 			if err := c.db.QueryRow(`SELECT successor_id FROM financial_subscription_renewals WHERE predecessor_id='renew-old'`).Scan(&linkedSuccessor); err != nil || linkedSuccessor != successor.ID {
-				t.Fatalf("preserved successor=%q err=%v", linkedSuccessor, err)
+				t.Fatalf("failed migration changed successor=%q err=%v", linkedSuccessor, err)
 			}
 		})
 	}
@@ -350,7 +344,7 @@ func TestOneShotMigrationPreservesExistingManualRenewalLink(t *testing.T) {
 func TestOneShotOrphanArmFactFailsClosed(t *testing.T) {
 	c, _, due, _ := renewalFixture(t)
 	input := oneShotArmInput(t, "renew-old", "one-shot-orphan", 1, due.Add(-time.Second))
-	if _, err := c.db.Exec(`INSERT INTO financial_commercial_operations(operation_id,action,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at) VALUES(?,'subscription.one_shot.arm',?,?,'subscription_one_shot','renew-old',1,?)`, input.Meta.OperationID, input.Meta.ActorAdminID, input.Meta.PayloadDigest[:], formatCommercialTime(due.Add(-time.Second))); err != nil {
+	if _, err := c.db.Exec(`INSERT INTO financial_commercial_operations(operation_id,action,actor_kind,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at) VALUES(?,'subscription.one_shot.arm','admin',?,?,'subscription_one_shot','renew-old',1,?)`, input.Meta.OperationID, input.Meta.ActorAdminID, input.Meta.PayloadDigest[:], formatCommercialTime(due.Add(-time.Second))); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.OneShotRenewal(context.Background(), "renew-old"); !errors.Is(err, ErrSchema) {

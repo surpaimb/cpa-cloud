@@ -74,7 +74,7 @@ func TestAdminAuditExportFiveSourcesOrderingFilteringAndMetadataOnly(t *testing.
 			t.Fatalf("row %d=%v", index, records[index+1])
 		}
 	}
-	if records[1][7] != "" || records[3][2] != "" || records[3][7] != "1" || records[3][8] != "2026-09-29T10:00:00.1Z" {
+	if records[1][8] != "" || records[3][2] != "legacy_unknown" || records[3][3] != "" || records[3][8] != "1" || records[3][9] != "2026-09-29T10:00:00.1Z" {
 		t.Fatalf("nullable/revision/time projection=%v", records)
 	}
 	for _, forbidden := range []string{"payload_digest", "csrf_token", "credential_ciphertext", "amount_micro", "prompt", "response_body"} {
@@ -85,7 +85,7 @@ func TestAdminAuditExportFiveSourcesOrderingFilteringAndMetadataOnly(t *testing.
 
 	filter := endpoint + "&sources=account_pool,financial_commercial&action=redemption.redeem&target_type=redemption&target_id=redeem-export&result=succeeded"
 	_, selected := readAdminAuditCSV(t, requestJSON(t, http.MethodGet, filter, "", fixture.cookie, "", ""))
-	if len(selected) != 2 || selected[1][0] != "financial_commercial" || selected[1][2] != "" {
+	if len(selected) != 2 || selected[1][0] != "financial_commercial" || selected[1][2] != "legacy_unknown" || selected[1][3] != "" {
 		t.Fatalf("filtered CSV=%v", selected)
 	}
 	_, empty := readAdminAuditCSV(t, requestJSON(t, http.MethodGet, endpoint+"&sources=account_pool&action=not-found", "", fixture.cookie, "", ""))
@@ -106,7 +106,7 @@ func TestAdminAuditExportRejectsParametersAndFailsClosed(t *testing.T) {
 	for _, statement := range []string{
 		`DROP TABLE financial_commercial_operations`,
 		`DROP TRIGGER financial_commercial_operations_no_update`,
-		`INSERT INTO financial_commercial_operations(operation_id,action,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at) VALUES('bad-export','settings.update',NULL,zeroblob(32),'settings','',1,'2026-09-29T10:00:00Z')`,
+		`INSERT INTO financial_commercial_operations(operation_id,action,actor_kind,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at) VALUES('bad-export','settings.update','admin',(SELECT id FROM admins LIMIT 1),zeroblob(32),'settings','',1,'2026-09-29T10:00:00Z')`,
 	} {
 		t.Run(statement[:strings.IndexByte(statement, ' ')], func(t *testing.T) {
 			broken := newRuntimeAccountPoolFixture(t)
@@ -159,7 +159,7 @@ func TestAdminAuditExportRowsAndBytesAreBounded(t *testing.T) {
 	long := strings.Repeat(`"`, 256)
 	items := make([]adminAuditEventView, adminAuditExportMaxRows)
 	for index := range items {
-		items[index] = adminAuditEventView{Source: "account_pool", EventID: long, ActorID: &long, Action: long, TargetType: long, TargetID: long, Result: "succeeded", OccurredAt: "2026-09-29T10:00:00Z"}
+		items[index] = adminAuditEventView{Source: "account_pool", EventID: long, ActorKind: "admin", ActorID: &long, Action: long, TargetType: long, TargetID: long, Result: "succeeded", OccurredAt: "2026-09-29T10:00:00Z"}
 	}
 	if _, err := encodeAdminAuditCSV(context.Background(), items); !errors.Is(err, errAdminAuditExportTooLarge) {
 		t.Fatalf("byte bound err=%v", err)
@@ -192,7 +192,7 @@ func TestAdminAuditExportRowsAndBytesAreBounded(t *testing.T) {
 
 func TestAdminAuditExportCSVFormulaSafetyAndCancellation(t *testing.T) {
 	actor := "@LOOKUP()"
-	item := adminAuditEventView{Source: "account_pool", EventID: "=1+1", ActorID: &actor, Action: "+cmd", TargetType: "-value", TargetID: `@x,"quoted"`, Result: "succeeded", OccurredAt: "2026-09-29T10:00:00Z"}
+	item := adminAuditEventView{Source: "account_pool", EventID: "=1+1", ActorKind: "admin", ActorID: &actor, Action: "+cmd", TargetType: "-value", TargetID: `@x,"quoted"`, Result: "succeeded", OccurredAt: "2026-09-29T10:00:00Z"}
 	payload, err := encodeAdminAuditCSV(context.Background(), []adminAuditEventView{item})
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +201,7 @@ func TestAdminAuditExportCSVFormulaSafetyAndCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index, want := range map[int]string{1: "'=1+1", 2: "'@LOOKUP()", 3: "'+cmd", 4: "'-value", 5: `'@x,"quoted"`} {
+	for index, want := range map[int]string{1: "'=1+1", 3: "'@LOOKUP()", 4: "'+cmd", 5: "'-value", 6: `'@x,"quoted"`} {
 		if records[1][index] != want {
 			t.Fatalf("column %d=%q want %q", index, records[1][index], want)
 		}

@@ -78,7 +78,7 @@ func TestEmployeeBalanceFailsClosedOnBadSchemaRowOverflowAndCommit(t *testing.T)
 		if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec(`INSERT INTO financial_operations(operation_id,action,actor_admin_id,resource_kind,resource_id,payload_digest,created_at) VALUES('bad-row-op','adjustment','admin-one','adjustment','bad-row',randomblob(32),?)`, financialTestTime.Format(time.RFC3339Nano)); err != nil {
+		if _, err := db.Exec(`INSERT INTO financial_operations(operation_id,action,actor_kind,actor_admin_id,resource_kind,resource_id,payload_digest,digest_version,created_at) VALUES('bad-row-op','adjustment','admin','admin-one','adjustment','bad-row',randomblob(32),2,?)`, financialTestTime.Format(time.RFC3339Nano)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := db.Exec(`INSERT INTO financial_entries(id,operation_id,account_id,kind,amount_micro,resource_kind,resource_id,created_at) VALUES('bad-row-entry','bad-row-op',(SELECT id FROM financial_accounts WHERE owner_kind='employee' AND employee_id='employee-one' AND currency='USD'),'adjustment_credit','not-a-number','adjustment','bad-row',?)`, financialTestTime.Add(time.Second).Format(time.RFC3339Nano)); err != nil {
@@ -96,7 +96,7 @@ func TestEmployeeBalanceFailsClosedOnBadSchemaRowOverflowAndCommit(t *testing.T)
 			t.Fatal(err)
 		}
 		postEmployeeBalanceEntry(t, ledger, "max-seed", Owner{Kind: OwnerEmployee, EmployeeID: "employee-one"}, "USD", EntryAdjustmentCredit, math.MaxInt64, financialTestTime)
-		if _, err := db.Exec(`INSERT INTO financial_operations(operation_id,action,actor_admin_id,resource_kind,resource_id,payload_digest,created_at) VALUES('overflow-op','adjustment','admin-one','adjustment','overflow',randomblob(32),?)`, financialTestTime.Add(time.Second).Format(time.RFC3339Nano)); err != nil {
+		if _, err := db.Exec(`INSERT INTO financial_operations(operation_id,action,actor_kind,actor_admin_id,resource_kind,resource_id,payload_digest,digest_version,created_at) VALUES('overflow-op','adjustment','admin','admin-one','adjustment','overflow',randomblob(32),2,?)`, financialTestTime.Add(time.Second).Format(time.RFC3339Nano)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := db.Exec(`INSERT INTO financial_entries(id,operation_id,account_id,kind,amount_micro,resource_kind,resource_id,created_at) VALUES('overflow-entry','overflow-op',(SELECT id FROM financial_accounts WHERE owner_kind='employee' AND employee_id='employee-one' AND currency='USD'),'adjustment_credit',1,'adjustment','overflow',?)`, financialTestTime.Add(time.Second).Format(time.RFC3339Nano)); err != nil {

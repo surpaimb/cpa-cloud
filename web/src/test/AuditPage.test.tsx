@@ -17,10 +17,10 @@ function auditPage(nextCursor: string | null = null): AdminAuditPage {
     snapshot_at: '2026-09-29T08:30:00.123456789Z',
     sources: ['account_pool', 'account_lifecycle', 'governance_management', 'governance_general_budget'],
     items: [
-      { source: 'account_pool', event_id: 'pool-2', actor_id: 'admin-1', action: 'account_group.update', target_type: 'account_group', target_id: 'group-1', result: 'succeeded', revision: null, occurred_at: '2026-09-29T08:00:00.1Z' },
-      { source: 'account_lifecycle', event_id: 'life-1', actor_id: 'admin-1', action: 'account.archive', target_type: 'account', target_id: 'account-1', result: 'succeeded', revision: null, occurred_at: '2026-09-29T08:00:00.1Z' },
-      { source: 'governance_management', event_id: 'gov-1', actor_id: 'admin-1', action: 'policy.update', target_type: 'policy', target_id: 'policy-1', result: 'succeeded', revision: 7, occurred_at: '2026-09-29T07:00:00.123456789Z' },
-      { source: 'governance_general_budget', event_id: 'budget-1', actor_id: 'admin-1', action: 'budget.create', target_type: 'budget', target_id: 'budget-1', result: 'succeeded', revision: 1, occurred_at: '2026-09-29T06:00:00Z' },
+      { source: 'account_pool', event_id: 'pool-2', actor_kind: 'admin', actor_id: 'admin-1', action: 'account_group.update', target_type: 'account_group', target_id: 'group-1', result: 'succeeded', revision: null, occurred_at: '2026-09-29T08:00:00.1Z' },
+      { source: 'account_lifecycle', event_id: 'life-1', actor_kind: 'admin', actor_id: 'admin-1', action: 'account.archive', target_type: 'account', target_id: 'account-1', result: 'succeeded', revision: null, occurred_at: '2026-09-29T08:00:00.1Z' },
+      { source: 'governance_management', event_id: 'gov-1', actor_kind: 'admin', actor_id: 'admin-1', action: 'policy.update', target_type: 'policy', target_id: 'policy-1', result: 'succeeded', revision: 7, occurred_at: '2026-09-29T07:00:00.123456789Z' },
+      { source: 'governance_general_budget', event_id: 'budget-1', actor_kind: 'admin', actor_id: 'admin-1', action: 'budget.create', target_type: 'budget', target_id: 'budget-1', result: 'succeeded', revision: 1, occurred_at: '2026-09-29T06:00:00Z' },
     ],
     next_cursor: nextCursor,
   }
@@ -61,7 +61,7 @@ describe('AuditPage', () => {
     expect(await screen.findByText('当前窗口没有匹配事实')).toBeInTheDocument()
     expect(calls).toHaveLength(2)
 
-    await userEvent.type(screen.getByLabelText('操作人（精确）'), 'admin-1')
+    await userEvent.type(screen.getByLabelText('管理员 ID（精确）'), 'admin-1')
     await userEvent.click(screen.getByRole('button', { name: '应用筛选' }))
     await waitFor(() => expect(calls).toHaveLength(3))
     expect(calls[2]).toContain('actor_id=admin-1')
@@ -116,7 +116,7 @@ describe('AuditPage', () => {
     }))
     render(<AuditPage />)
     await screen.findByText('account_group.update')
-    await userEvent.type(screen.getByLabelText('操作人（精确）'), 'new-admin')
+    await userEvent.type(screen.getByLabelText('管理员 ID（精确）'), 'new-admin')
     await userEvent.click(screen.getByRole('button', { name: '应用筛选' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('审计暂时不可用')
     await userEvent.click(screen.getByRole('button', { name: '重新加载' }))
@@ -128,16 +128,46 @@ describe('AuditPage', () => {
 })
 
 describe('financial commercial audit source', () => {
+  it('labels employee, system and historical-unknown actors without claiming they are administrators', async () => {
+    const page = auditPage()
+    page.sources = [...page.sources, 'financial_commercial']
+    page.items = [
+      { source: 'financial_commercial', event_id: 'typed-employee', actor_kind: 'employee', actor_id: 'employee-1', action: 'plan.create', target_type: 'plan', target_id: 'plan-1', result: 'succeeded', revision: 1, occurred_at: '2026-09-29T08:00:00Z' },
+      { source: 'financial_commercial', event_id: 'typed-system', actor_kind: 'system', actor_id: 'subscription_one_shot_worker', action: 'subscription.renew', target_type: 'subscription', target_id: 'sub-1', result: 'succeeded', revision: 1, occurred_at: '2026-09-29T07:00:00Z' },
+      { source: 'financial_commercial', event_id: 'typed-unknown', actor_kind: 'legacy_unknown', actor_id: null, action: 'plan.create', target_type: 'plan', target_id: 'plan-old', result: 'succeeded', revision: 1, occurred_at: '2026-09-29T06:00:00Z' },
+    ]
+    vi.stubGlobal('fetch', vi.fn(() => response(page)))
+    render(<AuditPage financialSource />)
+    expect(await screen.findByText('typed-employee')).toBeInTheDocument()
+    expect(screen.getByText('employee-1')).toBeInTheDocument()
+    expect(screen.getByText('subscription_one_shot_worker')).toBeInTheDocument()
+    expect(screen.getAllByText('员工')).toHaveLength(1)
+    expect(screen.getAllByText('系统')).toHaveLength(1)
+    expect(screen.getByText('历史执行者不明')).toBeInTheDocument()
+    expect(screen.queryByText('未关联管理员')).not.toBeInTheDocument()
+  })
+
+  it('rejects a fifth-source response that omits actor_kind', async () => {
+    const page = auditPage()
+    page.sources = [...page.sources, 'financial_commercial']
+    page.items = [{ source: 'financial_commercial', event_id: 'untyped', actor_kind: 'admin', actor_id: 'admin-1', action: 'plan.create', target_type: 'plan', target_id: 'plan-1', result: 'succeeded', revision: 1, occurred_at: '2026-09-29T08:00:00Z' }]
+    delete (page.items[0] as unknown as Record<string, unknown>).actor_kind
+    vi.stubGlobal('fetch', vi.fn(() => response(page)))
+    render(<AuditPage financialSource />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('审计响应格式无效')
+    expect(screen.queryByText('untyped')).not.toBeInTheDocument()
+  })
+
   it('shows a committed financial fact with no linked administrator only when the new capability is enabled', async () => {
     const calls: string[] = []
     const page = auditPage()
     page.sources = [...page.sources, 'financial_commercial']
-    page.items.push({ source: 'financial_commercial', event_id: 'financial-1', actor_id: null, action: 'redemption.redeem', target_type: 'redemption', target_id: 'redemption-1', result: 'succeeded', revision: 1, occurred_at: '2026-09-29T05:00:00Z' })
+    page.items.push({ source: 'financial_commercial', event_id: 'financial-1', actor_kind: 'legacy_unknown', actor_id: null, action: 'redemption.redeem', target_type: 'redemption', target_id: 'redemption-1', result: 'succeeded', revision: 1, occurred_at: '2026-09-29T05:00:00Z' })
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => { calls.push(String(input)); return response(page) }))
     render(<AuditPage financialSource />)
     expect(await screen.findByText('redemption.redeem')).toBeInTheDocument()
     expect(screen.getAllByText('财务商业操作').length).toBeGreaterThan(0)
-    expect(screen.getByText('未关联管理员')).toBeInTheDocument()
+    expect(screen.getByText('历史执行者不明')).toBeInTheDocument()
     expect(screen.getByText('事务已提交')).toBeInTheDocument()
     expect(screen.getByText(/不代表外部支付完成/)).toBeInTheDocument()
     expect(calls[0].endsWith('/admin/api/v1/audit/events?limit=20')).toBe(true)

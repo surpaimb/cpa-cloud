@@ -21,7 +21,7 @@ func TestBillingManualRenewalAdminBoundaryAndProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := financial.Owner{Kind: financial.OwnerEmployee, EmployeeID: "renew-employee"}
-	posted, err := financial.NewLedger(db).Post(context.Background(), financial.Post{OperationID: "renew-http-seed", Action: "adjustment", ResourceKind: "adjustment", ResourceID: "renew-http-seed", ObservedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Entries: []financial.EntryInput{{Owner: owner, Currency: "USD", Kind: financial.EntryAdjustmentCredit, AmountMicro: 100, ResourceKind: "adjustment", ResourceID: "renew-http-seed"}}})
+	posted, err := financial.NewLedger(db).Post(context.Background(), financial.Post{OperationID: "renew-http-seed", Action: "adjustment", Actor: financial.Actor{Kind: financial.ActorEmployee, ID: owner.EmployeeID}, ResourceKind: "adjustment", ResourceID: "renew-http-seed", ObservedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Entries: []financial.EntryInput{{Owner: owner, Currency: "USD", Kind: financial.EntryAdjustmentCredit, AmountMicro: 100, ResourceKind: "adjustment", ResourceID: "renew-http-seed"}}})
 	if err != nil || len(posted) != 1 {
 		t.Fatalf("seed entries=%+v err=%v", posted, err)
 	}

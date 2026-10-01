@@ -26,7 +26,7 @@ const (
 var errAdminAuditExportTooLarge = errors.New("audit export exceeds bound")
 
 var adminAuditCSVHeader = []string{
-	"source", "event_id", "actor_id", "action", "target_type", "target_id", "result", "revision", "occurred_at",
+	"source", "event_id", "actor_kind", "actor_id", "action", "target_type", "target_id", "result", "revision", "occurred_at",
 }
 
 func (a *App) getAdminAuditExport(w http.ResponseWriter, r *http.Request, _ adminSession) {
@@ -149,7 +149,10 @@ func encodeAdminAuditCSV(ctx context.Context, items []adminAuditEventView) ([]by
 			return nil, err
 		}
 		occurred, err := time.Parse(time.RFC3339Nano, item.OccurredAt)
-		if err != nil || item.OccurredAt != occurred.UTC().Format(time.RFC3339Nano) || adminAuditSourceRank(item.Source) < 0 || item.Result != "succeeded" || (item.ActorID == nil && item.Source != "financial_commercial") {
+		if err != nil || item.OccurredAt != occurred.UTC().Format(time.RFC3339Nano) || adminAuditSourceRank(item.Source) < 0 || item.Result != "succeeded" ||
+			(item.ActorID == nil) != (item.ActorKind == "legacy_unknown") ||
+			(item.Source != "financial_commercial" && item.ActorKind != "admin") ||
+			(item.Source == "financial_commercial" && item.ActorKind != "admin" && item.ActorKind != "employee" && item.ActorKind != "system" && item.ActorKind != "legacy_unknown") {
 			return nil, errors.New("invalid audit CSV event")
 		}
 		actor, revision := "", ""
@@ -165,9 +168,9 @@ func encodeAdminAuditCSV(ctx context.Context, items []adminAuditEventView) ([]by
 			}
 			revision = strconv.FormatInt(*item.Revision, 10)
 		}
-		fields := []string{item.Source, item.EventID, actor, item.Action, item.TargetType, item.TargetID, item.Result, revision, item.OccurredAt}
+		fields := []string{item.Source, item.EventID, item.ActorKind, actor, item.Action, item.TargetType, item.TargetID, item.Result, revision, item.OccurredAt}
 		for index, value := range fields {
-			if value == "" && ((index == 2 && item.ActorID == nil) || (index == 7 && item.Revision == nil)) {
+			if value == "" && ((index == 3 && item.ActorID == nil) || (index == 8 && item.Revision == nil)) {
 				continue
 			}
 			encoded, err := safeAdminAuditCSVCell(value)

@@ -73,7 +73,7 @@ func readActivityPage(t *testing.T, r *http.Response) selfActivityHTTPPage {
 func activityPost(t *testing.T, f selfWalletFixture, operation string, owner financial.Owner, currency string, kind financial.EntryKind, amount int64, at time.Time) {
 	t.Helper()
 	_, err := financial.NewLedger(f.app.store.db).Post(context.Background(), financial.Post{
-		OperationID: operation, Action: "adjustment", ResourceKind: "adjustment", ResourceID: operation, ObservedAt: at,
+		OperationID: operation, Action: "adjustment", Actor: financial.Actor{Kind: financial.ActorEmployee, ID: owner.EmployeeID}, ResourceKind: "adjustment", ResourceID: operation, ObservedAt: at,
 		Entries: []financial.EntryInput{{Owner: owner, Currency: currency, Kind: kind, AmountMicro: amount, ResourceKind: "adjustment", ResourceID: operation}},
 	})
 	if err != nil {

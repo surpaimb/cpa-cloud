@@ -1,4 +1,5 @@
 // Independently authored real-process AUDIT-01 acceptance for docs/admin-audit-export-contract.md
+// and docs/financial-actor-provenance-contract.md
 // using disposable data and synthetic metadata only.
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -12,7 +13,7 @@ assert.ok(server && webDir && path.isAbsolute(server) && path.isAbsolute(webDir)
 const dataDir = path.join(root, 'admin-audit-data');
 const upstreamSecret = 'synthetic-audit-' + randomBytes(20).toString('hex');
 const forbidden = [upstreamSecret, 'Authorization', 'Proxy-Authorization', 'prompt', 'response_body', 'payload_digest'];
-const allowedEventKeys = ['action', 'actor_id', 'event_id', 'occurred_at', 'result', 'revision', 'source', 'target_id', 'target_type'];
+const allowedEventKeys = ['action', 'actor_id', 'actor_kind', 'event_id', 'occurred_at', 'result', 'revision', 'source', 'target_id', 'target_type'];
 let serviceProcess;
 let combinedLogs = '';
 
@@ -26,6 +27,9 @@ function assertAuditPage(page) {
   for (const item of page.items) {
     assert.deepEqual(Object.keys(item).sort(), allowedEventKeys);
     assert.equal(item.result, 'succeeded');
+    assert.ok(['admin', 'employee', 'system', 'legacy_unknown'].includes(item.actor_kind));
+    if (item.source !== 'financial_commercial') assert.equal(item.actor_kind, 'admin');
+    assert.equal(item.actor_id === null, item.actor_kind === 'legacy_unknown');
     assert.match(item.occurred_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/);
   }
   const encoded = JSON.stringify(page);
@@ -97,6 +101,7 @@ try {
   assert.ok(items.some(item => item.target_id === governance.resource_id));
   assert.ok(items.some(item => item.target_id === budget.resource_id));
   assert.ok(items.some(item => item.source === 'financial_commercial' && item.target_id === financial.resource_id));
+  assert.ok(items.some(item => item.source === 'financial_commercial' && item.actor_kind === 'admin' && item.actor_id !== null));
   assert.ok(!items.some(item => item.target_id === afterWatermark.id), 'Post-watermark fact entered the cursor chain');
   assert.equal(new Set(items.map(item => `${item.source}:${item.event_id}`)).size, items.length, 'Cursor chain duplicated an event');
 
@@ -106,7 +111,7 @@ try {
   assert.equal(response.headers.get('content-disposition'), 'attachment; filename="cpa-cloud-admin-audit.csv"');
   assert.equal(response.headers.get('cache-control'), 'no-store');
   const exported = await response.text();
-  assert.ok(exported.startsWith('source,event_id,actor_id,action,target_type,target_id,result,revision,occurred_at\r\n'));
+  assert.ok(exported.startsWith('source,event_id,actor_kind,actor_id,action,target_type,target_id,result,revision,occurred_at\r\n'));
   for (const source of ['account_pool', 'account_lifecycle', 'governance_management', 'governance_general_budget', 'financial_commercial']) {
     assert.ok(exported.includes(source + ','), `CSV omitted ${source}`);
   }
