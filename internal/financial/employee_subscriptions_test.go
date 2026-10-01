@@ -127,7 +127,7 @@ func TestEmployeeSubscriptionsDirectOwnerStatusesAndKeyset(t *testing.T) {
 }
 
 func TestEmployeeSubscriptionsFailsClosedOnSchemaLookaheadCloseCommitAndCancel(t *testing.T) {
-	for _, variant := range []string{"schema", "lookahead", "close", "commit", "cancel"} {
+	for _, variant := range []string{"schema", "lookahead", "close", "commit", "cancel", "cancel_after_commit"} {
 		t.Run(variant, func(t *testing.T) {
 			db, commercial, monthPlan, _ := employeeSubscriptionFixture(t)
 			defer db.Close()
@@ -159,6 +159,19 @@ func TestEmployeeSubscriptionsFailsClosedOnSchemaLookaheadCloseCommitAndCancel(t
 				page, err := commercial.readEmployeeSubscriptions(ctx, "employee-one", "", 1, start, hooks)
 				if !errors.Is(err, ErrUnavailable) || len(page.Items) != 0 || page.NextPosition != "" {
 					t.Fatalf("cancel page=%+v err=%v", page, err)
+				}
+				return
+			case "cancel_after_commit":
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				hooks.commit = func(tx *sql.Tx) error {
+					err := tx.Commit()
+					cancel()
+					return err
+				}
+				page, err := commercial.readEmployeeSubscriptions(ctx, "employee-one", "", 1, start, hooks)
+				if !errors.Is(err, ErrUnavailable) || len(page.Items) != 0 || page.NextPosition != "" {
+					t.Fatalf("cancel after commit page=%+v err=%v", page, err)
 				}
 				return
 			}

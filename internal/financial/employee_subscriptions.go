@@ -97,6 +97,9 @@ func (c *Commercial) readEmployeeSubscriptions(ctx context.Context, employeeID, 
 	if err := commit(); err != nil {
 		return EmployeeSubscriptionPage{}, ErrUnavailable
 	}
+	if ctx.Err() != nil {
+		return EmployeeSubscriptionPage{}, ErrUnavailable
+	}
 	return page, nil
 }
 

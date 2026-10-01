@@ -122,6 +122,10 @@ func (a *App) selfSubscriptionStatus(w http.ResponseWriter, r *http.Request, ses
 		}
 		next = &encoded
 	}
+	if ctx.Err() != nil {
+		selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
 }
 
