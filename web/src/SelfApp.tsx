@@ -737,6 +737,15 @@ function SelfSubscriptionStatusPanel() {
   </section>
 }
 
+function planIDFollowsUTF8(id: string, prior: string): boolean {
+  const current = new TextEncoder().encode(id)
+  const previous = new TextEncoder().encode(prior)
+  for (let index = 0; index < Math.min(current.length, previous.length); index++) {
+    if (current[index] !== previous[index]) return current[index] > previous[index]
+  }
+  return current.length > previous.length
+}
+
 function validSelfPlanCatalogPage(raw: unknown, currency: string, previous?: SelfPlanCatalogPage): raw is SelfPlanCatalogPage {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
   const page = raw as Record<string, unknown>
@@ -752,7 +761,7 @@ function validSelfPlanCatalogPage(raw: unknown, currency: string, previous?: Sel
     const item = rawItem as Record<string, unknown>
     if (Object.keys(item).sort().join(',') !== 'credit_micro,interval,name,plan_id,price_micro,revision' ||
       typeof item.plan_id !== 'string' || item.plan_id.length < 1 || item.plan_id.length > 256 ||
-      item.plan_id.trim() !== item.plan_id || (priorID !== '' && item.plan_id <= priorID) ||
+      item.plan_id.trim() !== item.plan_id || (priorID !== '' && !planIDFollowsUTF8(item.plan_id, priorID)) ||
       typeof item.name !== 'string' || item.name.length < 1 || item.name.length > 128 || item.name.trim() !== item.name ||
       (item.interval !== 'one_time' && item.interval !== 'monthly') ||
       typeof item.price_micro !== 'string' || item.price_micro.length > 19 || !positiveMicro.test(item.price_micro) || BigInt(item.price_micro) > 9223372036854775807n ||

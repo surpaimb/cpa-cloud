@@ -231,3 +231,37 @@ func TestSelfPlanCatalogCurrentCursorRestartAndFailure(t *testing.T) {
 	}
 	readSelfWalletResponse(t, requestSelfPlanCatalog(t, server.URL, query, "", "", f.cookie), 401)
 }
+
+func TestSelfPlanCatalogCursorAcceptsExistingPlanIDDomain(t *testing.T) {
+	f := newSelfPlanCatalogFixture(t)
+	ids := []string{"plan one", "plan two", "套餐 三", "套餐 四"}
+	for _, id := range ids {
+		if _, err := f.app.store.db.Exec(`INSERT INTO financial_plans(id,name,currency,price_micro,credit_micro,interval,enabled,revision,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?)`, id, "Current plan", "USD", 10, 20, "monthly", 1, 1, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setSelfPlanCatalogCommercial(t, f, 1)
+	query := "?currency=USD&limit=1"
+	for index, id := range ids {
+		page := readSelfPlanCatalogPage(t, requestSelfPlanCatalog(t, f.server.URL, query, "", "", f.cookie))
+		if !page.Available || len(page.Items) != 1 || page.Items[0].PlanID != id || (page.NextCursor == nil) != (index == len(ids)-1) {
+			t.Fatalf("page %d=%+v", index, page)
+		}
+		if page.NextCursor != nil {
+			query = "?currency=USD&limit=1&cursor=" + url.QueryEscape(*page.NextCursor)
+		}
+	}
+
+	selector := strings.Split(f.cookie.Value, ".")[0]
+	for _, badID := range []string{"", " plan", "plan ", "plan\x00id", strings.Repeat("x", 257)} {
+		cursor, err := f.app.encodeSelfPlanCatalogCursor(selfPlanCatalogCursor{
+			Version: 1, EmployeeID: f.id, Session: selector, Currency: "USD",
+			IssuedAt: time.Now().UTC().Format(time.RFC3339Nano), Limit: 1, LastID: badID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		readSelfWalletResponse(t, requestSelfPlanCatalog(t, f.server.URL, "?currency=USD&limit=1&cursor="+url.QueryEscape(cursor), "", "", f.cookie), 400)
+	}
+}

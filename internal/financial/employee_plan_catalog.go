@@ -30,13 +30,18 @@ type employeePlanCatalogReadHooks struct {
 	commit    func(*sql.Tx) error
 }
 
+// ValidPlanCatalogID mirrors the existing commercial plan-ID domain for cursor validation.
+func ValidPlanCatalogID(value string) bool {
+	return validCommercialText(value, 256)
+}
+
 func (c *Commercial) ReadEmployeePlanCatalog(ctx context.Context, currency, afterID string, limit int) (EmployeePlanCatalogPage, error) {
 	return c.readEmployeePlanCatalog(ctx, currency, afterID, limit, employeePlanCatalogReadHooks{})
 }
 
 func (c *Commercial) readEmployeePlanCatalog(ctx context.Context, currency, afterID string, limit int, hooks employeePlanCatalogReadHooks) (EmployeePlanCatalogPage, error) {
 	if c == nil || c.db == nil || ctx == nil || !validCurrency(currency) || limit < 1 || limit > 50 ||
-		(afterID != "" && !validCommercialText(afterID, 256)) {
+		(afterID != "" && !ValidPlanCatalogID(afterID)) {
 		return EmployeePlanCatalogPage{}, ErrInvalid
 	}
 	tx, err := c.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -128,7 +133,7 @@ func scanEmployeePlanCatalog(rows *sql.Rows, currency string) (EmployeePlanCatal
 	}
 	createdTime, createdErr := time.Parse(time.RFC3339Nano, created)
 	updatedTime, updatedErr := time.Parse(time.RFC3339Nano, updated)
-	if idType != "text" || !validCommercialText(id, 256) || nameType != "text" || !validCommercialText(name, 128) ||
+	if idType != "text" || !ValidPlanCatalogID(id) || nameType != "text" || !validCommercialText(name, 128) ||
 		currencyType != "text" || storedCurrency != currency || priceType != "integer" || price < 1 ||
 		creditType != "integer" || credit < 1 || intervalType != "text" || (interval != "one_time" && interval != "monthly") ||
 		enabledType != "integer" || enabled != 1 || revisionType != "integer" || revision < 1 || revision > subscriptionRevisionMax ||

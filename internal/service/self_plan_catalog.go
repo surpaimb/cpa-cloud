@@ -192,7 +192,7 @@ func (a *App) decodeSelfPlanCatalogCursor(encoded string, session selfSession, r
 	canonical, err := json.Marshal(cursor)
 	if err != nil || !bytes.Equal(canonical, plain) || cursor.Version != 1 ||
 		cursor.EmployeeID != session.EmployeeID || cursor.Session != session.Selector || cursor.Currency != request.currency ||
-		cursor.Limit != request.limit || !validIdentifier(cursor.LastID, 256) {
+		cursor.Limit != request.limit || !financial.ValidPlanCatalogID(cursor.LastID) {
 		return invalid()
 	}
 	issued, err := time.Parse(time.RFC3339Nano, cursor.IssuedAt)

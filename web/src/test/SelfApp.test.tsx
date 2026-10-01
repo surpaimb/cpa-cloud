@@ -353,6 +353,33 @@ describe('employee self-service page', () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/billing/plans'))).toHaveLength(3)
   })
 
+  it('accepts catalog page order using the server UTF-8 ID order', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const plan = (planID: string, name: string) => ({ plan_id: planID, name, interval: 'monthly', price_micro: '10', credit_micro: '20', revision: 1 })
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_plan_catalog: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/plans?currency=USD&limit=20')) return reply(200, { currency: 'USD', available: true, items: [plan('plan one', 'Space ID')], next_cursor: 'p1' })
+      if (url.endsWith('/billing/plans?currency=USD&limit=20&cursor=p1')) return reply(200, { currency: 'USD', available: true, items: [plan('\uE000', 'BMP ID')], next_cursor: 'p2' })
+      if (url.endsWith('/billing/plans?currency=USD&limit=20&cursor=p2')) return reply(200, { currency: 'USD', available: true, items: [plan('😀', 'Supplementary ID')], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '当前可用套餐目录' })
+    await userEvent.type(within(panel).getByLabelText('套餐币种（三位大写字母，如 USD）'), 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(panel).findByText('Space ID')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多套餐' }))
+    expect(await within(panel).findByText('BMP ID')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多套餐' }))
+    expect(await within(panel).findByText('Supplementary ID')).toBeInTheDocument()
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('clears failed plan reads and prevents late catalog results after logout', async () => {
     const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
     let pending: ((value: Response) => void) | undefined
