@@ -6,6 +6,7 @@
 // docs/employee-self-key-revocation-contract.md.
 // docs/employee-self-signout-others-contract.md.
 // docs/employee-self-key-issuance-contract.md.
+// docs/employee-self-key-token-summary-contract.md.
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -545,5 +546,81 @@ describe('employee self-service page', () => {
     expect(issueSignal?.aborted).toBe(true)
     finishIssue?.(new Response(JSON.stringify({ id: 'key_reserved', name: 'Workstation', expires_at: null, key: 'cpac_late-secret' }), { status: 201 }))
     expect(screen.queryByText('cpac_late-secret')).not.toBeInTheDocument()
+  })
+
+  it('fetches only the selected Key summary and ignores a late response after switching or logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const keys = [
+      { id: 'key_one', name: 'Editor', created_at: '2026-10-01T01:00:00Z', expires_at: null, revoked_at: null, status: 'active' },
+      { id: 'key_two', name: 'Archive', created_at: '2026-10-01T02:00:00Z', expires_at: '2026-10-01T03:00:00Z', revoked_at: null, status: 'expired' },
+    ]
+    let firstSignal: AbortSignal | undefined
+    let resolveFirst: ((response: Response) => void) | undefined
+    const secondSummary = { ...emptyTokenSummary, requests: { ...emptyTokenSummary.requests, total: '2' }, attempts: { ...emptyTokenSummary.attempts, total: '3', pending: '1', input_tokens: { known_total: '9007199254740993', unknown_attempts: '1' } } }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/key-slots')) return reply(200, { items: [] })
+      if (url.endsWith('/keys')) return reply(200, { items: keys, next_cursor: null })
+      if (url.endsWith('/keys/key_one/usage/summary')) { firstSignal = init?.signal ?? undefined; return new Promise<Response>((resolve) => { resolveFirst = resolve }) }
+      if (url.endsWith('/keys/key_two/usage/summary')) return reply(200, secondSummary)
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    window.localStorage.clear()
+    window.sessionStorage.clear()
+    render(<SelfApp />)
+    expect(await screen.findByText('Editor')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/keys/') && String(url).endsWith('/usage/summary'))).toHaveLength(0)
+    await userEvent.click(screen.getByRole('button', { name: '查看 Editor 的已知 Token' }))
+    expect(await screen.findByText('正在读取此 Key 的 Token 汇总…')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '查看 Archive 的已知 Token' }))
+    expect(firstSignal?.aborted).toBe(true)
+    const region = await screen.findByRole('region', { name: 'Archive 的已知 Token' })
+    expect(region).toHaveTextContent('9007199254740993')
+    expect(region).toHaveTextContent('未知尝试')
+    expect(region).toHaveTextContent('待结束尝试')
+    expect(region).toHaveTextContent('不是完整用量、计费或合规结论')
+    resolveFirst?.(new Response(JSON.stringify({ ...secondSummary, attempts: { ...secondSummary.attempts, input_tokens: { known_total: 'stale-secret', unknown_attempts: '0' } } }), { status: 200 }))
+    await waitFor(() => expect(screen.queryByText('stale-secret')).not.toBeInTheDocument())
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/keys/') && String(url).endsWith('/usage/summary'))).toHaveLength(2)
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(screen.queryByText('9007199254740993')).not.toBeInTheDocument()
+  })
+
+  it('drops an earlier Key summary before a failed retry and never shows Key policy', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const key = { id: 'key_one', name: 'Editor', created_at: '2026-10-01T01:00:00Z', expires_at: null, revoked_at: '2026-10-01T02:00:00Z', status: 'revoked', policy: { source_cidrs: ['private-policy'] } }
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/key-slots')) return reply(200, { items: [] })
+      if (url.endsWith('/keys')) return reply(200, { items: [key], next_cursor: null })
+      if (url.endsWith('/keys/key_one/usage/summary')) {
+        reads++
+        return reads === 1 ? reply(200, { ...emptyTokenSummary, attempts: { ...emptyTokenSummary.attempts, input_tokens: { known_total: '777', unknown_attempts: '0' } } }) : reply(503, { error: { code: 'storage_unavailable' } })
+      }
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    await userEvent.click(await screen.findByRole('button', { name: '查看 Editor 的已知 Token' }))
+    expect(await screen.findByText('777')).toBeInTheDocument()
+    expect(screen.queryByText('private-policy')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '关闭汇总' }))
+    expect(screen.queryByText('777')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '查看 Editor 的已知 Token' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('此 Key 的 Token 汇总暂时无法读取')
+    expect(screen.queryByText('777')).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/keys/key_one/usage/summary'))).toHaveLength(2)
   })
 })

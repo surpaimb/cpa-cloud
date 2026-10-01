@@ -6,6 +6,7 @@
 // docs/employee-self-key-revocation-contract.md.
 // docs/employee-self-signout-others-contract.md.
 // docs/employee-self-key-issuance-contract.md.
+// docs/employee-self-key-token-summary-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
@@ -44,6 +45,60 @@ function selfKeyDate(value: string) {
   return new Date(value).toLocaleString('zh-CN')
 }
 
+function SelfKeyTokenSummaryPanel({ keyID, keyName, onClose }: { keyID: string; keyName: string; onClose: () => void }) {
+  const [summary, setSummary] = useState<SelfTokenSummary | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    const controller = new AbortController()
+    setSummary(null)
+    setLoading(true)
+    setError(false)
+    void selfRequest<SelfTokenSummary>(`/keys/${encodeURIComponent(keyID)}/usage/summary`, { signal: controller.signal }).then((value) => {
+      if (!active || controller.signal.aborted) return
+      setSummary(value)
+    }).catch(() => {
+      if (!active || controller.signal.aborted) return
+      setSummary(null)
+      setError(true)
+    }).finally(() => { if (active && !controller.signal.aborted) setLoading(false) })
+    return () => { active = false; controller.abort() }
+  }, [keyID])
+
+  const tokenRows = summary ? [
+    ['输入', summary.attempts.input_tokens],
+    ['输出', summary.attempts.output_tokens],
+    ['缓存读取', summary.attempts.cache_read_tokens],
+    ['缓存写入', summary.attempts.cache_write_tokens],
+  ] as const : []
+
+  return <section className="self-summary self-key-token-summary" aria-labelledby="self-key-token-summary-title">
+    <div className="self-key-token-summary-heading"><h3 id="self-key-token-summary-title">{keyName} 的已知 Token</h3><Button variant="secondary" onClick={onClose}>关闭汇总</Button></div>
+    <p>只统计此 Key 的上游尝试已知值；未知尝试另列。这不是完整用量、计费或合规结论。</p>
+    {loading ? <p role="status">正在读取此 Key 的 Token 汇总…</p> : null}
+    {error ? <p role="alert">此 Key 的 Token 汇总暂时无法读取，请稍后重试。</p> : null}
+    {summary && !error ? <>
+      <p className="self-summary-window">统计时间：<time dateTime={summary.from}>{selfKeyDate(summary.from)}</time> 至 <time dateTime={summary.to}>{selfKeyDate(summary.to)}</time>（不含结束时刻）</p>
+      <dl className="self-summary-counts">
+        <div><dt>此 Key 请求</dt><dd>{summary.requests.total}</dd></div>
+        <div><dt>进行中</dt><dd>{summary.requests.pending}</dd></div>
+        <div><dt>已完成</dt><dd>{summary.requests.succeeded}</dd></div>
+        <div><dt>失败</dt><dd>{summary.requests.failed}</dd></div>
+        <div><dt>已取消</dt><dd>{summary.requests.cancelled}</dd></div>
+        <div><dt>已中断</dt><dd>{summary.requests.interrupted}</dd></div>
+        <div><dt>上游尝试</dt><dd>{summary.attempts.total}</dd></div>
+        <div><dt>待结束尝试</dt><dd>{summary.attempts.pending}</dd></div>
+      </dl>
+      <ul className="self-summary-tokens">{tokenRows.map(([label, counts]) => <li key={label}>
+        <strong>{label}</strong>
+        <dl><div><dt>已知 Token（上游尝试）</dt><dd>{counts.known_total}</dd></div><div><dt>未知尝试</dt><dd>{counts.unknown_attempts}</dd></div></dl>
+      </li>)}</ul>
+    </> : null}
+  </section>
+}
+
 function SelfKeyInventory({ csrf }: { csrf: string }) {
   const [items, setItems] = useState<SelfKey[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
@@ -52,6 +107,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
   const [confirmID, setConfirmID] = useState<string | null>(null)
   const [revokeBusy, setRevokeBusy] = useState(false)
   const [revokeError, setRevokeError] = useState<string | null>(null)
+  const [selectedKeyID, setSelectedKeyID] = useState<string | null>(null)
   const pendingPage = useRef<AbortController | null>(null)
   const pendingRevoke = useRef<AbortController | null>(null)
   const mounted = useRef(true)
@@ -70,6 +126,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
       setItems([])
       setCursor(null)
       setError(true)
+      setSelectedKeyID(null)
     }).finally(() => { if (active) setLoading(false) })
     return () => { active = false; mounted.current = false; controller.abort(); pendingPage.current?.abort(); pendingRevoke.current?.abort() }
   }, [])
@@ -94,6 +151,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
       await selfRequest<void>(`/keys/${encodeURIComponent(id)}/revoke`, { method: 'POST', body: JSON.stringify({ current_password }), signal: controller.signal }, csrf)
       if (!mounted.current || controller.signal.aborted) return
       setConfirmID(null)
+      setSelectedKeyID(null)
       try {
         const page = await selfRequest<SelfKeyPage>('/keys', { signal: controller.signal })
         if (!mounted.current || controller.signal.aborted) return
@@ -105,6 +163,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
         setItems([])
         setCursor(null)
         setError(true)
+        setSelectedKeyID(null)
       }
     } catch (caught) {
       if (!mounted.current || controller.signal.aborted) return
@@ -137,11 +196,14 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
       setItems([])
       setCursor(null)
       setError(true)
+      setSelectedKeyID(null)
     } finally {
       if (!controller.signal.aborted) setLoading(false)
       if (pendingPage.current === controller) pendingPage.current = null
     }
   }
+
+  const selectedKey = items.find((item) => item.id === selectedKeyID)
 
   return <section className="self-keys" aria-labelledby="self-keys-title">
     <h2 id="self-keys-title">我的 API Key</h2>
@@ -152,6 +214,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
     {items.length > 0 ? <ul className="self-key-list">{items.map((item) => <li key={item.id}>
       <div className="self-key-top"><strong>{item.name}</strong><span className={`self-key-status self-key-status--${item.status}`}>{item.status === 'active' ? '有效' : item.status === 'expired' ? '已到期' : '已撤销'}</span></div>
       <dl><div><dt>Key ID</dt><dd>{item.id}</dd></div><div><dt>创建时间</dt><dd><time dateTime={item.created_at}>{selfKeyDate(item.created_at)}</time></dd></div><div><dt>到期时间</dt><dd>{item.expires_at ? <time dateTime={item.expires_at}>{selfKeyDate(item.expires_at)}</time> : '永不过期'}</dd></div>{item.revoked_at ? <div><dt>撤销时间</dt><dd><time dateTime={item.revoked_at}>{selfKeyDate(item.revoked_at)}</time></dd></div> : null}</dl>
+      <div className="self-key-summary-action"><Button variant="secondary" onClick={() => setSelectedKeyID((prior) => prior === item.id ? null : item.id)} aria-label={`查看 ${item.name} 的已知 Token`}>{selectedKeyID === item.id ? '收起此 Key 汇总' : '查看已知 Token'}</Button></div>
       {item.status !== 'revoked' ? <div className="self-key-revoke">
         {confirmID === item.id ? <form onSubmit={(event) => { void revoke(event, item.id) }}>
           <p>确认撤销“{item.name}”？撤销后此 Key 不能再发起新请求，正在进行的请求不会因此中断。</p>
@@ -161,6 +224,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
         </form> : <Button variant="secondary" disabled={revokeBusy} onClick={() => { setConfirmID(item.id); setRevokeError(null) }} aria-label={`撤销 ${item.name}`}>撤销 Key</Button>}
       </div> : null}
     </li>)}</ul> : null}
+    {selectedKey ? <SelfKeyTokenSummaryPanel key={selectedKey.id} keyID={selectedKey.id} keyName={selectedKey.name} onClose={() => setSelectedKeyID(null)} /> : null}
     {cursor && !error ? <Button variant="secondary" disabled={loading} onClick={loadMore}>{loading ? '正在加载…' : '加载更多'}</Button> : null}
   </section>
 }
