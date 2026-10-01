@@ -235,9 +235,15 @@ func effectiveSubscription(item *Subscription, asOf time.Time) error {
 func scanSubscription(scanner interface{ Scan(...any) error }, asOf time.Time) (Subscription, error) {
 	var item Subscription
 	var started string
-	var end, cancelled sql.NullString
-	if err := scanner.Scan(&item.ID, &item.AccountID, &item.PlanID, &item.PlanRevision, &item.PriceMicro, &item.CreditMicro, &item.Currency, &item.Interval, &item.Status, &started, &end, &cancelled, &item.Revision); err != nil {
+	var end, cancelled, predecessor, successor sql.NullString
+	if err := scanner.Scan(&item.ID, &item.AccountID, &item.PlanID, &item.PlanRevision, &item.PriceMicro, &item.CreditMicro, &item.Currency, &item.Interval, &item.Status, &started, &end, &cancelled, &item.Revision, &predecessor, &successor); err != nil {
 		return Subscription{}, err
+	}
+	if predecessor.Valid {
+		item.PredecessorID = predecessor.String
+	}
+	if successor.Valid {
+		item.SuccessorID = successor.String
 	}
 	var err error
 	item.StartedAt, err = parseSubscriptionStart(started)
@@ -267,4 +273,4 @@ func scanSubscription(scanner interface{ Scan(...any) error }, asOf time.Time) (
 	return item, nil
 }
 
-const subscriptionSelect = `SELECT id,account_id,plan_id,plan_revision,price_micro,credit_micro,currency,interval,status,started_at,period_end_at,cancelled_at,revision FROM financial_subscriptions`
+const subscriptionSelect = `SELECT s.id,s.account_id,s.plan_id,s.plan_revision,s.price_micro,s.credit_micro,s.currency,s.interval,s.status,s.started_at,s.period_end_at,s.cancelled_at,s.revision,prior.predecessor_id,next.successor_id FROM financial_subscriptions s LEFT JOIN financial_subscription_renewals prior ON prior.successor_id=s.id LEFT JOIN financial_subscription_renewals next ON next.predecessor_id=s.id`

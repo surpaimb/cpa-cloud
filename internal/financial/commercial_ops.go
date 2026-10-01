@@ -39,6 +39,7 @@ type TopUp struct {
 }
 type Subscription struct {
 	ID, AccountID, PlanID, Currency, Interval, Status string
+	PredecessorID, SuccessorID                        string
 	PlanRevision, PriceMicro, CreditMicro, Revision   int64
 	StartedAt                                         time.Time
 	PeriodEndAt                                       *time.Time
@@ -239,7 +240,7 @@ func (c *Commercial) ListSubscriptions(ctx context.Context, after string, limit 
 	if c == nil || c.db == nil || ctx == nil || limit < 1 || limit > 200 {
 		return nil, ErrInvalid
 	}
-	rows, err := c.db.QueryContext(ctx, subscriptionSelect+` WHERE id>? ORDER BY id LIMIT ?`, after, limit)
+	rows, err := c.db.QueryContext(ctx, subscriptionSelect+` WHERE s.id>? ORDER BY s.id LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, ErrUnavailable
 	}
@@ -254,6 +255,12 @@ func (c *Commercial) ListSubscriptions(ctx context.Context, after string, limit 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, ErrUnavailable
+	}
+	if err := rows.Close(); err != nil {
+		return nil, ErrUnavailable
+	}
+	if err := validateRenewalLinks(ctx, c.db); err != nil {
+		return nil, err
 	}
 	return items, nil
 }
@@ -1078,19 +1085,24 @@ func scanTopUp(row rowScanner) (TopUp, error) {
 }
 func loadSubscription(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, id string) (Subscription, error) {
 	return loadSubscriptionAt(ctx, q, id, time.Now().UTC())
 }
 
 func loadSubscriptionAt(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, id string, asOf time.Time) (Subscription, error) {
-	row := q.QueryRowContext(ctx, subscriptionSelect+` WHERE id=?`, id)
+	row := q.QueryRowContext(ctx, subscriptionSelect+` WHERE s.id=?`, id)
 	item, err := scanSubscription(row, asOf)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Subscription{}, ErrNotFound
 	}
 	if err != nil {
+		return Subscription{}, err
+	}
+	if err := validateRenewalLinks(ctx, q); err != nil {
 		return Subscription{}, err
 	}
 	return item, nil

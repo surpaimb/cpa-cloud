@@ -14,6 +14,7 @@ export function BillingPlans({ csrf, commercialEnabled }: { csrf: string; commer
   const [editing, setEditing] = useState<BillingPlan | 'new' | null>(null)
   const [subscribing, setSubscribing] = useState(false)
   const [cancelling, setCancelling] = useState<BillingSubscription | null>(null)
+  const [renewing, setRenewing] = useState<BillingSubscription | null>(null)
 
   async function load() {
     setLoading(true); setError(null)
@@ -48,13 +49,14 @@ export function BillingPlans({ csrf, commercialEnabled }: { csrf: string; commer
     </section>
     <section className="content-panel billing-panel">
       <div className="section-heading"><div><h2>订阅</h2><p>管理员购买会先从钱包扣套餐价格，再授予套餐额度；本里程碑不运行自动续费任务。</p></div><Button disabled={!commercialEnabled || !plans.some((item) => item.enabled)} onClick={() => setSubscribing(true)}>购买套餐</Button></div>
-      {!commercialEnabled ? <div className="billing-disabled-inline">商业执行总开关已关闭；仍可配置套餐，既有月订阅仍会按冻结时间到期，但不能购买。</div> : null}
-      {subscriptions.length === 0 && !loading && !error ? <EmptyState title="还没有订阅" body="购买动作需要相同币种的钱包余额足够。" /> : subscriptions.length ? <div className="table-scroll"><table><thead><tr><th>订阅</th><th>价格 / 额度</th><th>周期 / 到期</th><th>状态</th><th>操作</th></tr></thead><tbody>{subscriptions.map((item) => <tr key={item.id}><td><code>{item.id}</code><small>套餐 {item.plan_id} r{item.plan_revision}</small></td><td>{formatMicro(item.price_micro, item.currency)}<small>额度 {formatMicro(item.credit_micro, item.currency)}</small></td><td>{item.interval === 'monthly' ? '单月（不自动续费）' : '一次性'}<small>{item.period_end_at ? `到期 ${new Date(item.period_end_at).toLocaleString()}` : '无到期日'}</small></td><td>{item.status === 'active' ? '有效' : item.status === 'expired' ? '已到期' : '已取消'}<small>r{item.revision}</small></td><td>{item.status === 'active' ? <button className="link-button" onClick={() => setCancelling(item)}>取消</button> : '—'}</td></tr>)}</tbody></table></div> : null}
+      {!commercialEnabled ? <div className="billing-disabled-inline">商业执行总开关已关闭；仍可配置套餐，既有月订阅仍会按冻结时间到期，但不能购买或手工续购。</div> : null}
+      {subscriptions.length === 0 && !loading && !error ? <EmptyState title="还没有订阅" body="购买动作需要相同币种的钱包余额足够。" /> : subscriptions.length ? <div className="table-scroll"><table className="billing-subscription-table"><thead><tr><th>订阅 / 来源</th><th>价格 / 额度</th><th>周期 / 新一期</th><th>状态</th><th>操作</th></tr></thead><tbody>{subscriptions.map((item) => <tr key={item.id}><td><code>{item.id}</code><small>套餐 {item.plan_id} r{item.plan_revision}</small>{item.predecessor_id ? <small>来源：<code>{item.predecessor_id}</code></small> : null}{item.successor_id ? <small>续购到：<code>{item.successor_id}</code></small> : null}</td><td>{formatMicro(item.price_micro, item.currency)}<small>额度 {formatMicro(item.credit_micro, item.currency)}</small></td><td>{item.interval === 'monthly' ? '单月（不自动续费）' : '一次性'}<small>开始 {new Date(item.started_at).toLocaleString()}</small><small>{item.period_end_at ? `到期 ${new Date(item.period_end_at).toLocaleString()}` : '无到期日'}</small></td><td>{item.status === 'active' ? '有效' : item.status === 'expired' ? '已到期' : '已取消'}<small>r{item.revision}</small></td><td>{item.status === 'active' ? <button className="link-button" onClick={() => setCancelling(item)}>取消</button> : item.status === 'expired' && item.interval === 'monthly' && !item.successor_id && commercialEnabled && plans.some((plan) => plan.id === item.plan_id && plan.enabled && plan.interval === 'monthly') ? <button className="link-button" onClick={() => setRenewing(item)}>手工续购一期</button> : '—'}</td></tr>)}</tbody></table></div> : null}
       {subscriptionCursor ? <div className="billing-load-more"><Button variant="secondary" disabled={loading} onClick={() => void moreSubscriptions()}>加载更多订阅</Button></div> : null}
     </section>
     {editing ? <PlanEditor csrf={csrf} current={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void load() }} /> : null}
     {subscribing ? <SubscriptionEditor csrf={csrf} plans={plans.filter((item) => item.enabled)} onClose={() => setSubscribing(false)} onSaved={() => { setSubscribing(false); void load() }} /> : null}
     {cancelling ? <CancelSubscription csrf={csrf} item={cancelling} onClose={() => setCancelling(null)} onSaved={() => { setCancelling(null); void load() }} /> : null}
+    {renewing ? <RenewSubscriptionDialog csrf={csrf} item={renewing} plan={plans.find((plan) => plan.id === renewing.plan_id)} onClose={() => setRenewing(null)} onSaved={() => { setRenewing(null); void load() }} /> : null}
   </div>
 }
 
@@ -118,4 +120,13 @@ function CancelSubscription({ csrf, item, onClose, onSaved }: { csrf: string; it
   const [error, setError] = useState<string | null>(null)
   async function send(body: typeof initial) { setBusy(true); setError(null); setPending(body); try { await api.cancelBillingSubscription(item.id, body, csrf); setPending(null); onSaved() } catch (caught) { setError(billingError(caught)); if (caught instanceof ApiError) setPending(null) } finally { setBusy(false) } }
   return <ConfirmWrite title="确认取消订阅" description="取消只更新订阅状态，不自动退款或撤销既有额度。" confirmLabel="确认取消" danger busy={busy} error={error} pendingRetry={pending !== null} onConfirm={() => void send(initial)} onRetry={() => pending && void send(pending)} onReload={onSaved} onClose={onClose} details={<dl className="billing-confirm-list"><div><dt>订阅</dt><dd><code>{item.id}</code></dd></div><div><dt>套餐</dt><dd>{item.plan_id} · r{item.plan_revision}</dd></div><div><dt>expected revision</dt><dd>{item.revision}</dd></div></dl>} />
+}
+
+function RenewSubscriptionDialog({ csrf, item, plan, onClose, onSaved }: { csrf: string; item: BillingSubscription; plan?: BillingPlan; onClose: () => void; onSaved: () => void }) {
+  const [operation] = useState(() => ({ operation_id: crypto.randomUUID() }))
+  const [pending, setPending] = useState<typeof operation | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  async function send(body: typeof operation) { setBusy(true); setError(null); setPending(body); try { await api.renewBillingSubscription(item.id, body, csrf); setPending(null); onSaved() } catch (caught) { setError(billingError(caught)); if (caught instanceof ApiError) setPending(null) } finally { setBusy(false) } }
+  return <ConfirmWrite title="确认手工续购一期" description="仅为这条已到期月订阅的原归属对象购买新一期；从当前时间开始，不补齐过期间隔，不会自动续费或开通模型权限。" confirmLabel="确认续购" busy={busy} error={error} pendingRetry={pending !== null} onConfirm={() => void send(operation)} onRetry={() => pending && void send(pending)} onReload={onSaved} onClose={onClose} details={<dl className="billing-confirm-list"><div><dt>前一期</dt><dd><code>{item.id}</code></dd></div><div><dt>已到期</dt><dd>{item.period_end_at ? new Date(item.period_end_at).toLocaleString() : '—'}</dd></div><div><dt>当前套餐</dt><dd>{plan ? `${plan.name} · r${plan.revision}` : item.plan_id}</dd></div><div><dt>本次钱包扣款</dt><dd>{plan ? `−${formatMicro(plan.price_micro, plan.currency)}` : '以服务端当前套餐为准'}</dd></div><div><dt>本次额度入账</dt><dd>{plan ? `+${formatMicro(plan.credit_micro, plan.currency)}` : '以服务端当前套餐为准'}</dd></div></dl>} />
 }

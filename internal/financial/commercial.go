@@ -23,6 +23,18 @@ const commercialSettingsDDL = `CREATE TABLE IF NOT EXISTS financial_settings (
 
 const commercialOperationsDDL = `CREATE TABLE IF NOT EXISTS financial_commercial_operations (
 	operation_id TEXT PRIMARY KEY,
+	action TEXT NOT NULL CHECK(action IN ('settings.update','plan.create','plan.update','subscription.create','subscription.cancel','subscription.renew','connector.create','connector.update','topup.create','redemption_code.create','redemption.redeem','refund.create')),
+	actor_admin_id TEXT REFERENCES admins(id) ON DELETE RESTRICT,
+	payload_digest BLOB NOT NULL CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
+	resource_kind TEXT NOT NULL,
+	resource_id TEXT NOT NULL,
+	revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 9007199254740991),
+	created_at TEXT NOT NULL
+)`
+
+// Exact schema before manual renewal; accepted only as a migration input.
+const commercialOperationsLegacyDDL = `CREATE TABLE IF NOT EXISTS financial_commercial_operations (
+	operation_id TEXT PRIMARY KEY,
 	action TEXT NOT NULL CHECK(action IN ('settings.update','plan.create','plan.update','subscription.create','subscription.cancel','connector.create','connector.update','topup.create','redemption_code.create','redemption.redeem','refund.create')),
 	actor_admin_id TEXT REFERENCES admins(id) ON DELETE RESTRICT,
 	payload_digest BLOB NOT NULL CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
@@ -190,6 +202,15 @@ func (c *Commercial) Migrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	operationsLegacy, err := commercialOperationLegacySchema(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if operationsLegacy {
+		if err := migrateLegacyCommercialOperations(ctx, tx); err != nil {
+			return err
+		}
+	}
 	statements := []string{commercialSettingsDDL, commercialOperationsDDL, plansDDL, subscriptionsDDL, connectorsDDL, paymentsDDL, topupsDDL, redemptionCodesDDL, redemptionsDDL, refundsDDL, webhookEventsDDL,
 		subscriptionAccountIndexDDL, paymentAccountIndexDDL, paymentConnectorIndexDDL, refundPaymentIndexDDL, redemptionAccountIndexDDL,
 		commercialOperationsNoUpdateDDL, commercialOperationsNoDeleteDDL, topupsNoUpdateDDL, topupsNoDeleteDDL, redemptionsNoUpdateDDL, redemptionsNoDeleteDDL,
@@ -202,6 +223,11 @@ func (c *Commercial) Migrate(ctx context.Context) error {
 	if legacy {
 		if err := migrateLegacySubscriptions(ctx, tx); err != nil {
 			return err
+		}
+	}
+	for _, statement := range []string{subscriptionRenewalsDDL, subscriptionRenewalsNoUpdateDDL, subscriptionRenewalsNoDeleteDDL} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return ErrSchema
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO financial_settings(singleton,enabled,revision,updated_at) VALUES(1,0,1,?)`, time.Unix(0, 0).UTC().Format(time.RFC3339Nano)); err != nil {
@@ -223,7 +249,8 @@ func validateCommercialSchema(ctx context.Context, tx *sql.Tx) error {
 	tables := map[string]string{
 		"financial_settings": commercialSettingsDDL, "financial_commercial_operations": commercialOperationsDDL, "financial_plans": plansDDL,
 		"financial_subscriptions": subscriptionsDDL, "financial_payment_connectors": connectorsDDL, "financial_payments": paymentsDDL,
-		"financial_topups": topupsDDL, "financial_redemption_codes": redemptionCodesDDL, "financial_redemptions": redemptionsDDL,
+		"financial_subscription_renewals": subscriptionRenewalsDDL,
+		"financial_topups":                topupsDDL, "financial_redemption_codes": redemptionCodesDDL, "financial_redemptions": redemptionsDDL,
 		"financial_refunds": refundsDDL, "financial_webhook_events": webhookEventsDDL,
 	}
 	for name, ddl := range tables {
@@ -249,6 +276,7 @@ func validateCommercialSchema(ctx context.Context, tx *sql.Tx) error {
 		"financial_redemptions_no_update": redemptionsNoUpdateDDL, "financial_redemptions_no_delete": redemptionsNoDeleteDDL,
 		"financial_refunds_no_update": refundsNoUpdateDDL, "financial_refunds_no_delete": refundsNoDeleteDDL,
 		"financial_webhook_events_no_update": webhookEventsNoUpdateDDL, "financial_webhook_events_no_delete": webhookEventsNoDeleteDDL,
+		"financial_subscription_renewals_no_update": subscriptionRenewalsNoUpdateDDL, "financial_subscription_renewals_no_delete": subscriptionRenewalsNoDeleteDDL,
 	}
 	for name, ddl := range triggers {
 		var kind, actual string
@@ -257,10 +285,10 @@ func validateCommercialSchema(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	var explicitIndexes, triggerCount int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND tbl_name IN ('financial_settings','financial_commercial_operations','financial_plans','financial_subscriptions','financial_payment_connectors','financial_payments','financial_topups','financial_redemption_codes','financial_redemptions','financial_refunds','financial_webhook_events')`).Scan(&explicitIndexes); err != nil || explicitIndexes != 5 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND tbl_name IN ('financial_settings','financial_commercial_operations','financial_plans','financial_subscriptions','financial_subscription_renewals','financial_payment_connectors','financial_payments','financial_topups','financial_redemption_codes','financial_redemptions','financial_refunds','financial_webhook_events')`).Scan(&explicitIndexes); err != nil || explicitIndexes != 5 {
 		return ErrSchema
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('financial_settings','financial_commercial_operations','financial_plans','financial_subscriptions','financial_payment_connectors','financial_payments','financial_topups','financial_redemption_codes','financial_redemptions','financial_refunds','financial_webhook_events')`).Scan(&triggerCount); err != nil || triggerCount != 10 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('financial_settings','financial_commercial_operations','financial_plans','financial_subscriptions','financial_subscription_renewals','financial_payment_connectors','financial_payments','financial_topups','financial_redemption_codes','financial_redemptions','financial_refunds','financial_webhook_events')`).Scan(&triggerCount); err != nil || triggerCount != 12 {
 		return ErrSchema
 	}
 	return nil
@@ -293,6 +321,29 @@ func validateCommercialStored(ctx context.Context, tx *sql.Tx) error {
 	iterationErr, closeErr := subscriptions.Err(), subscriptions.Close()
 	if iterationErr != nil || closeErr != nil {
 		return ErrUnavailable
+	}
+	operations, err := tx.QueryContext(ctx, `SELECT operation_id,created_at FROM financial_commercial_operations`)
+	if err != nil {
+		return ErrUnavailable
+	}
+	for operations.Next() {
+		var id, created string
+		if err := operations.Scan(&id, &created); err != nil || !validCommercialText(id, 128) {
+			operations.Close()
+			return ErrSchema
+		}
+		at, err := time.Parse(time.RFC3339Nano, created)
+		if err != nil || at.Location() != time.UTC || formatCommercialTime(at) != created {
+			operations.Close()
+			return ErrSchema
+		}
+	}
+	iterationErr, closeErr = operations.Err(), operations.Close()
+	if iterationErr != nil || closeErr != nil {
+		return ErrUnavailable
+	}
+	if err := validateRenewalLinks(ctx, tx); err != nil {
+		return err
 	}
 	foreignRows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
 	if err != nil {

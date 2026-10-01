@@ -1,5 +1,11 @@
 # 集成状态
 
+## 2026-10-01：BILL-03 已到期月订阅管理员手工续购（本分支，待精确提交 CI）
+
+- 按[手工续购契约](subscription-manual-renewal-contract.md)，仅管理员可在商业执行显式开启时，用前一期相同归属对象的钱包购买当前同 ID 启用月套餐的新一期；旧期如仅在读取时有效到期，则同事务持久过期。新期从本次 UTC 开始，冻结当前价格、额度、币种、revision 和一个日历月终点。新账本扣款/授予、唯一前驱→后继链和幂等收据同事务提交。精确重试在后来关闭商业开关时仍只读返回原新期。旧快照/账目、到期 worker 和模型执行权限不受影响；不提供自动续购、支付或员工自助。
+- 本地专项 Go 财务/服务及旧 schema 迁移回滚测试、全仓 vet、双 CLI 构建、Web TypeScript/22 文件 198 项测试和 production build 已通过。动态非 8787 回环真实进程合成验收覆盖到期前后、重启、手工续购、账本两笔及开关关闭后重试；真实 Chrome 桌面 1365px/390px 完成管理员登录、列表展示、手工确认、新旧链显示及新一期时间，未见相关页面错误（登录前预期 session 401 单列）。390px 表格横向滚动且操作文案可读。Browser 插件不可用，Playwright CLI 无本地可执行入口，浏览器验收使用已有缓存 Playwright 模块，无新依赖。
+- Windows `go test ./... -count=1 -timeout=10m` 的服务包在既有 `TestOutboundProxyFinalDispatchRevisionAndAuthorization/pooled_false/route` 处超时，不能计作全量通过；其他已完成包通过。最终 Linux 全量/CGO race、CI 与独立固定二进制验收必须按最终精确 HEAD 再核。当前仅开发预览；未接触真实支付/供应商账号，未部署、发布或触发安装包构建。
+
 ## 2026-10-01：ID-05 退出其他设备（本分支，待精确提交验收）
 
 - 按[退出其他设备契约](employee-self-signout-others-contract.md)，默认关闭的 `/self/` 中增加当前密码确认的 `POST /self/api/v1/sessions/revoke-others`。仅删除同一员工的其他自助会话；当前会话和 CSRF 保留，不返回设备/会话数量。最终事务在独占 admission 锁下重核当前 selector、员工状态、过期时间与密码哈希版本。未知提交返回固定 503，不作成功声明；无新 DDL、配置或依赖。
