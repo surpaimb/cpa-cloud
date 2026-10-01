@@ -189,8 +189,26 @@ func TestSubscriptionExpiryPersistenceFailureRollsBackAndRetries(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM financial_subscriptions WHERE status='active'`).Scan(&active); err != nil || active != 2 {
 		t.Fatalf("rollback active=%d err=%v", active, err)
 	}
-	if _, err := db.Exec(`DROP TRIGGER expiry_test_failure`); err != nil {
+	var sequence int
+	var schema, file string
+	if err := db.QueryRow(`PRAGMA database_list`).Scan(&sequence, &schema, &file); err != nil || file == "" {
+		t.Fatalf("database path err=%v", err)
+	}
+	if err := db.Close(); err != nil {
 		t.Fatal(err)
+	}
+	reopened, err := sql.Open("sqlite", file+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reopened.SetMaxOpenConns(1)
+	commercial = NewCommercial(reopened)
+	if _, err := reopened.Exec(`DROP TRIGGER expiry_test_failure`); err != nil {
+		t.Fatal(err)
+	}
+	if err := commercial.Migrate(context.Background()); err != nil {
+		t.Fatalf("restart migration: %v", err)
 	}
 	if count, err := commercial.ExpireDueSubscriptions(context.Background(), end); err != nil || count != 2 {
 		t.Fatalf("retry count=%d err=%v", count, err)
