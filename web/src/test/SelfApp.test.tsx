@@ -7,6 +7,7 @@
 // docs/employee-self-signout-others-contract.md.
 // docs/employee-self-key-issuance-contract.md.
 // docs/employee-self-key-token-summary-contract.md.
+// docs/employee-self-key-request-history-contract.md.
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -622,5 +623,80 @@ describe('employee self-service page', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('此 Key 的 Token 汇总暂时无法读取')
     expect(screen.queryByText('777')).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/keys/key_one/usage/summary'))).toHaveLength(2)
+  })
+
+  it('loads request activity only for the selected Key and discards a late response on switch and logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const keys = [
+      { id: 'key_one', name: 'Editor', created_at: '2026-10-01T01:00:00Z', expires_at: null, revoked_at: null, status: 'active' },
+      { id: 'key_two', name: 'Archive', created_at: '2026-10-01T02:00:00Z', expires_at: null, revoked_at: '2026-10-01T03:00:00Z', status: 'revoked' },
+    ]
+    const request = { id: 'req-archive', key_id: 'key_two', model_id: 'model-public', status: 'succeeded', started_at: '2026-10-01T04:00:00Z', finished_at: '2026-10-01T04:00:01Z', prompt: 'private-prompt' }
+    let firstSignal: AbortSignal | undefined
+    let resolveFirst: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/key-slots')) return reply(200, { items: [] })
+      if (url.endsWith('/keys')) return reply(200, { items: keys, next_cursor: null })
+      if (url.endsWith('/keys/key_one/usage/requests')) { firstSignal = init?.signal ?? undefined; return new Promise<Response>((resolve) => { resolveFirst = resolve }) }
+      if (url.endsWith('/keys/key_two/usage/requests')) return reply(200, { items: [request], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    expect(await screen.findByText('Editor')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/keys/') && String(url).includes('/usage/requests'))).toHaveLength(0)
+    await userEvent.click(screen.getByRole('button', { name: '查看 Editor 的请求活动' }))
+    expect(await screen.findByText('正在读取此 Key 的请求活动…')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '查看 Archive 的请求活动' }))
+    expect(firstSignal?.aborted).toBe(true)
+    const region = await screen.findByRole('region', { name: 'Archive 的请求活动' })
+    expect(region).toHaveTextContent('req-archive')
+    expect(region).toHaveTextContent('不代表完整用量、账单或合规结论')
+    expect(region).not.toHaveTextContent('private-prompt')
+    resolveFirst?.(new Response(JSON.stringify({ items: [{ ...request, id: 'stale-request', key_id: 'key_one' }], next_cursor: null }), { status: 200 }))
+    await waitFor(() => expect(screen.queryByText('stale-request')).not.toBeInTheDocument())
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/keys/') && String(url).includes('/usage/requests'))).toHaveLength(2)
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(screen.queryByText('req-archive')).not.toBeInTheDocument()
+  })
+
+  it('clears a failed Key activity page and permits an explicit fresh read', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const key = { id: 'key_one', name: 'Editor', created_at: '2026-10-01T01:00:00Z', expires_at: null, revoked_at: null, status: 'active', policy: { source_cidrs: ['private-policy'] } }
+    const request = { id: 'req-one', key_id: key.id, model_id: 'model-public', status: 'pending', started_at: '2026-10-01T01:01:00Z', finished_at: null }
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/key-slots')) return reply(200, { items: [] })
+      if (url.endsWith('/keys')) return reply(200, { items: [key], next_cursor: null })
+      if (url.endsWith('/keys/key_one/usage/requests')) {
+        reads++
+        return reads === 1 ? reply(200, { items: [request], next_cursor: 'opaque-cursor' }) : reply(200, { items: [], next_cursor: null })
+      }
+      if (url.includes('/keys/key_one/usage/requests?cursor=')) return reply(503, { error: { code: 'storage_unavailable' } })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    await userEvent.click(await screen.findByRole('button', { name: '查看 Editor 的请求活动' }))
+    expect(await screen.findByText('req-one')).toBeInTheDocument()
+    expect(screen.queryByText('private-policy')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '加载更多请求' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('此 Key 的请求活动暂时无法读取')
+    expect(screen.queryByText('req-one')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '加载更多请求' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '关闭活动' }))
+    await userEvent.click(screen.getByRole('button', { name: '查看 Editor 的请求活动' }))
+    expect(await screen.findByText('此 Key 最近 24 小时暂无请求活动。')).toBeInTheDocument()
+    expect(reads).toBe(2)
   })
 })

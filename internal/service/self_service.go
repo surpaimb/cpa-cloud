@@ -54,6 +54,8 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("POST /self/api/v1/keys/{id}/revoke", a.requireSelfReleased(a.selfRevokeKey, true))
 	// Independently authored for docs/employee-self-request-history-contract.md.
 	mux.HandleFunc("GET /self/api/v1/usage/requests", a.requireSelf(a.selfRequestHistory, false))
+	// Independently authored for docs/employee-self-key-request-history-contract.md.
+	mux.HandleFunc("GET /self/api/v1/keys/{id}/usage/requests", a.requireSelf(a.selfKeyRequestHistory, false))
 	// Independently authored for docs/employee-self-token-summary-contract.md.
 	mux.HandleFunc("GET /self/api/v1/usage/summary", a.requireSelf(a.selfTokenSummary, false))
 	// Independently authored for docs/employee-self-key-token-summary-contract.md.

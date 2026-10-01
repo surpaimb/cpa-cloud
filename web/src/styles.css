@@ -757,9 +757,10 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-key-revoke p { margin: 0 0 10px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .self-key-revoke p[role="alert"] { color: #a52132; }
 .self-key-revoke .self-actions { margin-top: 10px; }
-/* Independently authored for docs/employee-self-key-token-summary-contract.md. */
-.self-key-summary-action { margin-top: 12px; }
-.self-key-summary-action .button { width: 100%; }
+/* Independently authored for docs/employee-self-key-token-summary-contract.md
+   and docs/employee-self-key-request-history-contract.md. */
+.self-key-view-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.self-key-view-actions .button { min-width: 0; width: 100%; }
 .self-summary.self-key-token-summary { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
 .self-key-token-summary-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
 .self-key-token-summary-heading h3 { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--navy); font-size: 16px; }
@@ -782,6 +783,10 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-history-list dt { color: var(--muted); }
 .self-history-list dd { min-width: 0; overflow-wrap: anywhere; color: var(--navy); }
 .self-history > .button { width: 100%; }
+.self-history.self-key-history { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.self-key-history-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+.self-key-history-heading h3 { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--navy); font-size: 16px; }
+.self-key-history-heading .button { flex: 0 1 auto; }
 /* Independently authored for docs/employee-self-token-summary-contract.md. */
 .self-summary { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
 .self-summary h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
@@ -806,6 +811,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-secret dd { margin: 3px 0 12px; overflow-wrap: anywhere; }
 .self-secret code { font-size: 13px; }
 @media (max-width: 540px) {
+  .self-key-view-actions { grid-template-columns: 1fr; }
   .self-key-token-summary .self-summary-tokens dl { grid-template-columns: 1fr; }
   .self-screen { padding: 16px; align-items: start; }
   .self-card { padding: 25px 20px; }

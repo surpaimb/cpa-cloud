@@ -6,6 +6,10 @@ spec = importlib.util.spec_from_file_location('ci_plan', Path(__file__).with_nam
 plan = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plan)
 
+race_spec = importlib.util.spec_from_file_location('ci_plan_service_race', Path(__file__).with_name('ci-plan-service-race.py'))
+race_plan = importlib.util.module_from_spec(race_spec)
+race_spec.loader.exec_module(race_plan)
+
 
 class PlanTests(unittest.TestCase):
     def test_docs_do_not_build(self):
@@ -36,6 +40,36 @@ class PlanTests(unittest.TestCase):
         result = plan.classify(['.github/workflows/preview-release.yml'])
         self.assertTrue(result['core'] and result['web'])
         self.assertFalse(any(result[key] for key in ('windows', 'linux', 'macos')))
+
+    def test_service_race_plan_change_runs_core_without_packaging(self):
+        result = plan.classify(['scripts/ci-plan-service-race.py'])
+        self.assertTrue(result['core'] and result['web'])
+        self.assertFalse(any(result[key] for key in ('windows', 'linux', 'macos')))
+
+
+class ServiceRaceShardTests(unittest.TestCase):
+    def test_default_case_parser_excludes_benchmarks_and_rejects_unknown_output(self):
+        listing = 'TestAlpha\nFuzzSeeds\nExampleUsage\nBenchmarkSlow\nok  \tcpacloud.local/server/internal/service\t0.1s\n'
+        self.assertEqual(race_plan.parse_cases(listing), ['ExampleUsage', 'FuzzSeeds', 'TestAlpha'])
+        for malformed in ('', 'TestAlpha\nTestAlpha\n', 'TestAlpha\nUNKNOWN\n'):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(ValueError):
+                    race_plan.parse_cases(malformed)
+
+    def test_fixed_shards_are_complete_disjoint_and_exactly_selectable(self):
+        import re
+        names = [f'TestCase{i:03d}' for i in range(50)] + ['FuzzSeeds', 'ExampleUsage']
+        shards = race_plan.partition(names, 4)
+        self.assertEqual(set().union(*(set(shard) for shard in shards)), set(names))
+        self.assertEqual(sum(map(len, shards)), len(names))
+        self.assertEqual(shards, race_plan.partition(list(reversed(names)), 4))
+        for shard in shards:
+            pattern = re.compile(race_plan.exact_regex(shard))
+            self.assertEqual(sorted(name for name in names if pattern.fullmatch(name)), sorted(shard))
+        with self.assertRaises(ValueError):
+            race_plan.partition(['TestDuplicate', 'TestDuplicate'], 4)
+        with self.assertRaises(ValueError):
+            race_plan.partition(['TestOnly'], 4)
 
 
 if __name__ == '__main__':
