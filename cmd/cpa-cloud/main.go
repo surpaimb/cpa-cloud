@@ -67,6 +67,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.StringVar(&cfg.BackupKeyProviderStoreDir, "backup-key-provider-store-dir", "", "host-protected backup key directory (default: a separate sibling of the data directory)")
 	flags.BoolVar(&cfg.ExperimentalCodexMembership, "experimental-codex-membership", false, "enable experimental Codex membership credential import and routing")
 	flags.BoolVar(&cfg.EmployeeSelfServiceEnabled, "employee-self-service-enabled", false, "enable the development-preview employee self-service page and API")
+	flags.BoolVar(&cfg.EmployeeSelfWalletBalanceEnabled, "employee-self-wallet-balance-enabled", false, "allow enrolled employees to read their own employee-owned wallet balance (requires employee self service)")
 	flags.BoolVar(&cfg.ResponsesStatefulResources, "responses-stateful-resources", false, "enable encrypted employee-owned Responses resources (development preview)")
 	flags.BoolVar(&cfg.ResponsesBackgroundTasks, "responses-background-tasks", false, "enable durable background Responses tasks; requires --responses-stateful-resources")
 	flags.StringVar(&cfg.CodexOAuthClientID, "codex-oauth-client-id", "", "registered OAuth client ID for the experimental Codex membership lifecycle")
@@ -104,6 +105,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	if cfg.ResponsesBackgroundTasks && !cfg.ResponsesStatefulResources {
 		return 1, errors.New("--responses-background-tasks requires --responses-stateful-resources")
+	}
+	if cfg.EmployeeSelfWalletBalanceEnabled && !cfg.EmployeeSelfServiceEnabled {
+		return 1, errors.New("--employee-self-wallet-balance-enabled requires --employee-self-service-enabled")
 	}
 	cfg.Version = version
 	absDataDir, err := filepath.Abs(cfg.DataDir)

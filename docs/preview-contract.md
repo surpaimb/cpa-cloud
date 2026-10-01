@@ -26,6 +26,10 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 普通 upstream 对象 {id,name,provider_kind,endpoint,enabled,revision}。
 
+### 员工本人钱包余额（ID-05/BILL-03 开发预览增量）
+
+`GET /self/api/v1/billing/balance?currency=USD` 仅在 `--employee-self-service-enabled` 与独立的 `--employee-self-wallet-balance-enabled` 同时显式开启时注册；后者默认关闭且不能单独启用。已开通、active 员工的自助会话是唯一身份来源，管理员 Cookie 与员工模型 Key 不可替代。查询必须指定一个三位大写 ASCII 币种，响应仅含 `currency`、`has_account`、canonical 字符串或 `null` 的 `amount_micro`；不混入本人 Key/资源子账户，亦不返回账户 ID、分录、套餐或支付资料。单一有界只读快照在故障时整响应 503。自助网页由独立 capability 门控且只在明确点击时读取；GOV-02 与完整账单仍待处理。详见[独立契约](employee-self-wallet-balance-contract.md)。
+
 ### 管理员账号池本机容量快照（OBS-01 第一段）
 
 `GET /admin/api/v1/models/{id}/pool-runtime` 仅接受管理员会话、匹配的可选 Origin 和无查询参数；响应包含模型/池 revision、UTC `as_of`、明确的 `explicit_pool|legacy_no_pool|model_disabled` 状态，以及最多 64 条不含凭据或身份信息的路由本机容量/持久预留/阻塞原因。读取在单个 SQLite 只读事务内完成，结构、时间或存储错误统一 503 且不返回部分结果。网页必须经 `features.account_pool_runtime_observation=true` 门控，仅手动刷新。该投影不是供应商配额、实时请求数或派发承诺；详见[本机观测契约](account-pool-runtime-observation-contract.md)。

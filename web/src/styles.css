@@ -728,6 +728,15 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-profile div + div { border-top: 1px solid var(--border); }
 .self-profile dt { color: var(--muted); font-size: 12px; }
 .self-profile dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--navy); font-size: 14px; font-weight: 650; }
+/* Independently authored for docs/employee-self-wallet-balance-contract.md. */
+.self-wallet { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.self-wallet h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
+.self-wallet > p { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.self-wallet > p[role="alert"] { color: #a52132; }
+.self-wallet-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; margin-bottom: 14px; }
+.self-wallet-form .button { white-space: nowrap; }
+.self-wallet .self-wallet-result { padding: 12px 14px; border: 1px solid #bfe3d5; border-radius: 9px; background: #f2f9f6; color: var(--navy); overflow-wrap: anywhere; }
+.self-wallet-result output { font-weight: 750; font-variant-numeric: tabular-nums; }
 /* Independently authored for docs/employee-self-key-inventory-contract.md. */
 .self-keys { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
 .self-keys h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
@@ -816,6 +825,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-secret dd { margin: 3px 0 12px; overflow-wrap: anywhere; }
 .self-secret code { font-size: 13px; }
 @media (max-width: 540px) {
+  .self-wallet-form { grid-template-columns: 1fr; }
+  .self-wallet-form .button { width: 100%; }
   .self-key-view-actions { grid-template-columns: 1fr; }
   .self-key-token-summary .self-summary-tokens dl { grid-template-columns: 1fr; }
   .self-screen { padding: 16px; align-items: start; }
