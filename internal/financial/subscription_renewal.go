@@ -103,9 +103,6 @@ func (c *Commercial) RenewSubscription(ctx context.Context, input RenewSubscript
 		}
 		return item, receipt, nil
 	}
-	if err := requireCommercialEnabled(ctx, tx); err != nil {
-		return Subscription{}, CommercialReceipt{}, err
-	}
 	clock := time.Now
 	if c.now != nil {
 		clock = c.now
@@ -113,6 +110,9 @@ func (c *Commercial) RenewSubscription(ctx context.Context, input RenewSubscript
 	now := clock().UTC()
 	predecessor, err := loadSubscriptionAt(ctx, tx, input.ID, now)
 	if err != nil {
+		return Subscription{}, CommercialReceipt{}, err
+	}
+	if err := requireCommercialEnabled(ctx, tx); err != nil {
 		return Subscription{}, CommercialReceipt{}, err
 	}
 	if predecessor.Interval != "monthly" || predecessor.Status != "expired" || predecessor.PeriodEndAt == nil || predecessor.SuccessorID != "" {

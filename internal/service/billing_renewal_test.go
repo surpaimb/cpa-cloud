@@ -44,6 +44,9 @@ func TestBillingManualRenewalAdminBoundaryAndProjection(t *testing.T) {
 	if status, _ := billingHTTPRequest(t, http.MethodPost, url, body, f.cookie, f.csrf, f.server.URL, nil); status != http.StatusConflict {
 		t.Fatalf("default-off status=%d", status)
 	}
+	if status, _ := billingHTTPRequest(t, http.MethodPost, f.server.URL+"/admin/api/v1/billing/subscriptions/missing/renew", `{"operation_id":"20000000-0000-4000-8000-000000000113"}`, f.cookie, f.csrf, f.server.URL, nil); status != http.StatusNotFound {
+		t.Fatalf("missing predecessor while off status=%d", status)
+	}
 	if _, err := db.Exec(`UPDATE financial_settings SET enabled=1 WHERE singleton=1`); err != nil {
 		t.Fatal(err)
 	}
