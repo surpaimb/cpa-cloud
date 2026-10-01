@@ -34,6 +34,8 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 `GET /self/api/v1/billing/subscriptions[?limit=20][&cursor=...]` 由另一默认关闭的 `--employee-self-subscription-status-enabled` 注册，只要求员工自助总开关。当前 active 员工会话是唯一归属来源；每页 1–50 条，按不可变订阅 ID 逆序，用绑定员工、会话和页大小的认证加密游标继续。仅显示本人直接拥有的现存订阅 ID、冻结 interval、只读有效状态及开始/终止/取消时间，不返回套餐、金额、权益、支付或账户资料；商业执行关闭仍可读历史。页间不是同一数据库快照，故障整页 503；网页只有独立 capability 和明确点击才读取，不改变订阅或账本。详见[本人订阅状态契约](employee-self-subscription-status-contract.md)。
 
+`GET /self/api/v1/billing/plans?currency=USD[&limit=20][&cursor=...]` 由默认关闭的 `--employee-self-plan-catalog-enabled` 注册，只要求员工自助总开关。当前 active 员工须明确指定单一三位大写币种并点击；仅当商业执行开关在本页读取快照中开启，返回该币种当前已启用套餐的 ID、名称、周期、价格/额度 micro 字符串和 revision，按 ID 升序分页。商业执行关闭时 `available=false`、空列表且无下一页；认证加密游标绑定员工、会话、币种、页大小和 15 分钟时限。它不是个人订阅、权益、固定报价或购买入口；无财务写入、支付或上游调用。详见[员工自助套餐目录契约](employee-self-plan-catalog-contract.md)。
+
 ### 管理员账号池本机容量快照（OBS-01 第一段）
 
 `GET /admin/api/v1/models/{id}/pool-runtime` 仅接受管理员会话、匹配的可选 Origin 和无查询参数；响应包含模型/池 revision、UTC `as_of`、明确的 `explicit_pool|legacy_no_pool|model_disabled` 状态，以及最多 64 条不含凭据或身份信息的路由本机容量/持久预留/阻塞原因。读取在单个 SQLite 只读事务内完成，结构、时间或存储错误统一 503 且不返回部分结果。网页必须经 `features.account_pool_runtime_observation=true` 门控，仅手动刷新。该投影不是供应商配额、实时请求数或派发承诺；详见[本机观测契约](account-pool-runtime-observation-contract.md)。

@@ -11,6 +11,7 @@
 // docs/employee-self-wallet-balance-contract.md.
 // docs/employee-self-wallet-activity-contract.md.
 // docs/employee-self-subscription-status-contract.md.
+// docs/employee-self-plan-catalog-contract.md.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -296,6 +297,167 @@ describe('employee self-service page', () => {
     expect(pendingSignal?.aborted).toBe(true)
     pending?.(new Response(JSON.stringify({ items: [{ subscription_id: 'sub-a-late', interval: 'one_time', status: 'active', started_at: '2026-01-31T08:00:00Z', period_end_at: null, cancelled_at: null }], next_cursor: null }), { status: 200 }))
     expect(screen.queryByText('sub-a-late')).not.toBeInTheDocument()
+  })
+
+  it('keeps the plan catalog absent without its independent capability', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_plan_catalog: false } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    expect(await screen.findByRole('heading', { name: '你好，Alice' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '当前可用套餐目录' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/plans'))).toBe(false)
+  })
+
+  it('reads the current plan catalog only after currency selection and clears old quotes when unavailable', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const first = { plan_id: 'plan-a', name: 'Current monthly', interval: 'monthly', price_micro: '13', credit_micro: '29', revision: 2 }
+    const second = { plan_id: 'plan-b', name: 'Current once', interval: 'one_time', price_micro: '10', credit_micro: '20', revision: 1 }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_plan_catalog: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/plans?currency=USD&limit=20')) return reply(200, { currency: 'USD', available: true, items: [first], next_cursor: 'opaque-plan-cursor' })
+      if (url.endsWith('/billing/plans?currency=USD&limit=20&cursor=opaque-plan-cursor')) return reply(200, { currency: 'USD', available: true, items: [second], next_cursor: null })
+      if (url.endsWith('/billing/plans?currency=EUR&limit=20')) return reply(200, { currency: 'EUR', available: false, items: [], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '当前可用套餐目录' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/plans'))).toBe(false)
+    const input = within(panel).getByLabelText('套餐币种（三位大写字母，如 USD）')
+    await userEvent.type(input, 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(panel).findByText('Current monthly')).toBeInTheDocument()
+    expect(within(panel).getByText('13 micro USD')).toBeInTheDocument()
+    expect(within(panel).getByText(/购买、取消与续购仍须管理员操作/)).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多套餐' }))
+    expect(await within(panel).findByText('Current once')).toBeInTheDocument()
+    expect(within(panel).getByText('Current monthly')).toBeInTheDocument()
+    await userEvent.clear(input)
+    expect(within(panel).queryByText('Current monthly')).not.toBeInTheDocument()
+    await userEvent.type(input, 'EUR')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(panel).findByText('当前套餐目录不可用；未展示旧报价。')).toBeInTheDocument()
+    expect(within(panel).queryByText('Current monthly')).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/billing/plans'))).toHaveLength(3)
+  })
+
+  it('accepts catalog page order using the server UTF-8 ID order', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const plan = (planID: string, name: string) => ({ plan_id: planID, name, interval: 'monthly', price_micro: '10', credit_micro: '20', revision: 1 })
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_plan_catalog: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/plans?currency=USD&limit=20')) return reply(200, { currency: 'USD', available: true, items: [plan('plan one', 'Space ID')], next_cursor: 'p1' })
+      if (url.endsWith('/billing/plans?currency=USD&limit=20&cursor=p1')) return reply(200, { currency: 'USD', available: true, items: [plan('\uE000', 'BMP ID')], next_cursor: 'p2' })
+      if (url.endsWith('/billing/plans?currency=USD&limit=20&cursor=p2')) return reply(200, { currency: 'USD', available: true, items: [plan('😀', 'Supplementary ID')], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '当前可用套餐目录' })
+    await userEvent.type(within(panel).getByLabelText('套餐币种（三位大写字母，如 USD）'), 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(panel).findByText('Space ID')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多套餐' }))
+    expect(await within(panel).findByText('BMP ID')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多套餐' }))
+    expect(await within(panel).findByText('Supplementary ID')).toBeInTheDocument()
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('clears failed plan reads and prevents late catalog results after logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let pending: ((value: Response) => void) | undefined
+    let pendingSignal: AbortSignal | undefined
+    let failure = false
+    const first = { plan_id: 'plan-a', name: 'Current monthly', interval: 'monthly', price_micro: '13', credit_micro: '29', revision: 2 }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_plan_catalog: true } })
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/plans?currency=USD&limit=20')) {
+        if (failure) return reply(503, { error: { code: 'storage_unavailable' } })
+        return reply(200, { currency: 'USD', available: true, items: [first], next_cursor: 'late' })
+      }
+      if (url.endsWith('/billing/plans?currency=USD&limit=20&cursor=late')) {
+        pendingSignal = init?.signal ?? undefined
+        return new Promise<Response>((resolve) => { pending = resolve })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '当前可用套餐目录' })
+    await userEvent.type(within(panel).getByLabelText('套餐币种（三位大写字母，如 USD）'), 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(panel).findByText('Current monthly')).toBeInTheDocument()
+    failure = true
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(panel).findByRole('alert')).toBeInTheDocument()
+    expect(within(panel).queryByText('Current monthly')).not.toBeInTheDocument()
+    failure = false
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(panel).findByText('Current monthly')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多套餐' }))
+    await waitFor(() => expect(pending).toBeTypeOf('function'))
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(screen.queryByText('Current monthly')).not.toBeInTheDocument()
+    expect(pendingSignal?.aborted).toBe(true)
+    pending?.(new Response(JSON.stringify({ currency: 'USD', available: true, items: [{ ...first, plan_id: 'plan-b', name: 'Late plan' }], next_cursor: null }), { status: 200 }))
+    expect(screen.queryByText('Late plan')).not.toBeInTheDocument()
+  })
+
+  it('abandons a pending plan quote when currency changes', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let pending: ((value: Response) => void) | undefined
+    let pendingSignal: AbortSignal | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_plan_catalog: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/plans?currency=USD&limit=20')) {
+        pendingSignal = init?.signal ?? undefined
+        return new Promise<Response>((resolve) => { pending = resolve })
+      }
+      if (url.endsWith('/billing/plans?currency=EUR&limit=20')) return reply(200, { currency: 'EUR', available: true, items: [{ plan_id: 'plan-eur', name: 'EUR plan', interval: 'one_time', price_micro: '7', credit_micro: '9', revision: 1 }], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '当前可用套餐目录' })
+    const input = within(panel).getByLabelText('套餐币种（三位大写字母，如 USD）')
+    await userEvent.type(input, 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    await waitFor(() => expect(pending).toBeTypeOf('function'))
+    await userEvent.clear(input)
+    expect(pendingSignal?.aborted).toBe(true)
+    await userEvent.type(input, 'EUR')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(panel).findByText('EUR plan')).toBeInTheDocument()
+    pending?.(new Response(JSON.stringify({ currency: 'USD', available: true, items: [{ plan_id: 'plan-usd', name: 'Late USD plan', interval: 'monthly', price_micro: '10', credit_micro: '20', revision: 1 }], next_cursor: null }), { status: 200 }))
+    expect(within(panel).queryByText('Late USD plan')).not.toBeInTheDocument()
+    expect(within(panel).getByText('EUR plan')).toBeInTheDocument()
   })
 
   it('logs in with the independent endpoint and displays only owned metadata', async () => {

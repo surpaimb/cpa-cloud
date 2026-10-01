@@ -36,6 +36,7 @@ type Config struct {
 	EmployeeSelfWalletBalanceEnabled      bool
 	EmployeeSelfWalletActivityEnabled     bool
 	EmployeeSelfSubscriptionStatusEnabled bool
+	EmployeeSelfPlanCatalogEnabled        bool
 	ResponsesStatefulResources            bool
 	ResponsesBackgroundTasks              bool
 	CodexOAuthClientID                    string

@@ -8,6 +8,8 @@
 
 下一段候选按[本人订阅状态独立契约](employee-self-subscription-status-contract.md)增加另一独立默认关闭的只读 opt-in，只依赖员工自助总开关。当前有效员工会话显式点击，按订阅 ID 逆序分页读取直接属于本人的现存订阅最小状态；已到期月订阅仅在读取中投影为过期，不写回。与钱包开关、商业执行开关无耦合。无套餐、金额、权益或购买入口，也无新 DDL、财务写入、完整账单或真实供应商/支付调用；GOV-02 继续开放。
 
+当前 `ID-05/BILL-03` 分支按[员工自助套餐目录独立契约](employee-self-plan-catalog-contract.md)增加单独默认关闭的只读 opt-in，仅依赖员工自助总开关。员工主动指定三位大写币种，按套餐 ID 分页读取当前商业执行已开启时的已启用套餐现价、额度和 revision；商业执行关闭时返回不可用和空目录。每页是独立快照，不承诺跨页一致或持久报价；没有员工购买、权益授予、支付、DDL 或财务写入。GOV-02 和生产启用验收仍待完成。
+
 `PROTO-08` 第四段候选按[显式 user 提示增量契约](openai-embeddings-user-contract.md)仅在已合格的 OpenAI-compatible API Key 非流式 float Embeddings wire 上，转发员工 Key 持有人自行提供的有界提示。它不是 CPA Cloud 身份，也不参与授权、账本或计费；省略时旧 wire 不变。base64、其他模型的 dimensions、其他供应商、真实客户端与通用预算上界仍待验证。精确提交的 CI 与固定二进制验收须单独记录，不借用前三段证据。
 
 ## 当前执行批次
