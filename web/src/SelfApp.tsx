@@ -9,12 +9,13 @@
 // docs/employee-self-key-token-summary-contract.md.
 // docs/employee-self-key-request-history-contract.md.
 // docs/employee-self-wallet-balance-contract.md.
+// docs/employee-self-wallet-activity-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -28,6 +29,8 @@ type SelfTokenSummary = {
   attempts: { total: string; pending: string; input_tokens: SelfTokenCounts; output_tokens: SelfTokenCounts; cache_read_tokens: SelfTokenCounts; cache_write_tokens: SelfTokenCounts }
 }
 type SelfWalletBalance = { currency: string; has_account: boolean; amount_micro: string | null }
+type SelfWalletActivityItem = { occurred_at: string; delta_micro: string }
+type SelfWalletActivityPage = { currency: string; has_account: boolean; window_start: string; window_end: string; items: SelfWalletActivityItem[]; next_cursor: string | null }
 
 async function selfRequest<T>(path: string, init: RequestInit = {}, csrf?: string): Promise<T> {
   const headers = new Headers(init.headers)
@@ -548,6 +551,102 @@ function SelfWalletBalancePanel() {
   </section>
 }
 
+function validSelfWalletActivityPage(raw: unknown, currency: string, previous?: SelfWalletActivityPage): raw is SelfWalletActivityPage {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const value = raw as Record<string, unknown>
+  if (Object.keys(value).sort().join(',') !== 'currency,has_account,items,next_cursor,window_end,window_start' ||
+    value.currency !== currency || typeof value.has_account !== 'boolean' || !Array.isArray(value.items) || value.items.length > 20 ||
+    (value.next_cursor !== null && (typeof value.next_cursor !== 'string' || value.next_cursor.length < 1 || value.next_cursor.length > 1024))) return false
+  const windowTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/
+  if (typeof value.window_start !== 'string' || typeof value.window_end !== 'string' ||
+    !windowTime.test(value.window_start) || !windowTime.test(value.window_end) ||
+    Date.parse(value.window_end) - Date.parse(value.window_start) !== 31 * 24 * 60 * 60 * 1000) return false
+  if (previous && (value.window_start !== previous.window_start || value.window_end !== previous.window_end || value.has_account !== previous.has_account)) return false
+  if (!value.has_account && (value.items.length !== 0 || value.next_cursor !== null)) return false
+  if (value.next_cursor !== null && value.items.length === 0) return false
+  const entryTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/
+  return value.items.every((item: unknown) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false
+    const entry = item as Record<string, unknown>
+    return Object.keys(entry).sort().join(',') === 'delta_micro,occurred_at' && typeof entry.occurred_at === 'string' &&
+      entryTime.test(entry.occurred_at) && !/\.\d*0Z$/.test(entry.occurred_at) && Number.isFinite(Date.parse(entry.occurred_at)) &&
+      typeof entry.delta_micro === 'string' && /^(?:-[1-9]\d*|[1-9]\d*)$/.test(entry.delta_micro)
+  })
+}
+
+function SelfWalletActivityPanel() {
+  const [currency, setCurrency] = useState('')
+  const [page, setPage] = useState<SelfWalletActivityPage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort() }, [])
+
+  function changeCurrency(value: string) {
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    setCurrency(value)
+    setPage(null)
+    setError(false)
+    setLoading(false)
+  }
+
+  async function readPage(cursor?: string) {
+    const requestedCurrency = currency
+    const prior = cursor ? page : null
+    if (!/^[A-Z]{3}$/.test(requestedCurrency) || (cursor && (!prior || prior.next_cursor !== cursor))) {
+      setPage(null)
+      setError(true)
+      return
+    }
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const controller = new AbortController()
+    pending.current = controller
+    if (!cursor) setPage(null)
+    setError(false)
+    setLoading(true)
+    try {
+      const path = `/billing/entries?currency=${encodeURIComponent(requestedCurrency)}&limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const value = await selfRequest<unknown>(path, { signal: controller.signal })
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (!validSelfWalletActivityPage(value, requestedCurrency, prior ?? undefined)) throw new Error('Invalid wallet activity response')
+      setPage(prior ? { ...value, items: [...prior.items, ...value.items] } : value)
+    } catch {
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      setPage(null)
+      setError(true)
+    } finally {
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(false)
+    }
+  }
+
+  return <section className="self-wallet-activity" aria-labelledby="self-wallet-activity-title">
+    <h2 id="self-wallet-activity-title">最近钱包变动</h2>
+    <p>仅显示你本人名下员工钱包近 31 天的逐笔金额变动，不含 API Key 或资源子账户。按需读取；这不是完整账单、支付记录或实时余额。同一秒内按稳定存储键显示，不保证纳秒先后。</p>
+    <form className="self-wallet-form" onSubmit={(event) => { event.preventDefault(); void readPage() }}>
+      <Field label="流水币种（三位大写字母，如 USD）"><input name="activity_currency" value={currency} onChange={(event) => changeCurrency(event.target.value)} required maxLength={3} pattern="[A-Z]{3}" autoComplete="off" spellCheck={false} /></Field>
+      <Button type="submit" disabled={loading}>{loading ? '正在读取…' : '读取最近变动'}</Button>
+    </form>
+    {error ? <p role="alert">最近钱包变动暂时无法读取，请检查币种或稍后重试。</p> : null}
+    {page && !error ? <div className="self-wallet-activity-result" role="status">
+      <p>查询窗口：<time dateTime={page.window_start}>{selfKeyDate(page.window_start)}</time> 至 <time dateTime={page.window_end}>{selfKeyDate(page.window_end)}</time>（不含结束时刻）</p>
+      {!page.has_account ? <p><strong>{page.currency}</strong> 暂无员工钱包账户（未显示为零余额）。</p>
+        : page.items.length === 0 ? <p><strong>{page.currency}</strong> 员工钱包在此窗口暂无变动；这不代表余额为零。</p>
+          : <ol className="self-wallet-activity-list">{page.items.map((item, index) => <li key={`${item.occurred_at}:${item.delta_micro}:${index}`}>
+            <time dateTime={item.occurred_at}>{selfKeyDate(item.occurred_at)}</time>
+            <strong className={item.delta_micro.startsWith('-') ? 'self-wallet-activity-negative' : 'self-wallet-activity-positive'}>{item.delta_micro.startsWith('-') ? '' : '+'}{item.delta_micro} micro</strong>
+          </li>)}</ol>}
+      {page.next_cursor ? <Button variant="secondary" disabled={loading} onClick={() => { void readPage(page.next_cursor ?? undefined) }}>{loading ? '正在读取…' : '加载更多变动'}</Button> : null}
+    </div> : null}
+  </section>
+}
+
 function SelfSignOutOthers({ csrf }: { csrf: string }) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -634,6 +733,8 @@ export function SelfApp() {
         <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、API Key、本人请求记录和 Token 汇总，也可以撤销自己的 Key 或退出其他设备。仅在管理员明确授权槽位后，你才能领取一个新的 Key；权限和限额仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
         {session.features?.employee_self_wallet_balance === true ? <SelfWalletBalancePanel key={`wallet:${session.profile.id}:${session.csrf_token}`} /> : null}
+        {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true
+          ? <SelfWalletActivityPanel key={`wallet-activity:${session.profile.id}:${session.csrf_token}`} /> : null}
         <SelfKeyIssuance key={`issue:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} onIssued={() => setKeyInventoryRevision((value) => value + 1)} />
         <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}:${keyInventoryRevision}`} csrf={session.csrf_token} />
         <SelfTokenSummaryPanel key={`summary:${session.profile.id}:${session.csrf_token}`} />

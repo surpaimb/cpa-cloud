@@ -24,7 +24,9 @@
 
 最新源码还可在员工自助 Key 列表中按需查看单个 Key 最近 24 小时的最小请求活动和已知 Token 汇总；不会批量读取各 Key，且不展示请求正文、Key 策略、费用或账单。这些只读视图仍受默认关闭的员工自助开关和 GOV-02 生产启用边界约束。详见[单 Key 请求活动契约](docs/employee-self-key-request-history-contract.md)和[单 Key Token 汇总契约](docs/employee-self-key-token-summary-contract.md)。
 
-本人钱包余额另需同时显式添加 `--employee-self-wallet-balance-enabled`，不能仅靠员工自助或商业执行开关启用。已开通且仍为 active 的员工必须输入三位大写币种并点击读取，页面仅显示该员工直接拥有的该币种钱包余额；无账户与真实零余额分开显示，不合并 Key/资源子账户。没有币种列表、账目、套餐或支付自助入口。详见[员工钱包只读契约](docs/employee-self-wallet-balance-contract.md)；GOV-02 仍开放，本能力不在 preview.3 包中。
+本人钱包余额另需同时显式添加 `--employee-self-wallet-balance-enabled`，不能仅靠员工自助或商业执行开关启用。已开通且仍为 active 的员工必须输入三位大写币种并点击读取，页面仅显示该员工直接拥有的该币种钱包余额；无账户与真实零余额分开显示，不合并 Key/资源子账户。余额面板没有币种列表、账目、套餐或支付入口。详见[员工钱包只读契约](docs/employee-self-wallet-balance-contract.md)；GOV-02 仍开放，本能力不在 preview.3 包中。
+
+最近钱包变动另需显式添加默认关闭的 `--employee-self-wallet-activity-enabled`，并同时开启上述员工自助和余额两个开关。员工再次输入单个三位大写币种并点击后，才可分页查看本人直接拥有的员工钱包近 31 天最小金额变动；无账户和已有账户但窗口内无变动分开显示，不包含 Key/资源子账户、操作或账户 ID、套餐、价格、支付或说明。页与页分别读取，不保证并发记账时的跨页完整快照；同一秒内为稳定存储键顺序，不宣称严格纳秒先后。这不是完整账单、自助充值或实时余额，GOV-02 仍开放，也不在 preview.3 包中。详见[最近钱包变动契约](docs/employee-self-wallet-activity-contract.md)。
 
 ## Codex 会员文件导入实验（仅最新源码）
 
