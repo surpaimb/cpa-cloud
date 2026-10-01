@@ -4,6 +4,7 @@ package financial
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"testing"
@@ -175,6 +176,7 @@ func TestManualRenewalMigratesExactOldOperationSchema(t *testing.T) {
 	if err := NewLedger(db).Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	downgradeEmptyLedgerOperationsForLegacyTest(t, db)
 	for _, ddl := range []string{commercialOperationsLegacyDDL, commercialOperationsNoUpdateDDL, commercialOperationsNoDeleteDDL} {
 		if _, err := db.Exec(ddl); err != nil {
 			t.Fatal(err)
@@ -205,6 +207,7 @@ func TestManualRenewalMigrationRollsBackMalformedLegacyFact(t *testing.T) {
 	if err := NewLedger(db).Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	downgradeEmptyLedgerOperationsForLegacyTest(t, db)
 	for _, ddl := range []string{commercialOperationsLegacyDDL, commercialOperationsNoUpdateDDL, commercialOperationsNoDeleteDDL} {
 		if _, err := db.Exec(ddl); err != nil {
 			t.Fatal(err)
@@ -238,11 +241,24 @@ func TestManualRenewalMigrationRollsBackMalformedLegacyFact(t *testing.T) {
 	}
 }
 
+func downgradeEmptyLedgerOperationsForLegacyTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var entries int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM financial_entries`).Scan(&entries); err != nil || entries != 0 {
+		t.Fatalf("legacy fixture requires empty ledger: entries=%d err=%v", entries, err)
+	}
+	for _, ddl := range []string{`DROP TABLE financial_operations`, operationsLegacyDDL, operationsNoUpdateDDL, operationsNoDeleteDDL} {
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestManualRenewalUsesCurrentCurrencyAndDoesNotBackfillGap(t *testing.T) {
 	commercial, ledger, due, planID := renewalFixture(t)
 	ctx := context.Background()
 	owner := Owner{Kind: OwnerKey, EmployeeID: "employee-one", KeyID: "key-one"}
-	if _, err := ledger.Post(ctx, Post{OperationID: "renew-eur-seed", Action: "adjustment", ResourceKind: "adjustment", ResourceID: "renew-eur-seed", ObservedAt: due, Entries: []EntryInput{{Owner: owner, Currency: "EUR", Kind: EntryAdjustmentCredit, AmountMicro: 100, ResourceKind: "adjustment", ResourceID: "renew-eur-seed"}}}); err != nil {
+	if _, err := ledger.Post(ctx, Post{OperationID: "renew-eur-seed", Action: "adjustment", ActorAdminID: "admin-one", ResourceKind: "adjustment", ResourceID: "renew-eur-seed", ObservedAt: due, Entries: []EntryInput{{Owner: owner, Currency: "EUR", Kind: EntryAdjustmentCredit, AmountMicro: 100, ResourceKind: "adjustment", ResourceID: "renew-eur-seed"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := commercial.db.Exec(`UPDATE financial_settings SET enabled=1 WHERE singleton=1`); err != nil {

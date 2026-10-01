@@ -64,6 +64,7 @@ type EntryInput struct {
 type Post struct {
 	OperationID        string       `json:"operation_id"`
 	Action             string       `json:"action"`
+	Actor              Actor        `json:"actor"`
 	ActorAdminID       string       `json:"actor_admin_id,omitempty"`
 	ResourceKind       string       `json:"resource_kind"`
 	ResourceID         string       `json:"resource_id"`
@@ -158,7 +159,7 @@ const accountsDDL = `CREATE TABLE IF NOT EXISTS financial_accounts (
 		(owner_kind='resource' AND resource_kind<>'' AND resource_id<>''))
 )`
 
-const operationsDDL = `CREATE TABLE IF NOT EXISTS financial_operations (
+const operationsLegacyDDL = `CREATE TABLE IF NOT EXISTS financial_operations (
 	operation_id TEXT PRIMARY KEY,
 	action TEXT NOT NULL CHECK(action IN ('adjustment','topup','redemption','subscription_purchase','payment_callback','refund','usage_charge')),
 	actor_admin_id TEXT REFERENCES admins(id) ON DELETE RESTRICT,
@@ -166,6 +167,25 @@ const operationsDDL = `CREATE TABLE IF NOT EXISTS financial_operations (
 	resource_id TEXT NOT NULL,
 	payload_digest BLOB NOT NULL CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
 	created_at TEXT NOT NULL
+)`
+
+const operationsDDL = `CREATE TABLE IF NOT EXISTS financial_operations (
+	operation_id TEXT PRIMARY KEY,
+	action TEXT NOT NULL CHECK(action IN ('adjustment','topup','redemption','subscription_purchase','payment_callback','refund','usage_charge')),
+	actor_kind TEXT NOT NULL CHECK(actor_kind IN ('admin','employee','system','legacy_unknown')),
+	actor_admin_id TEXT REFERENCES admins(id) ON DELETE RESTRICT,
+	actor_employee_id TEXT REFERENCES employees(id) ON DELETE RESTRICT,
+	actor_system_id TEXT,
+	resource_kind TEXT NOT NULL,
+	resource_id TEXT NOT NULL,
+	payload_digest BLOB NOT NULL CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
+	digest_version INTEGER NOT NULL CHECK(typeof(digest_version)='integer' AND digest_version IN (1,2)),
+	created_at TEXT NOT NULL,
+	CHECK((actor_kind='admin' AND actor_admin_id IS NOT NULL AND length(actor_admin_id) BETWEEN 1 AND 256 AND actor_employee_id IS NULL AND actor_system_id IS NULL) OR
+		(actor_kind='employee' AND actor_admin_id IS NULL AND actor_employee_id IS NOT NULL AND length(actor_employee_id) BETWEEN 1 AND 256 AND actor_system_id IS NULL) OR
+		(actor_kind='system' AND actor_admin_id IS NULL AND actor_employee_id IS NULL AND actor_system_id IS NOT NULL AND
+			((action='payment_callback' AND actor_system_id='payment_callback') OR (action='subscription_purchase' AND actor_system_id='subscription_one_shot_worker'))) OR
+		(actor_kind='legacy_unknown' AND actor_admin_id IS NULL AND actor_employee_id IS NULL AND actor_system_id IS NULL AND digest_version=1))
 )`
 
 const entriesDDL = `CREATE TABLE IF NOT EXISTS financial_entries (
@@ -188,12 +208,16 @@ const entriesNoUpdateDDL = `CREATE TRIGGER IF NOT EXISTS financial_entries_no_up
 const entriesNoDeleteDDL = `CREATE TRIGGER IF NOT EXISTS financial_entries_no_delete BEFORE DELETE ON financial_entries BEGIN SELECT RAISE(ABORT,'financial entries are immutable'); END`
 const operationsNoUpdateDDL = `CREATE TRIGGER IF NOT EXISTS financial_operations_no_update BEFORE UPDATE ON financial_operations BEGIN SELECT RAISE(ABORT,'financial operations are immutable'); END`
 const operationsNoDeleteDDL = `CREATE TRIGGER IF NOT EXISTS financial_operations_no_delete BEFORE DELETE ON financial_operations BEGIN SELECT RAISE(ABORT,'financial operations are immutable'); END`
+const operationsNoUnknownInsertDDL = `CREATE TRIGGER IF NOT EXISTS financial_operations_no_unknown_insert BEFORE INSERT ON financial_operations WHEN NEW.actor_kind='legacy_unknown' BEGIN SELECT RAISE(ABORT,'legacy unknown actor cannot be inserted'); END`
 const accountsNoUpdateDDL = `CREATE TRIGGER IF NOT EXISTS financial_accounts_no_update BEFORE UPDATE ON financial_accounts BEGIN SELECT RAISE(ABORT,'financial accounts are immutable'); END`
 const accountsNoDeleteDDL = `CREATE TRIGGER IF NOT EXISTS financial_accounts_no_delete BEFORE DELETE ON financial_accounts BEGIN SELECT RAISE(ABORT,'financial accounts are immutable'); END`
 
 func (l *Ledger) Migrate(ctx context.Context) error {
 	if l == nil || l.db == nil || ctx == nil {
 		return ErrInvalid
+	}
+	if err := migrateActorProvenance(ctx, l.db); err != nil {
+		return err
 	}
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -206,7 +230,7 @@ func (l *Ledger) Migrate(ctx context.Context) error {
 			return ErrSchema
 		}
 	}
-	for _, statement := range []string{accountsDDL, operationsDDL, entriesDDL, accountOwnerIndexDDL, entryAccountIndexDDL, entryResourceIndexDDL, entriesNoUpdateDDL, entriesNoDeleteDDL, operationsNoUpdateDDL, operationsNoDeleteDDL, accountsNoUpdateDDL, accountsNoDeleteDDL} {
+	for _, statement := range []string{accountsDDL, operationsDDL, entriesDDL, accountOwnerIndexDDL, entryAccountIndexDDL, entryResourceIndexDDL, entriesNoUpdateDDL, entriesNoDeleteDDL, operationsNoUpdateDDL, operationsNoDeleteDDL, operationsNoUnknownInsertDDL, accountsNoUpdateDDL, accountsNoDeleteDDL} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return ErrSchema
 		}
@@ -215,6 +239,9 @@ func (l *Ledger) Migrate(ctx context.Context) error {
 		return err
 	}
 	if err := validateStored(ctx, tx); err != nil {
+		return err
+	}
+	if err := validateActorStored(ctx, tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -246,16 +273,37 @@ func (l *Ledger) PostTx(ctx context.Context, tx *sql.Tx, input Post) ([]Entry, e
 	if l == nil || l.db == nil || ctx == nil || tx == nil || !validPost(input) {
 		return nil, ErrInvalid
 	}
-	digest, err := postDigest(input)
+	actor, ok := effectiveActor(input.Actor, input.ActorAdminID)
+	if !ok || !validActionActor(actor, input.Action, false) {
+		return nil, ErrInvalid
+	}
+	digest, err := postDigestV2(input, actor)
 	if err != nil {
 		return nil, ErrInvalid
 	}
-	storedDigest, found, err := operationDigest(ctx, tx, input.OperationID)
+	stored, found, err := operationDigest(ctx, tx, input.OperationID)
 	if err != nil {
 		return nil, err
 	}
 	if found {
-		if !equalBytes(storedDigest, digest[:]) {
+		if stored.Actor != actor {
+			return nil, ErrConflict
+		}
+		candidate := digest
+		if stored.Version == 1 {
+			legacyInput := input
+			legacyInput.ActorAdminID = ""
+			if actor.Kind == ActorAdmin {
+				legacyInput.ActorAdminID = actor.ID
+			}
+			candidate, err = postDigest(legacyInput)
+			if err != nil {
+				return nil, ErrInvalid
+			}
+		} else if stored.Version != 2 {
+			return nil, ErrSchema
+		}
+		if !equalBytes(stored.Digest, candidate[:]) {
 			return nil, ErrConflict
 		}
 		return loadOperationEntries(ctx, tx, input.OperationID)
@@ -312,11 +360,8 @@ func (l *Ledger) PostTx(ctx context.Context, tx *sql.Tx, input Post) ([]Entry, e
 			return nil, ErrInsufficient
 		}
 	}
-	actor := any(nil)
-	if input.ActorAdminID != "" {
-		actor = input.ActorAdminID
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_operations(operation_id,action,actor_admin_id,resource_kind,resource_id,payload_digest,created_at) VALUES(?,?,?,?,?,?,?)`, input.OperationID, input.Action, actor, input.ResourceKind, input.ResourceID, digest[:], input.ObservedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+	adminID, employeeID, systemID := actorColumns(actor)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_operations(operation_id,action,actor_kind,actor_admin_id,actor_employee_id,actor_system_id,resource_kind,resource_id,payload_digest,digest_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, input.OperationID, input.Action, actor.Kind, adminID, employeeID, systemID, input.ResourceKind, input.ResourceID, digest[:], 2, input.ObservedAt.UTC().Format(time.RFC3339Nano)); err != nil {
 		return nil, ErrUnavailable
 	}
 	result := make([]Entry, 0, len(pendingEntries))
@@ -561,18 +606,50 @@ func accountBalance(ctx context.Context, query interface {
 	return total, nil
 }
 
+type storedOperationDigest struct {
+	Digest  []byte
+	Version int
+	Actor   Actor
+}
+
 func operationDigest(ctx context.Context, query interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, operationID string) ([]byte, bool, error) {
-	var digest []byte
-	err := query.QueryRowContext(ctx, `SELECT payload_digest FROM financial_operations WHERE operation_id=?`, operationID).Scan(&digest)
+}, operationID string) (storedOperationDigest, bool, error) {
+	var stored storedOperationDigest
+	var kind string
+	var adminID, employeeID, systemID sql.NullString
+	err := query.QueryRowContext(ctx, `SELECT payload_digest,digest_version,actor_kind,actor_admin_id,actor_employee_id,actor_system_id FROM financial_operations WHERE operation_id=?`, operationID).Scan(&stored.Digest, &stored.Version, &kind, &adminID, &employeeID, &systemID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, false, nil
+		return storedOperationDigest{}, false, nil
 	}
 	if err != nil {
-		return nil, false, ErrUnavailable
+		return storedOperationDigest{}, false, ErrUnavailable
 	}
-	return digest, true, nil
+	stored.Actor.Kind = ActorKind(kind)
+	switch stored.Actor.Kind {
+	case ActorAdmin:
+		if !adminID.Valid || employeeID.Valid || systemID.Valid {
+			return storedOperationDigest{}, false, ErrSchema
+		}
+		stored.Actor.ID = adminID.String
+	case ActorEmployee:
+		if adminID.Valid || !employeeID.Valid || systemID.Valid {
+			return storedOperationDigest{}, false, ErrSchema
+		}
+		stored.Actor.ID = employeeID.String
+	case ActorSystem:
+		if adminID.Valid || employeeID.Valid || !systemID.Valid {
+			return storedOperationDigest{}, false, ErrSchema
+		}
+		stored.Actor.ID = systemID.String
+	case "legacy_unknown":
+		if adminID.Valid || employeeID.Valid || systemID.Valid || stored.Version != 1 {
+			return storedOperationDigest{}, false, ErrSchema
+		}
+	default:
+		return storedOperationDigest{}, false, ErrSchema
+	}
+	return stored, true, nil
 }
 
 func loadOperationEntries(ctx context.Context, query interface {
@@ -805,7 +882,30 @@ func randomID(prefix string) (string, error) {
 }
 
 func validateSchema(ctx context.Context, tx *sql.Tx) error {
-	tables := map[string]string{"financial_accounts": accountsDDL, "financial_operations": operationsDDL, "financial_entries": entriesDDL}
+	return validateSchemaVersion(ctx, tx, operationsDDL, false)
+}
+
+func postDigestV2(input Post, actor Actor) ([32]byte, error) {
+	payload := struct {
+		Domain             string       `json:"domain"`
+		OperationID        string       `json:"operation_id"`
+		Action             string       `json:"action"`
+		ActorKind          ActorKind    `json:"actor_kind"`
+		ActorID            string       `json:"actor_id"`
+		ResourceKind       string       `json:"resource_kind"`
+		ResourceID         string       `json:"resource_id"`
+		RequireNonNegative bool         `json:"require_non_negative"`
+		Entries            []EntryInput `json:"entries"`
+	}{"financial-post/v2", input.OperationID, input.Action, actor.Kind, actor.ID, input.ResourceKind, input.ResourceID, input.RequireNonNegative, input.Entries}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(encoded), nil
+}
+
+func validateSchemaVersion(ctx context.Context, tx *sql.Tx, operationDDL string, legacyActor bool) error {
+	tables := map[string]string{"financial_accounts": accountsDDL, "financial_operations": operationDDL, "financial_entries": entriesDDL}
 	for name, ddl := range tables {
 		var kind, actual string
 		if err := tx.QueryRowContext(ctx, `SELECT type,sql FROM sqlite_master WHERE name=?`, name).Scan(&kind, &actual); err != nil || kind != "table" || normalize(actual) != normalize(storedDDL(ddl)) {
@@ -820,6 +920,9 @@ func validateSchema(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	triggers := map[string]string{"financial_entries_no_update": entriesNoUpdateDDL, "financial_entries_no_delete": entriesNoDeleteDDL, "financial_operations_no_update": operationsNoUpdateDDL, "financial_operations_no_delete": operationsNoDeleteDDL, "financial_accounts_no_update": accountsNoUpdateDDL, "financial_accounts_no_delete": accountsNoDeleteDDL}
+	if !legacyActor {
+		triggers["financial_operations_no_unknown_insert"] = operationsNoUnknownInsertDDL
+	}
 	for name, ddl := range triggers {
 		var kind, actual string
 		if err := tx.QueryRowContext(ctx, `SELECT type,sql FROM sqlite_master WHERE name=?`, name).Scan(&kind, &actual); err != nil || kind != "trigger" || normalize(actual) != normalize(storedDDL(ddl)) {
@@ -830,7 +933,11 @@ func validateSchema(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND name IN ('financial_accounts_owner_idx','financial_entries_account_idx','financial_entries_resource_idx')`).Scan(&explicitIndexes); err != nil || explicitIndexes != 3 {
 		return ErrSchema
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('financial_entries_no_update','financial_entries_no_delete','financial_operations_no_update','financial_operations_no_delete','financial_accounts_no_update','financial_accounts_no_delete')`).Scan(&triggerCount); err != nil || triggerCount != 6 {
+	wantedTriggers := 7
+	if legacyActor {
+		wantedTriggers = 6
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('financial_accounts','financial_operations','financial_entries')`).Scan(&triggerCount); err != nil || triggerCount != wantedTriggers {
 		return ErrSchema
 	}
 	return nil

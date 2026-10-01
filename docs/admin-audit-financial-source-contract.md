@@ -2,6 +2,8 @@
 
 状态：AUDIT-01 第二段开发契约，2026-09-30。基于已合并的[第一段契约](admin-audit-overview-contract.md)。本文件只规定增量与冲突处；第一段其余鉴权、Origin、无缓存、脱敏、31 天窗口、每页 1–100 条、固定排序、五秒超时及“不等于完整审计”的边界继续生效。
 
+后续财务 actor provenance v1 的[增量契约](financial-actor-provenance-contract.md)覆盖本文件中第五源的 actor 投影、空值含义、schema/触发器数量、v2 游标及网页标签；这些原段落仅描述升级前行为。升级后第五源返回真实 `actor_kind`，`actor_id` 为对应类型的 ID 或历史未知时的 `null`，游标为 v3。
+
 ## 范围与来源
 
 将现有 `financial_commercial_operations` 作为第五个且最后一个固定来源，token 为 `financial_commercial`，排在旧四源之后。它是财务模块已存在的同事务、不可变商业操作 receipt；本批只读，不修改写路径、回填、保留规则、账本、支付或授权。不把它称为全部账务/支付审计，不纳入 `financial_operations`、`financial_webhook_events`、会话、备份或其他表。`result="succeeded"` 仅表示该行随其业务事务提交，不表示外部支付已成功、没有后续退款或完整商业流程已经完成。

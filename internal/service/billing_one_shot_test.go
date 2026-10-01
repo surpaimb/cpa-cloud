@@ -19,7 +19,7 @@ func TestBillingOneShotAdminGuardsAndTerminalRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := financial.Owner{Kind: financial.OwnerEmployee, EmployeeID: "one-shot-employee"}
-	if _, err := financial.NewLedger(db).Post(context.Background(), financial.Post{OperationID: "one-shot-http-seed", Action: "adjustment", ResourceKind: "adjustment", ResourceID: "one-shot-http-seed", ObservedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Entries: []financial.EntryInput{{Owner: owner, Currency: "USD", Kind: financial.EntryAdjustmentCredit, AmountMicro: 100, ResourceKind: "adjustment", ResourceID: "one-shot-http-seed"}}}); err != nil {
+	if _, err := financial.NewLedger(db).Post(context.Background(), financial.Post{OperationID: "one-shot-http-seed", Action: "adjustment", Actor: financial.Actor{Kind: financial.ActorEmployee, ID: owner.EmployeeID}, ResourceKind: "adjustment", ResourceID: "one-shot-http-seed", ObservedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Entries: []financial.EntryInput{{Owner: owner, Currency: "USD", Kind: financial.EntryAdjustmentCredit, AmountMicro: 100, ResourceKind: "adjustment", ResourceID: "one-shot-http-seed"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO financial_plans(id,name,currency,price_micro,credit_micro,interval,enabled,revision,created_at,updated_at) VALUES('one-shot-http-plan','One shot','USD',10,20,'monthly',1,1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {

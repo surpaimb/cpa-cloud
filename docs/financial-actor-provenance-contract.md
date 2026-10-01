@@ -1,6 +1,6 @@
 # 财务操作 actor provenance v1 契约
 
-状态：2026-10-02 独立设计合同；本提交仅为文档，不声称实现、迁移或验收完成。基线为 `main` 的 `f36b9a4d46b35f23de2aab986c9edff65f22b61c`。本段为后续员工本人钱包购买提供可信操作归属，但**不**增加员工购买 HTTP/UI、扣款授权、权益发放、支付回调能力或任何新商业开关。既有管理员商业写入、支付回调和一次性续订 worker 的业务结果必须保持不变。
+状态：2026-10-02 独立设计合同；实现和验收状态以对应提交及测试记录为准，不由本合同本身宣称完成。基线为 `main` 的 `f36b9a4d46b35f23de2aab986c9edff65f22b61c`。本段为后续员工本人钱包购买提供可信操作归属，但**不**增加员工购买 HTTP/UI、扣款授权、权益发放、支付回调能力或任何新商业开关。既有管理员商业写入、支付回调和一次性续订 worker 的业务结果必须保持不变。
 
 ## 现有事实与适用边界
 
@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | C1 | `commercialOperationsLegacyDDL` | 手动续订之前，无 `subscription.renew` 与一次性 arm/disarm action |
 | C2 | `commercialOperationsBeforeOneShotDDL` | 有 `subscription.renew`，无一次性 arm/disarm action |
-| C3 | `commercialOperationsDDL` | 含手动续订及一次性 arm/disarm；本基线现行结构 |
+| C3 | 基线中的 `commercialOperationsDDL`，实现中保留为 `commercialOperationsBeforeActorDDL` | 含手动续订及一次性 arm/disarm；本基线现行结构 |
 
 旧账本操作表记为 L1，新结构记为 L2；新商业结构记为 C4。空库可以缺两张表；仅有 L1、尚无商业表的旧库也可以存在。启动预检只允许 `(无,无)`、`(L1,无/C1/C2/C3)`、`(L2,无/C4)`，并逐项验证该代对应的 companion 表、索引、触发器及存储数据。商业表在账本表不存在时、L1/C4、L2/C1–C3、额外列/索引/触发器、视图/伪表替代或任何无法精确归类的组合均失败关闭，不得猜测修补。旧 C1/C2 到 C3 的既有合法升级以及订阅旧结构升级，可作为前置、可重启阶段；actor 转换本身必须一次事务同时覆盖已存在的 L1 与 C3，不能提交只有一张表已转换的状态。新库直接创建 L2/C4。不得把此合同当成其他未知历史财务 DDL 的导入许可。
 
@@ -43,7 +43,7 @@
 
 迁移仅在服务开始接客、worker 启动前运行；先用精确 `sqlite_master` DDL/类型、隐式与显式索引和不可变触发器清单识别旧代，运行已有存储、业务链、时间和 `PRAGMA foreign_key_check` 校验，再复制。`CREATE TABLE IF NOT EXISTS` 不能充当验证；未知 schema、坏 FK、重复/孤儿关联、缺触发器、摘要/actor 证据矛盾、读写/持久化错误都必须报 schema/storage 错误并停止启动。新 L2/C4 的严格验证同样检查新增列的 `CHECK`、两类 FK、账本摘要版本、触发器/索引**总数**和存储行形状；账本原 3 个显式索引不变、财务模块触发器总数由 6 增至 7，商业原 6 个显式索引不变、触发器总数由 14 增至 15，额外的均是相应操作表 `legacy_unknown` 插入禁令。管理员审计源须同步精确验证 C4 及其 3 条操作表触发器，不能因其 DDL 已变而静默跳过审计。
 
-因为账本操作被分录引用，分录又被付款/退款/兑换引用，商业操作也被续订和一次性预约引用，不能依赖 `ON DELETE RESTRICT` 的延迟行为直接 `DROP` 父表。采用 SQLite 官方重建表流程的受控变体：在**独占的同一 `sql.Conn`** 上、事务开始前临时关闭 FK，仅限启动迁移；开始独占事务，精确预检，分阶段复制包括原 `rowid`、原 operation ID/摘要/receipt/时间/金额关联，重建两张最终同名表及其原不可变触发器，用明确列清单回填，完整校验新 DDL/行、关系、`PRAGMA foreign_key_check` 后才提交。提交或回滚后，在释放连接前恢复并确认 `PRAGMA foreign_keys=ON`；恢复失败则关闭整个 DB/拒绝启动，不把 FK-off 连接还给服务池。不得在事务内部切换 FK，也不得使用 `defer_foreign_keys` 规避 `RESTRICT`。无接客/worker 并发、busy timeout、上下文取消、进程崩溃和写盘故障均以事务边界处理；任一失败后重启只会看到可识别的旧代或完整 L2/C4，不会有半张新表或临时 staging 对象。新结构重复启动仅验证、不重写历史行。只有 L2 检查摘要版本；C4 的原业务载荷摘要没有新增版本列。
+因为账本操作被分录引用，分录又被付款/退款/兑换引用，商业操作也被续订和一次性预约引用，不能依赖 `ON DELETE RESTRICT` 的延迟行为直接 `DROP` 父表。采用 SQLite 官方重建表流程的受控变体：在**独占的同一 `sql.Conn`** 上、事务开始前临时关闭 FK，仅限启动迁移；开始事务后第一条语句必须写入主数据库以取得并保持唯一写事务锁，不能先读再升级锁。项目所用 modernc SQLite v1.38.2 的 `BeginTx` 在未配置 `_txlock` 时是延迟 `BEGIN`；实现可用事务内创建随后删除的专用锁表获得写锁，并以第二个独立连接的竞争写入测试验证阻断与失败回滚。此处“独占”指迁移期间拒绝并发**写入**，WAL 下允许既有读者继续读旧快照。锁定后精确预检，分阶段复制包括原 `rowid`、原 operation ID/摘要/receipt/时间/金额关联，重建两张最终同名表及其原不可变触发器，用明确列清单回填，完整校验新 DDL/行、关系、`PRAGMA foreign_key_check` 后才提交。提交或回滚后，在释放连接前恢复并确认 `PRAGMA foreign_keys=ON`；恢复失败则关闭整个 DB/拒绝启动，不把 FK-off 连接还给服务池。不得在事务内部切换 FK，也不得使用 `defer_foreign_keys` 规避 `RESTRICT`。无接客/worker 并发、busy timeout、上下文取消、进程崩溃和写盘故障均以事务边界处理；任一失败后重启只会看到可识别的旧代或完整 L2/C4，不会有半张新表或临时 staging 对象。新结构重复启动仅验证、不重写历史行。只有 L2 检查摘要版本；C4 的原业务载荷摘要没有新增版本列。
 
 迁移前后对操作、分录、商业 receipt、订阅续订/预约、付款/退款/兑换的主键集合和不可变值做独立对比；不可默默删行、重分配 ID/rowid 或改金额。`rowid` 保留也用于避免现有管理员审计水位在迁移时意外重指；但审计投影语义改变，旧游标仍按下节明确升级处理。测试覆盖空库、L1+无商业表、L1+C1/C2/C3、C3 含真实依赖链和 NULL 混合行、L2/C4 重启、故障注入回滚及恶意 schema 失败关闭。
 
@@ -59,4 +59,4 @@
 
 不在本段：员工购买 API/按钮、实际 employee debit、员工权益发放、价格报价锁定、真实支付与供应商验收、跨实例账务、新密钥/生产发布或桌面客户端。此合同若遇到无法逐行证明的历史 actor，使用 `legacy_unknown`；若无法保证原子性或 FK/业务链不变量，则停止迁移并上报阻塞，不放宽约束继续写入。
 
-来源与许可：依据本项目[产品计划](product-plan.md)、[独立实现规则](independent-implementation.md)、[开发计划](development-plan.md)、[预览接口契约](preview-contract.md)、[单实例账务契约](single-instance-billing-contract.md)、[财务审计来源契约](admin-audit-financial-source-contract.md)与当前仓库独立编写的 Go/SQLite 行为。SQLite 迁移/FK 依据官方 [ALTER TABLE 重建流程](https://www.sqlite.org/lang_altertable.html)、[外键与 `RESTRICT` 语义](https://www.sqlite.org/foreignkeys.html)、[`PRAGMA foreign_key_check` 与 `foreign_keys`](https://www.sqlite.org/pragma.html)。不引入第三方依赖；原有 Go/SQLite 依赖保留各自许可证。新源码在实现提交中须明确写明本合同及所用公开技术文档的 provenance，不引用或移植 CLIProxyAPI、Sub2API、归档 CPA 或旁路参考仓库代码。
+来源与许可：依据本项目[产品计划](product-plan.md)、[独立实现规则](independent-implementation.md)、[开发计划](development-plan.md)、[预览接口契约](preview-contract.md)、[单实例账务契约](single-instance-billing-contract.md)、[财务审计来源契约](admin-audit-financial-source-contract.md)与当前仓库独立编写的 Go/SQLite 行为。SQLite 迁移/FK 依据官方 [ALTER TABLE 重建流程](https://www.sqlite.org/lang_altertable.html)、[外键与 `RESTRICT` 语义](https://www.sqlite.org/foreignkeys.html)、[事务和并发写锁](https://www.sqlite.org/lang_transaction.html)、[`PRAGMA foreign_key_check` 与 `foreign_keys`](https://www.sqlite.org/pragma.html)，驱动默认事务行为依据本仓库依赖的 modernc.org/sqlite v1.38.2 源码/文档。不引入第三方依赖；原有 Go/SQLite 依赖保留各自许可证。新源码在实现提交中须明确写明本合同及所用公开技术文档的 provenance，不引用或移植 CLIProxyAPI、Sub2API、归档 CPA 或旁路参考仓库代码。

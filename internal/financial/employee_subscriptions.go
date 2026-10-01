@@ -41,7 +41,7 @@ func (c *Commercial) readEmployeeSubscriptions(ctx context.Context, employeeID, 
 		return EmployeeSubscriptionPage{}, ErrUnavailable
 	}
 	defer tx.Rollback()
-	if validateSchema(ctx, tx) != nil || validateCommercialSchema(ctx, tx) != nil {
+	if validateSchema(ctx, tx) != nil || validateCommercialSchema(ctx, tx, commercialOperationsDDL, false) != nil {
 		return EmployeeSubscriptionPage{}, ErrUnavailable
 	}
 	query := `SELECT s.id,typeof(s.id),s.interval,typeof(s.interval),s.status,typeof(s.status),

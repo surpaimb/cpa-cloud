@@ -31,32 +31,34 @@ const (
 	adminAuditMaxLimit      = 100
 	adminAuditMaxWindow     = 31 * 24 * time.Hour
 	adminAuditCursorLimit   = 4096
-	adminAuditCursorVersion = 2
-	adminAuditCursorPurpose = "admin-audit-cursor/v2"
+	adminAuditCursorVersion = 3
+	adminAuditCursorPurpose = "admin-audit-cursor/v3"
 	adminAuditTimeKeyLayout = "2006-01-02T15:04:05.000000000Z"
 )
 
 type adminAuditSourceSpec struct {
-	token          string
-	table          string
-	idExpression   string
-	actorExpr      string
-	actionExpr     string
-	targetTypeExpr string
-	targetIDExpr   string
-	resultExpr     string
-	revisionExpr   string
-	timeColumn     string
-	rank           int
-	actorNullable  bool
+	token           string
+	table           string
+	idExpression    string
+	actorKindExpr   string
+	actorExpr       string
+	actorFilterExpr string
+	actionExpr      string
+	targetTypeExpr  string
+	targetIDExpr    string
+	resultExpr      string
+	revisionExpr    string
+	timeColumn      string
+	rank            int
+	actorNullable   bool
 }
 
 var adminAuditSources = []adminAuditSourceSpec{
-	{"account_pool", "account_pool_audit", "id", "actor_id", "action", "target_type", "target_id", "result", "NULL", "occurred_at", 0, false},
-	{"account_lifecycle", "account_lifecycle_audit", "id", "actor_id", "action", "target_type", "target_id", "result", "NULL", "occurred_at", 1, false},
-	{"governance_management", "governance_management_audit", "operation_id", "actor_id", "action", "resource_kind", "resource_id", "'succeeded'", "revision", "created_at", 2, false},
-	{"governance_general_budget", "governance_general_budget_audit", "operation_id", "actor_id", "action", "'budget'", "policy_id", "'succeeded'", "revision", "created_at", 3, false},
-	{"financial_commercial", "financial_commercial_operations", "operation_id", "actor_admin_id", "action", "resource_kind", "resource_id", "'succeeded'", "revision", "created_at", 4, true},
+	{"account_pool", "account_pool_audit", "id", "'admin'", "actor_id", "actor_id", "action", "target_type", "target_id", "result", "NULL", "occurred_at", 0, false},
+	{"account_lifecycle", "account_lifecycle_audit", "id", "'admin'", "actor_id", "actor_id", "action", "target_type", "target_id", "result", "NULL", "occurred_at", 1, false},
+	{"governance_management", "governance_management_audit", "operation_id", "'admin'", "actor_id", "actor_id", "action", "resource_kind", "resource_id", "'succeeded'", "revision", "created_at", 2, false},
+	{"governance_general_budget", "governance_general_budget_audit", "operation_id", "'admin'", "actor_id", "actor_id", "action", "'budget'", "policy_id", "'succeeded'", "revision", "created_at", 3, false},
+	{"financial_commercial", "financial_commercial_operations", "operation_id", "actor_kind", "CASE actor_kind WHEN 'admin' THEN actor_admin_id WHEN 'employee' THEN actor_employee_id WHEN 'system' THEN actor_system_id ELSE NULL END", "CASE WHEN actor_kind='admin' THEN actor_admin_id ELSE NULL END", "action", "resource_kind", "resource_id", "'succeeded'", "revision", "created_at", 4, true},
 }
 
 type adminAuditQuery struct {
@@ -92,6 +94,7 @@ type adminAuditCursor struct {
 type adminAuditEventView struct {
 	Source     string  `json:"source"`
 	EventID    string  `json:"event_id"`
+	ActorKind  string  `json:"actor_kind"`
 	ActorID    *string `json:"actor_id"`
 	Action     string  `json:"action"`
 	TargetType string  `json:"target_type"`
@@ -472,7 +475,7 @@ func queryAdminAuditSource(ctx context.Context, tx *sql.Tx, source adminAuditSou
 	clauses := []string{"rowid<=?", timeKey + ">=?", timeKey + "<?"}
 	arguments := []any{watermark, adminAuditTimeKey(query.From), adminAuditTimeKey(query.To)}
 	for _, filter := range []struct{ value, expression string }{
-		{query.ActorID, source.actorExpr}, {query.Action, source.actionExpr}, {query.TargetType, source.targetTypeExpr},
+		{query.ActorID, source.actorFilterExpr}, {query.Action, source.actionExpr}, {query.TargetType, source.targetTypeExpr},
 		{query.TargetID, source.targetIDExpr}, {query.Result, source.resultExpr},
 	} {
 		if filter.value != "" {
@@ -495,8 +498,8 @@ func queryAdminAuditSource(ctx context.Context, tx *sql.Tx, source adminAuditSou
 		}
 	}
 	arguments = append(arguments, query.Limit+1)
-	statement := fmt.Sprintf(`SELECT %s,%s,%s,%s,%s,%s,%s,%s,rowid FROM %s WHERE %s ORDER BY %s DESC,%s DESC LIMIT ?`,
-		source.idExpression, source.actorExpr, source.actionExpr, source.targetTypeExpr, source.targetIDExpr, source.resultExpr, source.revisionExpr, source.timeColumn,
+	statement := fmt.Sprintf(`SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,rowid FROM %s WHERE %s ORDER BY %s DESC,%s DESC LIMIT ?`,
+		source.idExpression, source.actorKindExpr, source.actorExpr, source.actionExpr, source.targetTypeExpr, source.targetIDExpr, source.resultExpr, source.revisionExpr, source.timeColumn,
 		source.table, strings.Join(clauses, " AND "), timeKey, source.idExpression)
 	rows, err := tx.QueryContext(ctx, statement, arguments...)
 	if err != nil {
@@ -510,10 +513,11 @@ func queryAdminAuditSource(ctx context.Context, tx *sql.Tx, source adminAuditSou
 		var revision sql.NullInt64
 		var timestamp string
 		var rowID int64
-		if err := rows.Scan(&item.EventID, &actor, &item.Action, &item.TargetType, &item.TargetID, &item.Result, &revision, &timestamp, &rowID); err != nil {
+		if err := rows.Scan(&item.EventID, &item.ActorKind, &actor, &item.Action, &item.TargetType, &item.TargetID, &item.Result, &revision, &timestamp, &rowID); err != nil {
 			return nil, err
 		}
-		if rowID < 1 || !validAdminAuditMetadata(item.EventID, 256) || (!actor.Valid && !source.actorNullable) || (actor.Valid && !validAdminAuditMetadata(actor.String, 256)) || !validAdminAuditMetadata(item.Action, 256) || !validAdminAuditMetadata(item.TargetType, 256) || !validAdminAuditMetadata(item.TargetID, 256) || item.Result != "succeeded" {
+		validKind := item.ActorKind == "admin" || source.token == "financial_commercial" && (item.ActorKind == "employee" || item.ActorKind == "system" || item.ActorKind == "legacy_unknown")
+		if rowID < 1 || !validAdminAuditMetadata(item.EventID, 256) || !validKind || (!actor.Valid && item.ActorKind != "legacy_unknown") || (actor.Valid && item.ActorKind == "legacy_unknown") || (actor.Valid && !validAdminAuditMetadata(actor.String, 256)) || !validAdminAuditMetadata(item.Action, 256) || !validAdminAuditMetadata(item.TargetType, 256) || !validAdminAuditMetadata(item.TargetID, 256) || item.Result != "succeeded" {
 			return nil, errors.New("invalid audit metadata")
 		}
 		if actor.Valid {

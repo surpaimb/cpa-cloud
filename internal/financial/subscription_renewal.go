@@ -28,7 +28,7 @@ func commercialOperationLegacySchema(ctx context.Context, tx *sql.Tx) (bool, err
 	if err != nil {
 		return false, ErrUnavailable
 	}
-	if normalize(actual) == normalize(storedDDL(commercialOperationsDDL)) {
+	if normalize(actual) == normalize(storedDDL(commercialOperationsBeforeActorDDL)) {
 		return false, nil
 	}
 	beforeManual := normalize(actual) == normalize(storedDDL(commercialOperationsLegacyDDL))
@@ -91,7 +91,7 @@ func migrateLegacyCommercialOperations(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, `DROP TABLE financial_commercial_operations`); err != nil {
 		return ErrSchema
 	}
-	if _, err := tx.ExecContext(ctx, commercialOperationsDDL); err != nil {
+	if _, err := tx.ExecContext(ctx, commercialOperationsBeforeActorDDL); err != nil {
 		return ErrSchema
 	}
 	columns := `operation_id,action,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at`
@@ -232,7 +232,7 @@ func (c *Commercial) renewSubscriptionTx(ctx context.Context, tx *sql.Tx, meta W
 			return Subscription{}, CommercialReceipt{}, ErrConflict
 		}
 	}
-	posted, err := ledger.PostTx(ctx, tx, Post{OperationID: meta.OperationID, Action: "subscription_purchase", ActorAdminID: meta.ActorAdminID, ResourceKind: "subscription", ResourceID: id, ObservedAt: now, RequireNonNegative: true, Entries: []EntryInput{{Owner: owner, Currency: plan.Currency, Kind: EntrySubscriptionCharge, AmountMicro: -plan.PriceMicro, ResourceKind: "subscription", ResourceID: id}, {Owner: owner, Currency: plan.Currency, Kind: EntrySubscriptionCredit, AmountMicro: plan.CreditMicro, ResourceKind: "subscription", ResourceID: id}}})
+	posted, err := ledger.PostTx(ctx, tx, Post{OperationID: meta.OperationID, Action: "subscription_purchase", Actor: meta.Actor, ActorAdminID: meta.ActorAdminID, ResourceKind: "subscription", ResourceID: id, ObservedAt: now, RequireNonNegative: true, Entries: []EntryInput{{Owner: owner, Currency: plan.Currency, Kind: EntrySubscriptionCharge, AmountMicro: -plan.PriceMicro, ResourceKind: "subscription", ResourceID: id}, {Owner: owner, Currency: plan.Currency, Kind: EntrySubscriptionCredit, AmountMicro: plan.CreditMicro, ResourceKind: "subscription", ResourceID: id}}})
 	if err != nil {
 		return Subscription{}, CommercialReceipt{}, err
 	}

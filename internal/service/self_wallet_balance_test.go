@@ -159,7 +159,7 @@ func TestSelfWalletBalanceOwnerCurrencyZeroRestartAndDisable(t *testing.T) {
 	ledger := financial.NewLedger(f.app.store.db)
 	post := func(id, employeeID, currency string, owner financial.Owner, kind financial.EntryKind, amount int64, seconds int) {
 		t.Helper()
-		_, err := ledger.Post(context.Background(), financial.Post{OperationID: id, Action: "adjustment", ResourceKind: "adjustment", ResourceID: id, ObservedAt: time.Date(2026, 10, 1, 0, 0, seconds, 0, time.UTC), Entries: []financial.EntryInput{{Owner: owner, Currency: currency, Kind: kind, AmountMicro: amount, ResourceKind: "adjustment", ResourceID: id}}})
+		_, err := ledger.Post(context.Background(), financial.Post{OperationID: id, Action: "adjustment", Actor: financial.Actor{Kind: financial.ActorEmployee, ID: employeeID}, ResourceKind: "adjustment", ResourceID: id, ObservedAt: time.Date(2026, 10, 1, 0, 0, seconds, 0, time.UTC), Entries: []financial.EntryInput{{Owner: owner, Currency: currency, Kind: kind, AmountMicro: amount, ResourceKind: "adjustment", ResourceID: id}}})
 		if err != nil {
 			t.Fatalf("post %s for %s: %v", id, employeeID, err)
 		}

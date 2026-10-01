@@ -21,7 +21,7 @@ const commercialSettingsDDL = `CREATE TABLE IF NOT EXISTS financial_settings (
 	updated_at TEXT NOT NULL
 )`
 
-const commercialOperationsDDL = `CREATE TABLE IF NOT EXISTS financial_commercial_operations (
+const commercialOperationsBeforeActorDDL = `CREATE TABLE IF NOT EXISTS financial_commercial_operations (
 	operation_id TEXT PRIMARY KEY,
 	action TEXT NOT NULL CHECK(action IN ('settings.update','plan.create','plan.update','subscription.create','subscription.cancel','subscription.renew','subscription.one_shot.arm','subscription.one_shot.disarm','connector.create','connector.update','topup.create','redemption_code.create','redemption.redeem','refund.create')),
 	actor_admin_id TEXT REFERENCES admins(id) ON DELETE RESTRICT,
@@ -30,6 +30,24 @@ const commercialOperationsDDL = `CREATE TABLE IF NOT EXISTS financial_commercial
 	resource_id TEXT NOT NULL,
 	revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 9007199254740991),
 	created_at TEXT NOT NULL
+)`
+
+const commercialOperationsDDL = `CREATE TABLE IF NOT EXISTS financial_commercial_operations (
+	operation_id TEXT PRIMARY KEY,
+	action TEXT NOT NULL CHECK(action IN ('settings.update','plan.create','plan.update','subscription.create','subscription.cancel','subscription.renew','subscription.one_shot.arm','subscription.one_shot.disarm','connector.create','connector.update','topup.create','redemption_code.create','redemption.redeem','refund.create')),
+	actor_kind TEXT NOT NULL CHECK(actor_kind IN ('admin','employee','system','legacy_unknown')),
+	actor_admin_id TEXT REFERENCES admins(id) ON DELETE RESTRICT,
+	actor_employee_id TEXT REFERENCES employees(id) ON DELETE RESTRICT,
+	actor_system_id TEXT,
+	payload_digest BLOB NOT NULL CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
+	resource_kind TEXT NOT NULL,
+	resource_id TEXT NOT NULL,
+	revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 9007199254740991),
+	created_at TEXT NOT NULL,
+	CHECK((actor_kind='admin' AND actor_admin_id IS NOT NULL AND length(actor_admin_id) BETWEEN 1 AND 256 AND actor_employee_id IS NULL AND actor_system_id IS NULL) OR
+		(actor_kind='employee' AND actor_admin_id IS NULL AND actor_employee_id IS NOT NULL AND length(actor_employee_id) BETWEEN 1 AND 256 AND actor_system_id IS NULL) OR
+		(actor_kind='system' AND actor_admin_id IS NULL AND actor_employee_id IS NULL AND actor_system_id='subscription_one_shot_worker' AND action='subscription.renew') OR
+		(actor_kind='legacy_unknown' AND actor_admin_id IS NULL AND actor_employee_id IS NULL AND actor_system_id IS NULL))
 )`
 
 // Exact commercial operation schema at the merged manual-renewal baseline.
@@ -186,6 +204,7 @@ const refundPaymentIndexDDL = `CREATE INDEX IF NOT EXISTS financial_refunds_paym
 const redemptionAccountIndexDDL = `CREATE INDEX IF NOT EXISTS financial_redemptions_account_idx ON financial_redemptions(account_id,id)`
 const commercialOperationsNoUpdateDDL = `CREATE TRIGGER IF NOT EXISTS financial_commercial_operations_no_update BEFORE UPDATE ON financial_commercial_operations BEGIN SELECT RAISE(ABORT,'financial commercial operations are immutable'); END`
 const commercialOperationsNoDeleteDDL = `CREATE TRIGGER IF NOT EXISTS financial_commercial_operations_no_delete BEFORE DELETE ON financial_commercial_operations BEGIN SELECT RAISE(ABORT,'financial commercial operations are immutable'); END`
+const commercialOperationsNoUnknownInsertDDL = `CREATE TRIGGER IF NOT EXISTS financial_commercial_operations_no_unknown_insert BEFORE INSERT ON financial_commercial_operations WHEN NEW.actor_kind='legacy_unknown' BEGIN SELECT RAISE(ABORT,'legacy unknown actor cannot be inserted'); END`
 const topupsNoUpdateDDL = `CREATE TRIGGER IF NOT EXISTS financial_topups_no_update BEFORE UPDATE ON financial_topups BEGIN SELECT RAISE(ABORT,'financial topups are immutable'); END`
 const topupsNoDeleteDDL = `CREATE TRIGGER IF NOT EXISTS financial_topups_no_delete BEFORE DELETE ON financial_topups BEGIN SELECT RAISE(ABORT,'financial topups are immutable'); END`
 const redemptionsNoUpdateDDL = `CREATE TRIGGER IF NOT EXISTS financial_redemptions_no_update BEFORE UPDATE ON financial_redemptions BEGIN SELECT RAISE(ABORT,'financial redemptions are immutable'); END`
@@ -198,6 +217,24 @@ const webhookEventsNoDeleteDDL = `CREATE TRIGGER IF NOT EXISTS financial_webhook
 func (c *Commercial) Migrate(ctx context.Context) error {
 	if c == nil || c.db == nil || ctx == nil {
 		return ErrInvalid
+	}
+	if err := migrateActorProvenance(ctx, c.db); err != nil {
+		return err
+	}
+	return c.migrate(ctx, false)
+}
+
+func (c *Commercial) migrateLegacy(ctx context.Context) error {
+	return c.migrate(ctx, true)
+}
+
+func (c *Commercial) migrate(ctx context.Context, legacyActor bool) error {
+	if c == nil || c.db == nil || ctx == nil {
+		return ErrInvalid
+	}
+	operationDDL := commercialOperationsDDL
+	if legacyActor {
+		operationDDL = commercialOperationsBeforeActorDDL
 	}
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -214,19 +251,24 @@ func (c *Commercial) Migrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	operationsLegacy, err := commercialOperationLegacySchema(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if operationsLegacy {
-		if err := migrateLegacyCommercialOperations(ctx, tx); err != nil {
+	if legacyActor {
+		operationsLegacy, err := commercialOperationLegacySchema(ctx, tx)
+		if err != nil {
 			return err
 		}
+		if operationsLegacy {
+			if err := migrateLegacyCommercialOperations(ctx, tx); err != nil {
+				return err
+			}
+		}
 	}
-	statements := []string{commercialSettingsDDL, commercialOperationsDDL, plansDDL, subscriptionsDDL, connectorsDDL, paymentsDDL, topupsDDL, redemptionCodesDDL, redemptionsDDL, refundsDDL, webhookEventsDDL,
+	statements := []string{commercialSettingsDDL, operationDDL, plansDDL, subscriptionsDDL, connectorsDDL, paymentsDDL, topupsDDL, redemptionCodesDDL, redemptionsDDL, refundsDDL, webhookEventsDDL,
 		subscriptionAccountIndexDDL, paymentAccountIndexDDL, paymentConnectorIndexDDL, refundPaymentIndexDDL, redemptionAccountIndexDDL,
 		commercialOperationsNoUpdateDDL, commercialOperationsNoDeleteDDL, topupsNoUpdateDDL, topupsNoDeleteDDL, redemptionsNoUpdateDDL, redemptionsNoDeleteDDL,
 		refundsNoUpdateDDL, refundsNoDeleteDDL, webhookEventsNoUpdateDDL, webhookEventsNoDeleteDDL}
+	if !legacyActor {
+		statements = append(statements, commercialOperationsNoUnknownInsertDDL)
+	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return ErrSchema
@@ -246,11 +288,16 @@ func (c *Commercial) Migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO financial_settings(singleton,enabled,revision,updated_at) VALUES(1,0,1,?)`, time.Unix(0, 0).UTC().Format(time.RFC3339Nano)); err != nil {
 		return ErrSchema
 	}
-	if err := validateCommercialSchema(ctx, tx); err != nil {
+	if err := validateCommercialSchema(ctx, tx, operationDDL, legacyActor); err != nil {
 		return err
 	}
 	if err := validateCommercialStored(ctx, tx); err != nil {
 		return err
+	}
+	if !legacyActor {
+		if err := validateActorStored(ctx, tx); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return ErrUnavailable
@@ -258,9 +305,9 @@ func (c *Commercial) Migrate(ctx context.Context) error {
 	return nil
 }
 
-func validateCommercialSchema(ctx context.Context, tx *sql.Tx) error {
+func validateCommercialSchema(ctx context.Context, tx *sql.Tx, operationDDL string, legacyActor bool) error {
 	tables := map[string]string{
-		"financial_settings": commercialSettingsDDL, "financial_commercial_operations": commercialOperationsDDL, "financial_plans": plansDDL,
+		"financial_settings": commercialSettingsDDL, "financial_commercial_operations": operationDDL, "financial_plans": plansDDL,
 		"financial_subscriptions": subscriptionsDDL, "financial_payment_connectors": connectorsDDL, "financial_payments": paymentsDDL,
 		"financial_subscription_renewals":          subscriptionRenewalsDDL,
 		"financial_subscription_one_shot_renewals": oneShotRenewalsDDL,
@@ -294,6 +341,9 @@ func validateCommercialSchema(ctx context.Context, tx *sql.Tx) error {
 		"financial_subscription_renewals_no_update": subscriptionRenewalsNoUpdateDDL, "financial_subscription_renewals_no_delete": subscriptionRenewalsNoDeleteDDL,
 		"financial_subscription_one_shot_immutable_update": oneShotRenewalsImmutableUpdateDDL, "financial_subscription_one_shot_no_delete": oneShotRenewalsNoDeleteDDL,
 	}
+	if !legacyActor {
+		triggers["financial_commercial_operations_no_unknown_insert"] = commercialOperationsNoUnknownInsertDDL
+	}
 	for name, ddl := range triggers {
 		var kind, actual string
 		if err := tx.QueryRowContext(ctx, `SELECT type,sql FROM sqlite_master WHERE name=?`, name).Scan(&kind, &actual); err != nil || kind != "trigger" || normalize(actual) != normalize(storedDDL(ddl)) {
@@ -304,7 +354,11 @@ func validateCommercialSchema(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND tbl_name IN ('financial_settings','financial_commercial_operations','financial_plans','financial_subscriptions','financial_subscription_renewals','financial_subscription_one_shot_renewals','financial_payment_connectors','financial_payments','financial_topups','financial_redemption_codes','financial_redemptions','financial_refunds','financial_webhook_events')`).Scan(&explicitIndexes); err != nil || explicitIndexes != 6 {
 		return ErrSchema
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('financial_settings','financial_commercial_operations','financial_plans','financial_subscriptions','financial_subscription_renewals','financial_subscription_one_shot_renewals','financial_payment_connectors','financial_payments','financial_topups','financial_redemption_codes','financial_redemptions','financial_refunds','financial_webhook_events')`).Scan(&triggerCount); err != nil || triggerCount != 14 {
+	wantedTriggers := 15
+	if legacyActor {
+		wantedTriggers = 14
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('financial_settings','financial_commercial_operations','financial_plans','financial_subscriptions','financial_subscription_renewals','financial_subscription_one_shot_renewals','financial_payment_connectors','financial_payments','financial_topups','financial_redemption_codes','financial_redemptions','financial_refunds','financial_webhook_events')`).Scan(&triggerCount); err != nil || triggerCount != wantedTriggers {
 		return ErrSchema
 	}
 	return nil
