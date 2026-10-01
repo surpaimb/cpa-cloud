@@ -88,8 +88,12 @@ func TestCommercialBillingPaymentRedemptionSubscriptionAndRefund(t *testing.T) {
 		t.Fatalf("duplicate owner redeem err=%v", err)
 	}
 	subscription, _, err := commercial.PurchaseSubscription(ctx, PurchaseSubscription{Meta: testCommercialMeta(t, "subscribe", map[string]any{"plan": plan.ID}, financialTestTime.Add(9*time.Second)), Owner: owner, PlanID: plan.ID})
-	if err != nil || subscription.Status != "active" {
+	if err != nil || subscription.Status != "active" || subscription.PeriodEndAt == nil || !subscription.PeriodEndAt.Equal(financialTestTime.AddDate(0, 1, 0).Add(9*time.Second)) {
 		t.Fatalf("subscription=%+v err=%v", subscription, err)
+	}
+	retry := PurchaseSubscription{Meta: testCommercialMeta(t, "subscribe", map[string]any{"plan": plan.ID}, financialTestTime.Add(10*time.Minute)), Owner: owner, PlanID: plan.ID}
+	if repeated, receipt, err := commercial.PurchaseSubscription(ctx, retry); err != nil || !receipt.Replay || repeated.PeriodEndAt == nil || !repeated.PeriodEndAt.Equal(*subscription.PeriodEndAt) {
+		t.Fatalf("subscription retry=%+v receipt=%+v err=%v", repeated, receipt, err)
 	}
 	if balance, err := ledger.Balance(ctx, owner, "USD"); err != nil || balance.AmountMicro != 135 {
 		t.Fatalf("subscription balance=%+v err=%v", balance, err)
@@ -102,6 +106,7 @@ func TestCommercialBillingPaymentRedemptionSubscriptionAndRefund(t *testing.T) {
 	if err != nil || updatedConnector.Revision != 2 || updatedConnector.Enabled {
 		t.Fatalf("updated connector=%+v err=%v", updatedConnector, err)
 	}
+	commercial.now = func() time.Time { return financialTestTime.Add(12 * time.Second) }
 	cancelled, _, err := commercial.CancelSubscription(ctx, CancelSubscription{Meta: testCommercialMeta(t, "subscription-cancel", map[string]any{"id": subscription.ID, "revision": 1}, financialTestTime.Add(12*time.Second)), ID: subscription.ID, ExpectedRevision: 1})
 	if err != nil || cancelled.Status != "cancelled" || cancelled.Revision != 2 {
 		t.Fatalf("cancelled subscription=%+v err=%v", cancelled, err)

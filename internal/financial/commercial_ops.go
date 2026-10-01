@@ -41,6 +41,7 @@ type Subscription struct {
 	ID, AccountID, PlanID, Currency, Interval, Status string
 	PlanRevision, PriceMicro, CreditMicro, Revision   int64
 	StartedAt                                         time.Time
+	PeriodEndAt                                       *time.Time
 	CancelledAt                                       *time.Time
 }
 type RedemptionCode struct {
@@ -238,29 +239,16 @@ func (c *Commercial) ListSubscriptions(ctx context.Context, after string, limit 
 	if c == nil || c.db == nil || ctx == nil || limit < 1 || limit > 200 {
 		return nil, ErrInvalid
 	}
-	rows, err := c.db.QueryContext(ctx, `SELECT id,account_id,plan_id,plan_revision,price_micro,credit_micro,currency,interval,status,started_at,cancelled_at,revision FROM financial_subscriptions WHERE id>? ORDER BY id LIMIT ?`, after, limit)
+	rows, err := c.db.QueryContext(ctx, subscriptionSelect+` WHERE id>? ORDER BY id LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, ErrUnavailable
 	}
 	defer rows.Close()
 	items := make([]Subscription, 0)
 	for rows.Next() {
-		var item Subscription
-		var started string
-		var cancelled sql.NullString
-		if err := rows.Scan(&item.ID, &item.AccountID, &item.PlanID, &item.PlanRevision, &item.PriceMicro, &item.CreditMicro, &item.Currency, &item.Interval, &item.Status, &started, &cancelled, &item.Revision); err != nil {
-			return nil, ErrUnavailable
-		}
-		item.StartedAt, err = time.Parse(time.RFC3339Nano, started)
+		item, err := scanSubscription(rows, time.Now().UTC())
 		if err != nil {
-			return nil, ErrSchema
-		}
-		if cancelled.Valid {
-			parsed, e := time.Parse(time.RFC3339Nano, cancelled.String)
-			if e != nil {
-				return nil, ErrSchema
-			}
-			item.CancelledAt = &parsed
+			return nil, err
 		}
 		items = append(items, item)
 	}
@@ -268,6 +256,12 @@ func (c *Commercial) ListSubscriptions(ctx context.Context, after string, limit 
 		return nil, ErrUnavailable
 	}
 	return items, nil
+}
+func (c *Commercial) GetSubscription(ctx context.Context, id string) (Subscription, error) {
+	if c == nil || c.db == nil || ctx == nil || !validCommercialText(id, 256) {
+		return Subscription{}, ErrInvalid
+	}
+	return loadSubscription(ctx, c.db, id)
 }
 func (c *Commercial) ListCodes(ctx context.Context, after string, limit int) ([]RedemptionCode, error) {
 	if c == nil || c.db == nil || ctx == nil || limit < 1 || limit > 200 {
@@ -605,6 +599,14 @@ func (c *Commercial) PurchaseSubscription(ctx context.Context, input PurchaseSub
 	if !plan.Enabled {
 		return Subscription{}, CommercialReceipt{}, ErrConflict
 	}
+	var periodEnd *time.Time
+	if plan.Interval == "monthly" {
+		end, err := monthlyPeriodEnd(input.Meta.ObservedAt)
+		if err != nil {
+			return Subscription{}, CommercialReceipt{}, ErrInvalid
+		}
+		periodEnd = &end
+	}
 	id, err := randomID("subscription")
 	if err != nil {
 		return Subscription{}, CommercialReceipt{}, ErrUnavailable
@@ -628,8 +630,12 @@ func (c *Commercial) PurchaseSubscription(ctx context.Context, input PurchaseSub
 	if len(posted) != 2 {
 		return Subscription{}, CommercialReceipt{}, ErrUnavailable
 	}
-	item := Subscription{ID: id, AccountID: posted[0].AccountID, PlanID: plan.ID, PlanRevision: plan.Revision, PriceMicro: plan.PriceMicro, CreditMicro: plan.CreditMicro, Currency: plan.Currency, Interval: plan.Interval, Status: "active", StartedAt: input.Meta.ObservedAt, Revision: 1}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_subscriptions(id,account_id,plan_id,plan_revision,price_micro,credit_micro,currency,interval,status,started_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,1)`, item.ID, item.AccountID, item.PlanID, item.PlanRevision, item.PriceMicro, item.CreditMicro, item.Currency, item.Interval, item.Status, formatCommercialTime(item.StartedAt)); err != nil {
+	item := Subscription{ID: id, AccountID: posted[0].AccountID, PlanID: plan.ID, PlanRevision: plan.Revision, PriceMicro: plan.PriceMicro, CreditMicro: plan.CreditMicro, Currency: plan.Currency, Interval: plan.Interval, Status: "active", StartedAt: input.Meta.ObservedAt, PeriodEndAt: periodEnd, Revision: 1}
+	var periodEndText any
+	if periodEnd != nil {
+		periodEndText = periodEnd.Format(subscriptionEndLayout)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_subscriptions(id,account_id,plan_id,plan_revision,price_micro,credit_micro,currency,interval,status,started_at,period_end_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`, item.ID, item.AccountID, item.PlanID, item.PlanRevision, item.PriceMicro, item.CreditMicro, item.Currency, item.Interval, item.Status, formatCommercialTime(item.StartedAt), periodEndText); err != nil {
 		return Subscription{}, CommercialReceipt{}, ErrUnavailable
 	}
 	receipt := CommercialReceipt{OperationID: input.Meta.OperationID, ResourceKind: "subscription", ResourceID: id, Revision: 1, CreatedAt: input.Meta.ObservedAt}
@@ -657,14 +663,22 @@ func (c *Commercial) CancelSubscription(ctx context.Context, input CancelSubscri
 		item, err := loadSubscription(ctx, tx, receipt.ResourceID)
 		return item, receipt, err
 	}
-	item, err := loadSubscription(ctx, tx, input.ID)
+	item, err := loadSubscriptionAt(ctx, tx, input.ID, input.Meta.ObservedAt)
 	if err != nil {
 		return Subscription{}, CommercialReceipt{}, err
 	}
-	if item.Status != "active" || item.Revision != input.ExpectedRevision {
+	commitClock := time.Now
+	if c.now != nil {
+		commitClock = c.now
+	}
+	committedAt := commitClock().UTC()
+	if err := effectiveSubscription(&item, committedAt); err != nil {
+		return Subscription{}, CommercialReceipt{}, err
+	}
+	if item.Status != "active" || item.Revision != input.ExpectedRevision || item.Revision >= subscriptionRevisionMax {
 		return Subscription{}, CommercialReceipt{}, ErrConflict
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE financial_subscriptions SET status='cancelled',cancelled_at=?,revision=revision+1 WHERE id=? AND status='active' AND revision=?`, formatCommercialTime(input.Meta.ObservedAt), input.ID, input.ExpectedRevision)
+	result, err := tx.ExecContext(ctx, `UPDATE financial_subscriptions SET status='cancelled',cancelled_at=?,revision=revision+1 WHERE id=? AND status='active' AND revision=? AND (period_end_at IS NULL OR period_end_at>?)`, formatCommercialTime(committedAt), input.ID, input.ExpectedRevision, committedAt.Format(subscriptionEndLayout))
 	if err != nil {
 		return Subscription{}, CommercialReceipt{}, ErrUnavailable
 	}
@@ -673,11 +687,16 @@ func (c *Commercial) CancelSubscription(ctx context.Context, input CancelSubscri
 	}
 	item.Status = "cancelled"
 	item.Revision++
-	cancelled := input.Meta.ObservedAt
+	cancelled := committedAt
 	item.CancelledAt = &cancelled
-	receipt := CommercialReceipt{OperationID: input.Meta.OperationID, ResourceKind: "subscription", ResourceID: item.ID, Revision: item.Revision, CreatedAt: input.Meta.ObservedAt}
-	if err := insertCommercialOperation(ctx, tx, input.Meta, "subscription.cancel", receipt); err != nil {
+	receipt := CommercialReceipt{OperationID: input.Meta.OperationID, ResourceKind: "subscription", ResourceID: item.ID, Revision: item.Revision, CreatedAt: committedAt}
+	commitMeta := input.Meta
+	commitMeta.ObservedAt = committedAt
+	if err := insertCommercialOperation(ctx, tx, commitMeta, "subscription.cancel", receipt); err != nil {
 		return Subscription{}, CommercialReceipt{}, err
+	}
+	if item.PeriodEndAt != nil && !commitClock().UTC().Before(*item.PeriodEndAt) {
+		return Subscription{}, CommercialReceipt{}, ErrConflict // rollback this transaction, including the operation fact
 	}
 	if err := tx.Commit(); err != nil {
 		return Subscription{}, CommercialReceipt{}, ErrUnavailable
@@ -1060,26 +1079,19 @@ func scanTopUp(row rowScanner) (TopUp, error) {
 func loadSubscription(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, id string) (Subscription, error) {
-	var item Subscription
-	var started string
-	var cancelled sql.NullString
-	err := q.QueryRowContext(ctx, `SELECT id,account_id,plan_id,plan_revision,price_micro,credit_micro,currency,interval,status,started_at,cancelled_at,revision FROM financial_subscriptions WHERE id=?`, id).Scan(&item.ID, &item.AccountID, &item.PlanID, &item.PlanRevision, &item.PriceMicro, &item.CreditMicro, &item.Currency, &item.Interval, &item.Status, &started, &cancelled, &item.Revision)
+	return loadSubscriptionAt(ctx, q, id, time.Now().UTC())
+}
+
+func loadSubscriptionAt(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, id string, asOf time.Time) (Subscription, error) {
+	row := q.QueryRowContext(ctx, subscriptionSelect+` WHERE id=?`, id)
+	item, err := scanSubscription(row, asOf)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Subscription{}, ErrNotFound
 	}
 	if err != nil {
-		return Subscription{}, ErrUnavailable
-	}
-	item.StartedAt, err = time.Parse(time.RFC3339Nano, started)
-	if err != nil {
-		return Subscription{}, ErrSchema
-	}
-	if cancelled.Valid {
-		parsed, e := time.Parse(time.RFC3339Nano, cancelled.String)
-		if e != nil {
-			return Subscription{}, ErrSchema
-		}
-		item.CancelledAt = &parsed
+		return Subscription{}, err
 	}
 	return item, nil
 }

@@ -35,6 +35,7 @@ func (a *App) registerBillingCommercialHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/api/v1/billing/topups", a.requireAdmin(a.billingCommercialListTopUps, false))
 	mux.HandleFunc("POST /admin/api/v1/billing/subscriptions", a.requireAdmin(a.billingCommercialSubscribe, true))
 	mux.HandleFunc("GET /admin/api/v1/billing/subscriptions", a.requireAdmin(a.billingCommercialListSubscriptions, false))
+	mux.HandleFunc("GET /admin/api/v1/billing/subscriptions/{id}", a.requireAdmin(a.billingCommercialGetSubscription, false))
 	mux.HandleFunc("POST /admin/api/v1/billing/subscriptions/{id}/cancel", a.requireAdmin(a.billingCommercialCancelSubscription, true))
 	mux.HandleFunc("POST /admin/api/v1/billing/redemption-codes", a.requireAdmin(a.billingCommercialCreateCode, true))
 	mux.HandleFunc("GET /admin/api/v1/billing/redemption-codes", a.requireAdmin(a.billingCommercialListCodes, false))
@@ -111,6 +112,18 @@ func (a *App) billingCommercialListSubscriptions(w http.ResponseWriter, r *http.
 		views = append(views, billingSubscriptionView(item))
 	}
 	writeJSON(w, http.StatusOK, billingListView(views, limit))
+}
+func (a *App) billingCommercialGetSubscription(w http.ResponseWriter, r *http.Request, _ adminSession) {
+	if r.URL.RawQuery != "" || r.ContentLength != 0 || r.PathValue("id") == "" {
+		writeBillingV1Error(w, financial.ErrInvalid)
+		return
+	}
+	item, err := financial.NewCommercial(a.store.db).GetSubscription(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeBillingV1Error(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, billingSubscriptionView(item))
 }
 func (a *App) billingCommercialListCodes(w http.ResponseWriter, r *http.Request, _ adminSession) {
 	after, limit, ok := billingListQuery(r)
@@ -628,7 +641,11 @@ func billingTopUpView(item financial.TopUp) map[string]any {
 	return map[string]any{"id": item.ID, "payment_id": item.PaymentID, "connector_id": item.ConnectorID, "external_reference": item.ExternalReference, "amount_micro": strconv.FormatInt(item.AmountMicro, 10), "currency": item.Currency, "status": item.Status, "refunded_micro": strconv.FormatInt(item.RefundedMicro, 10), "revision": item.Revision, "created_at": item.CreatedAt.Format(time.RFC3339Nano), "paid_at": paidAt}
 }
 func billingSubscriptionView(item financial.Subscription) map[string]any {
-	return map[string]any{"id": item.ID, "plan_id": item.PlanID, "plan_revision": item.PlanRevision, "price_micro": strconv.FormatInt(item.PriceMicro, 10), "credit_micro": strconv.FormatInt(item.CreditMicro, 10), "currency": item.Currency, "interval": item.Interval, "status": item.Status, "revision": item.Revision, "started_at": item.StartedAt.Format(time.RFC3339Nano)}
+	var end any
+	if item.PeriodEndAt != nil {
+		end = item.PeriodEndAt.Format(time.RFC3339Nano)
+	}
+	return map[string]any{"id": item.ID, "plan_id": item.PlanID, "plan_revision": item.PlanRevision, "price_micro": strconv.FormatInt(item.PriceMicro, 10), "credit_micro": strconv.FormatInt(item.CreditMicro, 10), "currency": item.Currency, "interval": item.Interval, "status": item.Status, "revision": item.Revision, "started_at": item.StartedAt.Format(time.RFC3339Nano), "period_end_at": end}
 }
 func billingCodeView(item financial.RedemptionCode) map[string]any {
 	expires := any(nil)

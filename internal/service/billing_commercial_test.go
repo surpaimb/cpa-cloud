@@ -105,6 +105,67 @@ func TestBillingCommercialSignedPaymentReplayAndOneTimeRedemptionCode(t *testing
 	}
 }
 
+func TestBillingSubscriptionAdminProjectionBeforeExpiryWorker(t *testing.T) {
+	f := newAccountPoolFixture(t, false)
+	f.app.subscriptionExpiry.Close()
+	f.app.subscriptionExpiry = nil // Simulate a delayed worker; reads must still fail closed.
+	for _, statement := range []string{
+		`INSERT INTO employees(id,name,status,model_mode,revision,created_at) VALUES('expiry-employee','Expiry','active','all',1,'2026-01-01T00:00:00Z')`,
+		`INSERT INTO financial_accounts(id,owner_kind,owner_key,employee_id,key_id,resource_kind,resource_id,currency,created_at) VALUES('expiry-account','employee','expiry-employee','expiry-employee',NULL,'','','USD','2026-01-01T00:00:00Z')`,
+		`INSERT INTO financial_plans(id,name,currency,price_micro,credit_micro,interval,enabled,revision,created_at,updated_at) VALUES('expiry-plan','Expiry','USD',10,20,'monthly',1,1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`INSERT INTO financial_subscriptions(id,account_id,plan_id,plan_revision,price_micro,credit_micro,currency,interval,status,started_at,period_end_at,revision) VALUES('expiry-sub','expiry-account','expiry-plan',1,10,20,'USD','monthly','active','2026-01-31T08:00:00Z','2026-02-28T08:00:00.000000000Z',1)`,
+	} {
+		if _, err := f.app.store.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	url := f.server.URL + "/admin/api/v1/billing/subscriptions"
+	status, body := billingHTTPRequest(t, http.MethodGet, url, "", f.cookie, "", "", nil)
+	if status != http.StatusOK || !strings.Contains(string(body), `"status":"expired"`) || !strings.Contains(string(body), `"period_end_at":"2026-02-28T08:00:00Z"`) {
+		t.Fatalf("list status=%d body=%s", status, body)
+	}
+	status, body = billingHTTPRequest(t, http.MethodGet, url+"/expiry-sub", "", f.cookie, "", "", nil)
+	if status != http.StatusOK || !strings.Contains(string(body), `"status":"expired"`) || !strings.Contains(string(body), `"revision":1`) {
+		t.Fatalf("detail status=%d body=%s", status, body)
+	}
+	status, _ = billingHTTPRequest(t, http.MethodGet, url+"/expiry-sub", "", nil, "", "", nil)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated detail status=%d", status)
+	}
+	status, _ = billingHTTPRequest(t, http.MethodGet, url+"/expiry-sub?extra=1", "", f.cookie, "", "", nil)
+	if status != http.StatusBadRequest {
+		t.Fatalf("query detail status=%d", status)
+	}
+	var enabled int
+	if err := f.app.store.db.QueryRow(`SELECT enabled FROM financial_settings WHERE singleton=1`).Scan(&enabled); err != nil || enabled != 0 {
+		t.Fatalf("default-off enabled=%d err=%v", enabled, err)
+	}
+	f.app.subscriptionExpiry = newSubscriptionExpiryWorker(f.app)
+	deadline := time.Now().Add(4 * time.Second)
+	var storedStatus string
+	for time.Now().Before(deadline) {
+		if err := f.app.store.db.QueryRow(`SELECT status FROM financial_subscriptions WHERE id='expiry-sub'`).Scan(&storedStatus); err != nil {
+			t.Fatal(err)
+		}
+		if storedStatus == "expired" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if storedStatus != "expired" {
+		t.Fatalf("worker did not persist expiry while commercial execution was off: %s", storedStatus)
+	}
+	settingsBody := `{"operation_id":"20000000-0000-4000-8000-000000000099","expected_revision":1,"enabled":true}`
+	status, body = billingHTTPRequest(t, http.MethodPut, f.server.URL+"/admin/api/v1/billing/settings", settingsBody, f.cookie, f.csrf, f.server.URL, nil)
+	if status != http.StatusOK {
+		t.Fatalf("enable status=%d body=%s", status, body)
+	}
+	status, body = billingHTTPRequest(t, http.MethodGet, url+"/expiry-sub", "", f.cookie, "", "", nil)
+	if status != http.StatusOK || !strings.Contains(string(body), `"status":"expired"`) {
+		t.Fatalf("re-enabled detail status=%d body=%s", status, body)
+	}
+}
+
 func billingHTTPRequest(t *testing.T, method, url, body string, cookie *http.Cookie, csrf, origin string, headers map[string]string) (int, []byte) {
 	t.Helper()
 	var reader io.Reader
