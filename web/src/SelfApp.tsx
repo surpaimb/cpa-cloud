@@ -7,6 +7,7 @@
 // docs/employee-self-signout-others-contract.md.
 // docs/employee-self-key-issuance-contract.md.
 // docs/employee-self-key-token-summary-contract.md.
+// docs/employee-self-key-request-history-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
@@ -99,6 +100,71 @@ function SelfKeyTokenSummaryPanel({ keyID, keyName, onClose }: { keyID: string; 
   </section>
 }
 
+function SelfKeyRequestHistoryPanel({ keyID, keyName, onClose }: { keyID: string; keyName: string; onClose: () => void }) {
+  const [items, setItems] = useState<SelfRequest[]>([])
+  const [cursor, setCursor] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  const pendingPage = useRef<AbortController | null>(null)
+  const mounted = useRef(true)
+
+  useEffect(() => {
+    mounted.current = true
+    let active = true
+    const controller = new AbortController()
+    setItems([])
+    setCursor(null)
+    setLoading(true)
+    setError(false)
+    void selfRequest<SelfRequestPage>(`/keys/${encodeURIComponent(keyID)}/usage/requests`, { signal: controller.signal }).then((page) => {
+      if (!active || controller.signal.aborted) return
+      setItems(page.items)
+      setCursor(page.next_cursor)
+    }).catch(() => {
+      if (!active || controller.signal.aborted) return
+      setItems([])
+      setCursor(null)
+      setError(true)
+    }).finally(() => { if (active && !controller.signal.aborted) setLoading(false) })
+    return () => { active = false; mounted.current = false; controller.abort(); pendingPage.current?.abort() }
+  }, [keyID])
+
+  async function loadMore() {
+    if (!cursor || loading || pendingPage.current) return
+    const controller = new AbortController()
+    pendingPage.current = controller
+    setLoading(true)
+    setError(false)
+    try {
+      const page = await selfRequest<SelfRequestPage>(`/keys/${encodeURIComponent(keyID)}/usage/requests?cursor=${encodeURIComponent(cursor)}`, { signal: controller.signal })
+      if (!mounted.current || controller.signal.aborted) return
+      setItems((prior) => [...prior, ...page.items])
+      setCursor(page.next_cursor)
+    } catch {
+      if (!mounted.current || controller.signal.aborted) return
+      setItems([])
+      setCursor(null)
+      setError(true)
+    } finally {
+      if (mounted.current && !controller.signal.aborted) setLoading(false)
+      if (pendingPage.current === controller) pendingPage.current = null
+    }
+  }
+
+  return <section className="self-history self-key-history" aria-label={`${keyName} 的请求活动`}>
+    <div className="self-key-history-heading"><h3>{keyName} 的请求活动</h3><Button variant="secondary" onClick={onClose}>关闭活动</Button></div>
+    <p>只显示此 Key 最近 24 小时的最小请求活动；不含正文、Token 或费用，也不代表完整用量、账单或合规结论。</p>
+    {loading && items.length === 0 ? <p role="status">正在读取此 Key 的请求活动…</p> : null}
+    {error ? <p role="alert">此 Key 的请求活动暂时无法读取，请稍后重试。</p> : null}
+    {!error && !loading && items.length === 0 ? <p>此 Key 最近 24 小时暂无请求活动。</p> : null}
+    {items.length > 0 ? <ul className="self-history-list">{items.map((item) => <li key={item.id}>
+      <div className="self-history-top"><strong>{item.model_id}</strong><span className={`self-history-status self-history-status--${item.status}`}>{requestStatus[item.status]}</span></div>
+      <dl><div><dt>请求 ID</dt><dd>{item.id}</dd></div><div><dt>Key ID</dt><dd>{item.key_id}</dd></div><div><dt>开始时间</dt><dd><time dateTime={item.started_at}>{selfKeyDate(item.started_at)}</time></dd></div><div><dt>结束时间</dt><dd>{item.finished_at ? <time dateTime={item.finished_at}>{selfKeyDate(item.finished_at)}</time> : '尚未结束'}</dd></div></dl>
+    </li>)}</ul> : null}
+    {cursor && !error ? <Button variant="secondary" disabled={loading} onClick={loadMore}>{loading ? '正在加载…' : '加载更多请求'}</Button> : null}
+  </section>
+}
+
 function SelfKeyInventory({ csrf }: { csrf: string }) {
   const [items, setItems] = useState<SelfKey[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
@@ -107,7 +173,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
   const [confirmID, setConfirmID] = useState<string | null>(null)
   const [revokeBusy, setRevokeBusy] = useState(false)
   const [revokeError, setRevokeError] = useState<string | null>(null)
-  const [selectedKeyID, setSelectedKeyID] = useState<string | null>(null)
+  const [selectedKeyView, setSelectedKeyView] = useState<{ id: string; kind: 'tokens' | 'requests' } | null>(null)
   const pendingPage = useRef<AbortController | null>(null)
   const pendingRevoke = useRef<AbortController | null>(null)
   const mounted = useRef(true)
@@ -126,7 +192,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
       setItems([])
       setCursor(null)
       setError(true)
-      setSelectedKeyID(null)
+      setSelectedKeyView(null)
     }).finally(() => { if (active) setLoading(false) })
     return () => { active = false; mounted.current = false; controller.abort(); pendingPage.current?.abort(); pendingRevoke.current?.abort() }
   }, [])
@@ -151,7 +217,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
       await selfRequest<void>(`/keys/${encodeURIComponent(id)}/revoke`, { method: 'POST', body: JSON.stringify({ current_password }), signal: controller.signal }, csrf)
       if (!mounted.current || controller.signal.aborted) return
       setConfirmID(null)
-      setSelectedKeyID(null)
+      setSelectedKeyView(null)
       try {
         const page = await selfRequest<SelfKeyPage>('/keys', { signal: controller.signal })
         if (!mounted.current || controller.signal.aborted) return
@@ -163,7 +229,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
         setItems([])
         setCursor(null)
         setError(true)
-        setSelectedKeyID(null)
+        setSelectedKeyView(null)
       }
     } catch (caught) {
       if (!mounted.current || controller.signal.aborted) return
@@ -196,14 +262,14 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
       setItems([])
       setCursor(null)
       setError(true)
-      setSelectedKeyID(null)
+      setSelectedKeyView(null)
     } finally {
       if (!controller.signal.aborted) setLoading(false)
       if (pendingPage.current === controller) pendingPage.current = null
     }
   }
 
-  const selectedKey = items.find((item) => item.id === selectedKeyID)
+  const selectedKey = items.find((item) => item.id === selectedKeyView?.id)
 
   return <section className="self-keys" aria-labelledby="self-keys-title">
     <h2 id="self-keys-title">我的 API Key</h2>
@@ -214,7 +280,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
     {items.length > 0 ? <ul className="self-key-list">{items.map((item) => <li key={item.id}>
       <div className="self-key-top"><strong>{item.name}</strong><span className={`self-key-status self-key-status--${item.status}`}>{item.status === 'active' ? '有效' : item.status === 'expired' ? '已到期' : '已撤销'}</span></div>
       <dl><div><dt>Key ID</dt><dd>{item.id}</dd></div><div><dt>创建时间</dt><dd><time dateTime={item.created_at}>{selfKeyDate(item.created_at)}</time></dd></div><div><dt>到期时间</dt><dd>{item.expires_at ? <time dateTime={item.expires_at}>{selfKeyDate(item.expires_at)}</time> : '永不过期'}</dd></div>{item.revoked_at ? <div><dt>撤销时间</dt><dd><time dateTime={item.revoked_at}>{selfKeyDate(item.revoked_at)}</time></dd></div> : null}</dl>
-      <div className="self-key-summary-action"><Button variant="secondary" onClick={() => setSelectedKeyID((prior) => prior === item.id ? null : item.id)} aria-label={`查看 ${item.name} 的已知 Token`}>{selectedKeyID === item.id ? '收起此 Key 汇总' : '查看已知 Token'}</Button></div>
+      <div className="self-key-view-actions"><Button variant="secondary" onClick={() => setSelectedKeyView((prior) => prior?.id === item.id && prior.kind === 'tokens' ? null : { id: item.id, kind: 'tokens' })} aria-label={`查看 ${item.name} 的已知 Token`}>{selectedKeyView?.id === item.id && selectedKeyView.kind === 'tokens' ? '收起此 Key 汇总' : '查看已知 Token'}</Button><Button variant="secondary" onClick={() => setSelectedKeyView((prior) => prior?.id === item.id && prior.kind === 'requests' ? null : { id: item.id, kind: 'requests' })} aria-label={`查看 ${item.name} 的请求活动`}>{selectedKeyView?.id === item.id && selectedKeyView.kind === 'requests' ? '收起此 Key 活动' : '查看请求活动'}</Button></div>
       {item.status !== 'revoked' ? <div className="self-key-revoke">
         {confirmID === item.id ? <form onSubmit={(event) => { void revoke(event, item.id) }}>
           <p>确认撤销“{item.name}”？撤销后此 Key 不能再发起新请求，正在进行的请求不会因此中断。</p>
@@ -224,7 +290,8 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
         </form> : <Button variant="secondary" disabled={revokeBusy} onClick={() => { setConfirmID(item.id); setRevokeError(null) }} aria-label={`撤销 ${item.name}`}>撤销 Key</Button>}
       </div> : null}
     </li>)}</ul> : null}
-    {selectedKey ? <SelfKeyTokenSummaryPanel key={selectedKey.id} keyID={selectedKey.id} keyName={selectedKey.name} onClose={() => setSelectedKeyID(null)} /> : null}
+    {selectedKey && selectedKeyView?.kind === 'tokens' ? <SelfKeyTokenSummaryPanel key={`tokens:${selectedKey.id}`} keyID={selectedKey.id} keyName={selectedKey.name} onClose={() => setSelectedKeyView(null)} /> : null}
+    {selectedKey && selectedKeyView?.kind === 'requests' ? <SelfKeyRequestHistoryPanel key={`requests:${selectedKey.id}`} keyID={selectedKey.id} keyName={selectedKey.name} onClose={() => setSelectedKeyView(null)} /> : null}
     {cursor && !error ? <Button variant="secondary" disabled={loading} onClick={loadMore}>{loading ? '正在加载…' : '加载更多'}</Button> : null}
   </section>
 }
