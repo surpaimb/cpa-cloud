@@ -11,12 +11,13 @@
 // docs/employee-self-wallet-balance-contract.md.
 // docs/employee-self-wallet-activity-contract.md.
 // docs/employee-self-subscription-status-contract.md.
+// docs/employee-self-plan-catalog-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_plan_catalog?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -34,6 +35,8 @@ type SelfWalletActivityItem = { occurred_at: string; delta_micro: string }
 type SelfWalletActivityPage = { currency: string; has_account: boolean; window_start: string; window_end: string; items: SelfWalletActivityItem[]; next_cursor: string | null }
 type SelfSubscriptionItem = { subscription_id: string; interval: 'one_time' | 'monthly'; status: 'active' | 'cancelled' | 'expired'; started_at: string; period_end_at: string | null; cancelled_at: string | null }
 type SelfSubscriptionPage = { items: SelfSubscriptionItem[]; next_cursor: string | null }
+type SelfPlanCatalogItem = { plan_id: string; name: string; interval: 'one_time' | 'monthly'; price_micro: string; credit_micro: string; revision: number }
+type SelfPlanCatalogPage = { currency: string; available: boolean; items: SelfPlanCatalogItem[]; next_cursor: string | null }
 
 async function selfRequest<T>(path: string, init: RequestInit = {}, csrf?: string): Promise<T> {
   const headers = new Headers(init.headers)
@@ -734,6 +737,104 @@ function SelfSubscriptionStatusPanel() {
   </section>
 }
 
+function validSelfPlanCatalogPage(raw: unknown, currency: string, previous?: SelfPlanCatalogPage): raw is SelfPlanCatalogPage {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const page = raw as Record<string, unknown>
+  if (Object.keys(page).sort().join(',') !== 'available,currency,items,next_cursor' || page.currency !== currency ||
+    typeof page.available !== 'boolean' || !Array.isArray(page.items) || page.items.length > 20 ||
+    (page.next_cursor !== null && (typeof page.next_cursor !== 'string' || page.next_cursor.length < 1 || page.next_cursor.length > 1024)) ||
+    (!page.available && (page.items.length !== 0 || page.next_cursor !== null)) ||
+    (page.next_cursor !== null && page.items.length === 0)) return false
+  const positiveMicro = /^[1-9][0-9]*$/
+  let priorID = previous?.items.at(-1)?.plan_id ?? ''
+  for (const rawItem of page.items) {
+    if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) return false
+    const item = rawItem as Record<string, unknown>
+    if (Object.keys(item).sort().join(',') !== 'credit_micro,interval,name,plan_id,price_micro,revision' ||
+      typeof item.plan_id !== 'string' || item.plan_id.length < 1 || item.plan_id.length > 256 ||
+      item.plan_id.trim() !== item.plan_id || (priorID !== '' && item.plan_id <= priorID) ||
+      typeof item.name !== 'string' || item.name.length < 1 || item.name.length > 128 || item.name.trim() !== item.name ||
+      (item.interval !== 'one_time' && item.interval !== 'monthly') ||
+      typeof item.price_micro !== 'string' || item.price_micro.length > 19 || !positiveMicro.test(item.price_micro) || BigInt(item.price_micro) > 9223372036854775807n ||
+      typeof item.credit_micro !== 'string' || item.credit_micro.length > 19 || !positiveMicro.test(item.credit_micro) || BigInt(item.credit_micro) > 9223372036854775807n ||
+      typeof item.revision !== 'number' || !Number.isSafeInteger(item.revision) || item.revision < 1) return false
+    priorID = item.plan_id
+  }
+  return true
+}
+
+function SelfPlanCatalogPanel() {
+  const [currency, setCurrency] = useState('')
+  const [page, setPage] = useState<SelfPlanCatalogPage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort() }, [])
+
+  function changeCurrency(value: string) {
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    setCurrency(value)
+    setPage(null)
+    setLoading(false)
+    setError(false)
+  }
+
+  async function readPage(requestedCurrency: string, cursor?: string) {
+    const prior = cursor ? page : null
+    if (!/^[A-Z]{3}$/.test(requestedCurrency) || (cursor && (!prior || prior.currency !== requestedCurrency || prior.next_cursor !== cursor))) {
+      setPage(null)
+      setError(true)
+      return
+    }
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const controller = new AbortController()
+    pending.current = controller
+    if (!cursor) setPage(null)
+    setError(false)
+    setLoading(true)
+    try {
+      const path = `/billing/plans?currency=${requestedCurrency}&limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const value = await selfRequest<unknown>(path, { signal: controller.signal })
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (!validSelfPlanCatalogPage(value, requestedCurrency, prior ?? undefined)) throw new Error('Invalid plan catalog response')
+      setPage(prior && value.available ? { ...value, items: [...prior.items, ...value.items] } : value)
+    } catch {
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      setPage(null)
+      setError(true)
+    } finally {
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(false)
+    }
+  }
+
+  return <section className="self-plan-catalog" aria-labelledby="self-plan-catalog-title">
+    <h2 id="self-plan-catalog-title">当前可用套餐目录</h2>
+    <p>仅展示查询时该币种已启用套餐的当前信息，不是权益或持久报价；购买、取消与续购仍须管理员操作。</p>
+    <form className="self-plan-catalog-form" onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void readPage(currency) }}>
+      <Field label="套餐币种（三位大写字母，如 USD）"><input name="plan_currency" value={currency} onChange={(event) => changeCurrency(event.target.value)} required maxLength={3} pattern="[A-Z]{3}" autoComplete="off" spellCheck={false} /></Field>
+      <Button type="submit" disabled={loading}>{loading ? '正在读取…' : '读取当前套餐'}</Button>
+    </form>
+    {error ? <p role="alert">当前套餐目录暂时无法读取，请检查币种或稍后重试。</p> : null}
+    {page && !error ? <div className="self-plan-catalog-result" role="status">
+      {!page.available ? <p>当前套餐目录不可用；未展示旧报价。</p>
+        : page.items.length === 0 ? <p>{page.currency} 暂无已启用套餐。</p>
+          : <ol className="self-plan-catalog-list">{page.items.map((item) => <li key={item.plan_id}>
+            <div className="self-plan-catalog-heading"><strong>{item.name}</strong><span>{item.interval === 'monthly' ? '单月' : '一次性'}</span></div>
+            <dl><div><dt>套餐 ID</dt><dd>{item.plan_id}</dd></div><div><dt>当前版本</dt><dd>{item.revision}</dd></div>
+              <div><dt>标价</dt><dd>{item.price_micro} micro {page.currency}</dd></div><div><dt>授予额度</dt><dd>{item.credit_micro} micro</dd></div></dl>
+          </li>)}</ol>}
+      {page.available && page.next_cursor ? <Button variant="secondary" disabled={loading} onClick={() => { void readPage(page.currency, page.next_cursor ?? undefined) }}>{loading ? '正在读取…' : '加载更多套餐'}</Button> : null}
+    </div> : null}
+  </section>
+}
+
 function SelfSignOutOthers({ csrf }: { csrf: string }) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -824,6 +925,8 @@ export function SelfApp() {
           ? <SelfWalletActivityPanel key={`wallet-activity:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_subscription_status === true
           ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} /> : null}
+        {session.features?.employee_self_plan_catalog === true
+          ? <SelfPlanCatalogPanel key={`plan-catalog:${session.profile.id}:${session.csrf_token}`} /> : null}
         <SelfKeyIssuance key={`issue:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} onIssued={() => setKeyInventoryRevision((value) => value + 1)} />
         <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}:${keyInventoryRevision}`} csrf={session.csrf_token} />
         <SelfTokenSummaryPanel key={`summary:${session.profile.id}:${session.csrf_token}`} />

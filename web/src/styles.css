@@ -769,6 +769,24 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-subscriptions-list dt { color: var(--muted); }
 .self-subscriptions-list dd { margin: 3px 0 0; overflow-wrap: anywhere; }
 @media (max-width: 520px) { .self-subscriptions-list dl { grid-template-columns: minmax(0, 1fr); } }
+/* Independently authored for docs/employee-self-plan-catalog-contract.md. */
+.self-plan-catalog { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.self-plan-catalog h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
+.self-plan-catalog > p { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.self-plan-catalog > p[role="alert"] { margin-top: 12px; color: #a52132; }
+.self-plan-catalog-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; margin-bottom: 14px; }
+.self-plan-catalog-form .button { white-space: nowrap; }
+.self-plan-catalog-result { padding: 12px 14px; border: 1px solid #bfe3d5; border-radius: 9px; background: #f2f9f6; color: var(--navy); overflow-wrap: anywhere; }
+.self-plan-catalog-result > p { margin: 0; font-size: 13px; line-height: 1.6; }
+.self-plan-catalog-list { display: grid; gap: 10px; padding: 0; margin: 0 0 12px; list-style: none; }
+.self-plan-catalog-list li { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; font-size: 13px; }
+.self-plan-catalog-heading { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 10px; }
+.self-plan-catalog-heading strong { overflow-wrap: anywhere; }
+.self-plan-catalog-list dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin: 0; }
+.self-plan-catalog-list dl div { min-width: 0; }
+.self-plan-catalog-list dt { color: var(--muted); }
+.self-plan-catalog-list dd { margin: 3px 0 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+@media (max-width: 520px) { .self-plan-catalog-form, .self-plan-catalog-list dl { grid-template-columns: minmax(0, 1fr); } }
 /* Independently authored for docs/employee-self-key-inventory-contract.md. */
 .self-keys { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
 .self-keys h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }

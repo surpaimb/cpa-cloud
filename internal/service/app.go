@@ -115,6 +115,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if cfg.EmployeeSelfSubscriptionStatusEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return nil, errors.New("employee self subscription status requires employee self service")
 	}
+	if cfg.EmployeeSelfPlanCatalogEnabled && !cfg.EmployeeSelfServiceEnabled {
+		return nil, errors.New("employee self plan catalog requires employee self service")
+	}
 	trustedProxies, err := keypolicy.NewTrustedProxySet(cfg.TrustedProxyCIDRs)
 	if err != nil {
 		return nil, err
@@ -503,6 +506,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"employee_self_wallet_balance":      a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled,
 			"employee_self_wallet_activity":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
 			"employee_self_subscription_status": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
+			"employee_self_plan_catalog":        a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled,
 			"employee_self_key_issuance":        a.cfg.EmployeeSelfServiceEnabled,
 			"codex_membership_import":           a.cfg.ExperimentalCodexMembership,
 			"responses_api":                     true,
