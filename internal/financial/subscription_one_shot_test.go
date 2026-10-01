@@ -360,3 +360,25 @@ func TestOneShotOrphanArmFactFailsClosed(t *testing.T) {
 		t.Fatalf("orphan arm fact survived migration: %v", err)
 	}
 }
+
+func TestOneShotWorkerReadFailureIsUnavailable(t *testing.T) {
+	c, _, due, _ := renewalFixture(t)
+	ctx := context.Background()
+	if _, err := c.db.Exec(`UPDATE financial_settings SET enabled=1 WHERE singleton=1`); err != nil {
+		t.Fatal(err)
+	}
+	c.now = func() time.Time { return due.Add(-time.Second) }
+	if _, _, err := c.ArmOneShotRenewal(ctx, oneShotArmInput(t, "renew-old", "one-shot-read-failure-arm", 1, due)); err != nil {
+		t.Fatal(err)
+	}
+	// A missing durable table causes QueryRow.Scan to fail with a storage
+	// error, not sql.ErrNoRows. It must not look like a skipped candidate.
+	if _, err := c.db.Exec(`DROP TABLE financial_subscription_one_shot_renewals`); err != nil {
+		t.Fatal(err)
+	}
+	c.now = func() time.Time { return due }
+	changed, err := c.processOneShotRenewal(ctx, "renew-old")
+	if changed || !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("storage read was swallowed: changed=%v err=%v", changed, err)
+	}
+}

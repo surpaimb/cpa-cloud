@@ -455,11 +455,14 @@ func (c *Commercial) processOneShotRenewal(ctx context.Context, id string) (bool
 	defer tx.Rollback()
 	var state, dueText, executionID string
 	err = tx.QueryRowContext(ctx, `SELECT state,due_at,execution_operation_id FROM financial_subscription_one_shot_renewals WHERE predecessor_id=?`, id).Scan(&state, &dueText, &executionID)
-	if errors.Is(err, sql.ErrNoRows) || state != "armed" {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, ErrUnavailable
+	}
+	if state != "armed" {
+		return false, nil
 	}
 	now := c.clockNow()
 	due, err := parseSubscriptionEnd(dueText)
