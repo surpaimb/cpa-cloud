@@ -7,9 +7,12 @@ import (
 	"time"
 )
 
-type Commercial struct{ db *sql.DB }
+type Commercial struct {
+	db  *sql.DB
+	now func() time.Time // test-injectable commit-boundary clock; production uses time.Now
+}
 
-func NewCommercial(db *sql.DB) *Commercial { return &Commercial{db: db} }
+func NewCommercial(db *sql.DB) *Commercial { return &Commercial{db: db, now: time.Now} }
 
 const commercialSettingsDDL = `CREATE TABLE IF NOT EXISTS financial_settings (
 	singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -44,6 +47,25 @@ const plansDDL = `CREATE TABLE IF NOT EXISTS financial_plans (
 )`
 
 const subscriptionsDDL = `CREATE TABLE IF NOT EXISTS financial_subscriptions (
+	id TEXT PRIMARY KEY,
+	account_id TEXT NOT NULL REFERENCES financial_accounts(id) ON DELETE RESTRICT,
+	plan_id TEXT NOT NULL REFERENCES financial_plans(id) ON DELETE RESTRICT,
+	plan_revision INTEGER NOT NULL CHECK(typeof(plan_revision)='integer' AND plan_revision BETWEEN 1 AND 9007199254740991),
+	price_micro INTEGER NOT NULL CHECK(typeof(price_micro)='integer' AND price_micro>0),
+	credit_micro INTEGER NOT NULL CHECK(typeof(credit_micro)='integer' AND credit_micro>0),
+	currency TEXT NOT NULL CHECK(length(currency)=3 AND currency GLOB '[A-Z][A-Z][A-Z]'),
+	interval TEXT NOT NULL CHECK(interval IN ('one_time','monthly')),
+	status TEXT NOT NULL CHECK(status IN ('active','cancelled','expired')),
+	started_at TEXT NOT NULL,
+	period_end_at TEXT,
+	cancelled_at TEXT,
+	revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 9007199254740991),
+	CHECK((interval='one_time' AND period_end_at IS NULL AND status<>'expired') OR (interval='monthly' AND period_end_at IS NOT NULL AND period_end_at>started_at)),
+	CHECK((status IN ('active','expired') AND cancelled_at IS NULL) OR (status='cancelled' AND cancelled_at IS NOT NULL))
+)`
+
+// Exact pre-BILL-03 schema, used only as an independently validated migration input.
+const subscriptionsLegacyDDL = `CREATE TABLE IF NOT EXISTS financial_subscriptions (
 	id TEXT PRIMARY KEY,
 	account_id TEXT NOT NULL REFERENCES financial_accounts(id) ON DELETE RESTRICT,
 	plan_id TEXT NOT NULL REFERENCES financial_plans(id) ON DELETE RESTRICT,
@@ -164,6 +186,10 @@ func (c *Commercial) Migrate(ctx context.Context) error {
 			return ErrSchema
 		}
 	}
+	legacy, err := subscriptionLegacySchema(ctx, tx)
+	if err != nil {
+		return err
+	}
 	statements := []string{commercialSettingsDDL, commercialOperationsDDL, plansDDL, subscriptionsDDL, connectorsDDL, paymentsDDL, topupsDDL, redemptionCodesDDL, redemptionsDDL, refundsDDL, webhookEventsDDL,
 		subscriptionAccountIndexDDL, paymentAccountIndexDDL, paymentConnectorIndexDDL, refundPaymentIndexDDL, redemptionAccountIndexDDL,
 		commercialOperationsNoUpdateDDL, commercialOperationsNoDeleteDDL, topupsNoUpdateDDL, topupsNoDeleteDDL, redemptionsNoUpdateDDL, redemptionsNoDeleteDDL,
@@ -171,6 +197,11 @@ func (c *Commercial) Migrate(ctx context.Context) error {
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return ErrSchema
+		}
+	}
+	if legacy {
+		if err := migrateLegacySubscriptions(ctx, tx); err != nil {
+			return err
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO financial_settings(singleton,enabled,revision,updated_at) VALUES(1,0,1,?)`, time.Unix(0, 0).UTC().Format(time.RFC3339Nano)); err != nil {
@@ -249,12 +280,26 @@ func validateCommercialStored(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM financial_payments WHERE (status='paid' AND refunded_micro<>0) OR (status='partially_refunded' AND (refunded_micro=0 OR refunded_micro>=amount_micro)) OR (status='refunded' AND refunded_micro<>amount_micro)`).Scan(&mismatches); err != nil || mismatches != 0 {
 		return ErrSchema
 	}
+	subscriptions, err := tx.QueryContext(ctx, subscriptionSelect)
+	if err != nil {
+		return ErrUnavailable
+	}
+	for subscriptions.Next() {
+		if _, err := scanSubscription(subscriptions, time.Now().UTC()); err != nil {
+			subscriptions.Close()
+			return ErrSchema
+		}
+	}
+	iterationErr, closeErr := subscriptions.Err(), subscriptions.Close()
+	if iterationErr != nil || closeErr != nil {
+		return ErrUnavailable
+	}
 	foreignRows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
 	if err != nil {
 		return ErrUnavailable
 	}
 	violated := foreignRows.Next()
-	iterationErr, closeErr := foreignRows.Err(), foreignRows.Close()
+	iterationErr, closeErr = foreignRows.Err(), foreignRows.Close()
 	if iterationErr != nil || closeErr != nil {
 		return ErrUnavailable
 	}

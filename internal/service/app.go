@@ -52,6 +52,7 @@ type App struct {
 	accountGroupAllocationRequired bool
 	responseResources              *responseResourceCoordinator
 	backgroundResponses            *backgroundResponseWorker
+	subscriptionExpiry             *subscriptionExpiryWorker
 	governance                     *requestGovernance
 	governancePolicies             *governanceManagementStore
 	budget                         *governance.Budget
@@ -272,6 +273,7 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err := app.channelMonitors.Start(); err != nil {
 		return nil, err
 	}
+	app.subscriptionExpiry = newSubscriptionExpiryWorker(app)
 	opened = true
 	return app, nil
 }
@@ -304,6 +306,9 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 }
 
 func (a *App) Close() error {
+	if a.subscriptionExpiry != nil {
+		a.subscriptionExpiry.Close()
+	}
 	if a.backupAutomation != nil {
 		a.backupAutomation.Close()
 	}
