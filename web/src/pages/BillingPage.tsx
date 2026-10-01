@@ -10,7 +10,7 @@ import { PageHeader } from './EmployeesPage'
 
 type Section = 'wallet' | 'plans' | 'funding' | 'codes'
 
-export function BillingPage({ csrf }: { csrf: string }) {
+export function BillingPage({ csrf, oneShotRenewal = false }: { csrf: string; oneShotRenewal?: boolean }) {
   const [settings, setSettings] = useState<BillingSettings | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -45,7 +45,7 @@ export function BillingPage({ csrf }: { csrf: string }) {
         <div><span className="billing-eyebrow">商业执行总开关 · revision {settings.revision}</span><h2>{settings.enabled ? '商业执行已开启' : '商业执行默认关闭'}</h2><p>{settings.enabled ? '充值、订阅购买、兑换和退款冲正可由管理员执行。真实支付仍未接入。' : '可预先配置套餐、测试连接器与兑换码；充值、购买、兑换和退款执行保持关闭。'}</p></div>
         <Button variant={settings.enabled ? 'danger' : 'primary'} onClick={() => { setWriteError(null); setConfirming({ operation_id: crypto.randomUUID(), expected_revision: settings.revision, enabled: !settings.enabled }) }}>{settings.enabled ? '关闭商业执行' : '开启商业执行'}</Button>
       </section>
-      <div className="billing-boundary"><strong>当前能力边界</strong><p>支付连接器和回调仅用于本地合成测试。没有真实收款、自动续费、外部退款出款或员工自助入口。所有财务写入使用 CSRF、revision 和幂等 operation ID。</p></div>
+      <div className="billing-boundary"><strong>当前能力边界</strong><p>{oneShotRenewal ? '支付连接器和回调仅用于本地合成测试。管理员可显式预约一次到期后的钱包续购；没有长期自动续费、真实收款、外部退款出款或员工自助入口。' : '支付连接器和回调仅用于本地合成测试。没有真实收款、自动续费、外部退款出款或员工自助入口。'}所有财务写入使用 CSRF、revision 和幂等 operation ID。</p></div>
       <nav className="billing-tabs" aria-label="商业管理分区">
         <button className={section === 'wallet' ? 'active' : ''} onClick={() => setSection('wallet')}>钱包与流水</button>
         <button className={section === 'plans' ? 'active' : ''} onClick={() => setSection('plans')}>套餐与订阅</button>
@@ -53,7 +53,7 @@ export function BillingPage({ csrf }: { csrf: string }) {
         <button className={section === 'codes' ? 'active' : ''} onClick={() => setSection('codes')}>兑换码</button>
       </nav>
       {section === 'wallet' ? <BillingWallet csrf={csrf} /> : null}
-      {section === 'plans' ? <BillingPlans csrf={csrf} commercialEnabled={settings.enabled} /> : null}
+      {section === 'plans' ? <BillingPlans csrf={csrf} commercialEnabled={settings.enabled} oneShotRenewal={oneShotRenewal} /> : null}
       {section === 'funding' ? <BillingFunding csrf={csrf} commercialEnabled={settings.enabled} /> : null}
       {section === 'codes' ? <BillingCodes csrf={csrf} commercialEnabled={settings.enabled} /> : null}
     </> : null}

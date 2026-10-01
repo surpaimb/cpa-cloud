@@ -705,6 +705,9 @@ func (c *Commercial) CancelSubscription(ctx context.Context, input CancelSubscri
 	if item.PeriodEndAt != nil && !commitClock().UTC().Before(*item.PeriodEndAt) {
 		return Subscription{}, CommercialReceipt{}, ErrConflict // rollback this transaction, including the operation fact
 	}
+	if err := settleOneShotAfterCancellation(ctx, tx, item.ID, committedAt); err != nil {
+		return Subscription{}, CommercialReceipt{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Subscription{}, CommercialReceipt{}, ErrUnavailable
 	}

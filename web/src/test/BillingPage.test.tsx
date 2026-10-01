@@ -160,4 +160,41 @@ describe('administrator commercial management', () => {
     expect(screen.getByText('来源：')).toBeInTheDocument()
     expect(screen.getAllByText('renew-new')).toHaveLength(2)
   })
+
+  it('shows an on-demand one-shot status and makes disarm visibly irreversible', async () => {
+    const old = { id: 'one-shot-old', plan_id: 'plan-month', plan_revision: 1, price_micro: '10', credit_micro: '20', currency: 'USD', interval: 'monthly', status: 'active', revision: 1, started_at: '2026-10-01T08:00:00Z', period_end_at: '2026-11-01T08:00:00Z', predecessor_id: null, successor_id: null }
+    const plan = { id: 'plan-month', name: '月套餐', currency: 'USD', price_micro: '12', credit_micro: '30', interval: 'monthly', enabled: true, revision: 2, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' }
+    const writes: { path: string; body: { operation_id: string; expected_revision: number } }[] = []
+    let state: 'none' | 'armed' | 'disarmed' = 'none'
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/billing/plans?')) return json({ items: [plan], next_cursor: null })
+      if (url.includes('/billing/subscriptions?')) return json({ items: [old], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions/one-shot-old/one-shot-renewal') && !init?.method) return json({ predecessor_id: old.id, state, revision: state === 'none' ? 0 : state === 'armed' ? 1 : 2, due_at: old.period_end_at, reason: state === 'disarmed' ? 'disarmed' : null, successor_id: null, terminal_at: null })
+      if (url.includes('/billing/subscriptions/one-shot-old/one-shot-renewal') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { operation_id: string; expected_revision: number }
+        writes.push({ path: url, body })
+        state = url.endsWith('/disarm') ? 'disarmed' : 'armed'
+        return json({ receipt: { operation_id: body.operation_id, resource_kind: 'subscription_one_shot', resource_id: old.id, revision: state === 'armed' ? 1 : 2, created_at: '2026-10-01T08:00:00Z', replay: false }, one_shot_renewal: { predecessor_id: old.id, state, revision: state === 'armed' ? 1 : 2, due_at: old.period_end_at, reason: state === 'disarmed' ? 'disarmed' : null, successor_id: null, terminal_at: null } })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<BillingPlans csrf="csrf-one-shot" commercialEnabled oneShotRenewal />)
+    await userEvent.click(await screen.findByRole('button', { name: '一次性预约状态' }))
+    expect(await screen.findByText('未预约')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '预约一次' }))
+    expect(await screen.findByText(/后继订阅不会继承预约/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '确认预约一次' }))
+    expect(await screen.findByText('已预约，等待到期尝试')).toBeInTheDocument()
+    expect(writes[0].body.expected_revision).toBe(1)
+    await userEvent.click(screen.getByRole('button', { name: '解除预约' }))
+    expect(await screen.findByText(/无法再次预约/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '确认解除且不再预约' }))
+    expect(await screen.findByText('已解除（不可重新预约同一期）')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '预约一次' })).not.toBeInTheDocument()
+    expect(writes).toHaveLength(2)
+    expect(writes[1].path.endsWith('/disarm')).toBe(true)
+    expect(writes[1].body.expected_revision).toBe(1)
+    expect(writes[1].body.operation_id).not.toBe(writes[0].body.operation_id)
+  })
 })

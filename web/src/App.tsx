@@ -84,6 +84,7 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
   const [loggingOut, setLoggingOut] = useState(false)
   const [backupConfiguration, setBackupConfiguration] = useState(false)
   const [billingCapability, setBillingCapability] = useState(false)
+  const [oneShotRenewalCapability, setOneShotRenewalCapability] = useState(false)
   const [channelMonitorCapability, setChannelMonitorCapability] = useState(false)
   const [auditCapability, setAuditCapability] = useState(false)
   const [auditFinancialSource, setAuditFinancialSource] = useState(false)
@@ -94,11 +95,12 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
     api.status().then((status) => {
       if (active) setBackupConfiguration(status.features?.automated_backups_configuration === true)
       if (active) setBillingCapability(status.features?.single_instance_billing === true)
+      if (active) setOneShotRenewalCapability(status.features?.billing_one_shot_renewal === true)
       if (active) setChannelMonitorCapability(status.features?.channel_monitor_configuration === true)
       if (active) setAuditCapability(status.features?.admin_audit_overview === true)
       if (active) setAuditFinancialSource(status.features?.admin_audit_overview === true && status.features?.admin_audit_financial_source === true)
       if (active) setAuditCSVExport(status.features?.admin_audit_overview === true && status.features?.admin_audit_csv_export === true)
-    }).catch(() => { if (active) { setBackupConfiguration(false); setBillingCapability(false); setChannelMonitorCapability(false); setAuditCapability(false); setAuditFinancialSource(false); setAuditCSVExport(false) } })
+    }).catch(() => { if (active) { setBackupConfiguration(false); setBillingCapability(false); setOneShotRenewalCapability(false); setChannelMonitorCapability(false); setAuditCapability(false); setAuditFinancialSource(false); setAuditCSVExport(false) } })
     return () => { active = false }
   }, [])
 
@@ -118,7 +120,7 @@ function AdminShell({ session, onLogout }: { session: Session; onLogout: () => v
     governance: <GovernancePage csrf={session.csrf_token} />,
     usage: <UsagePage csrf={session.csrf_token} />,
     audit: <AuditPage financialSource={auditFinancialSource} csvExport={auditCSVExport} />,
-    billing: <Suspense fallback={<div className="loading" role="status"><span />正在加载商业管理…</div>}><BillingPage csrf={session.csrf_token} /></Suspense>,
+    billing: <Suspense fallback={<div className="loading" role="status"><span />正在加载商业管理…</div>}><BillingPage csrf={session.csrf_token} oneShotRenewal={oneShotRenewalCapability} /></Suspense>,
     status: <StatusPage csrf={session.csrf_token} />,
   }[page]
 
