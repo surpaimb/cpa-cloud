@@ -593,7 +593,7 @@ func validTrustRevision(value string) bool {
 func (c *responseResourceCoordinator) authorizeOwnerTx(ctx context.Context, tx *sql.Tx, employeeID, keyID, model string, at time.Time, requireCurrentModelPolicy bool, sourceAddr netip.Addr, expectedPolicyRevision int64) error {
 	var status, mode string
 	var expires, revoked sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT e.status,e.model_mode,k.expires_at,k.revoked_at FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.id=? AND k.employee_id=?`, keyID, employeeID).Scan(&status, &mode, &expires, &revoked)
+	err := tx.QueryRowContext(ctx, `SELECT e.status,e.model_mode,k.expires_at,k.revoked_at FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.id=? AND k.employee_id=? AND NOT EXISTS(SELECT 1 FROM employee_self_key_slots slot WHERE slot.key_id=k.id AND (slot.state<>'issued' OR slot.employee_id<>k.employee_id))`, keyID, employeeID).Scan(&status, &mode, &expires, &revoked)
 	if errors.Is(err, sql.ErrNoRows) || status != "active" || revoked.Valid {
 		return errResponseResourceForbidden
 	}

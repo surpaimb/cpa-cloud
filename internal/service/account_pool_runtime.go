@@ -513,7 +513,7 @@ func (rt *accountPoolRuntime) authorizationCurrent(ctx context.Context, tx *sql.
 	}
 	var status, mode string
 	var expires, revoked sql.NullString
-	err := query(`SELECT e.status,e.model_mode,k.expires_at,k.revoked_at FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.id=? AND k.employee_id=?`, auth.KeyID, auth.EmployeeID).Scan(&status, &mode, &expires, &revoked)
+	err := query(`SELECT e.status,e.model_mode,k.expires_at,k.revoked_at FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.id=? AND k.employee_id=? AND NOT EXISTS(SELECT 1 FROM employee_self_key_slots slot WHERE slot.key_id=k.id AND (slot.state<>'issued' OR slot.employee_id<>k.employee_id))`, auth.KeyID, auth.EmployeeID).Scan(&status, &mode, &expires, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, false, false, nil
 	}

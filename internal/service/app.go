@@ -71,6 +71,10 @@ type App struct {
 	// Test-only SQL boundary hooks; production leaves both nil.
 	selfKeyRevokeBeforeTx func()
 	selfKeyRevokeCommit   func(*sql.Tx) error
+	// Independently authored for docs/employee-self-key-issuance-contract.md.
+	// Test-only boundaries; production leaves both nil.
+	selfKeyIssueBeforeTx func()
+	selfKeyIssueCommit   func(*sql.Tx) error
 	// Independently authored for docs/employee-self-signout-others-contract.md.
 	// Test-only transaction boundary hooks; production leaves both nil.
 	selfSignOutOthersBeforeTx func()
@@ -353,9 +357,15 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/api/v1/employees", a.requireAdmin(a.listEmployees, false))
 	if a.cfg.EmployeeSelfServiceEnabled {
 		mux.HandleFunc("POST /admin/api/v1/employees/{id}/self-enrollment", a.requireAdmin(a.issueSelfEnrollment, true))
+		mux.HandleFunc("POST /admin/api/v1/employees/{id}/self-key-slot", a.requireAdmin(a.reserveSelfKeySlot, true))
+		mux.HandleFunc("POST /admin/api/v1/keys/{id}/self-key-slot/arm", a.requireAdmin(a.armSelfKeySlot, true))
+		mux.HandleFunc("POST /admin/api/v1/keys/{id}/self-key-slot/cancel", a.requireAdmin(a.cancelSelfKeySlot, true))
 		a.registerSelfHandlers(mux)
 	} else {
 		mux.HandleFunc("/admin/api/v1/employees/{id}/self-enrollment", http.NotFound)
+		mux.HandleFunc("/admin/api/v1/employees/{id}/self-key-slot", http.NotFound)
+		mux.HandleFunc("/admin/api/v1/keys/{id}/self-key-slot/arm", http.NotFound)
+		mux.HandleFunc("/admin/api/v1/keys/{id}/self-key-slot/cancel", http.NotFound)
 	}
 	mux.HandleFunc("POST /admin/api/v1/employees", a.requireAdmin(a.createEmployee, true))
 	mux.HandleFunc("PATCH /admin/api/v1/employees/{id}", a.requireAdmin(a.updateEmployee, true))
@@ -463,6 +473,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"storage": "sqlite-wal",
 		"features": map[string]bool{
 			"employee_self_service":            a.cfg.EmployeeSelfServiceEnabled,
+			"employee_self_key_issuance":       a.cfg.EmployeeSelfServiceEnabled,
 			"codex_membership_import":          a.cfg.ExperimentalCodexMembership,
 			"responses_api":                    true,
 			"openai_embeddings":                true,

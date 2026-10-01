@@ -5,6 +5,7 @@
 // docs/employee-self-token-summary-contract.md.
 // docs/employee-self-key-revocation-contract.md.
 // docs/employee-self-signout-others-contract.md.
+// docs/employee-self-key-issuance-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
@@ -13,6 +14,8 @@ type Profile = { id: string; name: string; department: string; status: 'active' 
 type SelfSession = { csrf_token: string; profile: Profile }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
+type SelfKeySlot = { id: string; name: string; expires_at: string | null }
+type SelfIssuedKey = SelfKeySlot & { key: string }
 type SelfRequest = { id: string; key_id: string; model_id: string; status: 'pending' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; started_at: string; finished_at: string | null }
 type SelfRequestPage = { items: SelfRequest[]; next_cursor: string | null }
 type SelfTokenCounts = { known_total: string; unknown_attempts: string }
@@ -142,7 +145,7 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
 
   return <section className="self-keys" aria-labelledby="self-keys-title">
     <h2 id="self-keys-title">我的 API Key</h2>
-    <p>仅显示你已有 Key 的名称、时间和状态；Key 明文只在管理员创建时显示一次。</p>
+    <p>仅显示你已领取或管理员创建的 Key 名称、时间和状态；明文只在创建或领取成功时显示一次。</p>
     {loading && items.length === 0 ? <p role="status">正在读取 Key 列表…</p> : null}
     {error ? <p role="alert">Key 列表暂时无法读取，请稍后重新登录或刷新页面。</p> : null}
     {!error && !loading && items.length === 0 ? <p>暂无 API Key。</p> : null}
@@ -159,6 +162,72 @@ function SelfKeyInventory({ csrf }: { csrf: string }) {
       </div> : null}
     </li>)}</ul> : null}
     {cursor && !error ? <Button variant="secondary" disabled={loading} onClick={loadMore}>{loading ? '正在加载…' : '加载更多'}</Button> : null}
+  </section>
+}
+
+function SelfKeyIssuance({ csrf, onIssued }: { csrf: string; onIssued: () => void }) {
+  const [slot, setSlot] = useState<SelfKeySlot | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [issued, setIssued] = useState<SelfIssuedKey | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const mounted = useRef(true)
+  const pendingIssue = useRef<AbortController | null>(null)
+  useEffect(() => {
+    mounted.current = true
+    const controller = new AbortController()
+    void selfRequest<{ items: SelfKeySlot[] }>('/key-slots', { signal: controller.signal }).then((result) => {
+      if (mounted.current) setSlot(result.items[0] ?? null)
+    }).catch(() => { if (mounted.current) setError('授权槽位暂时无法读取，请刷新后重试。') }).finally(() => { if (mounted.current) setLoading(false) })
+    return () => { mounted.current = false; controller.abort(); pendingIssue.current?.abort() }
+  }, [])
+
+  async function issue(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!slot || busy) return
+    const form = event.currentTarget
+    let current_password = String(new FormData(form).get('current_password') ?? '')
+    form.reset()
+    const size = new TextEncoder().encode(current_password).length
+    if (size < 12 || size > 72) {
+      current_password = ''
+      setError('当前密码须为 12–72 个 UTF-8 字节。')
+      return
+    }
+    setBusy(true); setError(null); setIssued(null)
+    const controller = new AbortController()
+    pendingIssue.current = controller
+    try {
+      const result = await selfRequest<SelfIssuedKey>('/keys/issue', { method: 'POST', body: JSON.stringify({ slot_id: slot.id, current_password }), signal: controller.signal }, csrf)
+      if (!mounted.current || controller.signal.aborted) return
+      setIssued(result)
+      setSlot(null)
+      setConfirming(false)
+      onIssued()
+    } catch (caught) {
+      if (!mounted.current || controller.signal.aborted) return
+      setIssued(null)
+      setError(caught instanceof ApiError && caught.status === 503
+        ? '领取结果未确认。请刷新并检查 Key 列表；若已签发但未看到明文，请联系管理员撤销并重新创建。'
+        : caught instanceof ApiError && caught.status === 429
+          ? '尝试次数过多，请稍后再试。'
+          : '领取未完成。请检查密码或联系管理员确认授权状态。')
+    } finally {
+      current_password = ''
+      if (pendingIssue.current === controller) pendingIssue.current = null
+      if (mounted.current) setBusy(false)
+    }
+  }
+
+  if (loading) return <section className="self-keys" aria-label="领取管理员授权的 Key"><p role="status">正在检查授权槽位…</p></section>
+  if (!slot && !issued && !error) return null
+  return <section className="self-keys" aria-labelledby="self-key-issue-title">
+    <h2 id="self-key-issue-title">领取管理员授权的 Key</h2>
+    {issued ? <><p role="status">Key 已签发。请立即复制并安全保存；关闭或离开后无法再次查看。</p><div className="copy-field"><code data-testid="self-issued-key" style={{ overflowWrap: 'anywhere' }}>{issued.key}</code><Button variant="secondary" onClick={async () => { try { await navigator.clipboard.writeText(issued.key); setCopied(true) } catch { setError('复制失败，请手动选择并复制。') } }}>{copied ? '已复制' : '复制 Key'}</Button></div><div className="self-actions"><Button variant="secondary" onClick={() => { setIssued(null); setCopied(false); setError(null) }}>我已保存，关闭</Button></div></> : null}
+    {slot ? <><p>管理员已为你预留一个新的 Key：{slot.name}（{slot.id}）。它有独立的 Key ID 和管理员配置的限额，不是现有 Key 的额度延伸。{slot.expires_at ? `到期：${selfKeyDate(slot.expires_at)}。` : '默认永不过期。'}</p>{confirming ? <form className="self-form" onSubmit={(event) => { void issue(event) }}><p>确认领取后，明文只显示这一次。请准备安全的保存位置。</p><Field label="当前密码（领取确认）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} /></Field><div className="self-actions"><Button type="submit" disabled={busy}>{busy ? '正在领取…' : '确认领取 Key'}</Button><Button type="button" variant="secondary" disabled={busy} onClick={() => { setConfirming(false); setError(null) }}>取消</Button></div></form> : <Button variant="secondary" onClick={() => { setConfirming(true); setError(null) }}>领取此 Key</Button>}</> : null}
+    {error ? <p role="alert">{error}</p> : null}
   </section>
 }
 
@@ -348,6 +417,7 @@ export function SelfApp() {
   const [notice, setNotice] = useState<string | null>(null)
   const [changingPassword, setChangingPassword] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [keyInventoryRevision, setKeyInventoryRevision] = useState(0)
   useEffect(() => { document.title = 'CPA Cloud 员工自助入口' }, [])
   useEffect(() => {
     let active = true
@@ -360,9 +430,10 @@ export function SelfApp() {
     <div className="self-card">
       <div className="brand-lockup"><div className="brand-mark">C</div><div><strong>CPA Cloud</strong><span>员工自助入口</span></div></div>
       {session ? <>
-        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、已有 API Key 的基本信息、本人请求记录和已知 Token 汇总，并用当前密码撤销自己的已有 Key 或退出其他设备；Key 创建与策略仍由管理员管理。</p></header>
+        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、API Key、本人请求记录和 Token 汇总，也可以撤销自己的 Key 或退出其他设备。仅在管理员明确授权槽位后，你才能领取一个新的 Key；权限和限额仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
-        <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} />
+        <SelfKeyIssuance key={`issue:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} onIssued={() => setKeyInventoryRevision((value) => value + 1)} />
+        <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}:${keyInventoryRevision}`} csrf={session.csrf_token} />
         <SelfTokenSummaryPanel key={`summary:${session.profile.id}:${session.csrf_token}`} />
         <SelfRequestHistory key={`requests:${session.profile.id}:${session.csrf_token}`} />
         <SelfSignOutOthers key={`sessions:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} />

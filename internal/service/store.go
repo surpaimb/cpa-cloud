@@ -174,6 +174,11 @@ func (s *store) initialize(ctx context.Context) error {
 	if err := s.migrateAccessKeyOperationFingerprint(ctx); err != nil {
 		return fmt.Errorf("migrate access key operation fingerprints: %w", err)
 	}
+	// Authorization reads also run in migration-only and response-resource
+	// callers that open the store without constructing the full App.
+	if err := s.migrateSelfKeySlots(ctx); err != nil {
+		return fmt.Errorf("migrate employee self Key slots: %w", err)
+	}
 	return nil
 }
 

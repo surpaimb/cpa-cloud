@@ -5,6 +5,7 @@
 // docs/employee-self-token-summary-contract.md.
 // docs/employee-self-key-revocation-contract.md.
 // docs/employee-self-signout-others-contract.md.
+// docs/employee-self-key-issuance-contract.md.
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -153,6 +154,7 @@ describe('employee self-service page', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/key-slots')) return reply(200, { items: [] })
       if (url.endsWith('/keys')) return reply(200, { items: [first], next_cursor: 'v1.cursor' })
       if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
       if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
@@ -238,6 +240,7 @@ describe('employee self-service page', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/key-slots')) return reply(200, { items: [] })
       if (url.endsWith('/keys')) return reply(200, { items: [key], next_cursor: null })
       if (url.endsWith('/keys/key_one/revoke')) return reply(503, { error: { code: 'storage_unavailable' } })
       if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
@@ -440,6 +443,7 @@ describe('employee self-service page', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/key-slots')) return reply(200, { items: [] })
       if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
       if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
       if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
@@ -484,5 +488,62 @@ describe('employee self-service page', () => {
     expect(pendingSignal?.aborted).toBe(true)
     resolveMutation?.(new Response(null, { status: 204 }))
     expect(screen.queryByText('其他设备已退出；当前设备仍保持登录。')).not.toBeInTheDocument()
+  })
+
+  it('requires explicit confirmation and shows an authorized Key exactly once', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let issued = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/key-slots')) return reply(200, { items: [{ id: 'key_reserved', name: 'Workstation', expires_at: null }] })
+      if (url.endsWith('/keys/issue') && init?.method === 'POST') { issued = true; return reply(201, { id: 'key_reserved', name: 'Workstation', expires_at: null, key: 'cpac_once-only-secret' }) }
+      if (url.endsWith('/keys')) return reply(200, { items: issued ? [{ id: 'key_reserved', name: 'Workstation', created_at: '2026-10-01T01:00:00Z', expires_at: null, revoked_at: null, status: 'active' }] : [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    await userEvent.click(await screen.findByRole('button', { name: '领取此 Key' }))
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/keys/issue'))).toHaveLength(0)
+    await userEvent.type(screen.getByLabelText('当前密码（领取确认）'), 'a-long-self-password')
+    await userEvent.click(screen.getByRole('button', { name: '确认领取 Key' }))
+    expect(await screen.findByTestId('self-issued-key')).toHaveTextContent('cpac_once-only-secret')
+    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/keys/issue'))
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ slot_id: 'key_reserved', current_password: 'a-long-self-password' })
+    expect(new Headers(call?.[1]?.headers).get('X-CSRF-Token')).toBe('self-csrf')
+    await userEvent.click(screen.getByRole('button', { name: '我已保存，关闭' }))
+    expect(screen.queryByText('cpac_once-only-secret')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(screen.queryByText('cpac_once-only-secret')).not.toBeInTheDocument()
+  })
+
+  it('aborts an in-flight Key issue on logout without rendering a late secret', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let issueSignal: AbortSignal | undefined
+    let finishIssue: ((response: Response) => void) | undefined
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/key-slots')) return reply(200, { items: [{ id: 'key_reserved', name: 'Workstation', expires_at: null }] })
+      if (url.endsWith('/keys/issue')) { issueSignal = init?.signal ?? undefined; return new Promise<Response>((resolve) => { finishIssue = resolve }) }
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<SelfApp />)
+    await userEvent.click(await screen.findByRole('button', { name: '领取此 Key' }))
+    await userEvent.type(screen.getByLabelText('当前密码（领取确认）'), 'a-long-self-password')
+    await userEvent.click(screen.getByRole('button', { name: '确认领取 Key' }))
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(issueSignal?.aborted).toBe(true)
+    finishIssue?.(new Response(JSON.stringify({ id: 'key_reserved', name: 'Workstation', expires_at: null, key: 'cpac_late-secret' }), { status: 201 }))
+    expect(screen.queryByText('cpac_late-secret')).not.toBeInTheDocument()
   })
 })

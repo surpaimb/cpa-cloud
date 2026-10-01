@@ -68,6 +68,7 @@ export type EmployeeKey = {
   id: string
   name: string
   key?: string
+  issuance_state?: 'pending' | 'armed' | 'issued' | 'cancelled'
   expires_at: string | null
   revoked_at: string | null
   policy?: KeyAccessPolicy
@@ -323,6 +324,7 @@ export type SystemStatus = {
   limitations: string[]
   features?: {
 	  employee_self_service?: boolean
+	  employee_self_key_issuance?: boolean
 	  scheduled_tests_configuration?: boolean
 	  scheduled_tests_running?: boolean
 	  scheduled_tests_daily_local?: boolean
@@ -983,6 +985,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name, operation_id: crypto.randomUUID(), expires_at: null, ...(policy ? { policy } : {}) }),
     }, csrf),
+  reserveSelfKeySlot: (employeeId: string, name: string, csrf: string, policy: KeyPolicyInput) =>
+    request<EmployeeKey>(`/employees/${encodeURIComponent(employeeId)}/self-key-slot`, {
+      method: 'POST',
+      body: JSON.stringify({ name, operation_id: crypto.randomUUID(), expires_at: null, policy }),
+    }, csrf),
+  armSelfKeySlot: (keyId: string, employeeRevision: number, keyPolicyRevision: number, csrf: string) =>
+    request<{ id: string; issuance_state: 'armed' }>(`/keys/${encodeURIComponent(keyId)}/self-key-slot/arm`, {
+      method: 'POST',
+      body: JSON.stringify({ expected_employee_revision: employeeRevision, expected_key_policy_revision: keyPolicyRevision }),
+    }, csrf),
+  cancelSelfKeySlot: (keyId: string, csrf: string) =>
+    request<void>(`/keys/${encodeURIComponent(keyId)}/self-key-slot/cancel`, { method: 'POST', body: '{}' }, csrf),
   keyPolicy: (keyId: string) =>
     request<KeyAccessPolicy>(`/keys/${encodeURIComponent(keyId)}/policy`),
   putKeyPolicy: (keyId: string, body: KeyPolicyInput & { expected_revision: number }, csrf: string) =>

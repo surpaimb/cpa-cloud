@@ -1,4 +1,5 @@
-// Independently authored browser-component tests for KEY-02 access-key policy management.
+// Independently authored browser-component tests for KEY-02 access-key policy management
+// and docs/employee-self-key-issuance-contract.md.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -71,6 +72,42 @@ describe('access-key policy administration', () => {
     })
     await userEvent.click(screen.getByRole('button', { name: '我已保存，关闭' }))
     expect(screen.queryByText('cpa_plaintext_once')).not.toBeInTheDocument()
+  })
+
+  it('labels dormant self-issuance slots and requires explicit selected scope before reserve', async () => {
+    let reserved = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response({ ...systemStatus(true, true, false, true), features: { key_access_policy: true, key_source_policy: true, key_account_group_policy: true, employee_self_service: true, employee_self_key_issuance: true } })
+      if (url.endsWith('/employees') && !init?.method) return response({ items: [employee] })
+      if (url.endsWith('/models')) return response({ items: [model] })
+      if (url.endsWith('/account-groups')) return response({ items: [] })
+      if (url.endsWith('/employees/emp-1/self-key-slot') && init?.method === 'POST') {
+        reserved = true
+        return response({ id: 'key-slot', name: '默认 Key', issuance_state: 'pending', expires_at: null, revoked_at: null, policy: { ...allPolicy, revision: 1, protocol_mode: 'selected', protocols: ['openai-chat'], model_mode: 'selected', models: ['public-model'], account_group_mode: 'all', account_group_ids: [] } }, 201)
+      }
+      if (url.endsWith('/employees/emp-1/keys')) return response({ items: reserved ? [{ id: 'key-slot', name: '默认 Key', issuance_state: 'pending', expires_at: null, revoked_at: null, policy: { ...allPolicy, revision: 1, protocol_mode: 'selected', protocols: ['openai-chat'], model_mode: 'selected', models: ['public-model'], account_group_mode: 'all', account_group_ids: [] } }] : [] })
+      if (url.endsWith('/keys/key-slot/self-key-slot/arm') && init?.method === 'POST') return response({ id: 'key-slot', issuance_state: 'armed' })
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<EmployeesPage csrf="csrf" />)
+    await userEvent.click(await screen.findByRole('button', { name: '管理 Key' }))
+    const dialog = await screen.findByRole('dialog')
+    const reserve = within(dialog).getByRole('button', { name: '预留员工自领 Key 槽位' })
+    expect(reserve).toBeDisabled()
+    await userEvent.click(within(dialog).getByLabelText('仅指定协议'))
+    await userEvent.click(within(dialog).getByLabelText('OpenAI Chat Completions'))
+    await userEvent.click(within(dialog).getByLabelText('仅指定模型'))
+    await userEvent.click(await within(dialog).findByLabelText('public-model'))
+    expect(reserve).toBeEnabled()
+    await userEvent.click(reserve)
+    expect(await within(dialog).findByText('待管理员授权 · 不可使用')).toBeInTheDocument()
+    expect(within(dialog).getByText('Key ID：key-slot')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: '预留员工自领 Key 槽位' })).toBeDisabled()
+    await userEvent.click(within(dialog).getByRole('button', { name: '授权领取' }))
+    const arm = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/self-key-slot/arm'))
+    expect(JSON.parse(String(arm?.[1]?.body))).toEqual({ expected_employee_revision: 3, expected_key_policy_revision: 1 })
   })
 
   it('shows an explicit compatibility state and no fake policy save on an older service', async () => {
