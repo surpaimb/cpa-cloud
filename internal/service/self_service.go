@@ -48,6 +48,9 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	if a.cfg.EmployeeSelfWalletBalanceEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/balance", a.requireSelf(a.selfWalletBalance, false))
 	}
+	if a.cfg.EmployeeSelfWalletActivityEnabled {
+		mux.HandleFunc("GET /self/api/v1/billing/entries", a.requireSelf(a.selfWalletActivity, false))
+	}
 	// Independently authored for docs/employee-self-key-inventory-contract.md.
 	mux.HandleFunc("GET /self/api/v1/keys", a.requireSelf(a.selfListKeys, false))
 	// Independently authored for docs/employee-self-key-issuance-contract.md.
@@ -499,7 +502,10 @@ func (a *App) selfSessionInfo(w http.ResponseWriter, _ *http.Request, session se
 }
 
 func (a *App) selfSessionResponse(csrf string, profile selfProfile) map[string]any {
-	return map[string]any{"csrf_token": csrf, "profile": profile, "features": map[string]bool{"employee_self_wallet_balance": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled}}
+	return map[string]any{"csrf_token": csrf, "profile": profile, "features": map[string]bool{
+		"employee_self_wallet_balance":  a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled,
+		"employee_self_wallet_activity": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
+	}}
 }
 
 func (a *App) selfProfileInfo(w http.ResponseWriter, _ *http.Request, session selfSession) {

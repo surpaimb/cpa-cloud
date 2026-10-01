@@ -69,6 +69,8 @@ jobs:
         run: node scripts/smoke-subscription-renewal.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee wallet balance against an isolated process
         run: node scripts/smoke-employee-self-wallet-balance.mjs "$RUNNER_TEMP/cpa-cloud"
+      - name: Test opt-in employee wallet activity against an isolated process
+        run: node scripts/smoke-employee-self-wallet-activity.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test local account-pool reservation snapshot with synthetic traffic
         run: node scripts/smoke-account-pool.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test bounded four-source administrator audit overview

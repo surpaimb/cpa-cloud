@@ -109,6 +109,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if cfg.EmployeeSelfWalletBalanceEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return nil, errors.New("employee self wallet balance requires employee self service")
 	}
+	if cfg.EmployeeSelfWalletActivityEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled) {
+		return nil, errors.New("employee self wallet activity requires employee self service and wallet balance")
+	}
 	trustedProxies, err := keypolicy.NewTrustedProxySet(cfg.TrustedProxyCIDRs)
 	if err != nil {
 		return nil, err
@@ -495,6 +498,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"features": map[string]bool{
 			"employee_self_service":            a.cfg.EmployeeSelfServiceEnabled,
 			"employee_self_wallet_balance":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled,
+			"employee_self_wallet_activity":    a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
 			"employee_self_key_issuance":       a.cfg.EmployeeSelfServiceEnabled,
 			"codex_membership_import":          a.cfg.ExperimentalCodexMembership,
 			"responses_api":                    true,

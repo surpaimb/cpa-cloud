@@ -68,6 +68,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.BoolVar(&cfg.ExperimentalCodexMembership, "experimental-codex-membership", false, "enable experimental Codex membership credential import and routing")
 	flags.BoolVar(&cfg.EmployeeSelfServiceEnabled, "employee-self-service-enabled", false, "enable the development-preview employee self-service page and API")
 	flags.BoolVar(&cfg.EmployeeSelfWalletBalanceEnabled, "employee-self-wallet-balance-enabled", false, "allow enrolled employees to read their own employee-owned wallet balance (requires employee self service)")
+	flags.BoolVar(&cfg.EmployeeSelfWalletActivityEnabled, "employee-self-wallet-activity-enabled", false, "allow enrolled employees to read recent changes to their own employee-owned wallet (requires self service and wallet balance)")
 	flags.BoolVar(&cfg.ResponsesStatefulResources, "responses-stateful-resources", false, "enable encrypted employee-owned Responses resources (development preview)")
 	flags.BoolVar(&cfg.ResponsesBackgroundTasks, "responses-background-tasks", false, "enable durable background Responses tasks; requires --responses-stateful-resources")
 	flags.StringVar(&cfg.CodexOAuthClientID, "codex-oauth-client-id", "", "registered OAuth client ID for the experimental Codex membership lifecycle")
@@ -108,6 +109,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	if cfg.EmployeeSelfWalletBalanceEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return 1, errors.New("--employee-self-wallet-balance-enabled requires --employee-self-service-enabled")
+	}
+	if cfg.EmployeeSelfWalletActivityEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled) {
+		return 1, errors.New("--employee-self-wallet-activity-enabled requires --employee-self-service-enabled and --employee-self-wallet-balance-enabled")
 	}
 	cfg.Version = version
 	absDataDir, err := filepath.Abs(cfg.DataDir)
