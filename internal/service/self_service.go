@@ -45,6 +45,9 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("POST /self/api/v1/sessions", a.selfLogin)
 	mux.HandleFunc("GET /self/api/v1/session", a.requireSelf(a.selfSessionInfo, false))
 	mux.HandleFunc("GET /self/api/v1/profile", a.requireSelf(a.selfProfileInfo, false))
+	if a.cfg.EmployeeSelfWalletBalanceEnabled {
+		mux.HandleFunc("GET /self/api/v1/billing/balance", a.requireSelf(a.selfWalletBalance, false))
+	}
 	// Independently authored for docs/employee-self-key-inventory-contract.md.
 	mux.HandleFunc("GET /self/api/v1/keys", a.requireSelf(a.selfListKeys, false))
 	// Independently authored for docs/employee-self-key-issuance-contract.md.
@@ -360,7 +363,7 @@ func (a *App) redeemSelfEnrollment(w http.ResponseWriter, r *http.Request) {
 	}
 	a.clearSelfFailures(peer, profile.ID)
 	a.setSelfCookie(w, selector, verifier)
-	writeJSON(w, 200, map[string]any{"csrf_token": csrf, "profile": profile})
+	writeJSON(w, 200, a.selfSessionResponse(csrf, profile))
 }
 
 func (a *App) selfLogin(w http.ResponseWriter, r *http.Request) {
@@ -420,7 +423,7 @@ func (a *App) selfLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	a.clearSelfFailures(peer, profile.ID)
 	a.setSelfCookie(w, selector, verifier)
-	writeJSON(w, 200, map[string]any{"csrf_token": csrf, "profile": profile})
+	writeJSON(w, 200, a.selfSessionResponse(csrf, profile))
 }
 
 func (a *App) requireSelf(next func(http.ResponseWriter, *http.Request, selfSession), write bool) http.HandlerFunc {
@@ -492,7 +495,11 @@ func (a *App) requireSelfWithLock(next func(http.ResponseWriter, *http.Request, 
 }
 
 func (a *App) selfSessionInfo(w http.ResponseWriter, _ *http.Request, session selfSession) {
-	writeJSON(w, 200, map[string]any{"csrf_token": session.CSRF, "profile": session.Profile})
+	writeJSON(w, 200, a.selfSessionResponse(session.CSRF, session.Profile))
+}
+
+func (a *App) selfSessionResponse(csrf string, profile selfProfile) map[string]any {
+	return map[string]any{"csrf_token": csrf, "profile": profile, "features": map[string]bool{"employee_self_wallet_balance": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled}}
 }
 
 func (a *App) selfProfileInfo(w http.ResponseWriter, _ *http.Request, session selfSession) {

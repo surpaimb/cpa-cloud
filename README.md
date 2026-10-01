@@ -20,9 +20,11 @@
 
 员工 Key 正常重启后仍有效；撤销、员工停用、可选到期时间及权限限制仍会生效。员工无需知道上游供应商 Key。
 
-最新源码提供默认关闭的员工自助入口：启动时显式添加 `--employee-self-service-enabled`，管理员可在“员工与 Key”为已启用、尚未开通的员工签发一次性 15 分钟开通码。员工从 `/self/` 设置密码、登录后可查看个人资料、本人已有 Key 的基本信息、最近 24 小时的本人请求活动，以及本人上游尝试的已知 Token 与未知尝试数；后者不代表完整用量或账单。员工可输入当前密码撤销自己的已有 Key（含到期 Key），撤销后不可再用于新请求；已派发的在途请求不会因此中断。员工还可用当前密码使自己的其他设备自助会话失效，本设备保持登录；页面不列出设备或会话数量。管理员还可为已开通自助入口的员工预留一个新的 Key ID，配置该 ID 的明确协议/模型范围、RPM/并发和严格通用预算后授权其自行领取；该槽位一生只能领取一次，明文仅在确认签发后显示一次，待领取槽位不可用于模型请求。它会分配独立限额容量，不能当作原有 Key 的额度延伸。Key 策略、成本、余额和账单不会在自助页显示。停用员工会同时清除该入口的密码与会话，重新启用后需重新开通。管理员会话、员工自助会话和 API Key 彼此不能代用。本功能不包含自助注册、密码找回、SSO 或任意 Key 自助创建，也不在 preview.3 下载包中；GOV-02 尚未完成，生产使用前须确定内部告知、删除和备份留存边界。详见[员工自助基础契约](docs/employee-self-service-foundation-contract.md)、[Key 列表契约](docs/employee-self-key-inventory-contract.md)、[Key 撤销契约](docs/employee-self-key-revocation-contract.md)、[Key 自领契约](docs/employee-self-key-issuance-contract.md)、[退出其他设备契约](docs/employee-self-signout-others-contract.md)、[请求记录契约](docs/employee-self-request-history-contract.md)和[Token 汇总契约](docs/employee-self-token-summary-contract.md)。
+最新源码提供默认关闭的员工自助入口：启动时显式添加 `--employee-self-service-enabled`，管理员可为已启用、尚未开通的员工签发一次性 15 分钟开通码。员工从 `/self/` 设置密码、登录后可查看个人资料、本人已有 Key 的基本信息、最近 24 小时的本人请求活动，以及本人上游尝试的已知 Token 与未知尝试数；后者不代表完整用量或账单。员工可输入当前密码撤销自己的已有 Key（含到期 Key），也可使自己的其他设备自助会话失效。管理员可为已开通员工预留一个新 Key ID 并配置明确权限/限额，授权其一次性领取；明文仅在确认签发后显示一次，待领取槽位不可用于模型请求。Key 策略、成本和账单不会在自助页显示。停用员工会清除自助密码与会话，重新启用后需重新开通。管理员会话、员工自助会话和 API Key 彼此不能代用。本功能不包含自助注册、密码找回、SSO 或任意 Key 自助创建，也不在 preview.3 下载包中；GOV-02 尚未完成，生产使用前须确定内部告知、删除和备份留存边界。详见[员工自助基础契约](docs/employee-self-service-foundation-contract.md)、[Key 列表契约](docs/employee-self-key-inventory-contract.md)、[Key 撤销契约](docs/employee-self-key-revocation-contract.md)、[Key 自领契约](docs/employee-self-key-issuance-contract.md)、[退出其他设备契约](docs/employee-self-signout-others-contract.md)、[请求记录契约](docs/employee-self-request-history-contract.md)和[Token 汇总契约](docs/employee-self-token-summary-contract.md)。
 
 最新源码还可在员工自助 Key 列表中按需查看单个 Key 最近 24 小时的最小请求活动和已知 Token 汇总；不会批量读取各 Key，且不展示请求正文、Key 策略、费用或账单。这些只读视图仍受默认关闭的员工自助开关和 GOV-02 生产启用边界约束。详见[单 Key 请求活动契约](docs/employee-self-key-request-history-contract.md)和[单 Key Token 汇总契约](docs/employee-self-key-token-summary-contract.md)。
+
+本人钱包余额另需同时显式添加 `--employee-self-wallet-balance-enabled`，不能仅靠员工自助或商业执行开关启用。已开通且仍为 active 的员工必须输入三位大写币种并点击读取，页面仅显示该员工直接拥有的该币种钱包余额；无账户与真实零余额分开显示，不合并 Key/资源子账户。没有币种列表、账目、套餐或支付自助入口。详见[员工钱包只读契约](docs/employee-self-wallet-balance-contract.md)；GOV-02 仍开放，本能力不在 preview.3 包中。
 
 ## Codex 会员文件导入实验（仅最新源码）
 

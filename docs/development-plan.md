@@ -2,6 +2,8 @@
 
 状态：2026-09-29 已从首轮预览进入持续功能对齐。以 [功能矩阵](feature-parity-plan.md) 分批交付符合 CPA Cloud 产品边界的能力，不以打包数量或最小文本请求替代产品验收。
 
+当前 `ID-05/BILL-03` 候选按[员工本人钱包余额只读契约](employee-self-wallet-balance-contract.md)增加独立默认关闭的自助 opt-in：仅已开通且有效的员工自助会话，主动指定一个三位大写币种，可读取该员工直接拥有的钱包账户和不可变分录之和。Key/资源子账户、其他员工、账户/分录 ID、套餐、价格、信用和支付信息不进入响应；无账户不同于真实零。基础自助开关或既有商业执行开关均不自动开启此能力。无新 DDL、财务写入或供应商/支付调用；完整用量/账单及 GOV-02 仍待完成。
+
 `PROTO-08` 第四段候选按[显式 user 提示增量契约](openai-embeddings-user-contract.md)仅在已合格的 OpenAI-compatible API Key 非流式 float Embeddings wire 上，转发员工 Key 持有人自行提供的有界提示。它不是 CPA Cloud 身份，也不参与授权、账本或计费；省略时旧 wire 不变。base64、其他模型的 dimensions、其他供应商、真实客户端与通用预算上界仍待验证。精确提交的 CI 与固定二进制验收须单独记录，不借用前三段证据。
 
 ## 当前执行批次

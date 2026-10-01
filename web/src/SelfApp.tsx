@@ -8,12 +8,13 @@
 // docs/employee-self-key-issuance-contract.md.
 // docs/employee-self-key-token-summary-contract.md.
 // docs/employee-self-key-request-history-contract.md.
+// docs/employee-self-wallet-balance-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -26,6 +27,7 @@ type SelfTokenSummary = {
   requests: { total: string; pending: string; succeeded: string; failed: string; cancelled: string; interrupted: string }
   attempts: { total: string; pending: string; input_tokens: SelfTokenCounts; output_tokens: SelfTokenCounts; cache_read_tokens: SelfTokenCounts; cache_write_tokens: SelfTokenCounts }
 }
+type SelfWalletBalance = { currency: string; has_account: boolean; amount_micro: string | null }
 
 async function selfRequest<T>(path: string, init: RequestInit = {}, csrf?: string): Promise<T> {
   const headers = new Headers(init.headers)
@@ -478,6 +480,74 @@ function SelfTokenSummaryPanel() {
   </section>
 }
 
+function SelfWalletBalancePanel() {
+  const [currency, setCurrency] = useState('')
+  const [balance, setBalance] = useState<SelfWalletBalance | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort() }, [])
+
+  function changeCurrency(value: string) {
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    setCurrency(value)
+    setBalance(null)
+    setError(false)
+    setLoading(false)
+  }
+
+  async function readBalance(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!/^[A-Z]{3}$/.test(currency)) {
+      setBalance(null)
+      setError(true)
+      return
+    }
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const requestedCurrency = currency
+    const controller = new AbortController()
+    pending.current = controller
+    setBalance(null)
+    setError(false)
+    setLoading(true)
+    try {
+      const value = await selfRequest<SelfWalletBalance>(`/billing/balance?currency=${encodeURIComponent(requestedCurrency)}`, { signal: controller.signal })
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (value.currency !== requestedCurrency || typeof value.has_account !== 'boolean' ||
+        (value.has_account ? typeof value.amount_micro !== 'string' || !/^(?:0|-[1-9][0-9]*|[1-9][0-9]*)$/.test(value.amount_micro) : value.amount_micro !== null)) {
+        throw new Error('Invalid balance response')
+      }
+      setBalance(value)
+    } catch {
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      setBalance(null)
+      setError(true)
+    } finally {
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(false)
+    }
+  }
+
+  return <section className="self-wallet" aria-labelledby="self-wallet-title">
+    <h2 id="self-wallet-title">我的钱包余额</h2>
+    <p>仅查看你本人名下的员工钱包，不包括 API Key 或资源子账户。请输入一个币种后按需读取；这不是供应商余额或完整账单。</p>
+    <form className="self-wallet-form" onSubmit={(event) => { void readBalance(event) }}>
+      <Field label="币种（三位大写字母，如 USD）"><input name="currency" value={currency} onChange={(event) => changeCurrency(event.target.value)} required maxLength={3} pattern="[A-Z]{3}" autoComplete="off" spellCheck={false} /></Field>
+      <Button type="submit" disabled={loading}>{loading ? '正在读取…' : '读取余额'}</Button>
+    </form>
+    {error ? <p role="alert">钱包余额暂时无法读取，请检查币种或稍后重试。</p> : null}
+    {balance && !error ? balance.has_account
+      ? <p className="self-wallet-result" role="status"><strong>{balance.currency}</strong> 员工钱包余额：<output>{balance.amount_micro}</output> micro</p>
+      : <p className="self-wallet-result" role="status"><strong>{balance.currency}</strong> 暂无员工钱包账户（未显示为零余额）。</p> : null}
+  </section>
+}
+
 function SelfSignOutOthers({ csrf }: { csrf: string }) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -563,6 +633,7 @@ export function SelfApp() {
       {session ? <>
         <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、API Key、本人请求记录和 Token 汇总，也可以撤销自己的 Key 或退出其他设备。仅在管理员明确授权槽位后，你才能领取一个新的 Key；权限和限额仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
+        {session.features?.employee_self_wallet_balance === true ? <SelfWalletBalancePanel key={`wallet:${session.profile.id}:${session.csrf_token}`} /> : null}
         <SelfKeyIssuance key={`issue:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} onIssued={() => setKeyInventoryRevision((value) => value + 1)} />
         <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}:${keyInventoryRevision}`} csrf={session.csrf_token} />
         <SelfTokenSummaryPanel key={`summary:${session.profile.id}:${session.csrf_token}`} />

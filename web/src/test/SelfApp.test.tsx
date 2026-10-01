@@ -8,7 +8,8 @@
 // docs/employee-self-key-issuance-contract.md.
 // docs/employee-self-key-token-summary-contract.md.
 // docs/employee-self-key-request-history-contract.md.
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+// docs/employee-self-wallet-balance-contract.md.
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SelfApp } from '../SelfApp'
@@ -23,6 +24,89 @@ const emptyTokenSummary = {
 describe('employee self-service page', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
+  it('keeps the wallet control absent without its independent capability', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_wallet_balance: false } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    expect(await screen.findByRole('heading', { name: '你好，Alice' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '我的钱包余额' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/balance'))).toBe(false)
+  })
+
+  it('reads one typed currency on demand and distinguishes missing from zero', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_wallet_balance: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/balance?currency=USD')) return reply(200, { currency: 'USD', has_account: false, amount_micro: null })
+      if (url.endsWith('/billing/balance?currency=EUR')) return reply(200, { currency: 'EUR', has_account: true, amount_micro: '0' })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const wallet = await screen.findByRole('region', { name: '我的钱包余额' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/balance'))).toBe(false)
+    await userEvent.type(within(wallet).getByLabelText('币种（三位大写字母，如 USD）'), 'USD')
+    await userEvent.click(within(wallet).getByRole('button', { name: '读取余额' }))
+    expect(await within(wallet).findByText(/暂无员工钱包账户/)).toBeInTheDocument()
+    await userEvent.clear(within(wallet).getByLabelText('币种（三位大写字母，如 USD）'))
+    expect(within(wallet).queryByText(/暂无员工钱包账户/)).not.toBeInTheDocument()
+    await userEvent.type(within(wallet).getByLabelText('币种（三位大写字母，如 USD）'), 'EUR')
+    await userEvent.click(within(wallet).getByRole('button', { name: '读取余额' }))
+    expect(await within(wallet).findByText('0')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/billing/balance'))).toHaveLength(2)
+  })
+
+  it('clears stale wallet results on currency switch, failure and logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let finishUSD: ((value: Response) => void) | undefined
+    let failEUR = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_wallet_balance: true } })
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/balance?currency=USD')) return new Promise<Response>((resolve) => { finishUSD = resolve })
+      if (url.endsWith('/billing/balance?currency=EUR')) return failEUR
+        ? reply(503, { error: { code: 'storage_unavailable' } })
+        : reply(200, { currency: 'EUR', has_account: true, amount_micro: '42' })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const wallet = await screen.findByRole('region', { name: '我的钱包余额' })
+    const field = within(wallet).getByLabelText('币种（三位大写字母，如 USD）')
+    await userEvent.type(field, 'USD')
+    await userEvent.click(within(wallet).getByRole('button', { name: '读取余额' }))
+    await waitFor(() => expect(finishUSD).toBeTypeOf('function'))
+    await userEvent.clear(field)
+    await userEvent.type(field, 'EUR')
+    await userEvent.click(within(wallet).getByRole('button', { name: '读取余额' }))
+    expect(await within(wallet).findByText('42')).toBeInTheDocument()
+    finishUSD?.(new Response(JSON.stringify({ currency: 'USD', has_account: true, amount_micro: '999' }), { status: 200 }))
+    await waitFor(() => expect(within(wallet).queryByText('999')).not.toBeInTheDocument())
+    failEUR = true
+    await userEvent.click(within(wallet).getByRole('button', { name: '读取余额' }))
+    expect(await within(wallet).findByRole('alert')).toBeInTheDocument()
+    expect(within(wallet).queryByText('42')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '我的钱包余额' })).not.toBeInTheDocument()
+  })
 
   it('logs in with the independent endpoint and displays only owned metadata', async () => {
     const profile = { id: 'emp-1', name: 'Alice', department: 'Research', status: 'active' }
