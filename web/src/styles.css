@@ -749,6 +749,26 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-wallet-activity-list strong { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .self-wallet-activity-positive { color: #236347; }
 .self-wallet-activity-negative { color: #a52132; }
+
+/* Independently authored for docs/employee-self-subscription-status-contract.md. */
+.self-subscriptions { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.self-subscriptions h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
+.self-subscriptions > p { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.self-subscriptions > p[role="alert"] { margin-top: 12px; color: #a52132; }
+.self-subscriptions-result { margin-top: 14px; padding: 12px 14px; border: 1px solid #bfe3d5; border-radius: 9px; background: #f2f9f6; color: var(--navy); overflow-wrap: anywhere; }
+.self-subscriptions-result > p { margin: 0; font-size: 13px; }
+.self-subscriptions-list { display: grid; gap: 10px; padding: 0; margin: 0 0 12px; list-style: none; }
+.self-subscriptions-list li { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; font-size: 13px; }
+.self-subscriptions-heading { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 10px; }
+.self-subscriptions-heading strong { overflow-wrap: anywhere; }
+.self-subscriptions-status { font-weight: 650; }
+.self-subscriptions-status--active { color: #236347; }
+.self-subscriptions-status--cancelled, .self-subscriptions-status--expired { color: #805a24; }
+.self-subscriptions-list dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin: 0; }
+.self-subscriptions-list dl div { min-width: 0; }
+.self-subscriptions-list dt { color: var(--muted); }
+.self-subscriptions-list dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+@media (max-width: 520px) { .self-subscriptions-list dl { grid-template-columns: minmax(0, 1fr); } }
 /* Independently authored for docs/employee-self-key-inventory-contract.md. */
 .self-keys { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
 .self-keys h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }

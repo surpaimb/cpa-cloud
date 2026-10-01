@@ -10,6 +10,7 @@
 // docs/employee-self-key-request-history-contract.md.
 // docs/employee-self-wallet-balance-contract.md.
 // docs/employee-self-wallet-activity-contract.md.
+// docs/employee-self-subscription-status-contract.md.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -203,6 +204,98 @@ describe('employee self-service page', () => {
     await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
     expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '最近钱包变动' })).not.toBeInTheDocument()
+  })
+
+  it('keeps subscription status absent without its independent capability', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_wallet_balance: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    expect(await screen.findByRole('heading', { name: '你好，Alice' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '我的订阅状态' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/subscriptions'))).toBe(false)
+  })
+
+  it('reads existing subscription statuses only on click and appends a bound page', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const first = { subscription_id: 'sub-z', interval: 'one_time', status: 'active', started_at: '2026-01-31T08:00:00Z', period_end_at: null, cancelled_at: null }
+    const second = { subscription_id: 'sub-y', interval: 'monthly', status: 'expired', started_at: '2026-01-31T08:00:00Z', period_end_at: '2026-02-28T08:00:00.000000000Z', cancelled_at: null }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [first], next_cursor: 'opaque-sub-cursor' })
+      if (url.endsWith('/billing/subscriptions?limit=20&cursor=opaque-sub-cursor')) return reply(200, { items: [second], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    expect(screen.queryByRole('region', { name: '我的钱包余额' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/subscriptions'))).toBe(false)
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    expect(await within(panel).findByText('sub-z')).toBeInTheDocument()
+    expect(within(panel).getByText('一次性')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多订阅' }))
+    expect(await within(panel).findByText('sub-y')).toBeInTheDocument()
+    expect(within(panel).getByText('已到期')).toBeInTheDocument()
+    expect(within(panel).getByText('sub-z')).toBeInTheDocument()
+    expect(within(panel).queryByRole('button', { name: '加载更多订阅' })).not.toBeInTheDocument()
+    expect(within(panel).queryByText(/plan|credit|price|支付/i)).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/billing/subscriptions'))).toHaveLength(2)
+  })
+
+  it('clears subscription results on failure and ignores a late response after logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let pending: ((value: Response) => void) | undefined
+    let pendingSignal: AbortSignal | undefined
+    let failure = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true } })
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) {
+        if (failure) return reply(503, { error: { code: 'storage_unavailable' } })
+        return reply(200, { items: [{ subscription_id: 'sub-z', interval: 'one_time', status: 'active', started_at: '2026-01-31T08:00:00Z', period_end_at: null, cancelled_at: null }], next_cursor: 'late' })
+      }
+      if (url.endsWith('/billing/subscriptions?limit=20&cursor=late')) {
+        pendingSignal = init?.signal ?? undefined
+        return new Promise<Response>((resolve) => { pending = resolve })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    expect(await within(panel).findByText('sub-z')).toBeInTheDocument()
+    failure = true
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    expect(await within(panel).findByRole('alert')).toBeInTheDocument()
+    expect(within(panel).queryByText('sub-z')).not.toBeInTheDocument()
+    failure = false
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    expect(await within(panel).findByText('sub-z')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多订阅' }))
+    await waitFor(() => expect(pending).toBeTypeOf('function'))
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(screen.queryByText('sub-z')).not.toBeInTheDocument()
+    expect(pendingSignal?.aborted).toBe(true)
+    pending?.(new Response(JSON.stringify({ items: [{ subscription_id: 'sub-a-late', interval: 'one_time', status: 'active', started_at: '2026-01-31T08:00:00Z', period_end_at: null, cancelled_at: null }], next_cursor: null }), { status: 200 }))
+    expect(screen.queryByText('sub-a-late')).not.toBeInTheDocument()
   })
 
   it('logs in with the independent endpoint and displays only owned metadata', async () => {

@@ -32,6 +32,8 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 `GET /self/api/v1/billing/entries?currency=USD[&limit=20][&cursor=...]` 另由默认关闭的 `--employee-self-wallet-activity-enabled` 注册，并要求上述两个开关先启用。当前 active 员工自助会话是唯一归属来源；单币种、每页 1–50 条、首读冻结近 31 天 UTC 整秒窗口，后续独立快照用目的隔离的认证加密游标按稳定 `(created_at TEXT,id)` 位置继续。响应只有币种、账户是否存在、窗口、每条时间/有符号 micro 变动和下一游标，不泄露 ID/Key/资源/套餐/支付元数据。缺账户与本窗口无条目有别；同秒混精度文本顺序不宣称严格纳秒排名，页间并发不宣称完整快照。故障整页 503，网页必须显式按需打开且由独立 capability 门控；不产生财务写入或完整账单。详见[最近钱包变动契约](employee-self-wallet-activity-contract.md)。
 
+`GET /self/api/v1/billing/subscriptions[?limit=20][&cursor=...]` 由另一默认关闭的 `--employee-self-subscription-status-enabled` 注册，只要求员工自助总开关。当前 active 员工会话是唯一归属来源；每页 1–50 条，按不可变订阅 ID 逆序，用绑定员工、会话和页大小的认证加密游标继续。仅显示本人直接拥有的现存订阅 ID、冻结 interval、只读有效状态及开始/终止/取消时间，不返回套餐、金额、权益、支付或账户资料；商业执行关闭仍可读历史。页间不是同一数据库快照，故障整页 503；网页只有独立 capability 和明确点击才读取，不改变订阅或账本。详见[本人订阅状态契约](employee-self-subscription-status-contract.md)。
+
 ### 管理员账号池本机容量快照（OBS-01 第一段）
 
 `GET /admin/api/v1/models/{id}/pool-runtime` 仅接受管理员会话、匹配的可选 Origin 和无查询参数；响应包含模型/池 revision、UTC `as_of`、明确的 `explicit_pool|legacy_no_pool|model_disabled` 状态，以及最多 64 条不含凭据或身份信息的路由本机容量/持久预留/阻塞原因。读取在单个 SQLite 只读事务内完成，结构、时间或存储错误统一 503 且不返回部分结果。网页必须经 `features.account_pool_runtime_observation=true` 门控，仅手动刷新。该投影不是供应商配额、实时请求数或派发承诺；详见[本机观测契约](account-pool-runtime-observation-contract.md)。

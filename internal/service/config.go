@@ -18,30 +18,31 @@ import (
 )
 
 type Config struct {
-	DataDir                           string
-	Listen                            string
-	WebDir                            string
-	TLSCert                           string
-	TLSKey                            string
-	TrustedProxyCIDRs                 []string
-	AllowLoopbackUpstream             bool
-	AccountRecoveryEnabled            bool
-	ScheduledTestsEnabled             bool
-	ChannelMonitorsEnabled            bool
-	AutomatedBackupsEnabled           bool
-	AutomatedBackupsOutputDir         string
-	BackupKeyProviderStoreDir         string
-	ExperimentalCodexMembership       bool
-	EmployeeSelfServiceEnabled        bool
-	EmployeeSelfWalletBalanceEnabled  bool
-	EmployeeSelfWalletActivityEnabled bool
-	ResponsesStatefulResources        bool
-	ResponsesBackgroundTasks          bool
-	CodexOAuthClientID                string
-	CodexOAuthRedirectURI             string
-	InstanceID                        string
-	Version                           string
-	backupAutomationRehearsal         bool
+	DataDir                               string
+	Listen                                string
+	WebDir                                string
+	TLSCert                               string
+	TLSKey                                string
+	TrustedProxyCIDRs                     []string
+	AllowLoopbackUpstream                 bool
+	AccountRecoveryEnabled                bool
+	ScheduledTestsEnabled                 bool
+	ChannelMonitorsEnabled                bool
+	AutomatedBackupsEnabled               bool
+	AutomatedBackupsOutputDir             string
+	BackupKeyProviderStoreDir             string
+	ExperimentalCodexMembership           bool
+	EmployeeSelfServiceEnabled            bool
+	EmployeeSelfWalletBalanceEnabled      bool
+	EmployeeSelfWalletActivityEnabled     bool
+	EmployeeSelfSubscriptionStatusEnabled bool
+	ResponsesStatefulResources            bool
+	ResponsesBackgroundTasks              bool
+	CodexOAuthClientID                    string
+	CodexOAuthRedirectURI                 string
+	InstanceID                            string
+	Version                               string
+	backupAutomationRehearsal             bool
 }
 
 const (
