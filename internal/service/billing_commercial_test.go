@@ -136,6 +136,34 @@ func TestBillingSubscriptionAdminProjectionBeforeExpiryWorker(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("query detail status=%d", status)
 	}
+	var enabled int
+	if err := f.app.store.db.QueryRow(`SELECT enabled FROM financial_settings WHERE singleton=1`).Scan(&enabled); err != nil || enabled != 0 {
+		t.Fatalf("default-off enabled=%d err=%v", enabled, err)
+	}
+	f.app.subscriptionExpiry = newSubscriptionExpiryWorker(f.app)
+	deadline := time.Now().Add(4 * time.Second)
+	var storedStatus string
+	for time.Now().Before(deadline) {
+		if err := f.app.store.db.QueryRow(`SELECT status FROM financial_subscriptions WHERE id='expiry-sub'`).Scan(&storedStatus); err != nil {
+			t.Fatal(err)
+		}
+		if storedStatus == "expired" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if storedStatus != "expired" {
+		t.Fatalf("worker did not persist expiry while commercial execution was off: %s", storedStatus)
+	}
+	settingsBody := `{"operation_id":"20000000-0000-4000-8000-000000000099","expected_revision":1,"enabled":true}`
+	status, body = billingHTTPRequest(t, http.MethodPut, f.server.URL+"/admin/api/v1/billing/settings", settingsBody, f.cookie, f.csrf, f.server.URL, nil)
+	if status != http.StatusOK {
+		t.Fatalf("enable status=%d body=%s", status, body)
+	}
+	status, body = billingHTTPRequest(t, http.MethodGet, url+"/expiry-sub", "", f.cookie, "", "", nil)
+	if status != http.StatusOK || !strings.Contains(string(body), `"status":"expired"`) {
+		t.Fatalf("re-enabled detail status=%d body=%s", status, body)
+	}
 }
 
 func billingHTTPRequest(t *testing.T, method, url, body string, cookie *http.Cookie, csrf, origin string, headers map[string]string) (int, []byte) {

@@ -168,3 +168,34 @@ func TestSubscriptionCancellationAtEndConflicts(t *testing.T) {
 		t.Fatalf("failed operation count=%d err=%v", count, err)
 	}
 }
+
+func TestSubscriptionExpiryPersistenceFailureRollsBackAndRetries(t *testing.T) {
+	db, _, commercial, accountID, planID := subscriptionTestFixture(t)
+	defer db.Close()
+	start := time.Date(2026, 1, 31, 8, 0, 0, 0, time.UTC)
+	end, _ := monthlyPeriodEnd(start)
+	for _, id := range []string{"failure-a", "failure-b"} {
+		if _, err := db.Exec(`INSERT INTO financial_subscriptions(id,account_id,plan_id,plan_revision,price_micro,credit_micro,currency,interval,status,started_at,period_end_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`, id, accountID, planID, 1, 10, 20, "USD", "monthly", "active", formatCommercialTime(start), end.Format(subscriptionEndLayout)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`CREATE TRIGGER expiry_test_failure BEFORE UPDATE ON financial_subscriptions WHEN OLD.id='failure-b' BEGIN SELECT RAISE(ABORT,'synthetic persistence failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := commercial.ExpireDueSubscriptions(context.Background(), end); err == nil || count != 0 {
+		t.Fatalf("failure count=%d err=%v", count, err)
+	}
+	var active int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM financial_subscriptions WHERE status='active'`).Scan(&active); err != nil || active != 2 {
+		t.Fatalf("rollback active=%d err=%v", active, err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER expiry_test_failure`); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := commercial.ExpireDueSubscriptions(context.Background(), end); err != nil || count != 2 {
+		t.Fatalf("retry count=%d err=%v", count, err)
+	}
+	if err := commercial.Migrate(context.Background()); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+}
