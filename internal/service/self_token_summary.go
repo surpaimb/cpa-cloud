@@ -112,13 +112,39 @@ func validateSelfTokenAttemptCounts(values [11]int64) bool {
 }
 
 func readSelfTokenSummary(ctx context.Context, db *sql.DB, employeeID string, from, to time.Time) (selfTokenSummaryResponse, error) {
+	return readSelfTokenSummaryScope(ctx, db, employeeID, "", from, to, nil, nil)
+}
+
+// A Key-scoped summary validates ownership and reads both aggregates in the
+// same transaction. An empty keyID preserves the existing all-Key projection.
+func readSelfTokenSummaryScope(ctx context.Context, db *sql.DB, employeeID, keyID string, from, to time.Time, afterOwnership func(), commitHook func(*sql.Tx) error) (selfTokenSummaryResponse, error) {
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return selfTokenSummaryResponse{}, err
 	}
 	defer tx.Rollback()
-	where := `r.employee_id=? AND ` + selfRequestStartedKeySQL + `>=? AND ` + selfRequestStartedKeySQL + `<?`
-	args := []any{employeeID, selfRequestSortTime(from), selfRequestSortTime(to)}
+	where := `r.employee_id=?`
+	args := []any{employeeID}
+	if keyID != "" {
+		var idType, employeeType string
+		err = tx.QueryRowContext(ctx, `SELECT typeof(k.id),typeof(k.employee_id) FROM access_keys k
+			WHERE k.id=? AND k.employee_id=? AND NOT EXISTS(
+				SELECT 1 FROM employee_self_key_slots slot WHERE slot.key_id=k.id
+				AND (slot.state<>'issued' OR slot.employee_id<>k.employee_id))`, keyID, employeeID).Scan(&idType, &employeeType)
+		if err != nil {
+			return selfTokenSummaryResponse{}, err
+		}
+		if idType != "text" || employeeType != "text" {
+			return selfTokenSummaryResponse{}, errors.New("invalid key metadata")
+		}
+		if afterOwnership != nil {
+			afterOwnership()
+		}
+		where += ` AND r.key_id=?`
+		args = append(args, keyID)
+	}
+	where += ` AND ` + selfRequestStartedKeySQL + `>=? AND ` + selfRequestStartedKeySQL + `<?`
+	args = append(args, selfRequestSortTime(from), selfRequestSortTime(to))
 	var requests [7]int64
 	err = tx.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE(SUM(CASE WHEN r.status='pending' THEN 1 ELSE 0 END),0),
@@ -151,7 +177,11 @@ func readSelfTokenSummary(ctx context.Context, db *sql.DB, employeeID string, fr
 	if ctx.Err() != nil {
 		return selfTokenSummaryResponse{}, ctx.Err()
 	}
-	if err := tx.Commit(); err != nil {
+	commit := tx.Commit
+	if commitHook != nil {
+		commit = func() error { return commitHook(tx) }
+	}
+	if err := commit(); err != nil {
 		return selfTokenSummaryResponse{}, err
 	}
 	return selfTokenSummaryResponse{
@@ -174,6 +204,28 @@ func (a *App) selfTokenSummary(w http.ResponseWriter, r *http.Request, session s
 	ctx, cancel := context.WithTimeout(r.Context(), usageQueryTimeout)
 	defer cancel()
 	response, err := readSelfTokenSummary(ctx, a.store.db, session.EmployeeID, from, to)
+	if err != nil {
+		selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// Independently authored for docs/employee-self-key-token-summary-contract.md.
+func (a *App) selfKeyTokenSummary(w http.ResponseWriter, r *http.Request, session selfSession) {
+	keyID := r.PathValue("id")
+	from, to, err := parseSelfTokenWindow(r.URL.RawQuery, time.Now())
+	if !validSelfKeyID(keyID) || err != nil || r.ContentLength != 0 || len(r.TransferEncoding) > 0 {
+		selfError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), usageQueryTimeout)
+	defer cancel()
+	response, err := readSelfTokenSummaryScope(ctx, a.store.db, session.EmployeeID, keyID, from, to, a.selfKeyTokenSummaryAfterOwnership, a.selfKeyTokenSummaryCommit)
+	if errors.Is(err, sql.ErrNoRows) {
+		selfError(w, http.StatusNotFound, "not_found")
+		return
+	}
 	if err != nil {
 		selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
 		return

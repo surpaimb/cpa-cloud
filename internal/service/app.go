@@ -79,9 +79,13 @@ type App struct {
 	// Test-only transaction boundary hooks; production leaves both nil.
 	selfSignOutOthersBeforeTx func()
 	selfSignOutOthersCommit   func(*sql.Tx) error
-	catalogMu                 sync.Mutex
-	catalogs                  map[string]codexCatalogCacheEntry
-	codexCatalog              codexCatalogLister
+	// Independently authored for docs/employee-self-key-token-summary-contract.md.
+	// Test-only snapshot and commit boundaries; production leaves both nil.
+	selfKeyTokenSummaryAfterOwnership func()
+	selfKeyTokenSummaryCommit         func(*sql.Tx) error
+	catalogMu                         sync.Mutex
+	catalogs                          map[string]codexCatalogCacheEntry
+	codexCatalog                      codexCatalogLister
 	// Lifecycle integration hooks are SQL-only before commit and non-blocking
 	// after commit. Scheduled-test integration wires these without changing the
 	// account lock -> admission lock -> transaction ordering.
