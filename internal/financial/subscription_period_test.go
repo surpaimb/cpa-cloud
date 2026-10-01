@@ -217,3 +217,17 @@ func TestSubscriptionExpiryPersistenceFailureRollsBackAndRetries(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 }
+
+func TestSubscriptionCorruptFrozenEndFailsClosed(t *testing.T) {
+	db, _, commercial, accountID, planID := subscriptionTestFixture(t)
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO financial_subscriptions(id,account_id,plan_id,plan_revision,price_micro,credit_micro,currency,interval,status,started_at,period_end_at,revision) VALUES('wrong-end',?,?,?,?,?,?,?,?,?,?,1)`, accountID, planID, 1, 10, 20, "USD", "monthly", "active", "2026-01-31T08:00:00Z", "2026-03-01T08:00:00.000000000Z"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := commercial.GetSubscription(context.Background(), "wrong-end"); !errors.Is(err, ErrSchema) {
+		t.Fatalf("read err=%v", err)
+	}
+	if err := commercial.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
+		t.Fatalf("restart validation err=%v", err)
+	}
+}

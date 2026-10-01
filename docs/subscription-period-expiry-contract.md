@@ -18,7 +18,7 @@ This independently authored development-preview increment extends the [single-in
 
 ## Verification
 
-Automated tests cover month-end and leap boundaries, exact-end behavior, one-time isolation, purchased snapshot/retry/ledger invariants, cancellation races, worker batch/restart/idempotency, commercial switch off/on, migration rollback and recovery, corrupted stored data, and admin list/detail projection while the worker lags. Browser checks cover monthly status/end visibility and cancellation controls. Tests must distinguish directly exercised behavior from planned provider compatibility. Build, vet, race tests, and browser checks precede a draft PR; a green GitHub workflow is verified at its exact commit before readiness is claimed.
+Automated tests cover month-end and leap boundaries, exact-end behavior, one-time isolation, purchased snapshot/retry/ledger invariants, cancellation races, worker batch/restart/idempotency, commercial switch off/on, migration rollback and recovery, corrupted stored data, and admin list/detail projection while the worker lags. Browser checks cover monthly status/end visibility and cancellation controls. Tests must distinguish directly exercised behavior from planned provider compatibility. Build, vet, and targeted tests precede a draft PR; race tests, browser checks, and a green GitHub workflow at its exact commit precede a readiness claim.
 
 ## Public sources and provenance
 
