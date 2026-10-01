@@ -51,9 +51,11 @@ jobs:
       - name: Race-check service
         env:
           CGO_ENABLED: '1'
-        # The full non-cached race matrix took 44m20s on a prior successful
-        # runner; preserve coverage with headroom under the 90m core job cap.
-        run: go test -race ./internal/service -count=1 -timeout=55m
+        # The prior full suite took 53m56s; adding self-session race cases
+        # reached the old 55m package limit while a later test was active.
+        # Preserve the full matrix with room for runner variance under the
+        # separate 90m core job cap.
+        run: go test -race ./internal/service -count=1 -timeout=70m
       - name: Race-check stateful capability packages
         env:
           CGO_ENABLED: '1'

@@ -4,6 +4,7 @@
 // docs/employee-self-request-history-contract.md.
 // docs/employee-self-token-summary-contract.md.
 // docs/employee-self-key-revocation-contract.md.
+// docs/employee-self-signout-others-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
@@ -277,6 +278,68 @@ function SelfTokenSummaryPanel() {
   </section>
 }
 
+function SelfSignOutOthers({ csrf }: { csrf: string }) {
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const pending = useRef<AbortController | null>(null)
+  const mounted = useRef(true)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false; pending.current?.abort() }
+  }, [])
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (busy) return
+    const form = event.currentTarget
+    let current_password = String(new FormData(form).get('current_password') ?? '')
+    form.reset()
+    const size = new TextEncoder().encode(current_password).length
+    if (size < 12 || size > 72) {
+      current_password = ''
+      setError('当前密码须为 12–72 个 UTF-8 字节。')
+      return
+    }
+    const controller = new AbortController()
+    pending.current = controller
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      await selfRequest<void>('/sessions/revoke-others', { method: 'POST', body: JSON.stringify({ current_password }), signal: controller.signal }, csrf)
+      if (!mounted.current || controller.signal.aborted) return
+      setConfirming(false)
+      setMessage('其他设备已退出；当前设备仍保持登录。')
+    } catch (caught) {
+      if (!mounted.current || controller.signal.aborted) return
+      setError(caught instanceof ApiError && caught.status === 429
+        ? '尝试次数过多，请稍后再试。'
+        : caught instanceof ApiError && caught.status === 503
+          ? '结果未确认，请稍后重试或联系管理员。'
+          : '操作未完成，请检查当前密码或稍后重试。')
+    } finally {
+      current_password = ''
+      if (pending.current === controller) pending.current = null
+      if (mounted.current) setBusy(false)
+    }
+  }
+
+  return <section className="self-sessions" aria-labelledby="self-sessions-title">
+    <h2 id="self-sessions-title">其他设备登录</h2>
+    <p>如果曾在其他设备登录，可以用当前密码使那些设备的员工自助会话失效。当前设备会保持登录。</p>
+    {message ? <p role="status">{message}</p> : null}
+    {confirming ? <form className="self-form" onSubmit={(event) => { void submit(event) }}>
+      <p>确认退出其他设备？这不会影响员工 API Key 或管理员会话。</p>
+      <Field label="当前密码（退出其他设备）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} /></Field>
+      {error ? <p role="alert">{error}</p> : null}
+      <div className="self-actions"><Button type="submit" disabled={busy}>{busy ? '正在处理…' : '确认退出其他设备'}</Button><Button type="button" variant="secondary" disabled={busy} onClick={() => { setConfirming(false); setError(null) }}>取消</Button></div>
+    </form> : <Button variant="secondary" disabled={busy} onClick={() => { setConfirming(true); setError(null); setMessage(null) }}>退出其他设备</Button>}
+  </section>
+}
+
 export function SelfApp() {
   const [checking, setChecking] = useState(true)
   const [session, setSession] = useState<SelfSession | null>(null)
@@ -297,11 +360,12 @@ export function SelfApp() {
     <div className="self-card">
       <div className="brand-lockup"><div className="brand-mark">C</div><div><strong>CPA Cloud</strong><span>员工自助入口</span></div></div>
       {session ? <>
-        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、已有 API Key 的基本信息、本人请求记录和已知 Token 汇总，并用当前密码撤销自己的已有 Key；Key 创建与策略仍由管理员管理。</p></header>
+        <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、已有 API Key 的基本信息、本人请求记录和已知 Token 汇总，并用当前密码撤销自己的已有 Key 或退出其他设备；Key 创建与策略仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
         <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} />
         <SelfTokenSummaryPanel key={`summary:${session.profile.id}:${session.csrf_token}`} />
         <SelfRequestHistory key={`requests:${session.profile.id}:${session.csrf_token}`} />
+        <SelfSignOutOthers key={`sessions:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} />
         {changingPassword ? <form className="self-form self-password-form" onSubmit={async (event) => {
           event.preventDefault()
           const form = event.currentTarget
