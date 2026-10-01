@@ -10,12 +10,13 @@
 // docs/employee-self-key-request-history-contract.md.
 // docs/employee-self-wallet-balance-contract.md.
 // docs/employee-self-wallet-activity-contract.md.
+// docs/employee-self-subscription-status-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -31,6 +32,8 @@ type SelfTokenSummary = {
 type SelfWalletBalance = { currency: string; has_account: boolean; amount_micro: string | null }
 type SelfWalletActivityItem = { occurred_at: string; delta_micro: string }
 type SelfWalletActivityPage = { currency: string; has_account: boolean; window_start: string; window_end: string; items: SelfWalletActivityItem[]; next_cursor: string | null }
+type SelfSubscriptionItem = { subscription_id: string; interval: 'one_time' | 'monthly'; status: 'active' | 'cancelled' | 'expired'; started_at: string; period_end_at: string | null; cancelled_at: string | null }
+type SelfSubscriptionPage = { items: SelfSubscriptionItem[]; next_cursor: string | null }
 
 async function selfRequest<T>(path: string, init: RequestInit = {}, csrf?: string): Promise<T> {
   const headers = new Headers(init.headers)
@@ -647,6 +650,90 @@ function SelfWalletActivityPanel() {
   </section>
 }
 
+function validSelfSubscriptionPage(raw: unknown, previous?: SelfSubscriptionPage): raw is SelfSubscriptionPage {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const page = raw as Record<string, unknown>
+  if (Object.keys(page).sort().join(',') !== 'items,next_cursor' || !Array.isArray(page.items) || page.items.length > 20 ||
+    (page.next_cursor !== null && (typeof page.next_cursor !== 'string' || page.next_cursor.length < 1 || page.next_cursor.length > 1024)) ||
+    (page.next_cursor !== null && page.items.length === 0)) return false
+  const date = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/
+  let priorID = previous?.items.at(-1)?.subscription_id ?? ''
+  for (const rawItem of page.items) {
+    if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) return false
+    const item = rawItem as Record<string, unknown>
+    if (Object.keys(item).sort().join(',') !== 'cancelled_at,interval,period_end_at,started_at,status,subscription_id' ||
+      typeof item.subscription_id !== 'string' || item.subscription_id.length < 1 || item.subscription_id.length > 256 ||
+      item.subscription_id.trim() !== item.subscription_id || (priorID !== '' && item.subscription_id >= priorID) ||
+      (item.interval !== 'one_time' && item.interval !== 'monthly') ||
+      (item.status !== 'active' && item.status !== 'cancelled' && item.status !== 'expired') ||
+      typeof item.started_at !== 'string' || !date.test(item.started_at) || !Number.isFinite(Date.parse(item.started_at)) ||
+      (item.interval === 'monthly' ? typeof item.period_end_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/.test(item.period_end_at) || !Number.isFinite(Date.parse(item.period_end_at)) : item.period_end_at !== null) ||
+      (item.status === 'cancelled' ? typeof item.cancelled_at !== 'string' || !date.test(item.cancelled_at) || !Number.isFinite(Date.parse(item.cancelled_at)) : item.cancelled_at !== null) ||
+      (item.interval === 'one_time' && item.status === 'expired')) return false
+    priorID = item.subscription_id
+  }
+  return true
+}
+
+const selfSubscriptionStatus: Record<SelfSubscriptionItem['status'], string> = { active: '有效', cancelled: '已取消', expired: '已到期' }
+
+function SelfSubscriptionStatusPanel() {
+  const [page, setPage] = useState<SelfSubscriptionPage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort() }, [])
+
+  async function readPage(cursor?: string) {
+    const prior = cursor ? page : null
+    if (cursor && (!prior || prior.next_cursor !== cursor)) {
+      setPage(null)
+      setError(true)
+      return
+    }
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const controller = new AbortController()
+    pending.current = controller
+    if (!cursor) setPage(null)
+    setError(false)
+    setLoading(true)
+    try {
+      const path = `/billing/subscriptions?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const value = await selfRequest<unknown>(path, { signal: controller.signal })
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (!validSelfSubscriptionPage(value, prior ?? undefined)) throw new Error('Invalid subscription status response')
+      setPage(prior ? { items: [...prior.items, ...value.items], next_cursor: value.next_cursor } : value)
+    } catch {
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      setPage(null)
+      setError(true)
+    } finally {
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(false)
+    }
+  }
+
+  return <section className="self-subscriptions" aria-labelledby="self-subscriptions-title">
+    <h2 id="self-subscriptions-title">我的订阅状态</h2>
+    <p>仅按需查看你本人直接名下既有订阅的期限与状态，不含 Key 或资源子账户。这不是模型使用权益、账单或购买入口；列表按订阅 ID 稳定排列，不代表时间先后。</p>
+    <Button variant="secondary" disabled={loading} onClick={() => { void readPage() }}>{loading ? '正在读取…' : '读取我的订阅状态'}</Button>
+    {error ? <p role="alert">订阅状态暂时无法读取，请稍后重试。</p> : null}
+    {page && !error ? <div className="self-subscriptions-result" role="status">
+      {page.items.length === 0 ? <p>目前没有可显示的本人订阅记录。</p> : <ol className="self-subscriptions-list">{page.items.map((item) => <li key={item.subscription_id}>
+        <div className="self-subscriptions-heading"><strong>{item.subscription_id}</strong><span className={`self-subscriptions-status self-subscriptions-status--${item.status}`}>{selfSubscriptionStatus[item.status]}</span></div>
+        <dl><div><dt>周期</dt><dd>{item.interval === 'monthly' ? '单月' : '一次性'}</dd></div><div><dt>开始</dt><dd><time dateTime={item.started_at}>{selfKeyDate(item.started_at)}</time></dd></div>
+          <div><dt>期限结束</dt><dd>{item.period_end_at ? <time dateTime={item.period_end_at}>{selfKeyDate(item.period_end_at)}</time> : '无固定结束时间'}</dd></div>
+          <div><dt>取消时间</dt><dd>{item.cancelled_at ? <time dateTime={item.cancelled_at}>{selfKeyDate(item.cancelled_at)}</time> : '未取消'}</dd></div></dl>
+      </li>)}</ol>}
+      {page.next_cursor ? <Button variant="secondary" disabled={loading} onClick={() => { void readPage(page.next_cursor ?? undefined) }}>{loading ? '正在读取…' : '加载更多订阅'}</Button> : null}
+    </div> : null}
+  </section>
+}
+
 function SelfSignOutOthers({ csrf }: { csrf: string }) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -735,6 +822,8 @@ export function SelfApp() {
         {session.features?.employee_self_wallet_balance === true ? <SelfWalletBalancePanel key={`wallet:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true
           ? <SelfWalletActivityPanel key={`wallet-activity:${session.profile.id}:${session.csrf_token}`} /> : null}
+        {session.features?.employee_self_subscription_status === true
+          ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} /> : null}
         <SelfKeyIssuance key={`issue:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} onIssued={() => setKeyInventoryRevision((value) => value + 1)} />
         <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}:${keyInventoryRevision}`} csrf={session.csrf_token} />
         <SelfTokenSummaryPanel key={`summary:${session.profile.id}:${session.csrf_token}`} />
