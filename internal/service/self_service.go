@@ -55,6 +55,8 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /self/api/v1/usage/summary", a.requireSelf(a.selfTokenSummary, false))
 	mux.HandleFunc("POST /self/api/v1/password", a.requireSelf(a.selfChangePassword, true))
 	mux.HandleFunc("DELETE /self/api/v1/sessions", a.requireSelf(a.selfLogout, true))
+	// Independently authored for docs/employee-self-signout-others-contract.md.
+	mux.HandleFunc("POST /self/api/v1/sessions/revoke-others", a.requireSelfReleased(a.selfSignOutOthers, true))
 	mux.HandleFunc("/self/api/", http.NotFound)
 }
 

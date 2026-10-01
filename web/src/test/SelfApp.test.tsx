@@ -4,6 +4,7 @@
 // docs/employee-self-request-history-contract.md.
 // docs/employee-self-token-summary-contract.md.
 // docs/employee-self-key-revocation-contract.md.
+// docs/employee-self-signout-others-contract.md.
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -402,5 +403,86 @@ describe('employee self-service page', () => {
     expect(await screen.findByText('Token 汇总暂时无法读取，请稍后重新登录或刷新页面。')).toBeInTheDocument()
     expect(container.querySelector('.self-summary-counts')).toBeNull()
     expect(container.querySelector('.self-summary-tokens')).toBeNull()
+  })
+
+  it('uses two steps and a transient password to sign out other devices while preserving this session', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/sessions/revoke-others') && init?.method === 'POST') return Promise.resolve(new Response(null, { status: 204 }))
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    await userEvent.click(await screen.findByRole('button', { name: '退出其他设备' }))
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/sessions/revoke-others'))).toHaveLength(0)
+    const field = screen.getByLabelText('当前密码（退出其他设备）') as HTMLInputElement
+    expect(field.type).toBe('password')
+    await userEvent.type(field, 'a-long-self-password')
+    await userEvent.click(screen.getByRole('button', { name: '确认退出其他设备' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('其他设备已退出；当前设备仍保持登录')
+    expect(screen.getByRole('heading', { name: '你好，Alice' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('当前密码（退出其他设备）')).not.toBeInTheDocument()
+    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/sessions/revoke-others'))
+    expect(String(call?.[0])).toBe('/self/api/v1/sessions/revoke-others')
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ current_password: 'a-long-self-password' })
+    expect(new Headers(call?.[1]?.headers).get('X-Self-Request')).toBe('1')
+    expect(new Headers(call?.[1]?.headers).get('X-CSRF-Token')).toBe('self-csrf')
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/sessions/revoke-others'))).toHaveLength(1)
+  })
+
+  it('clears the password and avoids a success claim after uncertain sign-out', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/sessions/revoke-others')) return reply(503, { error: { code: 'storage_unavailable' } })
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<SelfApp />)
+    await userEvent.click(await screen.findByRole('button', { name: '退出其他设备' }))
+    const field = screen.getByLabelText('当前密码（退出其他设备）') as HTMLInputElement
+    await userEvent.type(field, 'a-long-self-password')
+    await userEvent.click(screen.getByRole('button', { name: '确认退出其他设备' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('结果未确认'))
+    expect(field.value).toBe('')
+    expect(screen.queryByText('其他设备已退出；当前设备仍保持登录。')).not.toBeInTheDocument()
+    expect(screen.queryByText('a-long-self-password')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByLabelText('当前密码（退出其他设备）')).not.toBeInTheDocument()
+  })
+
+  it('aborts a pending other-device sign-out and clears its password on logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let pendingSignal: AbortSignal | undefined
+    let resolveMutation: ((response: Response) => void) | undefined
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/sessions/revoke-others')) { pendingSignal = init?.signal ?? undefined; return new Promise<Response>((resolve) => { resolveMutation = resolve }) }
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<SelfApp />)
+    await userEvent.click(await screen.findByRole('button', { name: '退出其他设备' }))
+    const field = screen.getByLabelText('当前密码（退出其他设备）') as HTMLInputElement
+    await userEvent.type(field, 'a-long-self-password')
+    await userEvent.click(screen.getByRole('button', { name: '确认退出其他设备' }))
+    expect(field.value).toBe('')
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(pendingSignal?.aborted).toBe(true)
+    resolveMutation?.(new Response(null, { status: 204 }))
+    expect(screen.queryByText('其他设备已退出；当前设备仍保持登录。')).not.toBeInTheDocument()
   })
 })

@@ -1,5 +1,10 @@
 # 集成状态
 
+## 2026-10-01：ID-05 退出其他设备（本分支，待精确提交验收）
+
+- 按[退出其他设备契约](employee-self-signout-others-contract.md)，默认关闭的 `/self/` 中增加当前密码确认的 `POST /self/api/v1/sessions/revoke-others`。仅删除同一员工的其他自助会话；当前会话和 CSRF 保留，不返回设备/会话数量。最终事务在独占 admission 锁下重核当前 selector、员工状态、过期时间与密码哈希版本。未知提交返回固定 503，不作成功声明；无新 DDL、配置或依赖。
+- 本分支本地专项 Go 测试已通过；网页 TypeScript、SelfApp 18 项测试和构建已通过。完整 Go/vet/race、隔离真实进程、桌面/390px Chrome、独立固定二进制与精确 HEAD GitHub CI 尚待分别核验，不能借用上段证据。GOV-02 的访问/留存、备份恢复边界仍未完成；本段不在 preview.3 包中，未使用真实提供商账号、未部署或发布。
+
 ## 2026-09-30：OBS-02 每计划已保留监控历史只读摘要（本分支，待最终验证）
 
 - 按[独立摘要契约](channel-monitor-summary-contract.md)增加管理员只读单计划接口和独立网页能力门控，只统计同一 SQLite 快照中已保留的完成结果与 running 行。归档/重绑旧历史仍算历史事实；满 200 条不推断更早次数，也不生成可用率、供应商健康或告警。

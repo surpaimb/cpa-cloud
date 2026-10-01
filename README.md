@@ -20,7 +20,7 @@
 
 员工 Key 正常重启后仍有效；撤销、员工停用、可选到期时间及权限限制仍会生效。员工无需知道上游供应商 Key。
 
-最新源码提供默认关闭的员工自助入口：启动时显式添加 `--employee-self-service-enabled`，管理员可在“员工与 Key”为已启用、尚未开通的员工签发一次性 15 分钟开通码。员工从 `/self/` 设置密码、登录后可查看个人资料、本人已有 Key 的基本信息、最近 24 小时的本人请求活动，以及本人上游尝试的已知 Token 与未知尝试数；后者不代表完整用量或账单。员工可输入当前密码撤销自己的已有 Key（含到期 Key），撤销后不可再用于新请求；已派发的在途请求不会因此中断。Key 明文、策略、成本、余额和账单不会在这里显示。停用员工会同时清除该入口的密码与会话，重新启用后需重新开通。管理员会话、员工自助会话和 API Key 彼此不能代用。本功能不包含自助注册、密码找回、SSO 或 Key 自助创建，也不在 preview.3 下载包中；GOV-02 尚未完成，生产使用前须确定内部告知、删除和备份留存边界。详见[员工自助基础契约](docs/employee-self-service-foundation-contract.md)、[Key 列表契约](docs/employee-self-key-inventory-contract.md)、[Key 撤销契约](docs/employee-self-key-revocation-contract.md)、[请求记录契约](docs/employee-self-request-history-contract.md)和[Token 汇总契约](docs/employee-self-token-summary-contract.md)。
+最新源码提供默认关闭的员工自助入口：启动时显式添加 `--employee-self-service-enabled`，管理员可在“员工与 Key”为已启用、尚未开通的员工签发一次性 15 分钟开通码。员工从 `/self/` 设置密码、登录后可查看个人资料、本人已有 Key 的基本信息、最近 24 小时的本人请求活动，以及本人上游尝试的已知 Token 与未知尝试数；后者不代表完整用量或账单。员工可输入当前密码撤销自己的已有 Key（含到期 Key），撤销后不可再用于新请求；已派发的在途请求不会因此中断。员工还可用当前密码使自己的其他设备自助会话失效，本设备保持登录；页面不列出设备或会话数量。Key 明文、策略、成本、余额和账单不会在这里显示。停用员工会同时清除该入口的密码与会话，重新启用后需重新开通。管理员会话、员工自助会话和 API Key 彼此不能代用。本功能不包含自助注册、密码找回、SSO 或 Key 自助创建，也不在 preview.3 下载包中；GOV-02 尚未完成，生产使用前须确定内部告知、删除和备份留存边界。详见[员工自助基础契约](docs/employee-self-service-foundation-contract.md)、[Key 列表契约](docs/employee-self-key-inventory-contract.md)、[Key 撤销契约](docs/employee-self-key-revocation-contract.md)、[退出其他设备契约](docs/employee-self-signout-others-contract.md)、[请求记录契约](docs/employee-self-request-history-contract.md)和[Token 汇总契约](docs/employee-self-token-summary-contract.md)。
 
 ## Codex 会员文件导入实验（仅最新源码）
 
