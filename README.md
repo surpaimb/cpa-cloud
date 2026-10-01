@@ -196,7 +196,7 @@ RPM 使用滚动 60 秒窗口；修改策略不会清空原窗口。Chat、Respo
 
 `/admin/api/v1/billing` 提供 employee、Key 或员工资源所有者范围内的定点余额、套餐快照、订阅购买/取消、待支付充值、兑换码和部分/全额退款。金额与已接受操作是不可变追加事实，相同 operation ID 只允许相同 actor/action/payload 幂等重放。商业执行在数据库中默认关闭，管理员可先配置套餐和加密 connector，再显式开启。
 
-支付回调只是本地通用 HMAC 接口，覆盖五分钟时间窗、常量时间验签、事件反重放以及回调/支付/账本原子提交；它**不是 Stripe、Airwallex、二维码或任何真实供应商的生产接入**，也没有自动续费、税务、发票、通知或多实例协调。见[单实例计费契约](docs/single-instance-billing-contract.md)。
+支付回调只是本地通用 HMAC 接口，覆盖五分钟时间窗、常量时间验签、事件反重放以及回调/支付/账本原子提交；它**不是 Stripe、Airwallex、二维码或任何真实供应商的生产接入**。月订阅可由管理员手工续购，或为当前一期显式预约一次到期钱包续购；后继不继承预约，失败不会自动重试，没有常驻自动续费、税务、发票、通知或多实例协调。见[单实例计费契约](docs/single-instance-billing-contract.md)、[手工续购契约](docs/subscription-manual-renewal-contract.md)和[一次性预约契约](docs/subscription-one-shot-renewal-contract.md)。
 
 ### 自动加密备份（默认关闭）
 

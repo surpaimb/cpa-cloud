@@ -348,6 +348,7 @@ export type SystemStatus = {
     openai_embeddings?: boolean
     account_lifecycle_management?: boolean
     single_instance_billing?: boolean
+    billing_one_shot_renewal?: boolean
     admin_audit_overview?: boolean
     admin_audit_financial_source?: boolean
     admin_audit_csv_export?: boolean
@@ -406,6 +407,7 @@ export type BillingPlan = { id: string; name: string; currency: string; price_mi
 export type BillingConnector = { id: string; name: string; enabled: boolean; revision: number; created_at: string; updated_at: string }
 export type BillingTopUp = { id: string; payment_id: string; connector_id: string; external_reference: string; amount_micro: string; currency: string; status: 'pending' | 'paid' | 'partially_refunded' | 'refunded'; refunded_micro: string; revision: number; created_at: string; paid_at: string | null }
 export type BillingSubscription = { id: string; plan_id: string; plan_revision: number; price_micro: string; credit_micro: string; currency: string; interval: 'one_time' | 'monthly'; status: 'active' | 'cancelled' | 'expired'; revision: number; started_at: string; period_end_at: string | null; predecessor_id: string | null; successor_id: string | null }
+export type BillingOneShotRenewal = { predecessor_id: string; state: 'none' | 'armed' | 'disarmed' | 'succeeded' | 'failed' | 'superseded' | 'cancelled'; revision: number; due_at: string | null; reason: string | null; successor_id: string | null; terminal_at: string | null }
 export type BillingRedemptionCode = { id: string; amount_micro: string; currency: string; max_uses: number; uses: number; expires_at: string | null; enabled: boolean; created_at: string }
 export type BillingRefund = { id: string; payment_id: string; entry_id: string; amount_micro: string; created_at: string }
 export type BillingEntry = { id: string; operation_id: string; account_id: string; owner: BillingOwner; currency: string; kind: string; amount_micro: string; original_entry_id: string | null; resource_kind: string; resource_id: string; created_at: string }
@@ -1161,6 +1163,9 @@ export const api = {
   createBillingSubscription: (body: { operation_id: string; owner: BillingOwner; plan_id: string }, csrf: string) => request<{ receipt: BillingReceipt; subscription: BillingSubscription }>('/billing/subscriptions', { method: 'POST', body: JSON.stringify(body) }, csrf),
   cancelBillingSubscription: (id: string, body: { operation_id: string; expected_revision: number }, csrf: string) => request<{ receipt: BillingReceipt; subscription: BillingSubscription }>(`/billing/subscriptions/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   renewBillingSubscription: (id: string, body: { operation_id: string }, csrf: string) => request<{ receipt: BillingReceipt; subscription: BillingSubscription }>(`/billing/subscriptions/${encodeURIComponent(id)}/renew`, { method: 'POST', body: JSON.stringify(body) }, csrf),
+  billingOneShotRenewal: (id: string, signal?: AbortSignal) => request<BillingOneShotRenewal>(`/billing/subscriptions/${encodeURIComponent(id)}/one-shot-renewal`, { signal }),
+  armBillingOneShotRenewal: (id: string, body: { operation_id: string; expected_revision: number }, csrf: string) => request<{ receipt: BillingReceipt; one_shot_renewal: BillingOneShotRenewal }>(`/billing/subscriptions/${encodeURIComponent(id)}/one-shot-renewal`, { method: 'POST', body: JSON.stringify(body) }, csrf),
+  disarmBillingOneShotRenewal: (id: string, body: { operation_id: string; expected_revision: number }, csrf: string) => request<{ receipt: BillingReceipt; one_shot_renewal: BillingOneShotRenewal }>(`/billing/subscriptions/${encodeURIComponent(id)}/one-shot-renewal/disarm`, { method: 'POST', body: JSON.stringify(body) }, csrf),
   billingRedemptionCodes: (afterId?: string, limit = 50, signal?: AbortSignal) => billingList<BillingRedemptionCode>('/billing/redemption-codes', afterId, limit, signal),
   createBillingRedemptionCode: (body: { operation_id: string; currency: string; amount_micro: string; max_uses: number; expires_at: string | null }, csrf: string) => request<{ receipt: BillingReceipt; redemption_code: BillingRedemptionCode; code: string | null }>('/billing/redemption-codes', { method: 'POST', body: JSON.stringify(body) }, csrf),
   redeemBillingCode: (body: { operation_id: string; owner: BillingOwner; code: string }, csrf: string) => request<{ receipt: BillingReceipt; entry_id: string; amount_micro: string; currency: string }>('/billing/redemptions', { method: 'POST', body: JSON.stringify(body) }, csrf),

@@ -31,7 +31,8 @@ func commercialOperationLegacySchema(ctx context.Context, tx *sql.Tx) (bool, err
 	if normalize(actual) == normalize(storedDDL(commercialOperationsDDL)) {
 		return false, nil
 	}
-	if normalize(actual) != normalize(storedDDL(commercialOperationsLegacyDDL)) {
+	beforeManual := normalize(actual) == normalize(storedDDL(commercialOperationsLegacyDDL))
+	if !beforeManual && normalize(actual) != normalize(storedDDL(commercialOperationsBeforeOneShotDDL)) {
 		return false, ErrSchema
 	}
 	var count int
@@ -47,15 +48,43 @@ func commercialOperationLegacySchema(ctx context.Context, tx *sql.Tx) (bool, err
 			return false, ErrSchema
 		}
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='financial_subscription_renewals'`).Scan(&count); err != nil || count != 0 {
-		return false, ErrSchema
+	if beforeManual {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='financial_subscription_renewals'`).Scan(&count); err != nil || count != 0 {
+			return false, ErrSchema
+		}
 	}
 	return true, nil
 }
 
 func migrateLegacyCommercialOperations(ctx context.Context, tx *sql.Tx) error {
-	// No pre-renewal table references this operation table. Keep the stage inside
-	// this transaction so any failed copy restores the old table and triggers.
+	// A manual-renewal database has immutable links referencing this table. Stage
+	// and recreate both tables in one transaction; never disable foreign keys.
+	var linkDDL string
+	linkErr := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='financial_subscription_renewals'`).Scan(&linkDDL)
+	if linkErr != nil && !errors.Is(linkErr, sql.ErrNoRows) {
+		return ErrSchema
+	}
+	hasLinks := linkErr == nil
+	if hasLinks {
+		if normalize(linkDDL) != normalize(storedDDL(subscriptionRenewalsDDL)) {
+			return ErrSchema
+		}
+		for name, ddl := range map[string]string{
+			"financial_subscription_renewals_no_update": subscriptionRenewalsNoUpdateDDL,
+			"financial_subscription_renewals_no_delete": subscriptionRenewalsNoDeleteDDL,
+		} {
+			var stored string
+			if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, name).Scan(&stored); err != nil || normalize(stored) != normalize(storedDDL(ddl)) {
+				return ErrSchema
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE one_shot_link_stage AS SELECT predecessor_id,successor_id,operation_id,created_at FROM financial_subscription_renewals`); err != nil {
+			return ErrSchema
+		}
+		if _, err := tx.ExecContext(ctx, `DROP TABLE financial_subscription_renewals`); err != nil {
+			return ErrSchema
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE commercial_renewal_stage AS SELECT * FROM financial_commercial_operations`); err != nil {
 		return ErrSchema
 	}
@@ -75,6 +104,22 @@ func migrateLegacyCommercialOperations(ctx context.Context, tx *sql.Tx) error {
 	for _, ddl := range []string{commercialOperationsNoUpdateDDL, commercialOperationsNoDeleteDDL} {
 		if _, err := tx.ExecContext(ctx, ddl); err != nil {
 			return ErrSchema
+		}
+	}
+	if hasLinks {
+		if _, err := tx.ExecContext(ctx, subscriptionRenewalsDDL); err != nil {
+			return ErrSchema
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO financial_subscription_renewals(predecessor_id,successor_id,operation_id,created_at) SELECT predecessor_id,successor_id,operation_id,created_at FROM one_shot_link_stage`); err != nil {
+			return ErrSchema
+		}
+		if _, err := tx.ExecContext(ctx, `DROP TABLE one_shot_link_stage`); err != nil {
+			return ErrSchema
+		}
+		for _, ddl := range []string{subscriptionRenewalsNoUpdateDDL, subscriptionRenewalsNoDeleteDDL} {
+			if _, err := tx.ExecContext(ctx, ddl); err != nil {
+				return ErrSchema
+			}
 		}
 	}
 	return nil
@@ -108,7 +153,23 @@ func (c *Commercial) RenewSubscription(ctx context.Context, input RenewSubscript
 		clock = c.now
 	}
 	now := clock().UTC()
-	predecessor, err := loadSubscriptionAt(ctx, tx, input.ID, now)
+	item, receipt, err := c.renewSubscriptionTx(ctx, tx, input.Meta, input.ID, now)
+	if err != nil {
+		return Subscription{}, CommercialReceipt{}, err
+	}
+	if err := settleOneShotAfterManualRenewal(ctx, tx, input.ID, item.ID, now); err != nil {
+		return Subscription{}, CommercialReceipt{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Subscription{}, CommercialReceipt{}, ErrUnavailable
+	}
+	return item, receipt, nil
+}
+
+// renewSubscriptionTx is shared by explicit renewal and the one-shot worker.
+// The caller owns commit and any reservation transition in this same transaction.
+func (c *Commercial) renewSubscriptionTx(ctx context.Context, tx *sql.Tx, meta WriteMeta, predecessorID string, now time.Time) (Subscription, CommercialReceipt, error) {
+	predecessor, err := loadSubscriptionAt(ctx, tx, predecessorID, now)
 	if err != nil {
 		return Subscription{}, CommercialReceipt{}, err
 	}
@@ -171,7 +232,7 @@ func (c *Commercial) RenewSubscription(ctx context.Context, input RenewSubscript
 			return Subscription{}, CommercialReceipt{}, ErrConflict
 		}
 	}
-	posted, err := ledger.PostTx(ctx, tx, Post{OperationID: input.Meta.OperationID, Action: "subscription_purchase", ActorAdminID: input.Meta.ActorAdminID, ResourceKind: "subscription", ResourceID: id, ObservedAt: now, RequireNonNegative: true, Entries: []EntryInput{{Owner: owner, Currency: plan.Currency, Kind: EntrySubscriptionCharge, AmountMicro: -plan.PriceMicro, ResourceKind: "subscription", ResourceID: id}, {Owner: owner, Currency: plan.Currency, Kind: EntrySubscriptionCredit, AmountMicro: plan.CreditMicro, ResourceKind: "subscription", ResourceID: id}}})
+	posted, err := ledger.PostTx(ctx, tx, Post{OperationID: meta.OperationID, Action: "subscription_purchase", ActorAdminID: meta.ActorAdminID, ResourceKind: "subscription", ResourceID: id, ObservedAt: now, RequireNonNegative: true, Entries: []EntryInput{{Owner: owner, Currency: plan.Currency, Kind: EntrySubscriptionCharge, AmountMicro: -plan.PriceMicro, ResourceKind: "subscription", ResourceID: id}, {Owner: owner, Currency: plan.Currency, Kind: EntrySubscriptionCredit, AmountMicro: plan.CreditMicro, ResourceKind: "subscription", ResourceID: id}}})
 	if err != nil {
 		return Subscription{}, CommercialReceipt{}, err
 	}
@@ -182,17 +243,13 @@ func (c *Commercial) RenewSubscription(ctx context.Context, input RenewSubscript
 	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_subscriptions(id,account_id,plan_id,plan_revision,price_micro,credit_micro,currency,interval,status,started_at,period_end_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`, item.ID, item.AccountID, item.PlanID, item.PlanRevision, item.PriceMicro, item.CreditMicro, item.Currency, item.Interval, item.Status, formatCommercialTime(now), end.Format(subscriptionEndLayout)); err != nil {
 		return Subscription{}, CommercialReceipt{}, ErrUnavailable
 	}
-	meta := input.Meta
 	meta.ObservedAt = now
-	receipt := CommercialReceipt{OperationID: input.Meta.OperationID, ResourceKind: "subscription", ResourceID: id, Revision: 1, CreatedAt: now}
+	receipt := CommercialReceipt{OperationID: meta.OperationID, ResourceKind: "subscription", ResourceID: id, Revision: 1, CreatedAt: now}
 	if err := insertCommercialOperation(ctx, tx, meta, "subscription.renew", receipt); err != nil {
 		return Subscription{}, CommercialReceipt{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_subscription_renewals(predecessor_id,successor_id,operation_id,created_at) VALUES(?,?,?,?)`, predecessor.ID, item.ID, input.Meta.OperationID, formatCommercialTime(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_subscription_renewals(predecessor_id,successor_id,operation_id,created_at) VALUES(?,?,?,?)`, predecessor.ID, item.ID, meta.OperationID, formatCommercialTime(now)); err != nil {
 		return Subscription{}, CommercialReceipt{}, ErrConflict
-	}
-	if err := tx.Commit(); err != nil {
-		return Subscription{}, CommercialReceipt{}, ErrUnavailable
 	}
 	return item, receipt, nil
 }

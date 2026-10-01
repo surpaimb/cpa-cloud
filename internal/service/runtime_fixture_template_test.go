@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -52,6 +54,10 @@ func runtimeTestDataDir(t *testing.T) string {
 		}
 		if err := app.Close(); err != nil {
 			runtimeFixtureTemplateErr = fmt.Errorf("close runtime template: %w", err)
+			return
+		}
+		if err := checkpointRuntimeFixtureTemplate(runtimeFixtureTemplateDir); err != nil {
+			runtimeFixtureTemplateErr = fmt.Errorf("checkpoint runtime template: %w", err)
 		}
 	})
 	if runtimeFixtureTemplateErr != nil {
@@ -62,24 +68,129 @@ func runtimeTestDataDir(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("read runtime template: %v", err)
 	}
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() {
-			t.Fatalf("runtime template contains non-regular entry %q", entry.Name())
+	if err := copyRuntimeFixtureTemplateFiles(runtimeFixtureTemplateDir, destination, entries); err != nil {
+		t.Fatal(err)
+	}
+	return destination
+}
+
+func checkpointRuntimeFixtureTemplate(directory string) error {
+	db, err := sql.Open("sqlite", filepath.Join(directory, "cpa-cloud.db"))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		var busy, logFrames, checkpointedFrames int
+		err := db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointedFrames)
+		if err == nil && busy == 0 {
+			return nil
 		}
-		source := filepath.Join(runtimeFixtureTemplateDir, entry.Name())
+		var sqliteError interface{ Code() int }
+		if err != nil && (!errors.As(err, &sqliteError) || sqliteError.Code()&0xff != 5) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("checkpoint remained busy: %w", ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// A successful TRUNCATE checkpoint makes the main database self-contained.
+// WAL/SHM are transient connection sidecars and may disappear after ReadDir.
+func copyRuntimeFixtureTemplateFiles(sourceDirectory, destination string, entries []os.DirEntry) error {
+	for _, entry := range entries {
+		if entry.Name() == "cpa-cloud.db-wal" || entry.Name() == "cpa-cloud.db-shm" {
+			continue
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("runtime template contains non-regular entry %q", entry.Name())
+		}
+		source := filepath.Join(sourceDirectory, entry.Name())
 		contents, err := os.ReadFile(source)
 		if err != nil {
-			t.Fatalf("read runtime template file %q: %v", entry.Name(), err)
+			return fmt.Errorf("read runtime template file %q: %w", entry.Name(), err)
 		}
 		info, err := entry.Info()
 		if err != nil {
-			t.Fatalf("inspect runtime template file %q: %v", entry.Name(), err)
+			return fmt.Errorf("inspect runtime template file %q: %w", entry.Name(), err)
 		}
 		if err := os.WriteFile(filepath.Join(destination, entry.Name()), contents, info.Mode().Perm()); err != nil {
-			t.Fatalf("copy runtime template file %q: %v", entry.Name(), err)
+			return fmt.Errorf("copy runtime template file %q: %w", entry.Name(), err)
 		}
 	}
-	return destination
+	return nil
+}
+
+func TestRuntimeFixtureCopySurvivesVanishingWALSidecars(t *testing.T) {
+	source, destination := t.TempDir(), t.TempDir()
+	for name, contents := range map[string]string{
+		"cpa-cloud.db": "synthetic database", "master.key": "synthetic key",
+		"cpa-cloud.db-wal": "transient WAL", "cpa-cloud.db-shm": "transient SHM",
+	} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"cpa-cloud.db-wal", "cpa-cloud.db-shm"} {
+		if err := os.Remove(filepath.Join(source, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyRuntimeFixtureTemplateFiles(source, destination, entries); err != nil {
+		t.Fatalf("transient sidecar disappeared: %v", err)
+	}
+	for name, want := range map[string]string{"cpa-cloud.db": "synthetic database", "master.key": "synthetic key"} {
+		actual, err := os.ReadFile(filepath.Join(destination, name))
+		if err != nil || string(actual) != want {
+			t.Fatalf("persistent file %s not copied: %v", name, err)
+		}
+	}
+}
+
+func TestRuntimeFixtureCheckpointWaitsForWriter(t *testing.T) {
+	directory := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(directory, "cpa-cloud.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE fixture_value(value INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO fixture_value(value) VALUES(7)`); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() { result <- checkpointRuntimeFixtureTemplate(directory) }()
+	time.Sleep(100 * time.Millisecond)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("checkpoint did not recover after writer completed: %v", err)
+	}
+	var value int
+	if err := db.QueryRow(`SELECT value FROM fixture_value`).Scan(&value); err != nil || value != 7 {
+		t.Fatalf("checkpoint lost committed fixture value=%d err=%v", value, err)
+	}
 }
 
 func newRuntimeAccountPoolFixture(t *testing.T) *accountPoolFixture {

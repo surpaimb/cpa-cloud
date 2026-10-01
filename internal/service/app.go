@@ -53,6 +53,7 @@ type App struct {
 	responseResources              *responseResourceCoordinator
 	backgroundResponses            *backgroundResponseWorker
 	subscriptionExpiry             *subscriptionExpiryWorker
+	subscriptionOneShot            *subscriptionOneShotWorker
 	governance                     *requestGovernance
 	governancePolicies             *governanceManagementStore
 	budget                         *governance.Budget
@@ -274,6 +275,7 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 	app.subscriptionExpiry = newSubscriptionExpiryWorker(app)
+	app.subscriptionOneShot = newSubscriptionOneShotWorker(app)
 	opened = true
 	return app, nil
 }
@@ -306,6 +308,9 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 }
 
 func (a *App) Close() error {
+	if a.subscriptionOneShot != nil {
+		a.subscriptionOneShot.Close()
+	}
 	if a.subscriptionExpiry != nil {
 		a.subscriptionExpiry.Close()
 	}
@@ -523,6 +528,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"reliable_usage_accounting":        true,
 			"general_budget_enforcement":       true,
 			"single_instance_billing":          true,
+			"billing_one_shot_renewal":         true,
 			"system_probe_accounting":          a.systemProbes != nil,
 			"account_recovery":                 a.recovery != nil,
 			"codex_membership_auto_refresh":    a.refresh != nil && a.refresh.enabled(),
