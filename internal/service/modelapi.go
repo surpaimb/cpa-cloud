@@ -137,7 +137,7 @@ func (a *App) lookupEmployeeKey(ctx context.Context, key string) (employeeAuth, 
 		return employeeAuth{}, false
 	}
 	defer tx.Rollback()
-	err = tx.QueryRowContext(ctx, `SELECT k.employee_id,k.id,k.digest,k.expires_at,k.revoked_at,e.status,e.model_mode FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.selector=?`, pair[0]).Scan(&auth.EmployeeID, &auth.KeyID, &digest, &expires, &revoked, &status, &auth.Mode)
+	err = tx.QueryRowContext(ctx, `SELECT k.employee_id,k.id,k.digest,k.expires_at,k.revoked_at,e.status,e.model_mode FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.selector=? AND NOT EXISTS(SELECT 1 FROM employee_self_key_slots slot WHERE slot.key_id=k.id AND (slot.state<>'issued' OR slot.employee_id<>k.employee_id))`, pair[0]).Scan(&auth.EmployeeID, &auth.KeyID, &digest, &expires, &revoked, &status, &auth.Mode)
 	valid := err == nil && subtle.ConstantTimeCompare(a.secrets.digest("employee-key/v1\x00"+pair[0], pair[1]), digest) == 1 && status == "active" && !revoked.Valid
 	if valid && expires.Valid {
 		t, e := parseTime(expires.String)

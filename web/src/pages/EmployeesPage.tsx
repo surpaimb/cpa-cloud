@@ -11,6 +11,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
   const [selected, setSelected] = useState<Employee | null>(null)
   const [enrolling, setEnrolling] = useState<Employee | null>(null)
   const [selfService, setSelfService] = useState(false)
+  const [selfKeyIssuance, setSelfKeyIssuance] = useState(false)
   const [policy, setPolicy] = useState<Employee | null>(null)
   const [keyPolicyCapability, setKeyPolicyCapability] = useState<boolean | null>(null)
   const [keySourcePolicyCapability, setKeySourcePolicyCapability] = useState<boolean | null>(null)
@@ -28,6 +29,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
         setTrustedProxySource(status.features?.trusted_proxy_source === true)
         setOpenAIEmbeddings(status.features?.openai_embeddings === true)
         setSelfService(status.features?.employee_self_service === true)
+        setSelfKeyIssuance(status.features?.employee_self_key_issuance === true)
       }
     }).catch(() => {
       if (active) {
@@ -37,6 +39,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
         setTrustedProxySource(false)
         setOpenAIEmbeddings(false)
         setSelfService(false)
+        setSelfKeyIssuance(false)
       }
     })
     return () => { active = false }
@@ -60,7 +63,7 @@ export function EmployeesPage({ csrf }: { csrf: string }) {
       </table></div> : null}
     </div>
     {creating ? <CreateEmployee csrf={csrf} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void reload() }} /> : null}
-    {selected ? <KeysDialog employee={selected} csrf={csrf} keyPolicyCapability={keyPolicyCapability} sourcePolicyCapability={keySourcePolicyCapability} accountGroupPolicyCapability={keyAccountGroupPolicyCapability} trustedProxySource={trustedProxySource} openAIEmbeddings={openAIEmbeddings} onClose={() => setSelected(null)} /> : null}
+    {selected ? <KeysDialog employee={selected} csrf={csrf} keyPolicyCapability={keyPolicyCapability} sourcePolicyCapability={keySourcePolicyCapability} accountGroupPolicyCapability={keyAccountGroupPolicyCapability} selfKeyIssuance={selfKeyIssuance} trustedProxySource={trustedProxySource} openAIEmbeddings={openAIEmbeddings} onClose={() => setSelected(null)} /> : null}
     {enrolling ? <EnrollmentDialog employee={enrolling} csrf={csrf} onClose={() => setEnrolling(null)} /> : null}
     {policy ? <PolicyDialog employee={policy} csrf={csrf} onClose={() => setPolicy(null)} onSaved={() => { setPolicy(null); void reload() }} /> : null}
   </>
@@ -157,7 +160,7 @@ function normalizedPolicy(draft: KeyPolicyInput, includeSource: boolean, include
   return normalized
 }
 
-function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapability, accountGroupPolicyCapability, trustedProxySource, openAIEmbeddings, onClose }: { employee: Employee; csrf: string; keyPolicyCapability: boolean | null; sourcePolicyCapability: boolean | null; accountGroupPolicyCapability: boolean | null; trustedProxySource: boolean; openAIEmbeddings: boolean; onClose: () => void }) {
+function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapability, accountGroupPolicyCapability, selfKeyIssuance, trustedProxySource, openAIEmbeddings, onClose }: { employee: Employee; csrf: string; keyPolicyCapability: boolean | null; sourcePolicyCapability: boolean | null; accountGroupPolicyCapability: boolean | null; selfKeyIssuance: boolean; trustedProxySource: boolean; openAIEmbeddings: boolean; onClose: () => void }) {
   const load = useCallback(() => api.keys(employee.id), [employee.id])
   const { data, loading, error, reload } = useResource(load)
   const loadModels = useCallback(() => keyPolicyCapability === true ? api.models() : Promise.resolve({ items: [] as ModelRoute[] }), [keyPolicyCapability])
@@ -177,6 +180,8 @@ function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapabilit
       .map((model) => model.id))].sort()
   }, [employee.model_mode, employee.models, modelData])
   const accountGroups = accountGroupData?.items ?? []
+  const reservedSlot = data?.items.some((item) => item.issuance_state !== undefined) === true
+  const slotPolicyReady = draft.protocol_mode === 'selected' && draft.protocols.length > 0 && draft.model_mode === 'selected' && draft.models.length > 0
   if (created?.key) return <KeyReveal created={created} onClose={() => { setCreated(null); onClose() }} />
   if (editing) return <EditKeyPolicyDialog employee={employee} keyItem={editing} csrf={csrf} sourcePolicyCapability={sourcePolicyCapability === true} accountGroupPolicyCapability={accountGroupPolicyCapability === true} trustedProxySource={trustedProxySource} openAIEmbeddings={openAIEmbeddings} modelIds={modelIds} modelsLoading={modelsLoading} modelsError={modelsError} onRetryModels={() => void reloadModels()} accountGroups={accountGroups} accountGroupsLoading={accountGroupsLoading} accountGroupsError={accountGroupsError} onRetryAccountGroups={() => void reloadAccountGroups()} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void reload() }} />
   return <Dialog title={`${employee.name} 的 Key`} description="Key 默认永久有效；可为不同设备或用途分别创建。" onClose={onClose} wide>
@@ -189,11 +194,17 @@ function KeysDialog({ employee, csrf, keyPolicyCapability, sourcePolicyCapabilit
       try { setCreated(await api.createKey(employee.id, name.trim(), csrf, keyPolicyCapability === true ? normalizedPolicy(draft, sourcePolicyCapability === true, accountGroupPolicyCapability === true) : undefined)); await reload() }
       catch (caught) { setActionError(messageFor(caught)); setBusy(false) }
     }}><Icon name="plus" />{busy ? '正在生成…' : '生成永久 Key'}</Button></div>
+    {selfKeyIssuance && keyPolicyCapability === true ? <div className="key-policy-compat"><strong>员工自行领取一个管理员授权的 Key</strong><span>预留会分配一个新的 Key ID 和独立限额空间，但不会产生可用明文。每名员工在当前数据库历史中只能预留一次。先选择明确的协议和模型，再为该 Key ID 配置 Key 级 RPM、并发和严格通用预算，最后点击“授权领取”。</span><Button variant="secondary" disabled={busy || reservedSlot || !name.trim() || !slotPolicyReady || sourcePolicyCapability === null || accountGroupPolicyCapability === null} onClick={async () => {
+      setBusy(true); setActionError(null)
+      try { await api.reserveSelfKeySlot(employee.id, name.trim(), csrf, normalizedPolicy(draft, sourcePolicyCapability === true, accountGroupPolicyCapability === true)); await reload() }
+      catch (caught) { setActionError(messageFor(caught)) }
+      finally { setBusy(false) }
+    }}>预留员工自领 Key 槽位</Button></div> : null}
     <FormError error={actionError} /><PageState loading={loading} error={error} onRetry={() => void reload()} />
     {data?.items.length === 0 ? <EmptyState title="还没有 Key" body="生成后明文只展示一次，请立即妥善保存。" /> : null}
-    {data?.items.length ? <div className="key-list">{data.items.map((key) => <div key={key.id} className="key-row key-row--policy"><div className="key-row__identity"><strong>{key.name}</strong><span>{key.revoked_at ? '已撤销' : key.expires_at ? `到期：${new Date(key.expires_at).toLocaleDateString('zh-CN')}` : '永久有效'}</span></div>
+    {data?.items.length ? <div className="key-list">{data.items.map((key) => <div key={key.id} className="key-row key-row--policy"><div className="key-row__identity"><strong>{key.name}</strong><span>{key.issuance_state === 'pending' ? '待管理员授权 · 不可使用' : key.issuance_state === 'armed' ? '已授权员工领取 · 尚不可使用' : key.issuance_state === 'cancelled' ? '已取消 · 永不可领取' : key.revoked_at ? '已撤销' : key.expires_at ? `到期：${new Date(key.expires_at).toLocaleDateString('zh-CN')}` : '永久有效'}</span>{key.issuance_state ? <small>Key ID：{key.id}</small> : null}</div>
       {keyPolicyCapability === true && key.policy ? <KeyPolicySummary policy={key.policy} sourcePolicyCapability={sourcePolicyCapability === true} accountGroupPolicyCapability={accountGroupPolicyCapability === true} /> : <div className="key-policy-unavailable">{keyPolicyCapability === true ? '策略信息不可用；重新载入后再编辑。' : '沿用员工权限'}</div>}
-      <div className="key-row__actions">{keyPolicyCapability === true && key.policy && !key.revoked_at && (!accountGroupPolicyCapability || accountGroupPolicyFields(key.policy)) ? <Button variant="secondary" onClick={() => setEditing(key)}>编辑独立权限</Button> : null}{key.revoked_at ? null : <Button variant="danger" onClick={async () => { try { await api.revokeKey(key.id, csrf); await reload() } catch (caught) { setActionError(messageFor(caught)) } }}>撤销</Button>}</div>
+      <div className="key-row__actions">{keyPolicyCapability === true && key.policy && !key.revoked_at && (!accountGroupPolicyCapability || accountGroupPolicyFields(key.policy)) ? <Button variant="secondary" onClick={() => setEditing(key)}>编辑独立权限</Button> : null}{selfKeyIssuance && (key.issuance_state === 'pending' || key.issuance_state === 'armed') && key.policy ? <Button variant="secondary" disabled={busy} onClick={async () => { setBusy(true); setActionError(null); try { await api.armSelfKeySlot(key.id, employee.revision, key.policy!.revision, csrf); await reload() } catch (caught) { setActionError(caught instanceof ApiError && caught.status === 409 ? '授权条件或修订已变化。请刷新员工、Key 策略与治理限额后重新确认。' : messageFor(caught)) } finally { setBusy(false) } }}>授权领取</Button> : null}{selfKeyIssuance && (key.issuance_state === 'pending' || key.issuance_state === 'armed') ? <Button variant="danger" disabled={busy} onClick={async () => { setBusy(true); setActionError(null); try { await api.cancelSelfKeySlot(key.id, csrf); await reload() } catch (caught) { setActionError(messageFor(caught)) } finally { setBusy(false) } }}>永久取消槽位</Button> : key.revoked_at ? null : <Button variant="danger" onClick={async () => { try { await api.revokeKey(key.id, csrf); await reload() } catch (caught) { setActionError(messageFor(caught)) } }}>撤销</Button>}</div>
     </div>)}</div> : null}
   </Dialog>
 }

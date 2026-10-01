@@ -305,12 +305,13 @@ func (a *App) employeeModels(ctx context.Context, id string) ([]string, error) {
 }
 
 type keyView struct {
-	ID        string        `json:"id"`
-	Name      string        `json:"name"`
-	Key       string        `json:"key,omitempty"`
-	ExpiresAt *string       `json:"expires_at"`
-	RevokedAt *string       `json:"revoked_at"`
-	Policy    keyPolicyView `json:"policy"`
+	ID            string        `json:"id"`
+	Name          string        `json:"name"`
+	Key           string        `json:"key,omitempty"`
+	IssuanceState *string       `json:"issuance_state,omitempty"`
+	ExpiresAt     *string       `json:"expires_at"`
+	RevokedAt     *string       `json:"revoked_at"`
+	Policy        keyPolicyView `json:"policy"`
 }
 
 func (a *App) listKeys(w http.ResponseWriter, r *http.Request, _ adminSession) {
@@ -319,7 +320,7 @@ func (a *App) listKeys(w http.ResponseWriter, r *http.Request, _ adminSession) {
 		writeAdminError(w, 404, "not_found", "Employee was not found.")
 		return
 	}
-	rows, err := a.store.db.QueryContext(r.Context(), `SELECT id,name,expires_at,revoked_at FROM access_keys WHERE employee_id=? ORDER BY created_at,id`, r.PathValue("id"))
+	rows, err := a.store.db.QueryContext(r.Context(), `SELECT k.id,k.name,k.expires_at,k.revoked_at,s.state FROM access_keys k LEFT JOIN employee_self_key_slots s ON s.key_id=k.id WHERE k.employee_id=? ORDER BY k.created_at,k.id`, r.PathValue("id"))
 	if err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -327,13 +328,14 @@ func (a *App) listKeys(w http.ResponseWriter, r *http.Request, _ adminSession) {
 	items := make([]keyView, 0)
 	for rows.Next() {
 		var item keyView
-		var exp, rev sql.NullString
-		if err := rows.Scan(&item.ID, &item.Name, &exp, &rev); err != nil {
+		var exp, rev, issuance sql.NullString
+		if err := rows.Scan(&item.ID, &item.Name, &exp, &rev, &issuance); err != nil {
 			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 			return
 		}
 		item.ExpiresAt = nullString(exp)
 		item.RevokedAt = nullString(rev)
+		item.IssuanceState = nullString(issuance)
 		items = append(items, item)
 	}
 	iterationErr := rows.Err()
@@ -545,15 +547,44 @@ func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, _ adminSession) 
 	}
 	a.admission.Lock()
 	defer a.admission.Unlock()
-	now := utcNow()
-	res, err := a.store.db.ExecContext(r.Context(), `UPDATE access_keys SET revoked_at=COALESCE(revoked_at,?) WHERE id=?`, now, r.PathValue("id"))
+	tx, err := a.store.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	count, _ := res.RowsAffected()
+	defer tx.Rollback()
+	keyID := r.PathValue("id")
+	var slotState string
+	err = tx.QueryRowContext(r.Context(), `SELECT state FROM employee_self_key_slots WHERE key_id=?`, keyID).Scan(&slotState)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	var count int64
+	if slotState == "pending" || slotState == "armed" {
+		if err := cancelSelfKeySlotTx(r.Context(), tx, keyID); err != nil {
+			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+		count = 1
+	} else {
+		res, err := tx.ExecContext(r.Context(), `UPDATE access_keys SET revoked_at=COALESCE(revoked_at,?) WHERE id=?`, utcNow(), keyID)
+		if err != nil {
+			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+		count, err = res.RowsAffected()
+		if err != nil {
+			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+	}
 	if count != 1 {
 		writeAdminError(w, 404, "not_found", "Key was not found.")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
 	a.notifyAccountPoolChanged()

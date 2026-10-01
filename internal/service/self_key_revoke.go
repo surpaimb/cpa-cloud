@@ -95,7 +95,7 @@ func (a *App) selfRevokeKey(w http.ResponseWriter, r *http.Request, session self
 	}
 	var revoked sql.NullString
 	var revokedType string
-	err = tx.QueryRowContext(r.Context(), `SELECT revoked_at,typeof(revoked_at) FROM access_keys WHERE id=? AND employee_id=?`, id, session.EmployeeID).Scan(&revoked, &revokedType)
+	err = tx.QueryRowContext(r.Context(), `SELECT k.revoked_at,typeof(k.revoked_at) FROM access_keys k WHERE k.id=? AND k.employee_id=? AND NOT EXISTS(SELECT 1 FROM employee_self_key_slots slot WHERE slot.key_id=k.id AND slot.state<>'issued')`, id, session.EmployeeID).Scan(&revoked, &revokedType)
 	if errors.Is(err, sql.ErrNoRows) {
 		selfError(w, http.StatusNotFound, "not_found")
 		return
@@ -111,7 +111,7 @@ func (a *App) selfRevokeKey(w http.ResponseWriter, r *http.Request, session self
 		}
 	}
 	if !revoked.Valid {
-		result, err := tx.ExecContext(r.Context(), `UPDATE access_keys SET revoked_at=? WHERE id=? AND employee_id=? AND revoked_at IS NULL`, utcNow(), id, session.EmployeeID)
+		result, err := tx.ExecContext(r.Context(), `UPDATE access_keys SET revoked_at=? WHERE id=? AND employee_id=? AND revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM employee_self_key_slots slot WHERE slot.key_id=access_keys.id AND slot.state<>'issued')`, utcNow(), id, session.EmployeeID)
 		if err != nil {
 			selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
 			return

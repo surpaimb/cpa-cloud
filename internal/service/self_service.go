@@ -47,6 +47,9 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /self/api/v1/profile", a.requireSelf(a.selfProfileInfo, false))
 	// Independently authored for docs/employee-self-key-inventory-contract.md.
 	mux.HandleFunc("GET /self/api/v1/keys", a.requireSelf(a.selfListKeys, false))
+	// Independently authored for docs/employee-self-key-issuance-contract.md.
+	mux.HandleFunc("GET /self/api/v1/key-slots", a.requireSelf(a.selfListKeySlots, false))
+	mux.HandleFunc("POST /self/api/v1/keys/issue", a.requireSelfReleased(a.selfIssueKey, true))
 	// Independently authored for docs/employee-self-key-revocation-contract.md.
 	mux.HandleFunc("POST /self/api/v1/keys/{id}/revoke", a.requireSelfReleased(a.selfRevokeKey, true))
 	// Independently authored for docs/employee-self-request-history-contract.md.
@@ -470,8 +473,8 @@ func (a *App) requireSelfWithLock(next func(http.ResponseWriter, *http.Request, 
 			if !a.selfWriteOrigin(w, r) {
 				return
 			}
-			provided := r.Header.Get("X-CSRF-Token")
-			if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(session.CSRF)) != 1 {
+			provided := r.Header.Values("X-CSRF-Token")
+			if len(provided) != 1 || subtle.ConstantTimeCompare([]byte(provided[0]), []byte(session.CSRF)) != 1 {
 				selfError(w, 403, "csrf_rejected")
 				return
 			}

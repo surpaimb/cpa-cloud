@@ -92,8 +92,10 @@ func selfKeyTime(value string) (string, time.Time, error) {
 
 func readSelfKeyPage(ctx context.Context, db *sql.DB, employeeID, after string, limit int, now time.Time) (selfKeyPage, error) {
 	page := selfKeyPage{Items: make([]selfKeyItem, 0, limit)}
-	rows, err := db.QueryContext(ctx, `SELECT id,name,created_at,expires_at,revoked_at,typeof(id),typeof(name),typeof(created_at),typeof(expires_at),typeof(revoked_at)
-		FROM access_keys WHERE employee_id=? AND id COLLATE BINARY > ? ORDER BY id COLLATE BINARY LIMIT ?`, employeeID, after, limit+1)
+	rows, err := db.QueryContext(ctx, `SELECT k.id,k.name,k.created_at,k.expires_at,k.revoked_at,typeof(k.id),typeof(k.name),typeof(k.created_at),typeof(k.expires_at),typeof(k.revoked_at)
+		FROM access_keys k WHERE k.employee_id=? AND k.id COLLATE BINARY > ?
+		AND NOT EXISTS(SELECT 1 FROM employee_self_key_slots slot WHERE slot.key_id=k.id AND slot.state<>'issued')
+		ORDER BY k.id COLLATE BINARY LIMIT ?`, employeeID, after, limit+1)
 	if err != nil {
 		return selfKeyPage{}, err
 	}

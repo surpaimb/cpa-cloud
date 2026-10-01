@@ -148,7 +148,7 @@ func (a *App) selectModelRoute(r *http.Request, auth employeeAuth, model string,
 func (a *App) legacyEmployeeRoute(ctx context.Context, auth employeeAuth, model string, providers []string) (route, *modelAdmissionError) {
 	var status, mode string
 	var expires, revoked sql.NullString
-	err := a.store.db.QueryRowContext(ctx, `SELECT e.status,e.model_mode,k.expires_at,k.revoked_at FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.id=? AND k.employee_id=?`, auth.KeyID, auth.EmployeeID).Scan(&status, &mode, &expires, &revoked)
+	err := a.store.db.QueryRowContext(ctx, `SELECT e.status,e.model_mode,k.expires_at,k.revoked_at FROM access_keys k JOIN employees e ON e.id=k.employee_id WHERE k.id=? AND k.employee_id=? AND NOT EXISTS(SELECT 1 FROM employee_self_key_slots slot WHERE slot.key_id=k.id AND (slot.state<>'issued' OR slot.employee_id<>k.employee_id))`, auth.KeyID, auth.EmployeeID).Scan(&status, &mode, &expires, &revoked)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return route{}, poolAdmissionFailure(accountPoolStorageUnavailable)
 	}
