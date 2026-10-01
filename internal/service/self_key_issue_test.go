@@ -60,7 +60,7 @@ func (f *selfSlotFixture) reserve(t *testing.T, operation string) int {
 		}
 		f.keyID = result.ID
 	} else {
-		t.Logf("reserve status=%d body=%s", status, readBody(r))
+		r.Body.Close()
 	}
 	return status
 }
@@ -111,16 +111,44 @@ func TestSelfKeySlotDefaultOffAndOneLifetimeReservation(t *testing.T) {
 	}
 	app := openSelfTestApp(t, dir, false)
 	server := httptest.NewServer(app.Handler())
-	r := selfRequestTest(t, "GET", server.URL+"/self/api/v1/key-slots", "", "", nil, "")
-	if r.StatusCode != 404 {
-		t.Fatalf("default-off self route=%d", r.StatusCode)
+	adminCookie, adminCSRF := loginTestAdmin(t, server.URL)
+	var r *http.Response
+	for _, path := range []string{"/self/api/v1/key-slots", "/self/api/v1/keys/issue"} {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodOptions} {
+			for _, role := range []string{"anonymous", "admin"} {
+				var cookie *http.Cookie
+				csrf := ""
+				if role == "admin" {
+					cookie, csrf = adminCookie, adminCSRF
+				}
+				r = selfRequestTest(t, method, server.URL+path, `{}`, server.URL, cookie, csrf)
+				if r.StatusCode != http.StatusNotFound || r.Header.Get("Allow") != "" {
+					t.Fatalf("default-off %s %s as %s: status=%d Allow=%q", method, path, role, r.StatusCode, r.Header.Get("Allow"))
+				}
+				r.Body.Close()
+			}
+		}
 	}
-	r.Body.Close()
-	r = requestJSON(t, "POST", server.URL+"/admin/api/v1/keys/key_missing/self-key-slot/arm", `{}`, nil, "", server.URL)
-	if r.StatusCode != 404 {
-		t.Fatalf("default-off admin route=%d", r.StatusCode)
+	for _, path := range []string{
+		"/admin/api/v1/employees/emp_missing/self-key-slot",
+		"/admin/api/v1/keys/key_missing/self-key-slot/arm",
+		"/admin/api/v1/keys/key_missing/self-key-slot/cancel",
+	} {
+		for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodOptions} {
+			for _, role := range []string{"admin", "anonymous"} {
+				var cookie *http.Cookie
+				csrf := ""
+				if role == "admin" {
+					cookie, csrf = adminCookie, adminCSRF
+				}
+				r = requestJSON(t, method, server.URL+path, `{}`, cookie, csrf, server.URL)
+				if r.StatusCode != http.StatusNotFound || r.Header.Get("Allow") != "" {
+					t.Fatalf("default-off %s %s as %s: status=%d Allow=%q", method, path, role, r.StatusCode, r.Header.Get("Allow"))
+				}
+				r.Body.Close()
+			}
+		}
 	}
-	r.Body.Close()
 	server.Close()
 	_ = app.Close()
 

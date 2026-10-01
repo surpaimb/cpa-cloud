@@ -363,6 +363,9 @@ func (a *App) Handler() http.Handler {
 		a.registerSelfHandlers(mux)
 	} else {
 		mux.HandleFunc("/admin/api/v1/employees/{id}/self-enrollment", http.NotFound)
+		mux.HandleFunc("/admin/api/v1/employees/{id}/self-key-slot", http.NotFound)
+		mux.HandleFunc("/admin/api/v1/keys/{id}/self-key-slot/arm", http.NotFound)
+		mux.HandleFunc("/admin/api/v1/keys/{id}/self-key-slot/cancel", http.NotFound)
 	}
 	mux.HandleFunc("POST /admin/api/v1/employees", a.requireAdmin(a.createEmployee, true))
 	mux.HandleFunc("PATCH /admin/api/v1/employees/{id}", a.requireAdmin(a.updateEmployee, true))
