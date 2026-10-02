@@ -14,12 +14,13 @@
 // docs/employee-self-plan-catalog-contract.md.
 // docs/employee-self-plan-purchase-contract.md.
 // docs/employee-self-subscription-cancel-contract.md.
+// docs/employee-self-one-shot-disarm-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_cancel?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -38,6 +39,8 @@ type SelfWalletActivityPage = { currency: string; has_account: boolean; window_s
 type SelfSubscriptionItem = { subscription_id: string; interval: 'one_time' | 'monthly'; status: 'active' | 'cancelled' | 'expired'; started_at: string; period_end_at: string | null; cancelled_at: string | null; revision?: number }
 type SelfSubscriptionPage = { items: SelfSubscriptionItem[]; next_cursor: string | null }
 type SelfSubscriptionCancelResult = { operation_id: string; subscription_id: string; replay: boolean; status: 'cancelled'; revision: number; cancelled_at: string }
+type SelfOneShotStatus = { subscription_id: string; state: 'none' | 'armed' | 'disarmed' | 'succeeded' | 'failed' | 'superseded' | 'cancelled'; revision: number; due_at: string | null; reason: string | null; terminal_at: string | null }
+type SelfOneShotDisarmResult = SelfOneShotStatus & { operation_id: string; replay: boolean; state: 'disarmed'; revision: 2; due_at: string; reason: 'disarmed'; terminal_at: string }
 type SelfPlanCatalogItem = { plan_id: string; name: string; interval: 'one_time' | 'monthly'; price_micro: string; credit_micro: string; revision: number }
 type SelfPlanCatalogPage = { currency: string; available: boolean; items: SelfPlanCatalogItem[]; next_cursor: string | null }
 type SelfPlanPurchaseQuote = { quote_token: string; plan_id: string; revision: number; currency: string; interval: 'one_time'; price_micro: string; credit_micro: string; expires_at: string }
@@ -701,13 +704,179 @@ function newSelfSubscriptionCancelOperationID(): string {
   return `self-cancel-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
 }
 
-function SelfSubscriptionStatusPanel({ csrf, cancelEnabled }: { csrf: string; cancelEnabled: boolean }) {
+const selfOneShotLabels: Record<SelfOneShotStatus['state'], string> = {
+  none: '没有一次性续购预约', armed: '已预约，尚未执行', disarmed: '已撤销预约',
+  succeeded: '本地续购已提交', failed: '预约执行失败', superseded: '已由手动续购取代', cancelled: '订阅取消后预约终结',
+}
+const selfOneShotReasons: Record<string, string> = {
+  disarmed: '员工或管理员已撤销', manual_renewal: '已手动续购', predecessor_cancelled: '原订阅已取消',
+  commercial_disabled: '商业执行已关闭', plan_unavailable: '原套餐不可用', insufficient_balance: '钱包余额不足',
+  owner_unavailable: '钱包归属不可用', period_unrepresentable: '下一周期无法确定',
+}
+
+function validSelfOneShotStatus(raw: unknown, id: string): raw is SelfOneShotStatus {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const value = raw as Record<string, unknown>
+  if (Object.keys(value).sort().join(',') !== 'due_at,reason,revision,state,subscription_id,terminal_at' || value.subscription_id !== id ||
+    typeof value.state !== 'string' || !(value.state in selfOneShotLabels) || typeof value.revision !== 'number' || !Number.isSafeInteger(value.revision)) return false
+  const utc = (time: unknown) => typeof time === 'string' && purchaseUTC.test(time) && Number.isFinite(Date.parse(time))
+  if (value.state === 'none') return value.revision === 0 && value.due_at === null && value.reason === null && value.terminal_at === null
+  if (!utc(value.due_at)) return false
+  if (value.state === 'armed') return value.revision === 1 && value.reason === null && value.terminal_at === null
+  if (value.revision !== 2 || !utc(value.terminal_at)) return false
+  if (value.state === 'succeeded') return value.reason === null
+  if (value.state === 'disarmed') return value.reason === 'disarmed'
+  if (value.state === 'superseded') return value.reason === 'manual_renewal'
+  if (value.state === 'cancelled') return value.reason === 'predecessor_cancelled'
+  return value.state === 'failed' && typeof value.reason === 'string' &&
+    ['commercial_disabled', 'plan_unavailable', 'insufficient_balance', 'owner_unavailable', 'period_unrepresentable'].includes(value.reason)
+}
+
+function validSelfOneShotDisarmResult(raw: unknown, id: string, operationID: string): raw is SelfOneShotDisarmResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const value = raw as Record<string, unknown>
+  if (Object.keys(value).sort().join(',') !== 'due_at,operation_id,reason,replay,revision,state,subscription_id,terminal_at' ||
+    value.operation_id !== operationID || typeof value.replay !== 'boolean' || value.state !== 'disarmed' || value.reason !== 'disarmed') return false
+  const { operation_id: _operationID, replay: _replay, ...status } = value
+  return validSelfOneShotStatus(status, id)
+}
+
+function SelfOneShotRenewalPanel({ id, csrf, selected, onSelect }: { id: string; csrf: string; selected: boolean; onSelect: (id: string) => void }) {
+  const [status, setStatus] = useState<SelfOneShotStatus | null>(null)
+  const [loading, setLoading] = useState<'read' | 'disarm' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState(false)
+  const [retry, setRetry] = useState<{ revision: number; operationID: string } | null>(null)
+  const [outcome, setOutcome] = useState<SelfOneShotDisarmResult | null>(null)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort() }, [])
+  useEffect(() => {
+    if (selected) return
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    setStatus(null); setLoading(null); setError(null); setConfirm(false); setRetry(null); setOutcome(null)
+  }, [selected])
+
+  async function readReservation(afterDisarm = false) {
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const controller = new AbortController()
+    pending.current = controller
+    setStatus(null)
+    setConfirm(false)
+    setRetry(null)
+    if (!afterDisarm) setOutcome(null)
+    setError(null)
+    setLoading('read')
+    try {
+      const value = await selfRequest<unknown>(`/billing/subscriptions/${encodeURIComponent(id)}/one-shot-renewal`, { signal: controller.signal })
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (!validSelfOneShotStatus(value, id)) throw new Error('Invalid reservation response')
+      setStatus(value)
+    } catch {
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      setStatus(null)
+      setError(afterDisarm ? '撤销已确认，但最新预约状态暂时无法读取；请手动刷新。' : '预约状态暂时无法读取，请稍后重试。')
+    } finally {
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(null)
+    }
+  }
+
+  async function submitDisarm(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (loading !== null || (!confirm && !retry)) return
+    const form = event.currentTarget
+    let password = String(new FormData(form).get('current_password') ?? '')
+    form.reset()
+    const revision = retry?.revision ?? status?.revision
+    if (revision !== 1 || new TextEncoder().encode(password).length < 12 || new TextEncoder().encode(password).length > 72) {
+      password = ''
+      setStatus(null); setConfirm(false); setRetry(null); setOutcome(null)
+      setError('当前密码须为 12–72 个 UTF-8 字节；请重新读取预约状态。')
+      return
+    }
+    let operationID = retry?.operationID ?? ''
+    if (!retry) {
+      try {
+        const bytes = new Uint8Array(16)
+        globalThis.crypto.getRandomValues(bytes)
+        operationID = `self-one-shot-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
+      } catch {
+        password = ''
+        setStatus(null); setConfirm(false); setOutcome(null)
+        setError('无法生成撤销操作编号，请稍后重试。')
+        return
+      }
+    }
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const controller = new AbortController()
+    pending.current = controller
+    setStatus(null); setConfirm(false); setRetry(null); setOutcome(null)
+    setLoading('disarm'); setError(null)
+    try {
+      const value = await selfRequest<unknown>(`/billing/subscriptions/${encodeURIComponent(id)}/one-shot-renewal/disarm`, {
+        method: 'POST', body: JSON.stringify({ operation_id: operationID, expected_revision: revision, current_password: password }), signal: controller.signal,
+      }, csrf)
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (!validSelfOneShotDisarmResult(value, id, operationID)) throw new Error('Invalid disarm response')
+      setOutcome(value)
+      pending.current = null
+      setLoading(null)
+      void readReservation(true)
+    } catch (caught) {
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      const uncertain = !(caught instanceof ApiError) || caught.status === 503
+      setError(uncertain ? '撤销结果未确认；请重新输入当前密码，显式重试同一操作。' : '撤销未完成；请重新读取预约状态。')
+      if (uncertain) setRetry({ revision, operationID })
+    } finally {
+      password = ''
+      operationID = ''
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(null)
+    }
+  }
+
+  return <section className="self-one-shot" aria-label={`订阅 ${id} 的一次性续购预约`}>
+    <Button variant="secondary" disabled={loading !== null} onClick={() => { onSelect(id); void readReservation() }}>{loading === 'read' ? '正在读取预约…' : '查看续购预约'}</Button>
+    {error ? <p role="alert">{error}</p> : null}
+    {outcome ? <p role="status">{outcome.replay ? '已确认原撤销' : '撤销已确认'}：订阅 {id} 的一次性预约已撤销，时间 <time dateTime={outcome.terminal_at}>{selfKeyDate(outcome.terminal_at)}</time>。</p> : null}
+    {status ? <div className="self-one-shot-status"><p>{selfOneShotLabels[status.state]}</p>
+      {status.due_at ? <p>冻结到期时刻：<time dateTime={status.due_at}>{selfKeyDate(status.due_at)}</time>；预约版本：{status.revision}。</p> : null}
+      {status.terminal_at ? <p>终结时间：<time dateTime={status.terminal_at}>{selfKeyDate(status.terminal_at)}</time>；原因：{status.reason ? selfOneShotReasons[status.reason] : '本地续购已提交'}。</p> : null}
+      {status.state === 'armed' ? <Button variant="secondary" disabled={loading !== null} onClick={() => { setConfirm(true); setError(null); setOutcome(null) }}>撤销这一笔预约</Button> : null}
+    </div> : null}
+    {confirm && status?.state === 'armed' ? <form className="self-subscriptions-confirm" onSubmit={(event) => { void submitDisarm(event) }}>
+      <h3>确认撤销一次性续购预约</h3>
+      <p>订阅 ID：<strong>{id}</strong>；预约存储版本：<strong>{status.revision}</strong>；冻结到期：<time dateTime={status.due_at ?? ''}>{selfKeyDate(status.due_at ?? '')}</time>。</p>
+      <p>仅撤销这一笔一次性预约；到期扣费可能失败；不取消当前订阅、不退款；同一前驱不可再次预约。</p>
+      <label className="self-plan-purchase-check"><input name="confirm" type="checkbox" required />我已阅读并确认只撤销这一笔预约。</label>
+      <Field label="当前密码（确认撤销预约）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} /></Field>
+      <div className="self-actions"><Button type="submit" disabled={loading !== null}>确认撤销预约</Button><Button type="button" variant="secondary" onClick={() => setConfirm(false)}>返回预约状态</Button></div>
+    </form> : null}
+    {retry ? <form className="self-subscriptions-confirm" onSubmit={(event) => { void submitDisarm(event) }}>
+      <h3>上次撤销结果未确认</h3><p>仅对订阅 {id} 的原预约版本 {retry.revision} 使用原操作编号重试；不会自动重试。</p>
+      <label className="self-plan-purchase-check"><input name="confirm" type="checkbox" required />我确认显式重试原撤销操作。</label>
+      <Field label="当前密码（重试原撤销）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} /></Field>
+      <div className="self-actions"><Button type="submit" disabled={loading !== null}>确认重试撤销</Button><Button type="button" variant="secondary" onClick={() => { setRetry(null); setError(null) }}>放弃重试</Button></div>
+    </form> : null}
+  </section>
+}
+
+function SelfSubscriptionStatusPanel({ csrf, cancelEnabled, oneShotEnabled }: { csrf: string; cancelEnabled: boolean; oneShotEnabled: boolean }) {
   const [page, setPage] = useState<SelfSubscriptionPage | null>(null)
   const [loading, setLoading] = useState<'read' | 'cancel' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<SelfSubscriptionItem | null>(null)
   const [retry, setRetry] = useState<{ id: string; revision: number; operationID: string } | null>(null)
   const [outcome, setOutcome] = useState<SelfSubscriptionCancelResult | null>(null)
+  const [oneShotTarget, setOneShotTarget] = useState<string | null>(null)
   const pending = useRef<AbortController | null>(null)
   const generation = useRef(0)
 
@@ -727,6 +896,7 @@ function SelfSubscriptionStatusPanel({ csrf, cancelEnabled }: { csrf: string; ca
     pending.current = controller
     setConfirm(null)
     setRetry(null)
+    if (!cursor) setOneShotTarget(null)
     if (!afterCancel) setOutcome(null)
     if (!cursor) setPage(null)
     setError(null)
@@ -821,6 +991,7 @@ function SelfSubscriptionStatusPanel({ csrf, cancelEnabled }: { csrf: string; ca
           <div><dt>取消时间</dt><dd>{item.cancelled_at ? <time dateTime={item.cancelled_at}>{selfKeyDate(item.cancelled_at)}</time> : '未取消'}</dd></div>
           {cancelEnabled ? <div><dt>存储版本</dt><dd>{item.revision}</dd></div> : null}</dl>
         {cancelEnabled && item.status === 'active' && item.revision ? <Button variant="secondary" disabled={loading !== null} onClick={() => { setConfirm(item); setRetry(null); setOutcome(null); setError(null) }}>取消此订阅</Button> : null}
+        {oneShotEnabled && item.interval === 'monthly' ? <SelfOneShotRenewalPanel key={`${item.subscription_id}:${item.revision ?? 'unknown'}`} id={item.subscription_id} csrf={csrf} selected={oneShotTarget === item.subscription_id} onSelect={setOneShotTarget} /> : null}
       </li>)}</ol>}
       {page.next_cursor ? <Button variant="secondary" disabled={loading !== null} onClick={() => { void readPage(page.next_cursor ?? undefined) }}>{loading === 'read' ? '正在读取…' : '加载更多订阅'}</Button> : null}
     </div> : null}
@@ -1280,7 +1451,7 @@ export function SelfApp() {
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true
           ? <SelfWalletActivityPanel key={`wallet-activity:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_subscription_status === true
-          ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} cancelEnabled={session.features?.employee_self_subscription_cancel === true} /> : null}
+          ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} cancelEnabled={session.features?.employee_self_subscription_cancel === true} oneShotEnabled={session.features?.employee_self_one_shot_renewal_disarm === true} /> : null}
         {session.features?.employee_self_plan_catalog === true && session.features?.employee_self_plan_purchase !== true
           ? <SelfPlanCatalogPanel key={`plan-catalog:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_plan_catalog === true && session.features?.employee_self_plan_purchase === true

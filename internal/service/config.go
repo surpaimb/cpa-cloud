@@ -37,15 +37,17 @@ type Config struct {
 	EmployeeSelfWalletActivityEnabled     bool
 	EmployeeSelfSubscriptionStatusEnabled bool
 	EmployeeSelfSubscriptionCancelEnabled bool
-	EmployeeSelfPlanCatalogEnabled        bool
-	EmployeeSelfPlanPurchaseEnabled       bool
-	ResponsesStatefulResources            bool
-	ResponsesBackgroundTasks              bool
-	CodexOAuthClientID                    string
-	CodexOAuthRedirectURI                 string
-	InstanceID                            string
-	Version                               string
-	backupAutomationRehearsal             bool
+	// Independently authored for docs/employee-self-one-shot-disarm-contract.md.
+	EmployeeSelfOneShotRenewalDisarmEnabled bool
+	EmployeeSelfPlanCatalogEnabled          bool
+	EmployeeSelfPlanPurchaseEnabled         bool
+	ResponsesStatefulResources              bool
+	ResponsesBackgroundTasks                bool
+	CodexOAuthClientID                      string
+	CodexOAuthRedirectURI                   string
+	InstanceID                              string
+	Version                                 string
+	backupAutomationRehearsal               bool
 }
 
 const (

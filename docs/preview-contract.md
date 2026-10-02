@@ -34,6 +34,8 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 `GET /self/api/v1/billing/subscriptions[?limit=20][&cursor=...]` 由另一默认关闭的 `--employee-self-subscription-status-enabled` 注册，只要求员工自助总开关。当前 active 员工会话是唯一归属来源；每页 1–50 条，按不可变订阅 ID 逆序，用绑定员工、会话和页大小的认证加密游标继续。仅显示本人直接拥有的现存订阅 ID、冻结 interval、只读有效状态及开始/终止/取消时间，不返回套餐、金额、权益、支付或账户资料；商业执行关闭仍可读历史。页间不是同一数据库快照，故障整页 503；网页只有独立 capability 和明确点击才读取，不改变订阅或账本。详见[本人订阅状态契约](employee-self-subscription-status-contract.md)。
 
+`GET /self/api/v1/billing/subscriptions/{id}/one-shot-renewal` 与 `POST .../{id}/one-shot-renewal/disarm` 是另一个默认关闭的员工自助 opt-in，要求自助总开关和本人订阅状态开关。只有当前已开通且 active 的员工可按需查看本人直属钱包 monthly 订阅的一次性预约最小状态，或用当前密码、CSRF、预约存储 revision 和全局 operation ID 撤销尚未执行的预约；商业执行关闭后仍可读取及精确重放。员工不能 arm、购买、退款或取消本期订阅。GET 不触发 worker 或财务写入；POST 只以 typed employee actor 在同一事务记录一次 disarm receipt 和预约终态，不动钱包/账本。详见[员工一次性预约查看与撤销契约](employee-self-one-shot-disarm-contract.md)；真实生产启用与完整付款验收尚未完成。
+
 `GET /self/api/v1/billing/plans?currency=USD[&limit=20][&cursor=...]` 由默认关闭的 `--employee-self-plan-catalog-enabled` 注册，只要求员工自助总开关。当前 active 员工须明确指定单一三位大写币种并点击；仅当商业执行开关在本页读取快照中开启，返回该币种当前已启用套餐的 ID、名称、周期、价格/额度 micro 字符串和 revision，按 ID 升序分页。商业执行关闭时 `available=false`、空列表且无下一页；认证加密游标绑定员工、会话、币种、页大小和 15 分钟时限。它不是个人订阅、权益、固定报价或购买入口；无财务写入、支付或上游调用。详见[员工自助套餐目录契约](employee-self-plan-catalog-contract.md)。
 
 ### 管理员账号池本机容量快照（OBS-01 第一段）

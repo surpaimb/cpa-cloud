@@ -14,6 +14,7 @@
 // docs/employee-self-plan-catalog-contract.md.
 // docs/employee-self-plan-purchase-contract.md.
 // docs/employee-self-subscription-cancel-contract.md.
+// docs/employee-self-one-shot-disarm-contract.md.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -389,6 +390,158 @@ describe('employee self-service page', () => {
     const second = JSON.parse(String(calls[1]?.[1]?.body)) as { operation_id: string; expected_revision: number }
     expect(second.operation_id).toBe(first.operation_id)
     expect(second.expected_revision).toBe(1)
+  })
+
+  it('keeps one-shot controls absent without their independent capability', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [{ subscription_id: 'sub-month', interval: 'monthly', status: 'active', started_at: '2026-10-01T08:00:00Z', period_end_at: '2026-11-01T08:00:00.000000000Z', cancelled_at: null }], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    expect(await within(panel).findByText('sub-month')).toBeInTheDocument()
+    expect(within(panel).queryByRole('button', { name: '查看续购预约' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/one-shot-renewal'))).toBe(false)
+  })
+
+  it('reads an armed monthly reservation only on click and disarms after separate confirmation', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const due = '2026-11-01T08:00:00Z'
+    const terminal = '2026-10-02T08:00:00Z'
+    let disarmed = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true, employee_self_one_shot_renewal_disarm: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [
+        { subscription_id: 'sub-once', interval: 'one_time', status: 'active', started_at: '2026-10-01T08:00:00Z', period_end_at: null, cancelled_at: null },
+        { subscription_id: 'sub-month', interval: 'monthly', status: 'active', started_at: '2026-10-01T08:00:00Z', period_end_at: '2026-11-01T08:00:00.000000000Z', cancelled_at: null },
+      ], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions/sub-month/one-shot-renewal') && init?.method !== 'POST') return reply(200, { subscription_id: 'sub-month', state: disarmed ? 'disarmed' : 'armed', revision: disarmed ? 2 : 1, due_at: due, reason: disarmed ? 'disarmed' : null, terminal_at: disarmed ? terminal : null })
+      if (url.endsWith('/billing/subscriptions/sub-month/one-shot-renewal/disarm') && init?.method === 'POST') {
+        disarmed = true
+        const body = JSON.parse(String(init.body)) as { operation_id: string }
+        return reply(200, { operation_id: body.operation_id, subscription_id: 'sub-month', replay: false, state: 'disarmed', revision: 2, due_at: due, reason: 'disarmed', terminal_at: terminal })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/one-shot-renewal'))).toBe(false)
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    expect(await within(panel).findByText('sub-month')).toBeInTheDocument()
+    expect(within(panel).getAllByRole('button', { name: '查看续购预约' })).toHaveLength(1)
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/one-shot-renewal'))).toBe(false)
+    await userEvent.click(within(panel).getByRole('button', { name: '查看续购预约' }))
+    expect(await within(panel).findByText('已预约，尚未执行')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '撤销这一笔预约' }))
+    expect(within(panel).getByText(/不取消当前订阅、不退款/)).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/disarm'))).toBe(false)
+    await userEvent.click(within(panel).getByLabelText('我已阅读并确认只撤销这一笔预约。'))
+    const password = within(panel).getByLabelText('当前密码（确认撤销预约）') as HTMLInputElement
+    expect(password.type).toBe('password')
+    await userEvent.type(password, 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('button', { name: '确认撤销预约' }))
+    expect(await within(panel).findByText('已撤销预约')).toBeInTheDocument()
+    expect(within(panel).getByText(/撤销已确认/)).toBeInTheDocument()
+    expect(within(panel).queryByLabelText('当前密码（确认撤销预约）')).not.toBeInTheDocument()
+    const post = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/one-shot-renewal/disarm'))
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({ operation_id: expect.stringMatching(/^self-one-shot-[0-9a-f]{32}$/), expected_revision: 1, current_password: 'a-long-self-password' })
+    expect(new Headers(post?.[1]?.headers).get('X-CSRF-Token')).toBe('self-csrf')
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/sub-month/one-shot-renewal'))).toHaveLength(2)
+  })
+
+  it('keeps an uncertain one-shot retry only in memory and aborts late reads on logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const due = '2026-11-01T08:00:00Z'
+    const terminal = '2026-10-02T08:00:00Z'
+    let attempts = 0
+    let pending: ((response: Response) => void) | undefined
+    let pendingSignal: AbortSignal | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true, employee_self_one_shot_renewal_disarm: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [{ subscription_id: 'sub-retry', interval: 'monthly', status: 'active', started_at: '2026-10-01T08:00:00Z', period_end_at: '2026-11-01T08:00:00.000000000Z', cancelled_at: null }], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions/sub-retry/one-shot-renewal') && init?.method !== 'POST') {
+        if (attempts > 1) { pendingSignal = init?.signal as AbortSignal; return new Promise<Response>((resolve) => { pending = resolve }) }
+        return reply(200, { subscription_id: 'sub-retry', state: 'armed', revision: 1, due_at: due, reason: null, terminal_at: null })
+      }
+      if (url.endsWith('/billing/subscriptions/sub-retry/one-shot-renewal/disarm') && init?.method === 'POST') {
+        attempts++
+        if (attempts === 1) return reply(503, { error: { code: 'storage_unavailable' } })
+        const body = JSON.parse(String(init.body)) as { operation_id: string }
+        return reply(200, { operation_id: body.operation_id, subscription_id: 'sub-retry', replay: true, state: 'disarmed', revision: 2, due_at: due, reason: 'disarmed', terminal_at: terminal })
+      }
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return reply(200, { ok: true })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    window.localStorage.clear(); window.sessionStorage.clear()
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    await userEvent.click(await within(panel).findByRole('button', { name: '查看续购预约' }))
+    await userEvent.click(await within(panel).findByRole('button', { name: '撤销这一笔预约' }))
+    await userEvent.click(within(panel).getByLabelText('我已阅读并确认只撤销这一笔预约。'))
+    await userEvent.type(within(panel).getByLabelText('当前密码（确认撤销预约）'), 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('button', { name: '确认撤销预约' }))
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('撤销结果未确认')
+    expect(window.localStorage.length).toBe(0); expect(window.sessionStorage.length).toBe(0)
+    await userEvent.click(within(panel).getByLabelText('我确认显式重试原撤销操作。'))
+    await userEvent.type(within(panel).getByLabelText('当前密码（重试原撤销）'), 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('button', { name: '确认重试撤销' }))
+    await waitFor(() => expect(pending).toBeTypeOf('function'))
+    const calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/one-shot-renewal/disarm'))
+    expect(calls).toHaveLength(2)
+    expect(JSON.parse(String(calls[0]?.[1]?.body)).operation_id).toBe(JSON.parse(String(calls[1]?.[1]?.body)).operation_id)
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(pendingSignal?.aborted).toBe(true)
+    pending?.(new Response(JSON.stringify({ subscription_id: 'sub-retry', state: 'armed', revision: 1, due_at: due, reason: null, terminal_at: null }), { status: 200 }))
+    expect(screen.queryByText('已预约，尚未执行')).not.toBeInTheDocument()
+  })
+
+  it('clears the first reservation confirmation and password when switching monthly targets', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const due = '2026-11-01T08:00:00Z'
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true, employee_self_one_shot_renewal_disarm: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: ['sub-z', 'sub-a'].map(subscription_id => ({ subscription_id, interval: 'monthly', status: 'active', started_at: '2026-10-01T08:00:00Z', period_end_at: '2026-11-01T08:00:00.000000000Z', cancelled_at: null })), next_cursor: null })
+      if (url.endsWith('/billing/subscriptions/sub-z/one-shot-renewal')) return reply(200, { subscription_id: 'sub-z', state: 'armed', revision: 1, due_at: due, reason: null, terminal_at: null })
+      if (url.endsWith('/billing/subscriptions/sub-a/one-shot-renewal')) return reply(200, { subscription_id: 'sub-a', state: 'none', revision: 0, due_at: null, reason: null, terminal_at: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    const first = await within(panel).findByRole('region', { name: '订阅 sub-z 的一次性续购预约' })
+    const second = within(panel).getByRole('region', { name: '订阅 sub-a 的一次性续购预约' })
+    await userEvent.click(within(first).getByRole('button', { name: '查看续购预约' }))
+    await userEvent.click(await within(first).findByRole('button', { name: '撤销这一笔预约' }))
+    await userEvent.type(within(first).getByLabelText('当前密码（确认撤销预约）'), 'a-long-self-password')
+    await userEvent.click(within(second).getByRole('button', { name: '查看续购预约' }))
+    expect(await within(second).findByText('没有一次性续购预约')).toBeInTheDocument()
+    expect(within(first).queryByLabelText('当前密码（确认撤销预约）')).not.toBeInTheDocument()
+    expect(within(first).queryByText('已预约，尚未执行')).not.toBeInTheDocument()
   })
 
   it('keeps the plan catalog absent without its independent capability', async () => {

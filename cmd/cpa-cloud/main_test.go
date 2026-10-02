@@ -146,6 +146,24 @@ func TestSelfSubscriptionCancelCLIRequiresBothPrerequisitesBeforeStorage(t *test
 	}
 }
 
+// Independently authored for docs/employee-self-one-shot-disarm-contract.md.
+func TestSelfOneShotDisarmCLIRequiresBothPrerequisitesBeforeStorage(t *testing.T) {
+	for _, flags := range [][]string{
+		{"--employee-self-one-shot-renewal-disarm-enabled"},
+		{"--employee-self-service-enabled", "--employee-self-one-shot-renewal-disarm-enabled"},
+	} {
+		dataDir := filepath.Join(t.TempDir(), "unused")
+		args := append([]string{"--data-dir", dataDir}, flags...)
+		code, err := runCLI(args, strings.NewReader(""), io.Discard)
+		if code != 1 || err == nil || !strings.Contains(err.Error(), "--employee-self-one-shot-renewal-disarm-enabled requires") {
+			t.Fatalf("flags=%v code=%d err=%v", flags, code, err)
+		}
+		if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+			t.Fatalf("flags=%v wrote data: %v", flags, err)
+		}
+	}
+}
+
 func TestHelpDoesNotStartOrWriteData(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "unused")
 	var output bytes.Buffer
