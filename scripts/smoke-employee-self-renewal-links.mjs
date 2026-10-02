@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { adminClient, initialize, password as adminPassword, root, startServer, stopServer } from './next-batch-smoke-lib.mjs';
 
@@ -16,6 +16,7 @@ assert.ok(executable && path.isAbsolute(executable) && go && path.isAbsolute(go)
 const scratch = path.join(root, `employee-self-renewal-links-${randomUUID()}`);
 const flags = ['--employee-self-service-enabled', '--employee-self-subscription-status-enabled',
   '--employee-self-subscription-renewal-links-enabled'];
+const bothFlags = [...flags, '--employee-self-wallet-balance-enabled', '--employee-self-subscription-renewal-enabled'];
 const selfPassword = 'synthetic-renewal-links-password-123';
 let processHandle;
 
@@ -47,6 +48,13 @@ async function makeDue(subscriptionID) {
 
 try {
   await mkdir(scratch, { recursive: true });
+  const rejectedDir = path.join(scratch, 'rejected-init');
+  const rejected = spawn(executable, ['--data-dir', rejectedDir, '--init', '--employee-self-subscription-renewal-links-enabled'], {
+    cwd: path.resolve(import.meta.dirname, '..'), windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'],
+  });
+  rejected.stdin.end(adminPassword + '\n');
+  assert.equal((await once(rejected, 'exit'))[0], 1, 'missing prerequisites must reject --init');
+  await assert.rejects(stat(rejectedDir), { code: 'ENOENT' }, 'rejected --init must not create a data directory');
   await initialize(executable, scratch);
   processHandle = await startServer(executable, scratch, path.resolve('web/dist'));
   await selfCall('/self/api/v1/billing/subscriptions/absent/renewal-links', { expected: 404 });
@@ -125,6 +133,21 @@ try {
   assert.equal((await admin.request(`/billing/balances?owner_kind=employee&employee_id=${employee.id}&currency=USD`)).balance_micro,
     balanceBefore, 'read must not move money');
   assert.ok(!processHandle.output().includes(adminPassword) && !processHandle.output().includes(selfPassword), 'secret appeared in service logs');
+
+  // The monthly write guard must not swallow the sibling renewal-links read.
+  await stopServer(processHandle);
+  processHandle = await startServer(executable, scratch, path.resolve('web/dist'), bothFlags);
+  assert.equal((await selfCall('/self/api/v1/session', { cookie })).value.features.employee_self_subscription_renewal, true);
+  assert.deepEqual((await selfCall(route(rootSubscription.id), { cookie })).value, {
+    subscription_id: rootSubscription.id, predecessor_id: null, successor_id: renewed.id,
+  });
+  assert.deepEqual((await selfCall(route(renewed.id), { cookie })).value, {
+    subscription_id: renewed.id, predecessor_id: rootSubscription.id, successor_id: null,
+  });
+  const wrongMethod = await selfCall(route(rootSubscription.id), { cookie, method: 'POST', expected: 405 });
+  assert.equal(wrongMethod.allow, 'GET');
+  const monthlyMethod = await selfCall(`/self/api/v1/billing/subscriptions/${rootSubscription.id}/renew`, { cookie, expected: 405 });
+  assert.equal(monthlyMethod.allow, 'POST');
   console.log('employee self renewal links isolated process acceptance passed');
   if (holdBrowser) {
     console.log(`browser origin=${processHandle.origin} employee=${employee.id} root=${rootSubscription.id} successor=${renewed.id}`);

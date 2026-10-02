@@ -125,6 +125,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	if cfg.EmployeeSelfSubscriptionStatusEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return 1, errors.New("--employee-self-subscription-status-enabled requires --employee-self-service-enabled")
 	}
+	if cfg.EmployeeSelfSubscriptionRenewalLinksEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled) {
+		return 1, errors.New("--employee-self-subscription-renewal-links-enabled requires --employee-self-service-enabled and --employee-self-subscription-status-enabled")
+	}
 	if cfg.EmployeeSelfSubscriptionCancelEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled) {
 		return 1, errors.New("--employee-self-subscription-cancel-enabled requires --employee-self-service-enabled and --employee-self-subscription-status-enabled")
 	}

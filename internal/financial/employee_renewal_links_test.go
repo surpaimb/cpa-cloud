@@ -83,6 +83,29 @@ func TestEmployeeRenewalLinksRootMiddleLeafAndHistoricalSwitch(t *testing.T) {
 	if got, err := readRenewalLinksTest(t, commercial, owner.EmployeeID, second.ID, purchaseSnapshotReadHooks{}); err != nil || got.PredecessorID == nil || got.SuccessorID == nil {
 		t.Fatalf("historical links=%+v err=%v", got, err)
 	}
+	// Corrupting the successor's purchase entry invalidates both the owned
+	// target and the direct outgoing edge, while a foreign target still hides
+	// the malformed chain behind the ownership boundary.
+	if _, err := db.Exec(`DROP TRIGGER financial_entries_no_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE financial_entries SET amount_micro=-999 WHERE resource_kind='subscription' AND resource_id=? AND kind='subscription_charge'`, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(entriesNoUpdateDDL); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if got, err := readRenewalLinksTest(t, commercial, owner.EmployeeID, id, purchaseSnapshotReadHooks{}); !errors.Is(err, ErrUnavailable) || got.SubscriptionID != "" {
+			t.Fatalf("corrupt direct edge id=%s links=%+v err=%v", id, got, err)
+		}
+	}
+	if _, err := readRenewalLinksTest(t, commercial, "employee-two", first.ID, purchaseSnapshotReadHooks{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign corrupt target leaked status: %v", err)
+	}
+	if got, err := readRenewalLinksTest(t, commercial, owner.EmployeeID, third.ID, purchaseSnapshotReadHooks{}); err != nil || got.PredecessorID == nil || *got.PredecessorID != second.ID {
+		t.Fatalf("two-hop corruption affected valid direct edge: %+v err=%v", got, err)
+	}
 }
 
 func TestEmployeeRenewalLinksOneTimeForeignAndBrokenLink(t *testing.T) {

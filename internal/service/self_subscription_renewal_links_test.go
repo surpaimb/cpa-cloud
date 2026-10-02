@@ -15,8 +15,9 @@ import (
 	"cpacloud.local/server/internal/financial"
 )
 
-func newSelfRenewalLinksFixture(t *testing.T, enabled bool) selfWalletFixture {
+func newSelfRenewalLinksFixture(t *testing.T, enabled bool, monthlyEnabled ...bool) selfWalletFixture {
 	t.Helper()
+	withMonthly := len(monthlyEnabled) > 0 && monthlyEnabled[0]
 	dir := t.TempDir()
 	if err := Initialize(context.Background(), dir, strings.NewReader("a-strong-preview-password\n")); err != nil {
 		t.Fatal(err)
@@ -25,6 +26,7 @@ func newSelfRenewalLinksFixture(t *testing.T, enabled bool) selfWalletFixture {
 		DataDir: dir, Listen: "127.0.0.1:0", Version: "test",
 		EmployeeSelfServiceEnabled: true, EmployeeSelfSubscriptionStatusEnabled: true,
 		EmployeeSelfSubscriptionRenewalLinksEnabled: enabled,
+		EmployeeSelfWalletBalanceEnabled:            withMonthly, EmployeeSelfSubscriptionRenewalEnabled: withMonthly,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +39,75 @@ func newSelfRenewalLinksFixture(t *testing.T, enabled bool) selfWalletFixture {
 	secret := selfIssue(t, server.URL, employee.ID, adminCookie, adminCSRF)
 	cookie, csrf := selfRedeem(t, server.URL, employee.ID, secret)
 	return selfWalletFixture{app: app, server: server, dir: dir, id: employee.ID, cookie: cookie, csrf: csrf, adminCookie: adminCookie, adminCSRF: adminCSRF}
+}
+
+func TestSelfRenewalLinksAndMonthlyRenewalGuardsTogether(t *testing.T) {
+	f := newSelfRenewalLinksFixture(t, true, true)
+	first, second := seedSelfRenewalLinks(t, f)
+	root := readSelfWalletResponse(t, selfRenewalLinksRequest(t, f, first+"/renewal-links", "", "", f.cookie), 200)
+	if len(root) != 3 || root["subscription_id"] != first || root["predecessor_id"] != nil || root["successor_id"] != second {
+		t.Fatalf("both-flags root=%+v", root)
+	}
+	leaf := readSelfWalletResponse(t, selfRenewalLinksRequest(t, f, second+"/renewal-links", "", "", f.cookie), 200)
+	if len(leaf) != 3 || leaf["predecessor_id"] != first || leaf["successor_id"] != nil {
+		t.Fatalf("both-flags leaf=%+v", leaf)
+	}
+	postLinks := selfRequestTest(t, http.MethodPost, f.server.URL+"/self/api/v1/billing/subscriptions/"+first+"/renewal-links", "", f.server.URL, f.cookie, f.csrf)
+	if postLinks.Header.Get("Allow") != http.MethodGet {
+		t.Fatalf("both-flags renewal-links Allow=%q", postLinks.Header.Get("Allow"))
+	}
+	readSelfWalletResponse(t, postLinks, 405)
+	readSelfWalletResponse(t, selfRenewalLinksRequest(t, f, first+"/renewal-links/extra", "", "", f.cookie), 400)
+	getRenew := selfRequestTest(t, http.MethodGet, f.server.URL+"/self/api/v1/billing/subscriptions/"+first+"/renew", "", f.server.URL, f.cookie, f.csrf)
+	if getRenew.Header.Get("Allow") != http.MethodPost {
+		t.Fatalf("monthly renewal Allow=%q", getRenew.Header.Get("Allow"))
+	}
+	readSelfWalletResponse(t, getRenew, 405)
+}
+
+func TestSelfRenewalLinksEmployeeActorAfterSelfRenewal(t *testing.T) {
+	f := newSelfRenewalLinksFixture(t, true, true)
+	commercial := financial.NewCommercial(f.app.store.db)
+	start := time.Date(2026, 8, 31, 8, 0, 0, 0, time.UTC)
+	owner := financial.Owner{Kind: financial.OwnerEmployee, EmployeeID: f.id}
+	if _, err := commercial.SetEnabled(context.Background(), selfSnapshotMeta(t, f, "links-employee-enable", start.Add(-2*time.Hour)), 1, true); err != nil {
+		t.Fatal(err)
+	}
+	plan, _, err := commercial.CreatePlan(context.Background(), financial.CreatePlan{
+		Meta: selfSnapshotMeta(t, f, "links-employee-plan", start.Add(-2*time.Hour)), Name: "Synthetic employee renewal monthly",
+		Currency: "USD", Interval: "monthly", PriceMicro: 10, CreditMicro: 20, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activityPost(t, f, "links-employee-fund", owner, "USD", financial.EntryAdjustmentCredit, 100, start.Add(-time.Hour))
+	root, _, err := commercial.PurchaseSubscription(context.Background(), financial.PurchaseSubscription{
+		Meta: selfSnapshotMeta(t, f, "links-employee-buy", start), Owner: owner, PlanID: plan.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	monthly := selfPurchaseFixture{selfWalletFixture: f, planID: plan.ID}
+	quote := readSelfWalletResponse(t, selfMonthlyQuote(t, monthly, root.ID, f.cookie, f.csrf), 201)
+	token, ok := quote["quote_token"].(string)
+	if !ok || token == "" {
+		t.Fatalf("missing employee quote token: %+v", quote)
+	}
+	renewed := readSelfWalletResponse(t, selfMonthlyRenew(t, monthly, root.ID, "links-employee-renew", token, selfPurchaseTestPassword, f.cookie, f.csrf), 201)
+	successor, ok := renewed["subscription_id"].(string)
+	if !ok || successor == "" {
+		t.Fatalf("missing employee successor: %+v", renewed)
+	}
+	for _, item := range []struct{ id, prior, next string }{
+		{root.ID, "", successor}, {successor, root.ID, ""},
+	} {
+		got := readSelfWalletResponse(t, selfRenewalLinksRequest(t, f, item.id+"/renewal-links", "", "", f.cookie), 200)
+		if len(got) != 3 || got["subscription_id"] != item.id ||
+			(item.prior == "" && got["predecessor_id"] != nil || item.prior != "" && got["predecessor_id"] != item.prior) ||
+			(item.next == "" && got["successor_id"] != nil || item.next != "" && got["successor_id"] != item.next) {
+			t.Fatalf("typed employee links=%+v expected=%+v", got, item)
+		}
+	}
 }
 
 func seedSelfRenewalLinks(t *testing.T, f selfWalletFixture) (string, string) {
