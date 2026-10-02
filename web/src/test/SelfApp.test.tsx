@@ -13,6 +13,7 @@
 // docs/employee-self-subscription-status-contract.md.
 // docs/employee-self-plan-catalog-contract.md.
 // docs/employee-self-plan-purchase-contract.md.
+// docs/employee-self-subscription-cancel-contract.md.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -298,6 +299,96 @@ describe('employee self-service page', () => {
     expect(pendingSignal?.aborted).toBe(true)
     pending?.(new Response(JSON.stringify({ items: [{ subscription_id: 'sub-a-late', interval: 'one_time', status: 'active', started_at: '2026-01-31T08:00:00Z', period_end_at: null, cancelled_at: null }], next_cursor: null }), { status: 200 }))
     expect(screen.queryByText('sub-a-late')).not.toBeInTheDocument()
+  })
+
+  it('requires a separate confirmation before cancelling an active own subscription and refreshes authority', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let cancelled = false
+    const cancelledAt = '2026-10-02T08:00:00Z'
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true, employee_self_subscription_cancel: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [
+        { subscription_id: 'sub-own', interval: 'one_time', status: cancelled ? 'cancelled' : 'active', revision: cancelled ? 2 : 1, started_at: '2026-10-01T08:00:00Z', period_end_at: null, cancelled_at: cancelled ? cancelledAt : null },
+        { subscription_id: 'sub-expired', interval: 'monthly', status: 'expired', revision: 1, started_at: '2026-01-31T08:00:00Z', period_end_at: '2026-02-28T08:00:00.000000000Z', cancelled_at: null },
+      ], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions/sub-own/cancel') && init?.method === 'POST') {
+        cancelled = true
+        const body = JSON.parse(String(init.body)) as { operation_id: string }
+        return reply(200, { operation_id: body.operation_id, subscription_id: 'sub-own', replay: false, status: 'cancelled', revision: 2, cancelled_at: cancelledAt })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/subscriptions'))).toBe(false)
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    expect(await within(panel).findByText('sub-own')).toBeInTheDocument()
+    expect(within(panel).getAllByRole('button', { name: '取消此订阅' })).toHaveLength(1)
+    await userEvent.click(within(panel).getByRole('button', { name: '取消此订阅' }))
+    expect(within(panel).getByText(/不退款、不撤回已授额度/)).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/cancel'))).toBe(false)
+    await userEvent.click(within(panel).getByLabelText('我已阅读并确认取消这条订阅。'))
+    const field = within(panel).getByLabelText('当前密码（确认取消）') as HTMLInputElement
+    expect(field.type).toBe('password')
+    await userEvent.type(field, 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('button', { name: '确认取消订阅' }))
+    await waitFor(() => expect(within(panel).getByText('已取消')).toBeInTheDocument())
+    expect(within(panel).getByText(/取消已确认/)).toBeInTheDocument()
+    expect(within(panel).queryByLabelText('当前密码（确认取消）')).not.toBeInTheDocument()
+    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/sub-own/cancel'))
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ operation_id: expect.stringMatching(/^self-cancel-[0-9a-f]{32}$/), expected_revision: 1, current_password: 'a-long-self-password' })
+    expect(new Headers(call?.[1]?.headers).get('X-CSRF-Token')).toBe('self-csrf')
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/billing/subscriptions?limit=20'))).toHaveLength(2)
+  })
+
+  it('keeps only an in-memory retry envelope after an uncertain cancellation', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let attempts = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true, employee_self_subscription_cancel: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [{ subscription_id: 'sub-retry', interval: 'one_time', status: attempts ? 'cancelled' : 'active', revision: attempts ? 2 : 1, started_at: '2026-10-01T08:00:00Z', period_end_at: null, cancelled_at: attempts ? '2026-10-02T08:00:00Z' : null }], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions/sub-retry/cancel') && init?.method === 'POST') {
+        attempts++
+        if (attempts === 1) return reply(503, { error: { code: 'storage_unavailable' } })
+        const body = JSON.parse(String(init.body)) as { operation_id: string }
+        return reply(200, { operation_id: body.operation_id, subscription_id: 'sub-retry', replay: true, status: 'cancelled', revision: 2, cancelled_at: '2026-10-02T08:00:00Z' })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    window.localStorage.clear()
+    window.sessionStorage.clear()
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    await userEvent.click(await within(panel).findByRole('button', { name: '取消此订阅' }))
+    await userEvent.click(within(panel).getByLabelText('我已阅读并确认取消这条订阅。'))
+    await userEvent.type(within(panel).getByLabelText('当前密码（确认取消）'), 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('button', { name: '确认取消订阅' }))
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('取消结果未确认')
+    expect(within(panel).queryByText(/取消已确认/)).not.toBeInTheDocument()
+    expect(within(panel).queryByLabelText('当前密码（确认取消）')).not.toBeInTheDocument()
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+    await userEvent.click(within(panel).getByLabelText('我确认显式重试原取消操作。'))
+    await userEvent.type(within(panel).getByLabelText('当前密码（重试原操作）'), 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('button', { name: '确认重试取消' }))
+    expect(await within(panel).findByText(/已确认原取消/)).toBeInTheDocument()
+    const calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/sub-retry/cancel'))
+    expect(calls).toHaveLength(2)
+    const first = JSON.parse(String(calls[0]?.[1]?.body)) as { operation_id: string; expected_revision: number }
+    const second = JSON.parse(String(calls[1]?.[1]?.body)) as { operation_id: string; expected_revision: number }
+    expect(second.operation_id).toBe(first.operation_id)
+    expect(second.expected_revision).toBe(1)
   })
 
   it('keeps the plan catalog absent without its independent capability', async () => {

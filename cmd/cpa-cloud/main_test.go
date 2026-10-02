@@ -128,6 +128,24 @@ func TestInstanceIDValidationDoesNotWriteData(t *testing.T) {
 	}
 }
 
+// Independently authored for docs/employee-self-subscription-cancel-contract.md.
+func TestSelfSubscriptionCancelCLIRequiresBothPrerequisitesBeforeStorage(t *testing.T) {
+	for _, flags := range [][]string{
+		{"--employee-self-subscription-cancel-enabled"},
+		{"--employee-self-service-enabled", "--employee-self-subscription-cancel-enabled"},
+	} {
+		dataDir := filepath.Join(t.TempDir(), "unused")
+		args := append([]string{"--data-dir", dataDir}, flags...)
+		code, err := runCLI(args, strings.NewReader(""), io.Discard)
+		if code != 1 || err == nil || !strings.Contains(err.Error(), "--employee-self-subscription-cancel-enabled requires") {
+			t.Fatalf("flags=%v code=%d err=%v", flags, code, err)
+		}
+		if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+			t.Fatalf("flags=%v wrote data: %v", flags, err)
+		}
+	}
+}
+
 func TestHelpDoesNotStartOrWriteData(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "unused")
 	var output bytes.Buffer
