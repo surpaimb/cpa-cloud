@@ -4,6 +4,7 @@ package financial
 // The caller owns the one read-only transaction and its final commit.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -270,6 +271,7 @@ type snapshotReceipt struct {
 	OperationID string
 	Action      string
 	Actor       snapshotActor
+	Digest      [32]byte
 }
 
 type snapshotActor struct {
@@ -320,11 +322,12 @@ func snapshotCreationReceipt(ctx context.Context, tx *sql.Tx, subscription Emplo
 		return snapshotReceipt{}, ErrUnavailable
 	}
 	if action != "subscription.create" && action != "subscription.renew" ||
-		action == "subscription.create" && actor.Kind == "system" ||
-		action == "subscription.renew" && actor.Kind == "employee" {
+		action == "subscription.create" && actor.Kind == "system" {
 		return snapshotReceipt{}, ErrUnavailable
 	}
-	return snapshotReceipt{OperationID: operationID, Action: action, Actor: actor}, nil
+	var digestValue [32]byte
+	copy(digestValue[:], digest)
+	return snapshotReceipt{OperationID: operationID, Action: action, Actor: actor, Digest: digestValue}, nil
 }
 
 func snapshotLedgerOperation(ctx context.Context, tx *sql.Tx, subscription EmployeeSubscriptionPurchaseSnapshot, receipt snapshotReceipt) error {
@@ -347,6 +350,20 @@ func snapshotLedgerOperation(ctx context.Context, tx *sql.Tx, subscription Emplo
 		actor.Kind == "legacy_unknown" && version != 1 ||
 		(actor.Kind == "employee" || actor.Kind == "system") && version != 2 {
 		return ErrUnavailable
+	}
+	if receipt.Action == "subscription.renew" && actor.Kind == "employee" {
+		started, err := parseSubscriptionStart(subscription.StartedAt)
+		if err != nil {
+			return ErrUnavailable
+		}
+		owner := Owner{Kind: OwnerEmployee, EmployeeID: actor.ID}
+		post := employeePurchasePost(EmployeePurchaseInput{OperationID: operationID, Actor: Actor{Kind: ActorEmployee, ID: actor.ID}, Owner: owner,
+			Expected: ExpectedPurchasePlan{PlanID: subscription.PlanID, Revision: subscription.PlanRevision, Currency: subscription.Currency,
+				Interval: "monthly", PriceMicro: subscription.PriceMicro, CreditMicro: subscription.CreditMicro}, ObservedAt: started}, subscription.SubscriptionID)
+		wanted, err := postDigestV2(post, post.Actor)
+		if err != nil || !bytes.Equal(digest, wanted[:]) {
+			return ErrUnavailable
+		}
 	}
 	return nil
 }
@@ -394,6 +411,9 @@ func snapshotPurchaseEntries(ctx context.Context, tx *sql.Tx, subscription Emplo
 }
 
 func snapshotIncomingRenewal(ctx context.Context, tx *sql.Tx, subscription EmployeeSubscriptionPurchaseSnapshot, employeeID string, receipt snapshotReceipt, hooks purchaseSnapshotReadHooks) error {
+	if receipt.Action == "subscription.renew" && receipt.Actor.Kind == "employee" && receipt.Actor.ID != employeeID {
+		return ErrUnavailable
+	}
 	links, err := snapshotRows(ctx, tx, `SELECT predecessor_id,successor_id,operation_id,created_at FROM financial_subscription_renewals WHERE successor_id=? LIMIT 2`, 2, 4, hooks, subscription.SubscriptionID)
 	if err != nil {
 		return err
@@ -445,6 +465,16 @@ func snapshotIncomingRenewal(ctx context.Context, tx *sql.Tx, subscription Emplo
 		!ownerEmployeeOK || ownerEmployee != employeeID || prior[10] != nil ||
 		!resourceKindOK || resourceKind != "" || !resourceIDOK || resourceID != "" {
 		return ErrUnavailable
+	}
+	if receipt.Actor.Kind == "employee" {
+		input := EmployeeMonthlyRenewalInput{OperationID: receipt.OperationID, Actor: Actor{Kind: ActorEmployee, ID: employeeID},
+			Owner: Owner{Kind: OwnerEmployee, EmployeeID: employeeID}, PredecessorID: predecessorID, PredecessorEnd: endText,
+			Expected: ExpectedPurchasePlan{PlanID: subscription.PlanID, Revision: subscription.PlanRevision, Currency: subscription.Currency,
+				Interval: "monthly", PriceMicro: subscription.PriceMicro, CreditMicro: subscription.CreditMicro}, ObservedAt: successorStart}
+		wanted, err := employeeMonthlyRenewalDigest(input)
+		if err != nil || !bytes.Equal(receipt.Digest[:], wanted[:]) {
+			return ErrUnavailable
+		}
 	}
 	return nil
 }

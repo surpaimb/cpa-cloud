@@ -794,6 +794,11 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-one-shot > p[role="alert"] { margin-top: 10px; color: #a52132; }
 .self-one-shot > p[role="status"] { margin-top: 10px; color: var(--navy); }
 @media (max-width: 520px) { .self-one-shot .button { max-width: 100%; white-space: normal; } }
+/* Independently authored for docs/employee-self-monthly-renewal-contract.md. */
+.self-monthly-renewal { min-width: 0; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.self-monthly-renewal > p[role="alert"] { margin: 10px 0 0; color: #a52132; font-size: 13px; line-height: 1.6; }
+.self-monthly-renewal .self-subscriptions-confirm { max-width: 100%; }
+@media (max-width: 520px) { .self-monthly-renewal .button { max-width: 100%; width: 100%; white-space: normal; } }
 /* Independently authored for docs/employee-self-plan-catalog-contract.md. */
 .self-plan-catalog { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
 .self-plan-catalog h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }

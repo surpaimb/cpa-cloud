@@ -169,9 +169,41 @@ func (c *Commercial) RenewSubscription(ctx context.Context, input RenewSubscript
 // renewSubscriptionTx is shared by explicit renewal and the one-shot worker.
 // The caller owns commit and any reservation transition in this same transaction.
 func (c *Commercial) renewSubscriptionTx(ctx context.Context, tx *sql.Tx, meta WriteMeta, predecessorID string, now time.Time) (Subscription, CommercialReceipt, error) {
+	return c.renewSubscriptionWithRestrictionsTx(ctx, tx, meta, predecessorID, now, renewalRestrictions{})
+}
+
+// Employee renewal shares the existing subscription/ledger/link transition,
+// but must never let its account lookup create a wallet.
+type renewalRestrictions struct {
+	employeeID     string
+	predecessorEnd string
+	expectedPlan   *ExpectedPurchasePlan
+}
+
+func (c *Commercial) renewSubscriptionWithRestrictionsTx(ctx context.Context, tx *sql.Tx, meta WriteMeta, predecessorID string, now time.Time, restrictions renewalRestrictions) (Subscription, CommercialReceipt, error) {
+	if restrictions.employeeID != "" {
+		if err := snapshotOwnershipBoundary(ctx, tx, restrictions.employeeID, predecessorID); err != nil {
+			return Subscription{}, CommercialReceipt{}, err
+		}
+	}
 	predecessor, err := loadSubscriptionAt(ctx, tx, predecessorID, now)
 	if err != nil {
 		return Subscription{}, CommercialReceipt{}, err
+	}
+	if restrictions.employeeID != "" {
+		if err := validateEmployeeCancelSubscriptionShape(ctx, tx, predecessor); err != nil {
+			return Subscription{}, CommercialReceipt{}, err
+		}
+		ownerOK, err := employeeSubscriptionCancelOwner(ctx, tx, predecessor, restrictions.employeeID)
+		if err != nil {
+			return Subscription{}, CommercialReceipt{}, err
+		}
+		if !ownerOK {
+			return Subscription{}, CommercialReceipt{}, ErrNotFound
+		}
+		if predecessor.PeriodEndAt == nil || predecessor.PeriodEndAt.Format(subscriptionEndLayout) != restrictions.predecessorEnd {
+			return Subscription{}, CommercialReceipt{}, ErrConflict
+		}
 	}
 	if err := requireCommercialEnabled(ctx, tx); err != nil {
 		return Subscription{}, CommercialReceipt{}, err
@@ -179,12 +211,27 @@ func (c *Commercial) renewSubscriptionTx(ctx context.Context, tx *sql.Tx, meta W
 	if predecessor.Interval != "monthly" || predecessor.Status != "expired" || predecessor.PeriodEndAt == nil || predecessor.SuccessorID != "" {
 		return Subscription{}, CommercialReceipt{}, ErrConflict
 	}
-	plan, err := loadPlan(ctx, tx, predecessor.PlanID)
+	var plan Plan
+	if restrictions.employeeID != "" {
+		plan, err = loadEmployeePurchasePlan(ctx, tx, predecessor.PlanID)
+	} else {
+		plan, err = loadPlan(ctx, tx, predecessor.PlanID)
+	}
 	if err != nil {
+		if restrictions.employeeID != "" && errors.Is(err, ErrNotFound) {
+			return Subscription{}, CommercialReceipt{}, ErrConflict
+		}
 		return Subscription{}, CommercialReceipt{}, err
 	}
 	if !plan.Enabled || plan.Interval != "monthly" {
 		return Subscription{}, CommercialReceipt{}, ErrConflict
+	}
+	if restrictions.expectedPlan != nil {
+		expected := restrictions.expectedPlan
+		if plan.ID != expected.PlanID || plan.Revision != expected.Revision || plan.Currency != expected.Currency ||
+			plan.PriceMicro != expected.PriceMicro || plan.CreditMicro != expected.CreditMicro || plan.Interval != expected.Interval {
+			return Subscription{}, CommercialReceipt{}, ErrConflict
+		}
 	}
 	end, err := monthlyPeriodEnd(now)
 	if err != nil {
@@ -195,7 +242,15 @@ func (c *Commercial) renewSubscriptionTx(ctx context.Context, tx *sql.Tx, meta W
 		return Subscription{}, CommercialReceipt{}, err
 	}
 	ledger := NewLedger(c.db)
-	accountID, _, err := ledger.EnsureAccountTx(ctx, tx, owner, plan.Currency, now)
+	var accountID string
+	if restrictions.employeeID != "" {
+		if owner.Kind != OwnerEmployee || owner.EmployeeID != restrictions.employeeID {
+			return Subscription{}, CommercialReceipt{}, ErrNotFound
+		}
+		accountID, err = employeePurchaseWallet(ctx, tx, owner, plan.Currency)
+	} else {
+		accountID, _, err = ledger.EnsureAccountTx(ctx, tx, owner, plan.Currency, now)
+	}
 	if err != nil {
 		return Subscription{}, CommercialReceipt{}, err
 	}

@@ -58,6 +58,11 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 		mux.HandleFunc("GET /self/api/v1/billing/subscriptions/{id}/purchase-snapshot", a.requireSelf(a.selfSubscriptionPurchaseSnapshot, false))
 		mux.HandleFunc("GET /self/api/v1/billing/subscriptions/{id}/purchase-snapshot/{tail...}", a.requireSelf(a.selfSubscriptionPurchaseSnapshot, false))
 	}
+	// Independently authored for docs/employee-self-monthly-renewal-contract.md.
+	if a.cfg.EmployeeSelfSubscriptionRenewalEnabled {
+		mux.HandleFunc("POST /self/api/v1/billing/subscriptions/{id}/renewal-quotes", a.requireSelfReleased(a.selfMonthlyRenewalQuote, true))
+		mux.HandleFunc("POST /self/api/v1/billing/subscriptions/{id}/renew", a.requireSelfReleased(a.selfMonthlyRenewal, true))
+	}
 	if a.cfg.EmployeeSelfSubscriptionCancelEnabled {
 		mux.HandleFunc("POST /self/api/v1/billing/subscriptions/{id}/cancel", a.requireSelfReleased(a.selfSubscriptionCancel, true))
 	}
@@ -531,6 +536,7 @@ func (a *App) selfSessionResponse(csrf string, profile selfProfile) map[string]a
 		"employee_self_wallet_activity":                a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
 		"employee_self_subscription_status":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
 		"employee_self_subscription_purchase_snapshot": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled,
+		"employee_self_subscription_renewal":           a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionRenewalEnabled,
 		"employee_self_subscription_cancel":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionCancelEnabled,
 		"employee_self_one_shot_renewal_disarm":        a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfOneShotRenewalDisarmEnabled,
 		"employee_self_plan_catalog":                   a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled,

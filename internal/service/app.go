@@ -103,6 +103,13 @@ type App struct {
 	// Independently authored for docs/employee-self-subscription-purchase-snapshot-contract.md.
 	// Test-only read commit boundary; production leaves nil.
 	selfPurchaseSnapshotCommit func(*sql.Tx) error
+	// Independently authored for docs/employee-self-monthly-renewal-contract.md.
+	// Test-only clocks and commit boundaries; production leaves these nil.
+	selfMonthlyRenewalNow          func() time.Time
+	selfMonthlyRenewalBeforeTx     func()
+	selfMonthlyRenewalBeforeCommit func(*sql.Tx)
+	selfMonthlyRenewalQuoteCommit  func(*sql.Tx) error
+	selfMonthlyRenewalCommit       func(*sql.Tx) error
 	// Independently authored for docs/employee-self-key-token-summary-contract.md.
 	// Test-only snapshot and commit boundaries; production leaves both nil.
 	selfKeyTokenSummaryAfterOwnership func()
@@ -139,6 +146,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	}
 	if cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled || !cfg.EmployeeSelfWalletBalanceEnabled) {
 		return nil, errors.New("employee self subscription purchase snapshot requires employee self service, subscription status, and wallet balance")
+	}
+	if cfg.EmployeeSelfSubscriptionRenewalEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled || !cfg.EmployeeSelfWalletBalanceEnabled) {
+		return nil, errors.New("employee self subscription renewal requires employee self service, subscription status, and wallet balance")
 	}
 	if cfg.EmployeeSelfSubscriptionCancelEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled) {
 		return nil, errors.New("employee self subscription cancel requires employee self service and subscription status")
@@ -479,6 +489,9 @@ func (a *App) Handler() http.Handler {
 	if a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled {
 		handler = a.selfPurchaseSnapshotRouteGuard(handler)
 	}
+	if a.cfg.EmployeeSelfSubscriptionRenewalEnabled {
+		handler = a.selfMonthlyRenewalRouteGuard(handler)
+	}
 	return requestMiddleware(handler)
 }
 
@@ -545,6 +558,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"employee_self_wallet_activity":                a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
 			"employee_self_subscription_status":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
 			"employee_self_subscription_purchase_snapshot": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled,
+			"employee_self_subscription_renewal":           a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionRenewalEnabled,
 			"employee_self_plan_catalog":                   a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled,
 			"employee_self_plan_purchase":                  a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled && a.cfg.EmployeeSelfPlanPurchaseEnabled,
 			"employee_self_subscription_cancel":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionCancelEnabled,

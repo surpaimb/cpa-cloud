@@ -16,6 +16,7 @@
 // docs/employee-self-subscription-cancel-contract.md.
 // docs/employee-self-one-shot-disarm-contract.md.
 // docs/employee-self-subscription-purchase-snapshot-contract.md.
+// docs/employee-self-monthly-renewal-contract.md.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -1444,6 +1445,136 @@ describe('employee self-service page', () => {
     await userEvent.click(screen.getByRole('button', { name: '查看 Editor 的请求活动' }))
     expect(await screen.findByText('此 Key 最近 24 小时暂无请求活动。')).toBeInTheDocument()
     expect(reads).toBe(2)
+  })
+})
+
+describe('employee self monthly renewal', () => {
+  beforeEach(() => vi.restoreAllMocks())
+  afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
+  const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+  const item = (subscription_id: string, status: 'expired' | 'active' = 'expired') => ({
+    subscription_id, interval: 'monthly', status, started_at: '2026-08-31T08:00:00Z',
+    period_end_at: '2026-09-30T08:00:00.000000000Z', cancelled_at: null,
+  })
+  const quote = (predecessor_id: string) => ({
+    quote_token: 'opaque-renewal-token', predecessor_id,
+    predecessor_period_end_at: '2026-09-30T08:00:00.000000000Z', plan_id: 'plan-monthly',
+    revision: 2, currency: 'USD', interval: 'monthly', price_micro: '42', credit_micro: '11',
+    expires_at: '2026-10-02T01:05:00Z',
+  })
+
+  function baseline(url: string, renewal = true) {
+    if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true, employee_self_subscription_renewal: renewal } })
+    if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+    if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+    if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+    if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [item('sub-z'), item('sub-active', 'active'), item('sub-a')], next_cursor: null })
+    return null
+  }
+
+  it('only offers renewal for explicitly read expired monthly rows with the independent capability', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const response = baseline(String(input), false)
+      if (response) return response
+      throw new Error(`Unexpected request: ${String(input)}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    expect(within(panel).queryByRole('button', { name: '获取此订阅的续购报价' })).not.toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    await within(panel).findByText('sub-z')
+    expect(within(panel).queryByRole('button', { name: '获取此订阅的续购报价' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/renewal-quotes'))).toBe(false)
+  })
+
+  it('requires a quote and current password, then shows one committed successor', async () => {
+    const submissions: Array<{ body: Record<string, string>; headers: Headers }> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/billing/subscriptions/sub-z/renewal-quotes')) return reply(201, quote('sub-z'))
+      if (url.endsWith('/billing/subscriptions/sub-z/renew')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, string>
+        submissions.push({ body, headers: new Headers(init?.headers) })
+        return reply(201, { operation_id: body.operation_id, predecessor_id: 'sub-z', subscription_id: 'sub-new', replay: false,
+          plan_id: 'plan-monthly', revision: 2, currency: 'USD', interval: 'monthly', price_micro: '42', credit_micro: '11',
+          started_at: '2026-10-02T01:00:00Z', period_end_at: '2026-11-02T01:00:00Z' })
+      }
+      const response = baseline(url)
+      if (response) return response
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/renewal-quotes'))).toBe(false)
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    const renewal = await within(panel).findByRole('region', { name: '订阅 sub-z 的月度续购' })
+    expect(within(panel).getAllByRole('button', { name: '获取此订阅的续购报价' })).toHaveLength(2)
+    await userEvent.click(within(renewal).getByRole('button', { name: '获取此订阅的续购报价' }))
+    expect(await within(renewal).findByRole('heading', { name: '确认本人月度续购' })).toBeInTheDocument()
+    expect(within(renewal).getByText(/尚未扣款/)).toBeInTheDocument()
+    await userEvent.click(within(renewal).getByRole('checkbox', { name: /我确认从本人现有钱包扣款/ }))
+    await userEvent.type(within(renewal).getByLabelText('当前密码（确认续购）'), 'a-long-self-password')
+    await userEvent.click(within(renewal).getByRole('button', { name: '确认续购一个月' }))
+    expect(await within(panel).findByText(/续购已确认：原订阅 sub-z，新订阅 sub-new/)).toBeInTheDocument()
+    expect(submissions).toHaveLength(1)
+    expect(Object.keys(submissions[0].body).sort()).toEqual(['current_password', 'operation_id', 'quote_token'])
+    expect(submissions[0].body).toMatchObject({ quote_token: 'opaque-renewal-token', current_password: 'a-long-self-password' })
+    expect(submissions[0].body.operation_id).toMatch(/^self-renew-[0-9a-f]{32}$/)
+    expect(submissions[0].headers.get('X-CSRF-Token')).toBe('self-csrf')
+  })
+
+  it('keeps only the same ID/token after uncertainty and drops a late quote on target change', async () => {
+    let lateQuote: ((response: Response) => void) | undefined
+    let lateSignal: AbortSignal | undefined
+    const bodies: Array<Record<string, string>> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/billing/subscriptions/sub-a/renewal-quotes')) {
+        lateSignal = init?.signal ?? undefined
+        return new Promise<Response>((resolve) => { lateQuote = resolve })
+      }
+      if (url.endsWith('/billing/subscriptions/sub-z/renewal-quotes')) return reply(201, quote('sub-z'))
+      if (url.endsWith('/billing/subscriptions/sub-z/renew')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, string>
+        bodies.push(body)
+        return bodies.length === 1 ? reply(503, { error: { code: 'storage_unavailable' } }) : reply(200, {
+          operation_id: body.operation_id, predecessor_id: 'sub-z', subscription_id: 'sub-original', replay: true,
+          plan_id: 'plan-monthly', revision: 2, currency: 'USD', interval: 'monthly', price_micro: '42', credit_micro: '11',
+          started_at: '2026-10-02T01:00:00Z', period_end_at: '2026-11-02T01:00:00Z',
+        })
+      }
+      const response = baseline(url)
+      if (response) return response
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    const a = await within(panel).findByRole('region', { name: '订阅 sub-a 的月度续购' })
+    const z = within(panel).getByRole('region', { name: '订阅 sub-z 的月度续购' })
+    await userEvent.click(within(a).getByRole('button', { name: '获取此订阅的续购报价' }))
+    await waitFor(() => expect(lateQuote).toBeTypeOf('function'))
+    await userEvent.click(within(z).getByRole('button', { name: '获取此订阅的续购报价' }))
+    expect(lateSignal?.aborted).toBe(true)
+    lateQuote?.(new Response(JSON.stringify(quote('sub-a')), { status: 201 }))
+    expect(within(a).queryByRole('heading', { name: '确认本人月度续购' })).not.toBeInTheDocument()
+    await within(z).findByRole('heading', { name: '确认本人月度续购' })
+    await userEvent.click(within(z).getByRole('checkbox', { name: /我确认从本人现有钱包扣款/ }))
+    await userEvent.type(within(z).getByLabelText('当前密码（确认续购）'), 'a-long-self-password')
+    await userEvent.click(within(z).getByRole('button', { name: '确认续购一个月' }))
+    expect(await within(z).findByRole('heading', { name: '上次续购结果未确认' })).toBeInTheDocument()
+    expect(within(z).queryByRole('heading', { name: '确认本人月度续购' })).not.toBeInTheDocument()
+    await userEvent.click(within(z).getByRole('checkbox', { name: /我确认显式重试原续购操作/ }))
+    await userEvent.type(within(z).getByLabelText('当前密码（重试原操作）'), 'a-long-self-password')
+    await userEvent.click(within(z).getByRole('button', { name: '确认重试续购' }))
+    expect(await within(panel).findByText(/已确认原续购：原订阅 sub-z，新订阅 sub-original/)).toBeInTheDocument()
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1].operation_id).toBe(bodies[0].operation_id)
+    expect(bodies[1].quote_token).toBe(bodies[0].quote_token)
   })
 })
 
