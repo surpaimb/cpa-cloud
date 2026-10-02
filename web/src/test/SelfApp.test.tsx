@@ -17,6 +17,7 @@
 // docs/employee-self-one-shot-disarm-contract.md.
 // docs/employee-self-subscription-purchase-snapshot-contract.md.
 // docs/employee-self-monthly-renewal-contract.md.
+// docs/employee-self-subscription-renewal-links-contract.md.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -315,6 +316,92 @@ describe('employee self-service page', () => {
     await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
     expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
     expect(screen.queryByText('plan-sub-z')).not.toBeInTheDocument()
+  })
+
+  it('gates one-hop renewal links and reads only the explicitly selected listed subscription', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const item = (subscription_id: string) => ({ subscription_id, interval: 'monthly', status: 'expired', started_at: '2026-08-31T08:00:00Z', period_end_at: '2026-09-30T08:00:00.000000000Z', cancelled_at: null })
+    let enabled = false
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true, employee_self_subscription_renewal_links: enabled } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [item('sub-z'), item('sub-a')], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions/sub-z/renewal-links')) return reply(200, { subscription_id: 'sub-z', predecessor_id: null, successor_id: 'sub-a' })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const firstRender = render(<SelfApp />)
+    const firstPanel = await screen.findByRole('region', { name: '我的订阅状态' })
+    await userEvent.click(within(firstPanel).getByRole('button', { name: '读取我的订阅状态' }))
+    expect(within(firstPanel).queryByRole('button', { name: '查看直接续购关联' })).not.toBeInTheDocument()
+    firstRender.unmount()
+    enabled = true
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/renewal-links'))).toBe(false)
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    const target = await within(panel).findByRole('region', { name: '订阅 sub-z 的直接续购关联' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/renewal-links'))).toBe(false)
+    await userEvent.click(within(target).getByRole('button', { name: '查看直接续购关联' }))
+    expect(await within(target).findByText('无直接前驱')).toBeInTheDocument()
+    expect(within(target).getByText('sub-a')).toBeInTheDocument()
+    expect(within(target).getByText(/不是完整链、账单/)).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/renewal-links'))).toHaveLength(1)
+  })
+
+  it('clears renewal links on target, page, failure and logout and ignores a late response', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const item = (subscription_id: string) => ({ subscription_id, interval: 'one_time', status: 'active', started_at: '2026-10-02T08:00:00Z', period_end_at: null, cancelled_at: null })
+    let pending: ((value: Response) => void) | undefined
+    let pendingSignal: AbortSignal | undefined
+    let fail = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true, employee_self_subscription_renewal_links: true } })
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [item('sub-z'), item('sub-a')], next_cursor: 'next' })
+      if (url.endsWith('/billing/subscriptions?limit=20&cursor=next')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions/sub-z/renewal-links')) {
+        if (fail) return reply(503, { error: { code: 'storage_unavailable' } })
+        return reply(200, { subscription_id: 'sub-z', predecessor_id: null, successor_id: 'sub-next' })
+      }
+      if (url.endsWith('/billing/subscriptions/sub-a/renewal-links')) {
+        pendingSignal = init?.signal ?? undefined
+        return new Promise<Response>((resolve) => { pending = resolve })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    const first = await within(panel).findByRole('region', { name: '订阅 sub-z 的直接续购关联' })
+    const second = within(panel).getByRole('region', { name: '订阅 sub-a 的直接续购关联' })
+    await userEvent.click(within(first).getByRole('button', { name: '查看直接续购关联' }))
+    expect(await within(first).findByText('sub-next')).toBeInTheDocument()
+    await userEvent.click(within(second).getByRole('button', { name: '查看直接续购关联' }))
+    await waitFor(() => expect(pending).toBeTypeOf('function'))
+    expect(within(first).queryByText('sub-next')).not.toBeInTheDocument()
+    await userEvent.click(within(first).getByRole('button', { name: '查看直接续购关联' }))
+    expect(pendingSignal?.aborted).toBe(true)
+    pending?.(new Response(JSON.stringify({ subscription_id: 'sub-a', predecessor_id: null, successor_id: null }), { status: 200 }))
+    expect(await within(first).findByText('sub-next')).toBeInTheDocument()
+    expect(within(second).queryByText('无直接后继')).not.toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多订阅' }))
+    expect(within(first).queryByText('sub-next')).not.toBeInTheDocument()
+    fail = true
+    await userEvent.click(within(first).getByRole('button', { name: '查看直接续购关联' }))
+    expect(await within(first).findByRole('alert')).toBeInTheDocument()
+    expect(within(first).queryByText('sub-next')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(screen.queryByText('sub-next')).not.toBeInTheDocument()
   })
 
   it('clears subscription results on failure and ignores a late response after logout', async () => {

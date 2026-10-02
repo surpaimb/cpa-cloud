@@ -36,6 +36,8 @@ GET /session → {username,csrf_token}；写请求 X-CSRF-Token，服务端验�
 
 `GET /self/api/v1/billing/subscriptions/{id}/purchase-snapshot` 是独立、默认关闭的本人直属钱包单条订阅购买时记录读取，要求自助总开关、本人订阅状态与本人钱包余额三个现有开关。仅当前 active 员工会话可按已知订阅 ID 显式读取；不存在、非本人或 Key/资源子账户订阅统一 404。成功响应只有订阅/套餐 ID、套餐版本、币种、周期、购买时扣费和授予额度的 canonical micro 字符串、开始与冻结期限结束时间。单一只读事务交叉核对商业回执、账本操作、两条分录及适用的续购链接；链异常或存储故障整响应 503。商业执行关闭或当前套餐变化不抹除历史记录。订阅行并非全字段不可变，故这不是防直接 SQL 篡改的凭证，也不是当前价格、余额、外部账单、真实付款或使用权益。网页由独立 capability 门控，仅点击列表中一条订阅才读取。详见[本人购买时记录契约](employee-self-subscription-purchase-snapshot-contract.md)。
 
+`GET /self/api/v1/billing/subscriptions/{id}/renewal-links` 是另一个默认关闭的本人直属订阅一跳关联读取，要求员工自助总开关和本人订阅状态开关，不要求钱包余额或当前商业执行开启。当前 active 员工按已知 ID 显式请求，成功响应仅有目标订阅 ID、可为 null 的直接前驱和直接后继 ID；服务在同一只读事务中先核本人直属归属，再校验关联两端及创建回执、账本和分录。它不展开完整链，也不证明付款、账单或模型权益。网页仅在显式读取列表后提供单条点击入口。详见[本人一跳续购关联契约](employee-self-subscription-renewal-links-contract.md)。
+
 `GET /self/api/v1/billing/subscriptions/{id}/one-shot-renewal` 与 `POST .../{id}/one-shot-renewal/disarm` 是另一个默认关闭的员工自助 opt-in，要求自助总开关和本人订阅状态开关。只有当前已开通且 active 的员工可按需查看本人直属钱包 monthly 订阅的一次性预约最小状态，或用当前密码、CSRF、预约存储 revision 和全局 operation ID 撤销尚未执行的预约；商业执行关闭后仍可读取及精确重放。员工不能 arm、购买、退款或取消本期订阅。GET 不触发 worker 或财务写入；POST 只以 typed employee actor 在同一事务记录一次 disarm receipt 和预约终态，不动钱包/账本。详见[员工一次性预约查看与撤销契约](employee-self-one-shot-disarm-contract.md)；真实生产启用与完整付款验收尚未完成。
 
 `GET /self/api/v1/billing/plans?currency=USD[&limit=20][&cursor=...]` 由默认关闭的 `--employee-self-plan-catalog-enabled` 注册，只要求员工自助总开关。当前 active 员工须明确指定单一三位大写币种并点击；仅当商业执行开关在本页读取快照中开启，返回该币种当前已启用套餐的 ID、名称、周期、价格/额度 micro 字符串和 revision，按 ID 升序分页。商业执行关闭时 `available=false`、空列表且无下一页；认证加密游标绑定员工、会话、币种、页大小和 15 分钟时限。它不是个人订阅、权益、固定报价或购买入口；无财务写入、支付或上游调用。详见[员工自助套餐目录契约](employee-self-plan-catalog-contract.md)。

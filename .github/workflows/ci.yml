@@ -90,6 +90,11 @@ jobs:
           CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-monthly-renewal
           CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
         run: node scripts/smoke-employee-self-monthly-renewal.mjs "$RUNNER_TEMP/cpa-cloud" "$(command -v go)"
+      - name: Test opt-in employee renewal links against an isolated process
+        env:
+          CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-renewal-links
+          CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
+        run: node scripts/smoke-employee-self-renewal-links.mjs "$RUNNER_TEMP/cpa-cloud" "$(command -v go)"
       - name: Test local account-pool reservation snapshot with synthetic traffic
         run: node scripts/smoke-account-pool.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test bounded four-source administrator audit overview

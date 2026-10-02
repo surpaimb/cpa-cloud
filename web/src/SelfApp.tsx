@@ -17,12 +17,13 @@
 // docs/employee-self-one-shot-disarm-contract.md.
 // docs/employee-self-subscription-purchase-snapshot-contract.md.
 // docs/employee-self-monthly-renewal-contract.md.
+// docs/employee-self-subscription-renewal-links-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_purchase_snapshot?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_subscription_renewal?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_purchase_snapshot?: boolean; employee_self_subscription_renewal_links?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_subscription_renewal?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -41,6 +42,7 @@ type SelfWalletActivityPage = { currency: string; has_account: boolean; window_s
 type SelfSubscriptionItem = { subscription_id: string; interval: 'one_time' | 'monthly'; status: 'active' | 'cancelled' | 'expired'; started_at: string; period_end_at: string | null; cancelled_at: string | null; revision?: number }
 type SelfSubscriptionPage = { items: SelfSubscriptionItem[]; next_cursor: string | null }
 type SelfPurchaseSnapshot = { subscription_id: string; plan_id: string; plan_revision: number; currency: string; interval: 'one_time' | 'monthly'; price_micro: string; credit_micro: string; started_at: string; period_end_at: string | null }
+type SelfRenewalLinks = { subscription_id: string; predecessor_id: string | null; successor_id: string | null }
 type SelfSubscriptionCancelResult = { operation_id: string; subscription_id: string; replay: boolean; status: 'cancelled'; revision: number; cancelled_at: string }
 type SelfOneShotStatus = { subscription_id: string; state: 'none' | 'armed' | 'disarmed' | 'succeeded' | 'failed' | 'superseded' | 'cancelled'; revision: number; due_at: string | null; reason: string | null; terminal_at: string | null }
 type SelfOneShotDisarmResult = SelfOneShotStatus & { operation_id: string; replay: boolean; state: 'disarmed'; revision: 2; due_at: string; reason: 'disarmed'; terminal_at: string }
@@ -782,6 +784,68 @@ function SelfPurchaseSnapshotPanel({ id, selected, onSelect }: { id: string; sel
   </section>
 }
 
+function validSelfRenewalLinks(raw: unknown, id: string): raw is SelfRenewalLinks {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const value = raw as Record<string, unknown>
+  const validNeighbor = (neighbor: unknown) => neighbor === null ||
+    typeof neighbor === 'string' && neighbor.length > 0 && neighbor.length <= 256 && neighbor.trim() === neighbor && neighbor !== id
+  return Object.keys(value).sort().join(',') === 'predecessor_id,subscription_id,successor_id' &&
+    value.subscription_id === id && validNeighbor(value.predecessor_id) && validNeighbor(value.successor_id) &&
+    (value.predecessor_id === null || value.successor_id === null || value.predecessor_id !== value.successor_id)
+}
+
+function SelfRenewalLinksPanel({ id, selected, onSelect }: { id: string; selected: boolean; onSelect: (id: string) => void }) {
+  const [links, setLinks] = useState<SelfRenewalLinks | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort() }, [])
+  useEffect(() => {
+    if (selected) return
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    setLinks(null); setLoading(false); setError(false)
+  }, [selected])
+
+  async function readLinks() {
+    onSelect(id)
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const controller = new AbortController()
+    pending.current = controller
+    setLinks(null); setError(false); setLoading(true)
+    try {
+      const raw = await selfRequest<unknown>(`/billing/subscriptions/${encodeURIComponent(id)}/renewal-links`, { signal: controller.signal })
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (!validSelfRenewalLinks(raw, id)) throw new Error('Invalid renewal links response')
+      setLinks(raw)
+    } catch {
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      setLinks(null); setError(true)
+    } finally {
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(false)
+    }
+  }
+
+  return <section className="self-renewal-links" aria-label={`订阅 ${id} 的直接续购关联`}>
+    <Button variant="secondary" disabled={selected && loading} onClick={() => { void readLinks() }}>{selected && loading ? '正在读取关联…' : '查看直接续购关联'}</Button>
+    {selected && error ? <p role="alert">这条订阅的续购关联暂时无法读取，请重新读取订阅状态后重试。</p> : null}
+    {selected && links ? <div className="self-renewal-links-result" role="status">
+      <p>仅显示这条订阅在本地记录的直接前驱和直接后继；不是完整链、账单、真实付款或模型使用权益。</p>
+      <dl>
+        <div><dt>本条订阅</dt><dd>{links.subscription_id}</dd></div>
+        <div><dt>直接前驱</dt><dd>{links.predecessor_id ?? '无直接前驱'}</dd></div>
+        <div><dt>直接后继</dt><dd>{links.successor_id ?? '无直接后继'}</dd></div>
+      </dl>
+    </div> : null}
+  </section>
+}
+
 const selfOneShotLabels: Record<SelfOneShotStatus['state'], string> = {
   none: '没有一次性续购预约', armed: '已预约，尚未执行', disarmed: '已撤销预约',
   succeeded: '本地续购已提交', failed: '预约执行失败', superseded: '已由手动续购取代', cancelled: '订阅取消后预约终结',
@@ -1109,7 +1173,7 @@ function SelfMonthlyRenewalPanel({ item, csrf, selected, onSelect, onSuccess }: 
   </section>
 }
 
-function SelfSubscriptionStatusPanel({ csrf, cancelEnabled, oneShotEnabled, purchaseSnapshotEnabled, renewalEnabled }: { csrf: string; cancelEnabled: boolean; oneShotEnabled: boolean; purchaseSnapshotEnabled: boolean; renewalEnabled: boolean }) {
+function SelfSubscriptionStatusPanel({ csrf, cancelEnabled, oneShotEnabled, purchaseSnapshotEnabled, renewalLinksEnabled, renewalEnabled }: { csrf: string; cancelEnabled: boolean; oneShotEnabled: boolean; purchaseSnapshotEnabled: boolean; renewalLinksEnabled: boolean; renewalEnabled: boolean }) {
   const [page, setPage] = useState<SelfSubscriptionPage | null>(null)
   const [loading, setLoading] = useState<'read' | 'cancel' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -1118,6 +1182,7 @@ function SelfSubscriptionStatusPanel({ csrf, cancelEnabled, oneShotEnabled, purc
   const [outcome, setOutcome] = useState<SelfSubscriptionCancelResult | null>(null)
   const [oneShotTarget, setOneShotTarget] = useState<string | null>(null)
   const [purchaseSnapshotTarget, setPurchaseSnapshotTarget] = useState<string | null>(null)
+  const [renewalLinksTarget, setRenewalLinksTarget] = useState<string | null>(null)
   const [renewalTarget, setRenewalTarget] = useState<string | null>(null)
   const [renewalOutcome, setRenewalOutcome] = useState<SelfMonthlyRenewalResult | null>(null)
   const pending = useRef<AbortController | null>(null)
@@ -1140,6 +1205,7 @@ function SelfSubscriptionStatusPanel({ csrf, cancelEnabled, oneShotEnabled, purc
     setConfirm(null)
     setRetry(null)
     setPurchaseSnapshotTarget(null)
+    setRenewalLinksTarget(null)
     setOneShotTarget(null)
     setRenewalTarget(null)
     if (!afterMutation) { setOutcome(null); setRenewalOutcome(null) }
@@ -1195,6 +1261,7 @@ function SelfSubscriptionStatusPanel({ csrf, cancelEnabled, oneShotEnabled, purc
     pending.current = controller
     setLoading('cancel')
     setPurchaseSnapshotTarget(null)
+    setRenewalLinksTarget(null)
     setRenewalTarget(null)
     setRenewalOutcome(null)
     setError(null)
@@ -1240,9 +1307,10 @@ function SelfSubscriptionStatusPanel({ csrf, cancelEnabled, oneShotEnabled, purc
           <div><dt>取消时间</dt><dd>{item.cancelled_at ? <time dateTime={item.cancelled_at}>{selfKeyDate(item.cancelled_at)}</time> : '未取消'}</dd></div>
           {cancelEnabled ? <div><dt>存储版本</dt><dd>{item.revision}</dd></div> : null}</dl>
         {cancelEnabled && item.status === 'active' && item.revision ? <Button variant="secondary" disabled={loading !== null} onClick={() => { setConfirm(item); setRetry(null); setOutcome(null); setError(null) }}>取消此订阅</Button> : null}
-        {purchaseSnapshotEnabled ? <SelfPurchaseSnapshotPanel id={item.subscription_id} selected={purchaseSnapshotTarget === item.subscription_id} onSelect={(id) => { setOneShotTarget(null); setRenewalTarget(null); setPurchaseSnapshotTarget(id) }} /> : null}
-        {oneShotEnabled && item.interval === 'monthly' ? <SelfOneShotRenewalPanel key={`${item.subscription_id}:${item.revision ?? 'unknown'}`} id={item.subscription_id} csrf={csrf} selected={oneShotTarget === item.subscription_id} onSelect={(id) => { setPurchaseSnapshotTarget(null); setRenewalTarget(null); setOneShotTarget(id) }} /> : null}
-        {renewalEnabled && item.interval === 'monthly' && item.status === 'expired' ? <SelfMonthlyRenewalPanel item={item} csrf={csrf} selected={renewalTarget === item.subscription_id} onSelect={(id) => { setPurchaseSnapshotTarget(null); setOneShotTarget(null); setRenewalTarget(id); setRenewalOutcome(null) }} onSuccess={(result) => { setRenewalOutcome(result); void readPage(undefined, true) }} /> : null}
+        {purchaseSnapshotEnabled ? <SelfPurchaseSnapshotPanel id={item.subscription_id} selected={purchaseSnapshotTarget === item.subscription_id} onSelect={(id) => { setOneShotTarget(null); setRenewalTarget(null); setRenewalLinksTarget(null); setPurchaseSnapshotTarget(id) }} /> : null}
+        {renewalLinksEnabled ? <SelfRenewalLinksPanel id={item.subscription_id} selected={renewalLinksTarget === item.subscription_id} onSelect={(id) => { setPurchaseSnapshotTarget(null); setOneShotTarget(null); setRenewalTarget(null); setRenewalLinksTarget(id) }} /> : null}
+        {oneShotEnabled && item.interval === 'monthly' ? <SelfOneShotRenewalPanel key={`${item.subscription_id}:${item.revision ?? 'unknown'}`} id={item.subscription_id} csrf={csrf} selected={oneShotTarget === item.subscription_id} onSelect={(id) => { setPurchaseSnapshotTarget(null); setRenewalTarget(null); setRenewalLinksTarget(null); setOneShotTarget(id) }} /> : null}
+        {renewalEnabled && item.interval === 'monthly' && item.status === 'expired' ? <SelfMonthlyRenewalPanel item={item} csrf={csrf} selected={renewalTarget === item.subscription_id} onSelect={(id) => { setPurchaseSnapshotTarget(null); setOneShotTarget(null); setRenewalLinksTarget(null); setRenewalTarget(id); setRenewalOutcome(null) }} onSuccess={(result) => { setRenewalOutcome(result); void readPage(undefined, true) }} /> : null}
       </li>)}</ol>}
       {page.next_cursor ? <Button variant="secondary" disabled={loading !== null} onClick={() => { void readPage(page.next_cursor ?? undefined) }}>{loading === 'read' ? '正在读取…' : '加载更多订阅'}</Button> : null}
     </div> : null}
@@ -1702,7 +1770,7 @@ export function SelfApp() {
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true
           ? <SelfWalletActivityPanel key={`wallet-activity:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_subscription_status === true
-          ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} cancelEnabled={session.features?.employee_self_subscription_cancel === true} oneShotEnabled={session.features?.employee_self_one_shot_renewal_disarm === true} purchaseSnapshotEnabled={session.features?.employee_self_subscription_purchase_snapshot === true} renewalEnabled={session.features?.employee_self_subscription_renewal === true} /> : null}
+          ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} cancelEnabled={session.features?.employee_self_subscription_cancel === true} oneShotEnabled={session.features?.employee_self_one_shot_renewal_disarm === true} purchaseSnapshotEnabled={session.features?.employee_self_subscription_purchase_snapshot === true} renewalLinksEnabled={session.features?.employee_self_subscription_renewal_links === true} renewalEnabled={session.features?.employee_self_subscription_renewal === true} /> : null}
         {session.features?.employee_self_plan_catalog === true && session.features?.employee_self_plan_purchase !== true
           ? <SelfPlanCatalogPanel key={`plan-catalog:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_plan_catalog === true && session.features?.employee_self_plan_purchase === true
