@@ -18,6 +18,7 @@
 // docs/employee-self-subscription-purchase-snapshot-contract.md.
 // docs/employee-self-monthly-renewal-contract.md.
 // docs/employee-self-subscription-renewal-links-contract.md.
+// docs/employee-self-redemption-contract.md.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -48,7 +49,86 @@ describe('employee self-service page', () => {
     render(<SelfApp />)
     expect(await screen.findByRole('heading', { name: '你好，Alice' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '我的钱包余额' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '兑换码充值本人钱包' })).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/balance'))).toBe(false)
+  })
+
+  it('keeps the redemption code only in a short-lived explicit retry and reuses the same operation', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const submitted: Array<{ operation_id: string; code: string; current_password: string }> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_redemption: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/redemptions')) {
+        const body = JSON.parse(String(init?.body)) as { operation_id: string; code: string; current_password: string }
+        submitted.push(body)
+        if (submitted.length === 1) return Promise.reject(new TypeError('synthetic network uncertainty'))
+        return reply(200, { operation_id: body.operation_id, replay: true, currency: 'EUR', amount_micro: '37', credited_at: '2026-10-02T12:00:00Z' })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '兑换码充值本人钱包' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/redemptions'))).toBe(false)
+    await userEvent.type(within(panel).getByLabelText('管理员发放的兑换码'), 'cpa_synthetic-code')
+    await userEvent.type(within(panel).getByLabelText('当前密码'), 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('checkbox', { name: /我确认将此码兑换/ }))
+    await userEvent.click(within(panel).getByRole('button', { name: '确认兑换' }))
+    expect(await within(panel).findByText(/结果未确认/)).toBeInTheDocument()
+    expect(within(panel).queryByLabelText('管理员发放的兑换码')).not.toBeInTheDocument()
+    expect(within(panel).getByLabelText('当前密码（重试原操作）')).toHaveValue('')
+    await userEvent.type(within(panel).getByLabelText('当前密码（重试原操作）'), 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('checkbox', { name: /我确认重试原兑换操作/ }))
+    await userEvent.click(within(panel).getByRole('button', { name: '重试原兑换' }))
+    expect(await within(panel).findByText(/已确认原兑换/)).toBeInTheDocument()
+    expect(submitted).toHaveLength(2)
+    expect(submitted[0].operation_id).toMatch(/^self-redeem-[a-f0-9]{32}$/)
+    expect(submitted[1]).toEqual(submitted[0])
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('cpa_synthetic-code'))).toHaveLength(0)
+    expect(within(panel).queryByText('cpa_synthetic-code')).not.toBeInTheDocument()
+  })
+
+  it('clears a definite redemption failure and ignores a late result after logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    let finish: ((response: Response) => void) | undefined
+    let calls = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_redemption: true } })
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/redemptions')) {
+        calls++
+        if (calls === 1) return reply(409, { error: { code: 'redemption_unavailable' } })
+        return new Promise<Response>((resolve) => { finish = resolve })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '兑换码充值本人钱包' })
+    const submit = async () => {
+      await userEvent.type(within(panel).getByLabelText('管理员发放的兑换码'), 'cpa_synthetic-code')
+      await userEvent.type(within(panel).getByLabelText('当前密码'), 'a-long-self-password')
+      await userEvent.click(within(panel).getByRole('checkbox', { name: /我确认将此码兑换/ }))
+      await userEvent.click(within(panel).getByRole('button', { name: '确认兑换' }))
+    }
+    await submit()
+    expect(await within(panel).findByText(/兑换暂不可用/)).toBeInTheDocument()
+    expect(within(panel).getByLabelText('管理员发放的兑换码')).toHaveValue('')
+    await submit()
+    await waitFor(() => expect(finish).toBeTypeOf('function'))
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    finish?.(new Response(JSON.stringify({ operation_id: 'late', replay: false, currency: 'EUR', amount_micro: '37', credited_at: '2026-10-02T12:00:00Z' }), { status: 201 }))
+    expect(screen.queryByRole('heading', { name: '兑换码充值本人钱包' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/兑换成功/)).not.toBeInTheDocument()
   })
 
   it('reads one typed currency on demand and distinguishes missing from zero', async () => {

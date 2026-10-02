@@ -48,6 +48,9 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	if a.cfg.EmployeeSelfWalletBalanceEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/balance", a.requireSelf(a.selfWalletBalance, false))
 	}
+	if a.cfg.EmployeeSelfRedemptionEnabled {
+		mux.HandleFunc("POST /self/api/v1/billing/redemptions", a.requireSelfReleased(a.selfRedeemCode, true))
+	}
 	if a.cfg.EmployeeSelfWalletActivityEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/entries", a.requireSelf(a.selfWalletActivity, false))
 	}
@@ -537,6 +540,7 @@ func (a *App) selfSessionInfo(w http.ResponseWriter, _ *http.Request, session se
 func (a *App) selfSessionResponse(csrf string, profile selfProfile) map[string]any {
 	return map[string]any{"csrf_token": csrf, "profile": profile, "features": map[string]bool{
 		"employee_self_wallet_balance":                 a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled,
+		"employee_self_redemption":                     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfRedemptionEnabled,
 		"employee_self_wallet_activity":                a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
 		"employee_self_subscription_status":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
 		"employee_self_subscription_purchase_snapshot": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled,

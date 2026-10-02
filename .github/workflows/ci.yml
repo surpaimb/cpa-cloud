@@ -69,6 +69,11 @@ jobs:
         run: node scripts/smoke-subscription-renewal.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee wallet balance against an isolated process
         run: node scripts/smoke-employee-self-wallet-balance.mjs "$RUNNER_TEMP/cpa-cloud"
+      - name: Test opt-in employee self redemption against an isolated process
+        env:
+          CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-redemption
+          CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
+        run: node scripts/smoke-employee-self-redemption.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee wallet activity against an isolated process
         run: node scripts/smoke-employee-self-wallet-activity.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee subscription status against an isolated process

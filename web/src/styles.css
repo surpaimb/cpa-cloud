@@ -737,6 +737,16 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-wallet-form .button { white-space: nowrap; }
 .self-wallet .self-wallet-result { padding: 12px 14px; border: 1px solid #bfe3d5; border-radius: 9px; background: #f2f9f6; color: var(--navy); overflow-wrap: anywhere; }
 .self-wallet-result output { font-weight: 750; font-variant-numeric: tabular-nums; }
+/* Independently authored for docs/employee-self-redemption-contract.md. */
+.self-redemption { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); min-width: 0; }
+.self-redemption h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
+.self-redemption > p { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.self-redemption > p[role="alert"] { color: #a52132; }
+.self-redemption .self-redemption-result { padding: 12px 14px; border: 1px solid #bfe3d5; border-radius: 9px; background: #f2f9f6; color: var(--navy); overflow-wrap: anywhere; }
+.self-redemption-form { display: grid; gap: 12px; min-width: 0; margin-bottom: 14px; padding: 16px; border: 1px solid var(--border); border-radius: 9px; background: #fff; }
+.self-redemption-form > p { margin: 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.self-redemption-form input { min-width: 0; max-width: 100%; }
+.self-redemption-form .self-actions { margin-top: 2px; }
 /* Independently authored for docs/employee-self-wallet-activity-contract.md. */
 .self-wallet-activity { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
 .self-wallet-activity h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
@@ -937,6 +947,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 @media (max-width: 540px) {
   .self-wallet-form { grid-template-columns: 1fr; }
   .self-wallet-form .button { width: 100%; }
+  .self-redemption-form .button { width: 100%; }
   .self-key-view-actions { grid-template-columns: 1fr; }
   .self-key-token-summary .self-summary-tokens dl { grid-template-columns: 1fr; }
   .self-screen { padding: 16px; align-items: start; }
