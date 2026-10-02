@@ -64,33 +64,13 @@ func (c *Commercial) PurchaseEmployeeSubscriptionTx(ctx context.Context, tx *sql
 		return EmployeePurchaseResult{}, ErrInvalid
 	}
 	meta := WriteMeta{OperationID: input.OperationID, Actor: input.Actor, PayloadDigest: digest, ObservedAt: input.ObservedAt}
-
 	// A committed exact retry must precede gates that only apply to a new buy.
-	receipt, found, err := existingCommercialOperation(ctx, tx, meta, "subscription.create")
+	result, found, err := probeEmployeePurchaseReplay(ctx, tx, input, meta)
 	if err != nil {
 		return EmployeePurchaseResult{}, err
 	}
 	if found {
-		result, err := replayEmployeePurchase(ctx, tx, input, receipt)
-		if err != nil || ctx.Err() != nil {
-			if err != nil {
-				return EmployeePurchaseResult{}, err
-			}
-			return EmployeePurchaseResult{}, ErrUnavailable
-		}
 		return result, nil
-	}
-	// A changed actor or owner under a committed ID conflicts above. Only a
-	// genuinely new operation may reach the employee-only purchase boundary.
-	if input.Actor.Kind != ActorEmployee || input.Owner.Kind != OwnerEmployee || input.Owner.EmployeeID != input.Actor.ID {
-		return EmployeePurchaseResult{}, ErrInvalid
-	}
-	// A ledger-only row cannot be completed by silently creating the missing
-	// commercial receipt. It also makes global operation-ID collisions fail closed.
-	if _, exists, err := operationDigest(ctx, tx, input.OperationID); err != nil {
-		return EmployeePurchaseResult{}, err
-	} else if exists {
-		return EmployeePurchaseResult{}, ErrConflict
 	}
 	if err := requireEmployeePurchaseEnabled(ctx, tx); err != nil {
 		return EmployeePurchaseResult{}, err
@@ -105,7 +85,7 @@ func (c *Commercial) PurchaseEmployeeSubscriptionTx(ctx context.Context, tx *sql
 		}
 		return EmployeePurchaseResult{}, ErrSchema
 	}
-	if !validCommercialText(plan.ID, 256) || !validCommercialText(plan.Name, 128) || !validCurrency(plan.Currency) || plan.Revision < 1 || plan.Revision > subscriptionRevisionMax || plan.PriceMicro < 1 || plan.CreditMicro < 1 || (plan.Interval != "one_time" && plan.Interval != "monthly") {
+	if !validEmployeePurchasePlan(plan) {
 		return EmployeePurchaseResult{}, ErrSchema
 	}
 	if !plan.Enabled || plan.ID != input.Expected.PlanID || plan.Revision != input.Expected.Revision || plan.Currency != input.Expected.Currency || plan.PriceMicro != input.Expected.PriceMicro || plan.CreditMicro != input.Expected.CreditMicro || plan.Interval != input.Expected.Interval {
@@ -144,7 +124,7 @@ func (c *Commercial) PurchaseEmployeeSubscriptionTx(ctx context.Context, tx *sql
 	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_subscriptions(id,account_id,plan_id,plan_revision,price_micro,credit_micro,currency,interval,status,started_at,period_end_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,1)`, item.ID, item.AccountID, item.PlanID, item.PlanRevision, item.PriceMicro, item.CreditMicro, item.Currency, item.Interval, item.Status, formatCommercialTime(item.StartedAt)); err != nil {
 		return EmployeePurchaseResult{}, ErrUnavailable
 	}
-	receipt = CommercialReceipt{OperationID: input.OperationID, ResourceKind: "subscription", ResourceID: id, Revision: 1, CreatedAt: input.ObservedAt}
+	receipt := CommercialReceipt{OperationID: input.OperationID, ResourceKind: "subscription", ResourceID: id, Revision: 1, CreatedAt: input.ObservedAt}
 	if err := insertCommercialOperation(ctx, tx, meta, "subscription.create", receipt); err != nil {
 		return EmployeePurchaseResult{}, err
 	}
@@ -152,6 +132,64 @@ func (c *Commercial) PurchaseEmployeeSubscriptionTx(ctx context.Context, tx *sql
 		return EmployeePurchaseResult{}, ErrUnavailable
 	}
 	return EmployeePurchaseResult{Subscription: item, CommercialReceipt: receipt, LedgerReceipt: PurchaseLedgerReceipt{OperationID: input.OperationID, Charge: posted[0], Credit: posted[1]}}, nil
+}
+
+// ProbeEmployeePurchaseReplayTx checks the exact committed employee receipt in
+// the caller-owned transaction, without applying gates for a new purchase.
+// Its result is provisional until the caller successfully commits that tx.
+func (c *Commercial) ProbeEmployeePurchaseReplayTx(ctx context.Context, tx *sql.Tx, input EmployeePurchaseInput) (EmployeePurchaseResult, bool, error) {
+	if c == nil || c.db == nil || ctx == nil || tx == nil || !validEmployeePurchaseInput(input) {
+		return EmployeePurchaseResult{}, false, ErrInvalid
+	}
+	if ctx.Err() != nil {
+		return EmployeePurchaseResult{}, false, ErrUnavailable
+	}
+	if err := validateSchema(ctx, tx); err != nil {
+		return EmployeePurchaseResult{}, false, err
+	}
+	if err := validateCommercialSchema(ctx, tx, commercialOperationsDDL, false); err != nil {
+		return EmployeePurchaseResult{}, false, err
+	}
+	digest, err := employeePurchaseDigest(input)
+	if err != nil {
+		return EmployeePurchaseResult{}, false, ErrInvalid
+	}
+	meta := WriteMeta{OperationID: input.OperationID, Actor: input.Actor, PayloadDigest: digest, ObservedAt: input.ObservedAt}
+	return probeEmployeePurchaseReplay(ctx, tx, input, meta)
+}
+
+func probeEmployeePurchaseReplay(ctx context.Context, tx *sql.Tx, input EmployeePurchaseInput, meta WriteMeta) (EmployeePurchaseResult, bool, error) {
+	receipt, found, err := existingCommercialOperation(ctx, tx, meta, "subscription.create")
+	if err != nil {
+		return EmployeePurchaseResult{}, false, err
+	}
+	if found {
+		result, err := replayEmployeePurchase(ctx, tx, input, receipt)
+		if err != nil {
+			return EmployeePurchaseResult{}, false, err
+		}
+		if ctx.Err() != nil {
+			return EmployeePurchaseResult{}, false, ErrUnavailable
+		}
+		return result, true, nil
+	}
+	// A changed actor or owner under a committed ID conflicts above. A
+	// ledger-only row must never be completed by synthesizing a receipt.
+	if input.Actor.Kind != ActorEmployee || input.Owner.Kind != OwnerEmployee || input.Owner.EmployeeID != input.Actor.ID {
+		return EmployeePurchaseResult{}, false, ErrInvalid
+	}
+	if _, exists, err := operationDigest(ctx, tx, input.OperationID); err != nil {
+		return EmployeePurchaseResult{}, false, err
+	} else if exists {
+		return EmployeePurchaseResult{}, false, ErrConflict
+	}
+	return EmployeePurchaseResult{}, false, nil
+}
+
+func validEmployeePurchasePlan(plan Plan) bool {
+	return validCommercialText(plan.ID, 256) && validCommercialText(plan.Name, 128) && validCurrency(plan.Currency) &&
+		plan.Revision >= 1 && plan.Revision <= subscriptionRevisionMax && plan.PriceMicro > 0 && plan.CreditMicro > 0 &&
+		(plan.Interval == "one_time" || plan.Interval == "monthly")
 }
 
 func validEmployeePurchaseInput(input EmployeePurchaseInput) bool {

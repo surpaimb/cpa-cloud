@@ -12,6 +12,7 @@
 // docs/employee-self-wallet-activity-contract.md.
 // docs/employee-self-subscription-status-contract.md.
 // docs/employee-self-plan-catalog-contract.md.
+// docs/employee-self-plan-purchase-contract.md.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -1134,5 +1135,153 @@ describe('employee self-service page', () => {
     await userEvent.click(screen.getByRole('button', { name: '查看 Editor 的请求活动' }))
     expect(await screen.findByText('此 Key 最近 24 小时暂无请求活动。')).toBeInTheDocument()
     expect(reads).toBe(2)
+  })
+})
+
+describe('employee self plan purchase', () => {
+  beforeEach(() => vi.restoreAllMocks())
+  afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
+  const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+  const features = { employee_self_wallet_balance: true, employee_self_plan_catalog: true, employee_self_plan_purchase: true }
+  const catalog = { currency: 'USD', available: true, items: [
+    { plan_id: 'plan-monthly', name: 'Monthly', interval: 'monthly', price_micro: '12', credit_micro: '20', revision: 1 },
+    { plan_id: 'plan-once', name: 'Once', interval: 'one_time', price_micro: '40', credit_micro: '10', revision: 1 },
+  ], next_cursor: null }
+  const quote = { quote_token: 'opaque-quote', plan_id: 'plan-once', revision: 2, currency: 'USD', interval: 'one_time', price_micro: '42', credit_micro: '11', expires_at: '2026-10-02T01:00:00Z' }
+
+  function baseReply(url: string) {
+    if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features })
+    if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+    if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+    if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+    if (url.endsWith('/billing/plans?currency=USD&limit=20')) return reply(200, catalog)
+    if (url.endsWith('/billing/balance?currency=USD')) return reply(200, { currency: 'USD', has_account: true, amount_micro: '100' })
+    if (url.endsWith('/billing/plan-purchase-quotes')) return reply(201, quote)
+    return null
+  }
+
+  it('never mounts a purchase control when its independent capability is absent', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { ...features, employee_self_plan_purchase: false } })
+      const response = baseReply(url)
+      if (response) return response
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    expect(await screen.findByRole('heading', { name: '你好，Alice' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '本人钱包购买一次性套餐' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('purchase-quotes'))).toBe(false)
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/subscriptions') && !String(url).includes('?limit'))).toBe(false)
+  })
+
+  it('requires explicit catalog, wallet, frozen quote and password confirmation', async () => {
+    const purchases: Array<{ body: Record<string, string>; headers: Headers }> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/billing/subscriptions') && init?.method === 'POST') {
+        purchases.push({ body: JSON.parse(String(init.body)) as Record<string, string>, headers: new Headers(init.headers) })
+        return reply(201, { operation_id: purchases[0].body.operation_id, subscription_id: 'sub-one', replay: false, plan_id: 'plan-once', revision: 2, currency: 'USD', interval: 'one_time', price_micro: '42', credit_micro: '11' })
+      }
+      const response = baseReply(url)
+      if (response) return response
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '本人钱包购买一次性套餐' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/'))).toBe(false)
+    await userEvent.type(within(panel).getByLabelText('购买币种（三位大写字母，如 USD）'), 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(panel).findByText('Monthly')).toBeInTheDocument()
+    expect(within(panel).queryByRole('button', { name: '获取此套餐的冻结报价' })).not.toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '读取本币种本人钱包' }))
+    expect(await within(panel).findByText(/钱包当前余额：100 micro/)).toBeInTheDocument()
+    expect(within(panel).getAllByRole('button', { name: '获取此套餐的冻结报价' })).toHaveLength(1)
+    await userEvent.click(within(panel).getByRole('button', { name: '获取此套餐的冻结报价' }))
+    expect(await within(panel).findByRole('heading', { name: '确认冻结报价' })).toBeInTheDocument()
+    expect(within(panel).getByText('42 micro')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('checkbox', { name: /我确认上述本人钱包扣款/ }))
+    await userEvent.type(within(panel).getByLabelText('当前密码（确认购买）'), 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('button', { name: '确认购买一次性套餐' }))
+    expect(await within(panel).findByText(/购买已确认：订阅 sub-one/)).toBeInTheDocument()
+    expect(within(panel).queryByRole('heading', { name: '确认冻结报价' })).not.toBeInTheDocument()
+    expect(purchases).toHaveLength(1)
+    expect(Object.keys(purchases[0].body).sort()).toEqual(['current_password', 'operation_id', 'quote_token'])
+    expect(purchases[0].body).toMatchObject({ quote_token: 'opaque-quote', current_password: 'a-long-self-password' })
+    expect(purchases[0].body.operation_id).toMatch(/^self-buy-[0-9a-f]{32}$/)
+    expect(purchases[0].headers.get('X-CSRF-Token')).toBe('self-csrf')
+  })
+
+  it('clears the offer after an uncertain result and explicitly retries the same ID with a new password input', async () => {
+    const bodies: Array<Record<string, string>> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/billing/subscriptions') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as Record<string, string>
+        bodies.push(body)
+        return bodies.length === 1 ? reply(503, { error: { code: 'storage_unavailable' } })
+          : reply(200, { operation_id: body.operation_id, subscription_id: 'sub-original', replay: true, plan_id: 'plan-once', revision: 2, currency: 'USD', interval: 'one_time', price_micro: '42', credit_micro: '11' })
+      }
+      const response = baseReply(url)
+      if (response) return response
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '本人钱包购买一次性套餐' })
+    await userEvent.type(within(panel).getByLabelText('购买币种（三位大写字母，如 USD）'), 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    await within(panel).findByText('Once')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取本币种本人钱包' }))
+    await within(panel).findByText(/钱包当前余额：100 micro/)
+    await userEvent.click(within(panel).getByRole('button', { name: '获取此套餐的冻结报价' }))
+    await within(panel).findByRole('heading', { name: '确认冻结报价' })
+    await userEvent.click(within(panel).getByRole('checkbox', { name: /我确认上述本人钱包扣款/ }))
+    await userEvent.type(within(panel).getByLabelText('当前密码（确认购买）'), 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('button', { name: '确认购买一次性套餐' }))
+    expect(await within(panel).findByRole('heading', { name: '上次提交结果未确认' })).toBeInTheDocument()
+    expect(within(panel).queryByRole('heading', { name: '确认冻结报价' })).not.toBeInTheDocument()
+    expect(within(panel).queryByText(/钱包当前余额：100 micro/)).not.toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('checkbox', { name: /我确认显式重试上次操作/ }))
+    await userEvent.type(within(panel).getByLabelText('当前密码（重试原操作）'), 'a-long-self-password')
+    await userEvent.click(within(panel).getByRole('button', { name: '用同一操作编号重试' }))
+    expect(await within(panel).findByText(/已确认原购买：订阅 sub-original/)).toBeInTheDocument()
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1].operation_id).toBe(bodies[0].operation_id)
+    expect(bodies[1].quote_token).toBe(bodies[0].quote_token)
+    expect(bodies[1].current_password).toBe('a-long-self-password')
+  })
+
+  it('aborts an outstanding purchase quote and never backfills it after currency changes', async () => {
+    let resolveQuote: ((response: Response) => void) | undefined
+    let pendingSignal: AbortSignal | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/billing/plan-purchase-quotes')) {
+        pendingSignal = init?.signal ?? undefined
+        return new Promise<Response>((resolve) => { resolveQuote = resolve })
+      }
+      const response = baseReply(url)
+      if (response) return response
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '本人钱包购买一次性套餐' })
+    const input = within(panel).getByLabelText('购买币种（三位大写字母，如 USD）')
+    await userEvent.type(input, 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
+    await within(panel).findByText('Once')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取本币种本人钱包' }))
+    await within(panel).findByText(/钱包当前余额：100 micro/)
+    await userEvent.click(within(panel).getByRole('button', { name: '获取此套餐的冻结报价' }))
+    await waitFor(() => expect(resolveQuote).toBeTypeOf('function'))
+    await userEvent.clear(input)
+    expect(pendingSignal?.aborted).toBe(true)
+    resolveQuote?.(new Response(JSON.stringify(quote), { status: 201 }))
+    expect(within(panel).queryByRole('heading', { name: '确认冻结报价' })).not.toBeInTheDocument()
   })
 })

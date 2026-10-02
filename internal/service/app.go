@@ -81,6 +81,13 @@ type App struct {
 	// Test-only transaction boundary hooks; production leaves both nil.
 	selfSignOutOthersBeforeTx func()
 	selfSignOutOthersCommit   func(*sql.Tx) error
+	// Independently authored for docs/employee-self-plan-purchase-contract.md.
+	// Test-only transaction, clock, and commit boundaries; production leaves nil.
+	selfPlanPurchaseNow          func() time.Time
+	selfPlanPurchaseBeforeTx     func()
+	selfPlanPurchaseBeforeCommit func(*sql.Tx)
+	selfPlanPurchaseCommit       func(*sql.Tx) error
+	selfPlanQuoteCommit          func(*sql.Tx) error
 	// Independently authored for docs/employee-self-key-token-summary-contract.md.
 	// Test-only snapshot and commit boundaries; production leaves both nil.
 	selfKeyTokenSummaryAfterOwnership func()
@@ -117,6 +124,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	}
 	if cfg.EmployeeSelfPlanCatalogEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return nil, errors.New("employee self plan catalog requires employee self service")
+	}
+	if cfg.EmployeeSelfPlanPurchaseEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled || !cfg.EmployeeSelfPlanCatalogEnabled) {
+		return nil, errors.New("employee self plan purchase requires employee self service, wallet balance, and plan catalog")
 	}
 	trustedProxies, err := keypolicy.NewTrustedProxySet(cfg.TrustedProxyCIDRs)
 	if err != nil {
@@ -507,6 +517,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"employee_self_wallet_activity":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
 			"employee_self_subscription_status": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
 			"employee_self_plan_catalog":        a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled,
+			"employee_self_plan_purchase":       a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled && a.cfg.EmployeeSelfPlanPurchaseEnabled,
 			"employee_self_key_issuance":        a.cfg.EmployeeSelfServiceEnabled,
 			"codex_membership_import":           a.cfg.ExperimentalCodexMembership,
 			"responses_api":                     true,

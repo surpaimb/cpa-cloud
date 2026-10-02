@@ -787,6 +787,29 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-plan-catalog-list dt { color: var(--muted); }
 .self-plan-catalog-list dd { margin: 3px 0 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 @media (max-width: 520px) { .self-plan-catalog-form, .self-plan-catalog-list dl { grid-template-columns: minmax(0, 1fr); } }
+
+/* Independently authored for docs/employee-self-plan-purchase-contract.md. */
+.self-plan-purchase { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.self-plan-purchase h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
+.self-plan-purchase > p { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.self-plan-purchase > p[role="alert"] { color: #a52132; }
+.self-plan-purchase-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; margin-bottom: 14px; }
+.self-plan-purchase-form .button { white-space: nowrap; }
+.self-plan-purchase-catalog { display: grid; gap: 12px; margin-bottom: 14px; padding: 12px 14px; border: 1px solid #bfe3d5; border-radius: 9px; background: #f2f9f6; color: var(--navy); overflow-wrap: anywhere; }
+.self-plan-purchase-catalog > p { margin: 0; font-size: 13px; line-height: 1.6; }
+.self-plan-purchase-catalog .self-plan-catalog-list { margin-bottom: 0; }
+.self-plan-purchase-catalog .button { justify-self: start; }
+.self-plan-purchase-confirm { display: grid; gap: 12px; margin: 14px 0; padding: 16px; border: 1px solid #b6c8e4; border-radius: 9px; background: #f5f8fc; }
+.self-plan-purchase-confirm h3 { margin: 0; color: var(--navy); font-size: 16px; }
+.self-plan-purchase-confirm p { margin: 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.self-plan-purchase-check { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; line-height: 1.6; }
+.self-plan-purchase-check input { flex: none; margin-top: 3px; }
+.self-plan-purchase-confirm .self-actions { margin-top: 2px; }
+.self-plan-purchase-success { padding: 12px 14px; border: 1px solid #bfe3d5; border-radius: 9px; background: #f2f9f6; color: var(--navy) !important; overflow-wrap: anywhere; }
+@media (max-width: 520px) {
+  .self-plan-purchase-form { grid-template-columns: minmax(0, 1fr); }
+  .self-plan-purchase-form .button, .self-plan-purchase-catalog .button, .self-plan-purchase-confirm .button { width: 100%; }
+}
 /* Independently authored for docs/employee-self-key-inventory-contract.md. */
 .self-keys { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
 .self-keys h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }

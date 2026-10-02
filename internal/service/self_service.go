@@ -57,6 +57,10 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	if a.cfg.EmployeeSelfPlanCatalogEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/plans", a.requireSelf(a.selfPlanCatalog, false))
 	}
+	if a.cfg.EmployeeSelfPlanPurchaseEnabled {
+		mux.HandleFunc("POST /self/api/v1/billing/plan-purchase-quotes", a.requireSelfReleased(a.selfPlanPurchaseQuote, true))
+		mux.HandleFunc("POST /self/api/v1/billing/subscriptions", a.requireSelfReleased(a.selfPlanPurchase, true))
+	}
 	// Independently authored for docs/employee-self-key-inventory-contract.md.
 	mux.HandleFunc("GET /self/api/v1/keys", a.requireSelf(a.selfListKeys, false))
 	// Independently authored for docs/employee-self-key-issuance-contract.md.
@@ -513,6 +517,7 @@ func (a *App) selfSessionResponse(csrf string, profile selfProfile) map[string]a
 		"employee_self_wallet_activity":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
 		"employee_self_subscription_status": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
 		"employee_self_plan_catalog":        a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled,
+		"employee_self_plan_purchase":       a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled && a.cfg.EmployeeSelfPlanPurchaseEnabled,
 	}}
 }
 
