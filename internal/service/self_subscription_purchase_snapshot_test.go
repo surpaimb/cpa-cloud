@@ -80,6 +80,48 @@ func requestSelfPurchaseSnapshot(t *testing.T, f selfWalletFixture, suffix, body
 	return selfRequestTest(t, http.MethodGet, f.server.URL+"/self/api/v1/billing/subscriptions/"+suffix, body, origin, cookie, "")
 }
 
+func requestSelfSnapshotWithoutRedirect(t *testing.T, f selfWalletFixture, suffix string, cookie *http.Cookie) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, f.server.URL+"/self/api/v1/billing/subscriptions/"+suffix, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Self-Request", "1")
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func TestSelfPurchaseSnapshotMalformedOpaquePathNoRedirect(t *testing.T) {
+	enabled := newSelfPurchaseSnapshotFixture(t, true)
+	for _, suffix := range []string{
+		"a%2Fb/purchase-snapshot", "a%2fb/purchase-snapshot", "%2e/purchase-snapshot", "%2e%2e/purchase-snapshot",
+		"id/./purchase-snapshot", "id/../purchase-snapshot", "id//purchase-snapshot",
+	} {
+		response := requestSelfSnapshotWithoutRedirect(t, enabled, suffix, enabled.cookie)
+		if response.Header.Get("Location") != "" {
+			t.Fatalf("redirected malformed path %q", suffix)
+		}
+		value := readSelfWalletResponse(t, response, 400)
+		if value["error"].(map[string]any)["code"] != "invalid_request" {
+			t.Fatalf("%q response=%+v", suffix, value)
+		}
+	}
+	readSelfWalletResponse(t, requestSelfSnapshotWithoutRedirect(t, enabled, "a%2Fb/purchase-snapshot", nil), 401)
+	disabled := newSelfPurchaseSnapshotFixture(t, false)
+	response := requestSelfSnapshotWithoutRedirect(t, disabled, "a%2Fb/purchase-snapshot", disabled.cookie)
+	defer response.Body.Close()
+	if response.StatusCode != 404 || response.Header.Get("Location") != "" {
+		t.Fatalf("feature-off status=%d location=%q", response.StatusCode, response.Header.Get("Location"))
+	}
+}
+
 func TestSelfPurchaseSnapshotFlagAuthStrictnessAndHistoricalRead(t *testing.T) {
 	for _, cfg := range []Config{
 		{EmployeeSelfSubscriptionPurchaseSnapshotEnabled: true},
@@ -104,7 +146,7 @@ func TestSelfPurchaseSnapshotFlagAuthStrictnessAndHistoricalRead(t *testing.T) {
 		readSelfWalletResponse(t, requestSelfPurchaseSnapshot(t, enabled, route, "", "", cookie), 401)
 	}
 	readSelfWalletResponse(t, requestSelfPurchaseSnapshot(t, enabled, route, "", "http://evil.invalid", enabled.cookie), 403)
-	for _, suffix := range []string{route + "?", route + "?employee_id=x", route + "?x=1&x=2", route + "/extra", "missing/purchase-snapshot"} {
+	for _, suffix := range []string{route + "?", route + "?employee_id=x", route + "?x=1&x=2", route + "/extra", "a%2Fb/purchase-snapshot", "missing/purchase-snapshot"} {
 		want := 400
 		if suffix == "missing/purchase-snapshot" {
 			want = 404

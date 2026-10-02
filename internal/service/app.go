@@ -475,7 +475,11 @@ func (a *App) Handler() http.Handler {
 		mux.HandleFunc("/self/", a.serveWeb)
 		mux.HandleFunc("/", a.serveWeb)
 	}
-	return requestMiddleware(mux)
+	var handler http.Handler = mux
+	if a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled {
+		handler = a.selfPurchaseSnapshotRouteGuard(handler)
+	}
+	return requestMiddleware(handler)
 }
 
 func requestMiddleware(next http.Handler) http.Handler {

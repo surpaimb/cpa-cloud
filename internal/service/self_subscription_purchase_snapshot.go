@@ -9,14 +9,52 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"cpacloud.local/server/internal/financial"
 )
 
+// ServeMux may reject escaped separators before a wildcard handler runs. This
+// narrow guard classifies malformed snapshot-shaped GETs before mux routing,
+// while leaving other self routes and feature-off behavior unchanged.
+func (a *App) selfPurchaseSnapshotRouteGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && malformedPurchaseSnapshotRawPath(r) {
+			a.requireSelf(func(w http.ResponseWriter, _ *http.Request, _ selfSession) {
+				selfError(w, http.StatusBadRequest, "invalid_request")
+			}, false)(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func malformedPurchaseSnapshotRawPath(r *http.Request) bool {
+	const prefix = "/self/api/v1/billing/subscriptions/"
+	const suffix = "/purchase-snapshot"
+	escaped := r.URL.EscapedPath()
+	if !strings.HasPrefix(escaped, prefix) {
+		return false
+	}
+	rest := strings.TrimPrefix(escaped, prefix)
+	if !strings.Contains(rest, suffix) {
+		return false
+	}
+	if !strings.HasSuffix(rest, suffix) {
+		return true
+	}
+	segment := strings.TrimSuffix(rest, suffix)
+	if strings.Contains(segment, "/") {
+		return true
+	}
+	id, err := url.PathUnescape(segment)
+	return err != nil || !validSelfPurchaseID(id, 256) || strings.ContainsRune(id, '/') || id == "." || id == ".." || url.PathEscape(id) != segment
+}
+
 func selfPurchaseSnapshotPath(r *http.Request) (string, bool) {
 	id := r.PathValue("id")
-	if r.URL.RawQuery != "" || r.URL.ForceQuery || !utf8.ValidString(id) || !validSelfPurchaseID(id, 256) ||
+	if r.URL.RawQuery != "" || r.URL.ForceQuery || !utf8.ValidString(id) || !validSelfPurchaseID(id, 256) || strings.ContainsRune(id, '/') || id == "." || id == ".." ||
 		r.URL.EscapedPath() != "/self/api/v1/billing/subscriptions/"+url.PathEscape(id)+"/purchase-snapshot" {
 		return "", false
 	}
