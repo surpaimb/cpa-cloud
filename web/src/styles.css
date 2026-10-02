@@ -759,6 +759,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-wallet-activity-list strong { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .self-wallet-activity-positive { color: #236347; }
 .self-wallet-activity-negative { color: #a52132; }
+.self-wallet-classification .self-wallet-activity-list li > span { display: grid; gap: 5px; min-width: 0; }
+.self-entry-kind { width: fit-content; max-width: 100%; padding: 2px 6px; border-radius: 5px; background: #e8f0f6; color: var(--navy); font-size: 12px; overflow-wrap: anywhere; }
 
 /* Independently authored for docs/employee-self-subscription-status-contract.md. */
 .self-subscriptions { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
