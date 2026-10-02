@@ -34,10 +34,11 @@ type selfProfile struct {
 }
 
 type selfSession struct {
-	Selector   string
-	EmployeeID string
-	CSRF       string
-	Profile    selfProfile
+	Selector       string
+	EmployeeID     string
+	CSRF           string
+	VerifierDigest []byte
+	Profile        selfProfile
 }
 
 func (a *App) registerSelfHandlers(mux *http.ServeMux) {
@@ -56,6 +57,9 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	}
 	if a.cfg.EmployeeSelfWalletEntryClassificationEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/entry-classifications", a.requireSelfReleased(a.selfWalletEntryClassifications, false))
+	}
+	if a.cfg.EmployeeSelfRedemptionCreditHistoryEnabled {
+		mux.HandleFunc("GET /self/api/v1/billing/redemption-credits", a.requireSelfReleased(a.selfRedemptionCreditHistory, false))
 	}
 	if a.cfg.EmployeeSelfSubscriptionStatusEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/subscriptions", a.requireSelf(a.selfSubscriptionStatus, false))
@@ -523,6 +527,7 @@ func (a *App) requireSelfWithLock(next func(http.ResponseWriter, *http.Request, 
 			selfError(w, 401, "authentication_required")
 			return
 		}
+		session.VerifierDigest = append([]byte(nil), stored...)
 		if write {
 			if !a.selfWriteOrigin(w, r) {
 				return
@@ -551,6 +556,7 @@ func (a *App) selfSessionResponse(csrf string, profile selfProfile) map[string]a
 		"employee_self_redemption":                     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfRedemptionEnabled,
 		"employee_self_wallet_activity":                a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
 		"employee_self_wallet_entry_classification":    a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled,
+		"employee_self_redemption_credit_history":      a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled && a.cfg.EmployeeSelfRedemptionCreditHistoryEnabled,
 		"employee_self_subscription_status":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
 		"employee_self_subscription_purchase_snapshot": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled,
 		"employee_self_subscription_renewal_links":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionRenewalLinksEnabled,
