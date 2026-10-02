@@ -71,6 +71,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.BoolVar(&cfg.EmployeeSelfWalletActivityEnabled, "employee-self-wallet-activity-enabled", false, "allow enrolled employees to read recent changes to their own employee-owned wallet (requires self service and wallet balance)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionStatusEnabled, "employee-self-subscription-status-enabled", false, "allow enrolled employees to read minimal status of their own existing subscriptions (requires self service)")
 	flags.BoolVar(&cfg.EmployeeSelfPlanCatalogEnabled, "employee-self-plan-catalog-enabled", false, "allow enrolled employees to read the current minimal enabled plan catalog (requires self service)")
+	flags.BoolVar(&cfg.EmployeeSelfPlanPurchaseEnabled, "employee-self-plan-purchase-enabled", false, "allow enrolled employees to buy a one-time plan with their existing wallet (requires self service, wallet balance, and plan catalog)")
 	flags.BoolVar(&cfg.ResponsesStatefulResources, "responses-stateful-resources", false, "enable encrypted employee-owned Responses resources (development preview)")
 	flags.BoolVar(&cfg.ResponsesBackgroundTasks, "responses-background-tasks", false, "enable durable background Responses tasks; requires --responses-stateful-resources")
 	flags.StringVar(&cfg.CodexOAuthClientID, "codex-oauth-client-id", "", "registered OAuth client ID for the experimental Codex membership lifecycle")
@@ -120,6 +121,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	if cfg.EmployeeSelfPlanCatalogEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return 1, errors.New("--employee-self-plan-catalog-enabled requires --employee-self-service-enabled")
+	}
+	if cfg.EmployeeSelfPlanPurchaseEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled || !cfg.EmployeeSelfPlanCatalogEnabled) {
+		return 1, errors.New("--employee-self-plan-purchase-enabled requires --employee-self-service-enabled, --employee-self-wallet-balance-enabled, and --employee-self-plan-catalog-enabled")
 	}
 	cfg.Version = version
 	absDataDir, err := filepath.Abs(cfg.DataDir)

@@ -12,12 +12,13 @@
 // docs/employee-self-wallet-activity-contract.md.
 // docs/employee-self-subscription-status-contract.md.
 // docs/employee-self-plan-catalog-contract.md.
+// docs/employee-self-plan-purchase-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_plan_catalog?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -37,6 +38,8 @@ type SelfSubscriptionItem = { subscription_id: string; interval: 'one_time' | 'm
 type SelfSubscriptionPage = { items: SelfSubscriptionItem[]; next_cursor: string | null }
 type SelfPlanCatalogItem = { plan_id: string; name: string; interval: 'one_time' | 'monthly'; price_micro: string; credit_micro: string; revision: number }
 type SelfPlanCatalogPage = { currency: string; available: boolean; items: SelfPlanCatalogItem[]; next_cursor: string | null }
+type SelfPlanPurchaseQuote = { quote_token: string; plan_id: string; revision: number; currency: string; interval: 'one_time'; price_micro: string; credit_micro: string; expires_at: string }
+type SelfPlanPurchaseResult = { operation_id: string; subscription_id: string; replay: boolean; plan_id: string; revision: number; currency: string; interval: 'one_time'; price_micro: string; credit_micro: string }
 
 async function selfRequest<T>(path: string, init: RequestInit = {}, csrf?: string): Promise<T> {
   const headers = new Headers(init.headers)
@@ -844,6 +847,247 @@ function SelfPlanCatalogPanel() {
   </section>
 }
 
+const purchaseMicro = /^[1-9][0-9]*$/
+const purchaseUTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/
+
+function validPurchaseAmount(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 19 && purchaseMicro.test(value) && BigInt(value) <= 9223372036854775807n
+}
+
+function validSelfPlanPurchaseQuote(raw: unknown, planID: string, currency: string): raw is SelfPlanPurchaseQuote {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const value = raw as Record<string, unknown>
+  return Object.keys(value).sort().join(',') === 'credit_micro,currency,expires_at,interval,plan_id,price_micro,quote_token,revision' &&
+    value.plan_id === planID && value.currency === currency && value.interval === 'one_time' &&
+    typeof value.quote_token === 'string' && value.quote_token.length > 0 && value.quote_token.length <= 2048 &&
+    typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision > 0 &&
+    validPurchaseAmount(value.price_micro) && validPurchaseAmount(value.credit_micro) &&
+    typeof value.expires_at === 'string' && purchaseUTC.test(value.expires_at) && Number.isFinite(Date.parse(value.expires_at))
+}
+
+function validSelfPlanPurchaseResult(raw: unknown, operationID: string): raw is SelfPlanPurchaseResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const value = raw as Record<string, unknown>
+  return Object.keys(value).sort().join(',') === 'credit_micro,currency,interval,operation_id,plan_id,price_micro,replay,revision,subscription_id' &&
+    value.operation_id === operationID && typeof value.subscription_id === 'string' && value.subscription_id.length > 0 && value.subscription_id.length <= 256 &&
+    typeof value.replay === 'boolean' && typeof value.plan_id === 'string' && value.plan_id.length > 0 && value.plan_id.length <= 256 &&
+    typeof value.currency === 'string' && /^[A-Z]{3}$/.test(value.currency) && value.interval === 'one_time' &&
+    typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision > 0 &&
+    validPurchaseAmount(value.price_micro) && validPurchaseAmount(value.credit_micro)
+}
+
+function newSelfPurchaseOperationID(): string {
+  const bytes = new Uint8Array(16)
+  globalThis.crypto.getRandomValues(bytes)
+  return `self-buy-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
+}
+
+function SelfPlanPurchasePanel({ csrf }: { csrf: string }) {
+  const [currency, setCurrency] = useState('')
+  const [page, setPage] = useState<SelfPlanCatalogPage | null>(null)
+  const [balance, setBalance] = useState<SelfWalletBalance | null>(null)
+  const [quote, setQuote] = useState<SelfPlanPurchaseQuote | null>(null)
+  const [result, setResult] = useState<SelfPlanPurchaseResult | null>(null)
+  const [retry, setRetry] = useState<{ operationID: string; token: string } | null>(null)
+  const [loading, setLoading] = useState<'catalog' | 'balance' | 'quote' | 'purchase' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort(); pending.current = null }, [])
+
+  function clearCurrent(nextCurrency = currency) {
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    setCurrency(nextCurrency)
+    setPage(null)
+    setBalance(null)
+    setQuote(null)
+    setResult(null)
+    setRetry(null)
+    setError(null)
+    setLoading(null)
+  }
+
+  function beginRequest(kind: 'catalog' | 'balance' | 'quote' | 'purchase') {
+    generation.current++
+    pending.current?.abort()
+    const controller = new AbortController()
+    pending.current = controller
+    setLoading(kind)
+    setError(null)
+    return { controller, requestGeneration: generation.current }
+  }
+
+  function currentRequest(controller: AbortController, requestGeneration: number) {
+    return !controller.signal.aborted && generation.current === requestGeneration
+  }
+
+  function endRequest(controller: AbortController, requestGeneration: number) {
+    if (pending.current === controller) pending.current = null
+    if (currentRequest(controller, requestGeneration)) setLoading(null)
+  }
+
+  function failRequest(message: string) {
+    setPage(null)
+    setBalance(null)
+    setQuote(null)
+    setResult(null)
+    setRetry(null)
+    setError(message)
+  }
+
+  async function readCatalog(cursor?: string) {
+    const requestedCurrency = currency
+    const prior = cursor ? page : null
+    if (!/^[A-Z]{3}$/.test(requestedCurrency) || (cursor && (!prior || prior.next_cursor !== cursor))) {
+      failRequest('请输入三位大写币种后再读取套餐。')
+      return
+    }
+    const { controller, requestGeneration } = beginRequest('catalog')
+    setQuote(null)
+    setBalance(null)
+    setResult(null)
+    setRetry(null)
+    if (!cursor) setPage(null)
+    try {
+      const path = `/billing/plans?currency=${requestedCurrency}&limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const raw = await selfRequest<unknown>(path, { signal: controller.signal })
+      if (!currentRequest(controller, requestGeneration)) return
+      if (!validSelfPlanCatalogPage(raw, requestedCurrency, prior ?? undefined)) throw new Error('Invalid catalog response')
+      setPage(prior && raw.available ? { ...raw, items: [...prior.items, ...raw.items] } : raw)
+    } catch {
+      if (currentRequest(controller, requestGeneration)) failRequest('当前套餐暂时无法读取，请检查币种或稍后重试。')
+    } finally { endRequest(controller, requestGeneration) }
+  }
+
+  async function readBalance() {
+    if (!page?.available || page.currency !== currency) return
+    const requestedCurrency = currency
+    const { controller, requestGeneration } = beginRequest('balance')
+    setBalance(null)
+    setQuote(null)
+    setResult(null)
+    setRetry(null)
+    try {
+      const raw = await selfRequest<unknown>(`/billing/balance?currency=${requestedCurrency}`, { signal: controller.signal })
+      if (!currentRequest(controller, requestGeneration)) return
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid balance response')
+      const value = raw as Record<string, unknown>
+      if (Object.keys(value).sort().join(',') !== 'amount_micro,currency,has_account' || value.currency !== requestedCurrency || typeof value.has_account !== 'boolean' ||
+        (value.has_account ? typeof value.amount_micro !== 'string' || !/^(?:0|-[1-9][0-9]*|[1-9][0-9]*)$/.test(value.amount_micro) : value.amount_micro !== null)) throw new Error('Invalid balance response')
+      setBalance(value as SelfWalletBalance)
+    } catch {
+      if (currentRequest(controller, requestGeneration)) failRequest('本人钱包暂时无法读取，请重新读取套餐后再试。')
+    } finally { endRequest(controller, requestGeneration) }
+  }
+
+  async function requestQuote(planID: string) {
+    const item = page?.items.find((candidate) => candidate.plan_id === planID)
+    if (!page?.available || page.currency !== currency || !balance?.has_account || balance.currency !== currency || item?.interval !== 'one_time') return
+    const { controller, requestGeneration } = beginRequest('quote')
+    setQuote(null)
+    setResult(null)
+    setRetry(null)
+    try {
+      const raw = await selfRequest<unknown>('/billing/plan-purchase-quotes', { method: 'POST', body: JSON.stringify({ plan_id: planID }), signal: controller.signal }, csrf)
+      if (!currentRequest(controller, requestGeneration)) return
+      if (!validSelfPlanPurchaseQuote(raw, planID, currency)) throw new Error('Invalid quote response')
+      setQuote(raw)
+    } catch {
+      if (currentRequest(controller, requestGeneration)) failRequest('报价未能确认；套餐或钱包可能已变化，请重新读取。')
+    } finally { endRequest(controller, requestGeneration) }
+  }
+
+  async function submitPurchase(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (loading || (!quote && !retry)) return
+    const form = event.currentTarget
+    let current_password = String(new FormData(form).get('current_password') ?? '')
+    form.reset()
+    const size = new TextEncoder().encode(current_password).length
+    if (size < 12 || size > 72) {
+      current_password = ''
+      failRequest('当前密码须为 12–72 个 UTF-8 字节。请重新读取套餐。')
+      return
+    }
+    let operationID = retry?.operationID ?? ''
+    let token = retry?.token ?? quote?.quote_token ?? ''
+    if (!retry) {
+      try { operationID = newSelfPurchaseOperationID() } catch {
+        current_password = ''
+        failRequest('无法生成购买操作编号，请稍后重试。')
+        return
+      }
+    }
+    const { controller, requestGeneration } = beginRequest('purchase')
+    setError(null)
+    try {
+      const raw = await selfRequest<unknown>('/billing/subscriptions', {
+        method: 'POST', body: JSON.stringify({ operation_id: operationID, quote_token: token, current_password }), signal: controller.signal,
+      }, csrf)
+      if (!currentRequest(controller, requestGeneration)) return
+      if (!validSelfPlanPurchaseResult(raw, operationID)) throw new Error('Invalid purchase response')
+      setPage(null)
+      setBalance(null)
+      setQuote(null)
+      setRetry(null)
+      setResult(raw)
+    } catch (caught) {
+      if (!currentRequest(controller, requestGeneration)) return
+      const uncertain = !(caught instanceof ApiError) || caught.status === 503
+      failRequest(uncertain ? '结果未确认；可重新输入当前密码，显式重试同一操作。' : '购买未完成；请重新读取套餐、钱包并取得新报价。')
+      if (uncertain) setRetry({ operationID, token })
+    } finally {
+      current_password = ''
+      token = ''
+      operationID = ''
+      endRequest(controller, requestGeneration)
+    }
+  }
+
+  return <section className="self-plan-purchase" aria-labelledby="self-plan-purchase-title">
+    <h2 id="self-plan-purchase-title">本人钱包购买一次性套餐</h2>
+    <p>仅开发预览；先主动读取当前套餐和本人钱包，再获取五分钟冻结报价。目录不是报价；购买不代表模型权益、支付或供应商状态。</p>
+    <form className="self-plan-purchase-form" onSubmit={(event) => { event.preventDefault(); void readCatalog() }}>
+      <Field label="购买币种（三位大写字母，如 USD）"><input name="purchase_currency" value={currency} onChange={(event) => clearCurrent(event.target.value)} required maxLength={3} pattern="[A-Z]{3}" autoComplete="off" spellCheck={false} /></Field>
+      <Button type="submit" disabled={loading !== null}>{loading === 'catalog' ? '正在读取…' : '读取当前套餐'}</Button>
+    </form>
+    {error ? <p role="alert">{error}</p> : null}
+    {result ? <p className="self-plan-purchase-success" role="status">{result.replay ? '已确认原购买' : '购买已确认'}：订阅 {result.subscription_id}；从本人 {result.currency} 钱包扣除 {result.price_micro} micro，并记入 {result.credit_micro} micro 额度。</p> : null}
+    {page ? <div className="self-plan-purchase-catalog">
+      {!page.available ? <p role="status">当前商业套餐不可用；没有新购买入口。已提交的原操作仍可按同 ID 重试。</p>
+        : page.items.length === 0 ? <p role="status">{page.currency} 暂无可展示套餐。</p>
+          : <><ol className="self-plan-catalog-list">{page.items.map((item) => <li key={item.plan_id}>
+            <div className="self-plan-catalog-heading"><strong>{item.name}</strong><span>{item.interval === 'monthly' ? '单月（不可在此购买）' : '一次性'}</span></div>
+            <dl><div><dt>套餐 ID</dt><dd>{item.plan_id}</dd></div><div><dt>目录版本</dt><dd>{item.revision}</dd></div><div><dt>目录价格</dt><dd>{item.price_micro} micro {page.currency}</dd></div><div><dt>目录额度</dt><dd>{item.credit_micro} micro</dd></div></dl>
+            {item.interval === 'one_time' && balance?.has_account && balance.currency === page.currency ? <Button variant="secondary" disabled={loading !== null} onClick={() => { void requestQuote(item.plan_id) }}>获取此套餐的冻结报价</Button> : null}
+          </li>)}</ol>
+            <Button variant="secondary" disabled={loading !== null} onClick={() => { void readBalance() }}>{loading === 'balance' ? '正在读取钱包…' : '读取本币种本人钱包'}</Button>
+            {balance ? balance.has_account ? <p role="status">本人 {balance.currency} 钱包当前余额：{balance.amount_micro} micro。购买时仍以最终事务余额为准。</p>
+              : <p role="status">本人 {balance.currency} 钱包账户不存在；不能在此购买。</p> : null}
+          </>}
+      {page.available && page.next_cursor ? <Button variant="secondary" disabled={loading !== null} onClick={() => { void readCatalog(page.next_cursor ?? undefined) }}>加载更多套餐</Button> : null}
+    </div> : null}
+    {quote ? <form className="self-plan-purchase-confirm" onSubmit={(event) => { void submitPurchase(event) }}>
+      <h3>确认冻结报价</h3>
+      <p>一次性套餐 {quote.plan_id}（版本 {quote.revision}）：从你本人 {quote.currency} 钱包扣除 <strong>{quote.price_micro} micro</strong>，记入 <strong>{quote.credit_micro} micro</strong> 额度。</p>
+      <p>报价至 <time dateTime={quote.expires_at}>{selfKeyDate(quote.expires_at)}</time> 有效；提交时仍会核对当前套餐、商业开关及钱包余额。</p>
+      <label className="self-plan-purchase-check"><input name="confirm" type="checkbox" required />我确认上述本人钱包扣款与额度变动。</label>
+      <Field label="当前密码（确认购买）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} /></Field>
+      <div className="self-actions"><Button type="submit" disabled={loading !== null}>{loading === 'purchase' ? '正在确认…' : '确认购买一次性套餐'}</Button><Button type="button" variant="secondary" disabled={loading !== null} onClick={() => clearCurrent()}>取消报价</Button></div>
+    </form> : null}
+    {retry ? <form className="self-plan-purchase-confirm" onSubmit={(event) => { void submitPurchase(event) }}>
+      <h3>上次提交结果未确认</h3>
+      <p>只会用原操作编号和原认证报价重试；若先前已提交，返回原订阅。若未提交且报价已过期，不会新增购买。</p>
+      <label className="self-plan-purchase-check"><input name="confirm" type="checkbox" required />我确认显式重试上次操作；若尚未提交且原报价仍有效，可能完成先前确认的扣款。</label>
+      <Field label="当前密码（重试原操作）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} /></Field>
+      <div className="self-actions"><Button type="submit" disabled={loading !== null}>{loading === 'purchase' ? '正在核对…' : '用同一操作编号重试'}</Button><Button type="button" variant="secondary" disabled={loading !== null} onClick={() => clearCurrent()}>放弃本机重试</Button></div>
+    </form> : null}
+  </section>
+}
+
 function SelfSignOutOthers({ csrf }: { csrf: string }) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -929,13 +1173,16 @@ export function SelfApp() {
       {session ? <>
         <header><span className="self-kicker">PERSONAL PROFILE</span><h1>你好，{session.profile.name}</h1><p>你可以查看个人资料、API Key、本人请求记录和 Token 汇总，也可以撤销自己的 Key 或退出其他设备。仅在管理员明确授权槽位后，你才能领取一个新的 Key；权限和限额仍由管理员管理。</p></header>
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
-        {session.features?.employee_self_wallet_balance === true ? <SelfWalletBalancePanel key={`wallet:${session.profile.id}:${session.csrf_token}`} /> : null}
+        {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_plan_purchase !== true
+          ? <SelfWalletBalancePanel key={`wallet:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true
           ? <SelfWalletActivityPanel key={`wallet-activity:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_subscription_status === true
           ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} /> : null}
-        {session.features?.employee_self_plan_catalog === true
+        {session.features?.employee_self_plan_catalog === true && session.features?.employee_self_plan_purchase !== true
           ? <SelfPlanCatalogPanel key={`plan-catalog:${session.profile.id}:${session.csrf_token}`} /> : null}
+        {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_plan_catalog === true && session.features?.employee_self_plan_purchase === true
+          ? <SelfPlanPurchasePanel key={`plan-purchase:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} /> : null}
         <SelfKeyIssuance key={`issue:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} onIssued={() => setKeyInventoryRevision((value) => value + 1)} />
         <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}:${keyInventoryRevision}`} csrf={session.csrf_token} />
         <SelfTokenSummaryPanel key={`summary:${session.profile.id}:${session.csrf_token}`} />
