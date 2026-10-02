@@ -15,6 +15,7 @@
 // docs/employee-self-plan-purchase-contract.md.
 // docs/employee-self-subscription-cancel-contract.md.
 // docs/employee-self-one-shot-disarm-contract.md.
+// docs/employee-self-subscription-purchase-snapshot-contract.md.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -256,6 +257,63 @@ describe('employee self-service page', () => {
     expect(within(panel).queryByRole('button', { name: '加载更多订阅' })).not.toBeInTheDocument()
     expect(within(panel).queryByText(/plan|credit|price|支付/i)).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/billing/subscriptions'))).toHaveLength(2)
+    expect(within(panel).queryByRole('button', { name: '查看购买时记录' })).not.toBeInTheDocument()
+  })
+
+  it('reads only an explicitly selected historical purchase snapshot and clears on target, page, failure and logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const item = (subscription_id: string) => ({ subscription_id, interval: 'one_time', status: 'active', started_at: '2026-10-02T08:00:00Z', period_end_at: null, cancelled_at: null })
+    const snapshot = (subscription_id: string) => ({ subscription_id, plan_id: `plan-${subscription_id}`, plan_revision: 1, currency: 'USD', interval: 'one_time', price_micro: '10', credit_micro: '20', started_at: '2026-10-02T08:00:00Z', period_end_at: null })
+    let pending: ((value: Response) => void) | undefined
+    let pendingSignal: AbortSignal | undefined
+    let bad = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_subscription_status: true, employee_self_subscription_purchase_snapshot: true } })
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [item('sub-z'), item('sub-a')], next_cursor: 'next' })
+      if (url.endsWith('/billing/subscriptions?limit=20&cursor=next')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions/sub-z/purchase-snapshot')) {
+        if (bad) return reply(200, { ...snapshot('sub-z'), price_micro: 10 })
+        return reply(200, snapshot('sub-z'))
+      }
+      if (url.endsWith('/billing/subscriptions/sub-a/purchase-snapshot')) {
+        pendingSignal = init?.signal ?? undefined
+        return new Promise<Response>((resolve) => { pending = resolve })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '我的订阅状态' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/purchase-snapshot'))).toBe(false)
+    await userEvent.click(within(panel).getByRole('button', { name: '读取我的订阅状态' }))
+    const first = await within(panel).findByRole('region', { name: '订阅 sub-z 的本地钱包购买记录' })
+    const second = within(panel).getByRole('region', { name: '订阅 sub-a 的本地钱包购买记录' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/purchase-snapshot'))).toBe(false)
+    await userEvent.click(within(first).getByRole('button', { name: '查看购买时记录' }))
+    expect(await within(first).findByText('plan-sub-z')).toBeInTheDocument()
+    expect(within(first).getByText(/不是当前套餐价格/)).toBeInTheDocument()
+    await userEvent.click(within(second).getByRole('button', { name: '查看购买时记录' }))
+    await waitFor(() => expect(pending).toBeTypeOf('function'))
+    expect(within(first).queryByText('plan-sub-z')).not.toBeInTheDocument()
+    await userEvent.click(within(first).getByRole('button', { name: '查看购买时记录' }))
+    expect(pendingSignal?.aborted).toBe(true)
+    pending?.(new Response(JSON.stringify(snapshot('sub-a')), { status: 200 }))
+    expect(await within(first).findByText('plan-sub-z')).toBeInTheDocument()
+    expect(within(second).queryByText('plan-sub-a')).not.toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多订阅' }))
+    expect(within(first).queryByText('plan-sub-z')).not.toBeInTheDocument()
+    bad = true
+    await userEvent.click(within(first).getByRole('button', { name: '查看购买时记录' }))
+    expect(await within(first).findByRole('alert')).toBeInTheDocument()
+    expect(within(first).queryByText('plan-sub-z')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(screen.queryByText('plan-sub-z')).not.toBeInTheDocument()
   })
 
   it('clears subscription results on failure and ignores a late response after logout', async () => {

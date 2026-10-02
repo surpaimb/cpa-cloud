@@ -777,6 +777,16 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-subscriptions-confirm p { font-size: 13px; line-height: 1.6; }
 .self-subscriptions-success { margin-top: 14px !important; padding: 12px 14px; border: 1px solid #bfe3d5; border-radius: 9px; background: #f2f9f6; color: var(--navy) !important; overflow-wrap: anywhere; }
 @media (max-width: 520px) { .self-subscriptions-confirm .button { width: 100%; } }
+/* Independently authored for docs/employee-self-subscription-purchase-snapshot-contract.md. */
+.self-purchase-snapshot { min-width: 0; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.self-purchase-snapshot > p[role="alert"] { margin: 10px 0 0; color: #a52132; line-height: 1.6; }
+.self-purchase-snapshot-result { min-width: 0; margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: #f5f8fc; }
+.self-purchase-snapshot-result > p { margin: 0 0 12px; line-height: 1.6; }
+.self-purchase-snapshot-result dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 520px) {
+  .self-purchase-snapshot .button { max-width: 100%; white-space: normal; }
+  .self-purchase-snapshot-result dl { grid-template-columns: minmax(0, 1fr); }
+}
 /* Independently authored for docs/employee-self-one-shot-disarm-contract.md. */
 .self-one-shot { min-width: 0; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
 .self-one-shot-status { margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: #f5f8fc; }

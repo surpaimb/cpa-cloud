@@ -37,6 +37,12 @@ func (c *Commercial) readEmployeeSubscriptionPurchaseSnapshotTx(ctx context.Cont
 	if ctx.Err() != nil || validateSchema(ctx, tx) != nil || validateCommercialSchema(ctx, tx, commercialOperationsDDL, false) != nil {
 		return EmployeeSubscriptionPurchaseSnapshot{}, ErrUnavailable
 	}
+	// Establish the caller's direct ownership before validating mutable
+	// subscription fields. A foreign or Key-owned row must not reveal whether
+	// its purchase chain is malformed through a different response status.
+	if err := snapshotOwnershipBoundary(ctx, tx, employeeID, subscriptionID); err != nil {
+		return EmployeeSubscriptionPurchaseSnapshot{}, err
+	}
 	subscription, accountID, err := snapshotSubscription(ctx, tx, subscriptionID)
 	if err != nil {
 		return EmployeeSubscriptionPurchaseSnapshot{}, err
@@ -68,6 +74,33 @@ func (c *Commercial) readEmployeeSubscriptionPurchaseSnapshotTx(ctx context.Cont
 		return EmployeeSubscriptionPurchaseSnapshot{}, ErrUnavailable
 	}
 	return subscription, nil
+}
+
+func snapshotOwnershipBoundary(ctx context.Context, tx *sql.Tx, employeeID, subscriptionID string) error {
+	values, err := snapshotScan(tx.QueryRowContext(ctx, `SELECT account_id FROM financial_subscriptions WHERE id=?`, subscriptionID), 1)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return ErrUnavailable
+	}
+	accountID, ok := snapshotText(values[0])
+	if !ok || !validCommercialText(accountID, 256) {
+		return ErrUnavailable
+	}
+	owner, err := snapshotScan(tx.QueryRowContext(ctx, `SELECT owner_kind,employee_id FROM financial_accounts WHERE id=?`, accountID), 2)
+	if err != nil {
+		return ErrUnavailable
+	}
+	kind, kindOK := snapshotText(owner[0])
+	employee, employeeOK := snapshotText(owner[1])
+	if !kindOK || !employeeOK {
+		return ErrUnavailable
+	}
+	if kind != string(OwnerEmployee) || employee != employeeID {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func snapshotScan(scanner interface{ Scan(...any) error }, count int) ([]any, error) {

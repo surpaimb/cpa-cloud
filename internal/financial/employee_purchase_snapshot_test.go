@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 )
 
 func readPurchaseSnapshotTest(t *testing.T, c *Commercial, employeeID, subscriptionID string, hooks purchaseSnapshotReadHooks) (EmployeeSubscriptionPurchaseSnapshot, error) {
@@ -25,6 +26,53 @@ func readPurchaseSnapshotTest(t *testing.T, c *Commercial, employeeID, subscript
 		return EmployeeSubscriptionPurchaseSnapshot{}, err
 	}
 	return got, nil
+}
+
+func TestEmployeePurchaseSnapshotMonthlyPredecessorSuccessorAndPlanMutation(t *testing.T) {
+	db := openFinancialTestDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	ledger, commercial := NewLedger(db), NewCommercial(db)
+	if err := ledger.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := commercial.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 8, 31, 8, 0, 0, 0, time.UTC)
+	owner := Owner{Kind: OwnerEmployee, EmployeeID: "employee-one"}
+	postEmployeeBalanceEntry(t, ledger, "snapshot-monthly-fund", owner, "USD", EntryAdjustmentCredit, 100, start.Add(-time.Hour))
+	if _, err := commercial.SetEnabled(ctx, testCommercialMeta(t, "snapshot-monthly-enable", "on", start.Add(-time.Hour)), 1, true); err != nil {
+		t.Fatal(err)
+	}
+	plan, _, err := commercial.CreatePlan(ctx, CreatePlan{Meta: testCommercialMeta(t, "snapshot-monthly-plan", "plan", start.Add(-time.Hour)), Name: "Monthly", Currency: "USD", Interval: "monthly", PriceMicro: 10, CreditMicro: 20, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := commercial.PurchaseSubscription(ctx, PurchaseSubscription{Meta: testCommercialMeta(t, "snapshot-monthly-buy", "buy", start), Owner: owner, PlanID: plan.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := readPurchaseSnapshotTest(t, commercial, owner.EmployeeID, first.ID, purchaseSnapshotReadHooks{})
+	if err != nil || initial.Interval != "monthly" || initial.PeriodEndAt == nil || initial.PriceMicro != 10 {
+		t.Fatalf("initial=%+v err=%v", initial, err)
+	}
+	if _, err := db.Exec(`UPDATE financial_plans SET price_micro=12,credit_micro=30,revision=2 WHERE id=?`, plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	commercial.now = func() time.Time { return *first.PeriodEndAt }
+	second, _, err := commercial.RenewSubscription(ctx, renewalInput(t, first.ID, "snapshot-monthly-renew", *first.PeriodEndAt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior, err := readPurchaseSnapshotTest(t, commercial, owner.EmployeeID, first.ID, purchaseSnapshotReadHooks{})
+	if err != nil || prior.PlanRevision != 1 || prior.PriceMicro != 10 || prior.CreditMicro != 20 {
+		t.Fatalf("prior=%+v err=%v", prior, err)
+	}
+	successor, err := readPurchaseSnapshotTest(t, commercial, owner.EmployeeID, second.ID, purchaseSnapshotReadHooks{})
+	if err != nil || successor.PlanRevision != 2 || successor.PriceMicro != 12 || successor.CreditMicro != 30 || successor.PeriodEndAt == nil {
+		t.Fatalf("successor=%+v err=%v", successor, err)
+	}
 }
 
 func TestEmployeePurchaseSnapshotOwnOneTimeChainAndIsolation(t *testing.T) {
@@ -56,6 +104,35 @@ func TestEmployeePurchaseSnapshotOwnOneTimeChainAndIsolation(t *testing.T) {
 	}
 	if _, err := readPurchaseSnapshotTest(t, commercial, "employee-one", bought.Subscription.ID, purchaseSnapshotReadHooks{}); err != nil {
 		t.Fatalf("commercial-off historical read err=%v", err)
+	}
+}
+
+func TestEmployeePurchaseSnapshotForeignAndKeyRowsHideMalformedDates(t *testing.T) {
+	db, commercial, input := employeePurchaseFixture(t, 100)
+	enableEmployeePurchase(t, commercial)
+	for _, caseValue := range []struct {
+		name  string
+		owner Owner
+	}{
+		{"foreign_employee", Owner{Kind: OwnerEmployee, EmployeeID: "employee-two"}},
+		{"key_owned", Owner{Kind: OwnerKey, EmployeeID: "employee-one", KeyID: "key-one"}},
+	} {
+		t.Run(caseValue.name, func(t *testing.T) {
+			operationID := "snapshot-foreign-" + caseValue.name
+			postEmployeeBalanceEntry(t, NewLedger(db), operationID+"-fund", caseValue.owner, "USD", EntryAdjustmentCredit, 100, input.ObservedAt.Add(-time.Second))
+			purchased, _, err := commercial.PurchaseSubscription(context.Background(), PurchaseSubscription{
+				Meta: testCommercialMeta(t, operationID, caseValue.name, input.ObservedAt), Owner: caseValue.owner, PlanID: input.Expected.PlanID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE financial_subscriptions SET started_at='malformed-time' WHERE id=?`, purchased.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readPurchaseSnapshotTest(t, commercial, "employee-one", purchased.ID, purchaseSnapshotReadHooks{}); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("%s leaked malformed chain status: %v", caseValue.name, err)
+			}
+		})
 	}
 }
 
