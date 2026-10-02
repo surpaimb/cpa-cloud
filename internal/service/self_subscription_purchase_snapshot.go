@@ -20,7 +20,18 @@ import (
 // while leaving other self routes and feature-off behavior unchanged.
 func (a *App) selfPurchaseSnapshotRouteGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && malformedPurchaseSnapshotRawPath(r) {
+		if !snapshotShapedRawPath(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			a.requireSelf(func(w http.ResponseWriter, _ *http.Request, _ selfSession) {
+				w.Header().Set("Allow", http.MethodGet)
+				selfError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			}, false)(w, r)
+			return
+		}
+		if malformedPurchaseSnapshotRawPath(r) {
 			a.requireSelf(func(w http.ResponseWriter, _ *http.Request, _ selfSession) {
 				selfError(w, http.StatusBadRequest, "invalid_request")
 			}, false)(w, r)
@@ -30,17 +41,23 @@ func (a *App) selfPurchaseSnapshotRouteGuard(next http.Handler) http.Handler {
 	})
 }
 
+func snapshotShapedRawPath(r *http.Request) bool {
+	const prefix = "/self/api/v1/billing/subscriptions/"
+	const suffix = "/purchase-snapshot"
+	escaped := r.URL.EscapedPath()
+	decoded := r.URL.Path
+	return strings.HasPrefix(escaped, prefix) && strings.Contains(strings.TrimPrefix(escaped, prefix), suffix) ||
+		strings.HasPrefix(decoded, prefix) && strings.Contains(strings.TrimPrefix(decoded, prefix), suffix)
+}
+
 func malformedPurchaseSnapshotRawPath(r *http.Request) bool {
 	const prefix = "/self/api/v1/billing/subscriptions/"
 	const suffix = "/purchase-snapshot"
 	escaped := r.URL.EscapedPath()
 	if !strings.HasPrefix(escaped, prefix) {
-		return false
+		return true
 	}
 	rest := strings.TrimPrefix(escaped, prefix)
-	if !strings.Contains(rest, suffix) {
-		return false
-	}
 	if !strings.HasSuffix(rest, suffix) {
 		return true
 	}
@@ -49,12 +66,12 @@ func malformedPurchaseSnapshotRawPath(r *http.Request) bool {
 		return true
 	}
 	id, err := url.PathUnescape(segment)
-	return err != nil || !validSelfPurchaseID(id, 256) || strings.ContainsRune(id, '/') || id == "." || id == ".." || url.PathEscape(id) != segment
+	return err != nil || !validSelfPurchaseID(id, 256) || strings.ContainsAny(id, "/\\%") || id == "." || id == ".." || url.PathEscape(id) != segment
 }
 
 func selfPurchaseSnapshotPath(r *http.Request) (string, bool) {
 	id := r.PathValue("id")
-	if r.URL.RawQuery != "" || r.URL.ForceQuery || !utf8.ValidString(id) || !validSelfPurchaseID(id, 256) || strings.ContainsRune(id, '/') || id == "." || id == ".." ||
+	if r.URL.RawQuery != "" || r.URL.ForceQuery || !utf8.ValidString(id) || !validSelfPurchaseID(id, 256) || strings.ContainsAny(id, "/\\%") || id == "." || id == ".." ||
 		r.URL.EscapedPath() != "/self/api/v1/billing/subscriptions/"+url.PathEscape(id)+"/purchase-snapshot" {
 		return "", false
 	}

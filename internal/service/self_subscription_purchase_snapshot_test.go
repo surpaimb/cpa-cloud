@@ -103,6 +103,8 @@ func TestSelfPurchaseSnapshotMalformedOpaquePathNoRedirect(t *testing.T) {
 	for _, suffix := range []string{
 		"a%2Fb/purchase-snapshot", "a%2fb/purchase-snapshot", "%2e/purchase-snapshot", "%2e%2e/purchase-snapshot",
 		"id/./purchase-snapshot", "id/../purchase-snapshot", "id//purchase-snapshot",
+		"a%252Fb/purchase-snapshot", "a%252eb/purchase-snapshot", "a%5Cb/purchase-snapshot",
+		"a%2Fpurchase-snapshot", "a/%70urchase-snapshot",
 	} {
 		response := requestSelfSnapshotWithoutRedirect(t, enabled, suffix, enabled.cookie)
 		if response.Header.Get("Location") != "" {
@@ -119,6 +121,19 @@ func TestSelfPurchaseSnapshotMalformedOpaquePathNoRedirect(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != 404 || response.Header.Get("Location") != "" {
 		t.Fatalf("feature-off status=%d location=%q", response.StatusCode, response.Header.Get("Location"))
+	}
+	post := selfRequestTest(t, http.MethodPost, enabled.server.URL+"/self/api/v1/billing/subscriptions/known/purchase-snapshot", `{}`, "", enabled.cookie, "")
+	defer post.Body.Close()
+	if post.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST snapshot status=%d want=405", post.StatusCode)
+	}
+	if post.Header.Get("Allow") != http.MethodGet || post.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("POST snapshot headers Allow=%q Cache-Control=%q", post.Header.Get("Allow"), post.Header.Get("Cache-Control"))
+	}
+	head := selfRequestTest(t, http.MethodHead, enabled.server.URL+"/self/api/v1/billing/subscriptions/known/purchase-snapshot", "", "", enabled.cookie, "")
+	defer head.Body.Close()
+	if head.StatusCode != http.StatusMethodNotAllowed || head.Header.Get("Allow") != http.MethodGet {
+		t.Fatalf("HEAD snapshot status=%d Allow=%q", head.StatusCode, head.Header.Get("Allow"))
 	}
 }
 
