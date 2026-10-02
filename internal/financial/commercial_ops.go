@@ -586,6 +586,13 @@ func (c *Commercial) PurchaseSubscription(ctx context.Context, input PurchaseSub
 	if c == nil || c.db == nil || ctx == nil || !validMeta(input.Meta) || !validCommercialText(input.PlanID, 256) {
 		return Subscription{}, CommercialReceipt{}, ErrInvalid
 	}
+	// The existing self-contained purchase path is administrator-only. Employee
+	// purchases must use the caller-owned transaction primitive, which refuses
+	// automatic wallet creation and binds a full expected plan snapshot.
+	actor, ok := effectiveActor(input.Meta.Actor, input.Meta.ActorAdminID)
+	if !ok || actor.Kind != ActorAdmin {
+		return Subscription{}, CommercialReceipt{}, ErrInvalid
+	}
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Subscription{}, CommercialReceipt{}, ErrUnavailable
