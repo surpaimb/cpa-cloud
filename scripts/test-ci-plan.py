@@ -46,6 +46,11 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(result['core'] and result['web'])
         self.assertFalse(any(result[key] for key in ('windows', 'linux', 'macos')))
 
+    def test_employee_wallet_classification_smoke_runs_core_without_packaging(self):
+        result = plan.classify(['scripts/smoke-employee-self-wallet-entry-classification.mjs'])
+        self.assertTrue(result['core'])
+        self.assertFalse(any(result[key] for key in ('windows', 'linux', 'macos')))
+
 
 class ServiceRaceShardTests(unittest.TestCase):
     def test_default_case_parser_excludes_benchmarks_and_rejects_unknown_output(self):

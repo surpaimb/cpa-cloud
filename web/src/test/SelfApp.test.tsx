@@ -10,6 +10,7 @@
 // docs/employee-self-key-request-history-contract.md.
 // docs/employee-self-wallet-balance-contract.md.
 // docs/employee-self-wallet-activity-contract.md.
+// docs/employee-self-wallet-entry-classification-contract.md.
 // docs/employee-self-subscription-status-contract.md.
 // docs/employee-self-plan-catalog-contract.md.
 // docs/employee-self-plan-purchase-contract.md.
@@ -336,6 +337,104 @@ describe('employee self-service page', () => {
     await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
     expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '最近钱包变动' })).not.toBeInTheDocument()
+  })
+
+  it('keeps wallet classification absent without its own capability and never fetches on mount', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_wallet_balance: true, employee_self_wallet_activity: true, employee_self_wallet_entry_classification: false } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    expect(await screen.findByRole('region', { name: '最近钱包变动' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '钱包分录类型' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/entry-classifications'))).toBe(false)
+  })
+
+  it('opens one currency classification only on click and appends raw kinds without changing old activity', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const window = { window_start: '2026-09-02T12:00:00Z', window_end: '2026-10-03T12:00:00Z' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_wallet_balance: true, employee_self_wallet_activity: true, employee_self_wallet_entry_classification: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/entry-classifications?currency=JPY&limit=20')) return reply(200, { currency: 'JPY', has_account: false, ...window, items: [], next_cursor: null })
+      if (url.endsWith('/billing/entry-classifications?currency=EUR&limit=20')) return reply(200, { currency: 'EUR', has_account: true, ...window, items: [], next_cursor: null })
+      if (url.endsWith('/billing/entry-classifications?currency=USD&limit=20')) return reply(200, { currency: 'USD', has_account: true, ...window, items: [{ occurred_at: '2026-10-03T11:59:59Z', delta_micro: '-42', entry_kind: 'adjustment_debit' }], next_cursor: 'opaque-classification-next' })
+      if (url.endsWith('/billing/entry-classifications?currency=USD&limit=20&cursor=opaque-classification-next')) return reply(200, { currency: 'USD', has_account: true, ...window, items: [{ occurred_at: '2026-10-03T11:59:58Z', delta_micro: '42', entry_kind: 'redemption' }], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '钱包分录类型' })
+    const field = within(panel).getByLabelText('类型视图币种（三位大写字母，如 USD）')
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/entry-classifications') || String(url).includes('/billing/entries'))).toBe(false)
+    await userEvent.type(field, 'JPY')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取分录类型' }))
+    expect(await within(panel).findByText(/暂无员工钱包账户/)).toBeInTheDocument()
+    await userEvent.clear(field)
+    expect(within(panel).queryByText(/暂无员工钱包账户/)).not.toBeInTheDocument()
+    await userEvent.type(field, 'EUR')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取分录类型' }))
+    expect(await within(panel).findByText(/此窗口暂无分录/)).toBeInTheDocument()
+    await userEvent.clear(field)
+    await userEvent.type(field, 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取分录类型' }))
+    expect(await within(panel).findByText('adjustment_debit')).toBeInTheDocument()
+    expect(within(panel).getByText('-42 micro')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多分录' }))
+    expect(await within(panel).findByText('redemption')).toBeInTheDocument()
+    expect(within(panel).getByText('+42 micro')).toBeInTheDocument()
+    expect(within(panel).queryByRole('button', { name: '加载更多分录' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/billing/entry-classifications'))).toHaveLength(4)
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/entries'))).toBe(false)
+  })
+
+  it('clears classification on currency switch, failed read, late response and logout', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const window = { window_start: '2026-09-02T12:00:00Z', window_end: '2026-10-03T12:00:00Z' }
+    let finishUSD: ((value: Response) => void) | undefined
+    let failEUR = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_wallet_balance: true, employee_self_wallet_activity: true, employee_self_wallet_entry_classification: true } })
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/entry-classifications?currency=USD&limit=20')) return new Promise<Response>((resolve) => { finishUSD = resolve })
+      if (url.endsWith('/billing/entry-classifications?currency=EUR&limit=20')) return failEUR
+        ? reply(503, { error: { code: 'storage_unavailable' } })
+        : reply(200, { currency: 'EUR', has_account: true, ...window, items: [{ occurred_at: '2026-10-03T11:59:59Z', delta_micro: '7', entry_kind: 'topup' }], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '钱包分录类型' })
+    const field = within(panel).getByLabelText('类型视图币种（三位大写字母，如 USD）')
+    await userEvent.type(field, 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取分录类型' }))
+    await waitFor(() => expect(finishUSD).toBeTypeOf('function'))
+    await userEvent.clear(field)
+    await userEvent.type(field, 'EUR')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取分录类型' }))
+    expect(await within(panel).findByText('+7 micro')).toBeInTheDocument()
+    finishUSD?.(new Response(JSON.stringify({ currency: 'USD', has_account: true, ...window, items: [{ occurred_at: '2026-10-03T11:59:59Z', delta_micro: '999', entry_kind: 'redemption' }], next_cursor: null }), { status: 200 }))
+    await waitFor(() => expect(within(panel).queryByText('+999 micro')).not.toBeInTheDocument())
+    failEUR = true
+    await userEvent.click(within(panel).getByRole('button', { name: '读取分录类型' }))
+    expect(await within(panel).findByRole('alert')).toBeInTheDocument()
+    expect(within(panel).queryByText('+7 micro')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '钱包分录类型' })).not.toBeInTheDocument()
   })
 
   it('keeps subscription status absent without its independent capability', async () => {

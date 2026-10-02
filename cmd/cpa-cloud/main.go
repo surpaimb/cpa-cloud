@@ -70,6 +70,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.BoolVar(&cfg.EmployeeSelfWalletBalanceEnabled, "employee-self-wallet-balance-enabled", false, "allow enrolled employees to read their own employee-owned wallet balance (requires employee self service)")
 	flags.BoolVar(&cfg.EmployeeSelfRedemptionEnabled, "employee-self-redemption-enabled", false, "allow enrolled employees to redeem an issued code into their own direct wallet (requires self service and wallet balance)")
 	flags.BoolVar(&cfg.EmployeeSelfWalletActivityEnabled, "employee-self-wallet-activity-enabled", false, "allow enrolled employees to read recent changes to their own employee-owned wallet (requires self service and wallet balance)")
+	flags.BoolVar(&cfg.EmployeeSelfWalletEntryClassificationEnabled, "employee-self-wallet-entry-classification-enabled", false, "allow enrolled employees to read raw kinds of their own recent wallet entries (requires self service, wallet balance, and wallet activity)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionStatusEnabled, "employee-self-subscription-status-enabled", false, "allow enrolled employees to read minimal status of their own existing subscriptions (requires self service)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled, "employee-self-subscription-purchase-snapshot-enabled", false, "allow enrolled employees to read a verified local wallet purchase snapshot for one own subscription (requires self service, subscription status, and wallet balance)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionRenewalLinksEnabled, "employee-self-subscription-renewal-links-enabled", false, "allow enrolled employees to read verified predecessor/successor IDs for one own subscription (requires self service and subscription status)")
@@ -125,6 +126,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	if cfg.EmployeeSelfWalletActivityEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled) {
 		return 1, errors.New("--employee-self-wallet-activity-enabled requires --employee-self-service-enabled and --employee-self-wallet-balance-enabled")
+	}
+	if cfg.EmployeeSelfWalletEntryClassificationEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled || !cfg.EmployeeSelfWalletActivityEnabled) {
+		return 1, errors.New("--employee-self-wallet-entry-classification-enabled requires --employee-self-service-enabled, --employee-self-wallet-balance-enabled, and --employee-self-wallet-activity-enabled")
 	}
 	if cfg.EmployeeSelfSubscriptionStatusEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return 1, errors.New("--employee-self-subscription-status-enabled requires --employee-self-service-enabled")

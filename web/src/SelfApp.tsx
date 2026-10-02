@@ -10,6 +10,7 @@
 // docs/employee-self-key-request-history-contract.md.
 // docs/employee-self-wallet-balance-contract.md.
 // docs/employee-self-wallet-activity-contract.md.
+// docs/employee-self-wallet-entry-classification-contract.md.
 // docs/employee-self-subscription-status-contract.md.
 // docs/employee-self-plan-catalog-contract.md.
 // docs/employee-self-plan-purchase-contract.md.
@@ -24,7 +25,7 @@ import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_redemption?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_purchase_snapshot?: boolean; employee_self_subscription_renewal_links?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_subscription_renewal?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_redemption?: boolean; employee_self_wallet_activity?: boolean; employee_self_wallet_entry_classification?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_purchase_snapshot?: boolean; employee_self_subscription_renewal_links?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_subscription_renewal?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -41,6 +42,9 @@ type SelfWalletBalance = { currency: string; has_account: boolean; amount_micro:
 type SelfRedemptionResult = { operation_id: string; replay: boolean; currency: string; amount_micro: string; credited_at: string }
 type SelfWalletActivityItem = { occurred_at: string; delta_micro: string }
 type SelfWalletActivityPage = { currency: string; has_account: boolean; window_start: string; window_end: string; items: SelfWalletActivityItem[]; next_cursor: string | null }
+type SelfEntryKind = 'adjustment_credit' | 'adjustment_debit' | 'topup' | 'redemption' | 'subscription_charge' | 'subscription_credit' | 'refund' | 'usage_charge'
+type SelfClassificationItem = SelfWalletActivityItem & { entry_kind: SelfEntryKind }
+type SelfClassificationPage = Omit<SelfWalletActivityPage, 'items'> & { items: SelfClassificationItem[] }
 type SelfSubscriptionItem = { subscription_id: string; interval: 'one_time' | 'monthly'; status: 'active' | 'cancelled' | 'expired'; started_at: string; period_end_at: string | null; cancelled_at: string | null; revision?: number }
 type SelfSubscriptionPage = { items: SelfSubscriptionItem[]; next_cursor: string | null }
 type SelfPurchaseSnapshot = { subscription_id: string; plan_id: string; plan_revision: number; currency: string; interval: 'one_time' | 'monthly'; price_micro: string; credit_micro: string; started_at: string; period_end_at: string | null }
@@ -810,6 +814,109 @@ function SelfWalletActivityPanel() {
             <strong className={item.delta_micro.startsWith('-') ? 'self-wallet-activity-negative' : 'self-wallet-activity-positive'}>{item.delta_micro.startsWith('-') ? '' : '+'}{item.delta_micro} micro</strong>
           </li>)}</ol>}
       {page.next_cursor ? <Button variant="secondary" disabled={loading} onClick={() => { void readPage(page.next_cursor ?? undefined) }}>{loading ? '正在读取…' : '加载更多变动'}</Button> : null}
+    </div> : null}
+  </section>
+}
+
+const selfEntryKinds = new Set<SelfEntryKind>(['adjustment_credit', 'adjustment_debit', 'topup', 'redemption',
+  'subscription_charge', 'subscription_credit', 'refund', 'usage_charge'])
+
+function validSelfClassificationPage(raw: unknown, currency: string, previous?: SelfClassificationPage): raw is SelfClassificationPage {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const value = raw as Record<string, unknown>
+  if (Object.keys(value).sort().join(',') !== 'currency,has_account,items,next_cursor,window_end,window_start' ||
+    value.currency !== currency || typeof value.has_account !== 'boolean' || !Array.isArray(value.items) || value.items.length > 20 ||
+    (value.next_cursor !== null && (typeof value.next_cursor !== 'string' || value.next_cursor.length < 1 || value.next_cursor.length > 1024))) return false
+  const windowTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/
+  if (typeof value.window_start !== 'string' || typeof value.window_end !== 'string' ||
+    !windowTime.test(value.window_start) || !windowTime.test(value.window_end) ||
+    Date.parse(value.window_end) - Date.parse(value.window_start) !== 31 * 24 * 60 * 60 * 1000) return false
+  if (previous && (value.window_start !== previous.window_start || value.window_end !== previous.window_end || value.has_account !== previous.has_account)) return false
+  if (!value.has_account && (value.items.length !== 0 || value.next_cursor !== null)) return false
+  if (value.next_cursor !== null && value.items.length === 0) return false
+  const entryTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/
+  return value.items.every((item: unknown) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false
+    const entry = item as Record<string, unknown>
+    const kind = entry.entry_kind
+    const delta = entry.delta_micro
+    const credit = kind === 'adjustment_credit' || kind === 'topup' || kind === 'redemption' || kind === 'subscription_credit' || kind === 'refund'
+    return Object.keys(entry).sort().join(',') === 'delta_micro,entry_kind,occurred_at' && typeof entry.occurred_at === 'string' &&
+      entryTime.test(entry.occurred_at) && !/\.\d*0Z$/.test(entry.occurred_at) && Number.isFinite(Date.parse(entry.occurred_at)) &&
+      typeof kind === 'string' && selfEntryKinds.has(kind as SelfEntryKind) && typeof delta === 'string' &&
+      /^(?:-[1-9]\d*|[1-9]\d*)$/.test(delta) && credit !== delta.startsWith('-')
+  })
+}
+
+function SelfClassificationPanel() {
+  const [currency, setCurrency] = useState('')
+  const [page, setPage] = useState<SelfClassificationPage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort() }, [])
+
+  function changeCurrency(value: string) {
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    setCurrency(value)
+    setPage(null)
+    setError(false)
+    setLoading(false)
+  }
+
+  async function readPage(cursor?: string) {
+    const requestedCurrency = currency
+    const prior = cursor ? page : null
+    if (!/^[A-Z]{3}$/.test(requestedCurrency) || (cursor && (!prior || prior.next_cursor !== cursor))) {
+      setPage(null)
+      setError(true)
+      return
+    }
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const controller = new AbortController()
+    pending.current = controller
+    if (!cursor) setPage(null)
+    setError(false)
+    setLoading(true)
+    try {
+      const path = `/billing/entry-classifications?currency=${encodeURIComponent(requestedCurrency)}&limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const value = await selfRequest<unknown>(path, { signal: controller.signal })
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (!validSelfClassificationPage(value, requestedCurrency, prior ?? undefined)) throw new Error('Invalid wallet classification response')
+      setPage(prior ? { ...value, items: [...prior.items, ...value.items] } : value)
+    } catch {
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      setPage(null)
+      setError(true)
+    } finally {
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(false)
+    }
+  }
+
+  return <section className="self-wallet-activity self-wallet-classification" aria-labelledby="self-wallet-classification-title">
+    <h2 id="self-wallet-classification-title">钱包分录类型</h2>
+    <p>只按需显示本人直属钱包近 31 天的原始账本类型和金额变动。类型不证明付款、退款、用量收费、账单或业务来源；不包含 Key 或资源子账户。</p>
+    <form className="self-wallet-form" onSubmit={(event) => { event.preventDefault(); void readPage() }}>
+      <Field label="类型视图币种（三位大写字母，如 USD）"><input name="classification_currency" value={currency} onChange={(event) => changeCurrency(event.target.value)} required maxLength={3} pattern="[A-Z]{3}" autoComplete="off" spellCheck={false} /></Field>
+      <Button type="submit" disabled={loading}>{loading ? '正在读取…' : '读取分录类型'}</Button>
+    </form>
+    {error ? <p role="alert">钱包分录类型暂时无法读取，请检查币种或稍后重试。</p> : null}
+    {page && !error ? <div className="self-wallet-activity-result" role="status">
+      <p>查询窗口：<time dateTime={page.window_start}>{selfKeyDate(page.window_start)}</time> 至 <time dateTime={page.window_end}>{selfKeyDate(page.window_end)}</time>（不含结束时刻）</p>
+      {!page.has_account ? <p><strong>{page.currency}</strong> 暂无员工钱包账户（未显示为零余额）。</p>
+        : page.items.length === 0 ? <p><strong>{page.currency}</strong> 员工钱包在此窗口暂无分录；这不代表余额为零。</p>
+          : <ol className="self-wallet-activity-list">{page.items.map((item, index) => <li key={`${item.occurred_at}:${item.delta_micro}:${index}`}>
+            <span><time dateTime={item.occurred_at}>{selfKeyDate(item.occurred_at)}</time><code className="self-entry-kind">{item.entry_kind}</code></span>
+            <strong className={item.delta_micro.startsWith('-') ? 'self-wallet-activity-negative' : 'self-wallet-activity-positive'}>{item.delta_micro.startsWith('-') ? '' : '+'}{item.delta_micro} micro</strong>
+          </li>)}</ol>}
+      {page.next_cursor ? <Button variant="secondary" disabled={loading} onClick={() => { void readPage(page.next_cursor ?? undefined) }}>{loading ? '正在读取…' : '加载更多分录'}</Button> : null}
     </div> : null}
   </section>
 }
@@ -1917,6 +2024,8 @@ export function SelfApp() {
           ? <SelfRedemptionPanel key={`redemption:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} /> : null}
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true
           ? <SelfWalletActivityPanel key={`wallet-activity:${session.profile.id}:${session.csrf_token}`} /> : null}
+        {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true && session.features?.employee_self_wallet_entry_classification === true
+          ? <SelfClassificationPanel key={`wallet-classification:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_subscription_status === true
           ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} cancelEnabled={session.features?.employee_self_subscription_cancel === true} oneShotEnabled={session.features?.employee_self_one_shot_renewal_disarm === true} purchaseSnapshotEnabled={session.features?.employee_self_subscription_purchase_snapshot === true} renewalLinksEnabled={session.features?.employee_self_subscription_renewal_links === true} renewalEnabled={session.features?.employee_self_subscription_renewal === true} /> : null}
         {session.features?.employee_self_plan_catalog === true && session.features?.employee_self_plan_purchase !== true
