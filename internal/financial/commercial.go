@@ -9,8 +9,9 @@ import (
 
 type Commercial struct {
 	db                              *sql.DB
-	now                             func() time.Time // test-injectable commit-boundary clock; production uses time.Now
-	employeePurchaseAfterLedgerPost func() error     // test-only fault boundary; nil in production
+	now                             func() time.Time                     // test-injectable commit-boundary clock; production uses time.Now
+	employeePurchaseAfterLedgerPost func() error                         // test-only fault boundary; nil in production
+	employeeRedemptionBeforeInsert  func(context.Context, *sql.Tx) error // test-only INSERT fault boundary
 }
 
 func NewCommercial(db *sql.DB) *Commercial { return &Commercial{db: db, now: time.Now} }

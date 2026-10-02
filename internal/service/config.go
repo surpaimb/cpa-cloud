@@ -34,6 +34,7 @@ type Config struct {
 	ExperimentalCodexMembership                     bool
 	EmployeeSelfServiceEnabled                      bool
 	EmployeeSelfWalletBalanceEnabled                bool
+	EmployeeSelfRedemptionEnabled                   bool
 	EmployeeSelfWalletActivityEnabled               bool
 	EmployeeSelfSubscriptionStatusEnabled           bool
 	EmployeeSelfSubscriptionPurchaseSnapshotEnabled bool

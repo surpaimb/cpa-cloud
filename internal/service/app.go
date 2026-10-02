@@ -113,6 +113,11 @@ type App struct {
 	selfMonthlyRenewalBeforeCommit func(*sql.Tx)
 	selfMonthlyRenewalQuoteCommit  func(*sql.Tx) error
 	selfMonthlyRenewalCommit       func(*sql.Tx) error
+	// Independently authored for docs/employee-self-redemption-contract.md.
+	// Test-only SQL boundaries; production leaves both nil.
+	selfRedemptionBeforeTx func()
+	selfRedemptionCommit   func(*sql.Tx) error
+	selfRedemptionNow      func() time.Time
 	// Independently authored for docs/employee-self-key-token-summary-contract.md.
 	// Test-only snapshot and commit boundaries; production leaves both nil.
 	selfKeyTokenSummaryAfterOwnership func()
@@ -140,6 +145,9 @@ type loginAttempt struct {
 func Open(ctx context.Context, cfg Config) (*App, error) {
 	if cfg.EmployeeSelfWalletBalanceEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return nil, errors.New("employee self wallet balance requires employee self service")
+	}
+	if cfg.EmployeeSelfRedemptionEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled) {
+		return nil, errors.New("employee self redemption requires employee self service and wallet balance")
 	}
 	if cfg.EmployeeSelfWalletActivityEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled) {
 		return nil, errors.New("employee self wallet activity requires employee self service and wallet balance")
@@ -501,6 +509,7 @@ func (a *App) Handler() http.Handler {
 	if a.cfg.EmployeeSelfSubscriptionRenewalEnabled {
 		handler = a.selfMonthlyRenewalRouteGuard(handler)
 	}
+	handler = a.selfRedemptionRouteGuard(handler)
 	return requestMiddleware(handler)
 }
 
@@ -564,6 +573,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"features": map[string]bool{
 			"employee_self_service":                        a.cfg.EmployeeSelfServiceEnabled,
 			"employee_self_wallet_balance":                 a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled,
+			"employee_self_redemption":                     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfRedemptionEnabled,
 			"employee_self_wallet_activity":                a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
 			"employee_self_subscription_status":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
 			"employee_self_subscription_purchase_snapshot": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled,

@@ -18,12 +18,13 @@
 // docs/employee-self-subscription-purchase-snapshot-contract.md.
 // docs/employee-self-monthly-renewal-contract.md.
 // docs/employee-self-subscription-renewal-links-contract.md.
+// docs/employee-self-redemption-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_purchase_snapshot?: boolean; employee_self_subscription_renewal_links?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_subscription_renewal?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_redemption?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_purchase_snapshot?: boolean; employee_self_subscription_renewal_links?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_subscription_renewal?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -37,6 +38,7 @@ type SelfTokenSummary = {
   attempts: { total: string; pending: string; input_tokens: SelfTokenCounts; output_tokens: SelfTokenCounts; cache_read_tokens: SelfTokenCounts; cache_write_tokens: SelfTokenCounts }
 }
 type SelfWalletBalance = { currency: string; has_account: boolean; amount_micro: string | null }
+type SelfRedemptionResult = { operation_id: string; replay: boolean; currency: string; amount_micro: string; credited_at: string }
 type SelfWalletActivityItem = { occurred_at: string; delta_micro: string }
 type SelfWalletActivityPage = { currency: string; has_account: boolean; window_start: string; window_end: string; items: SelfWalletActivityItem[]; next_cursor: string | null }
 type SelfSubscriptionItem = { subscription_id: string; interval: 'one_time' | 'monthly'; status: 'active' | 'cancelled' | 'expired'; started_at: string; period_end_at: string | null; cancelled_at: string | null; revision?: number }
@@ -569,6 +571,150 @@ function SelfWalletBalancePanel() {
     {balance && !error ? balance.has_account
       ? <p className="self-wallet-result" role="status"><strong>{balance.currency}</strong> 员工钱包余额：<output>{balance.amount_micro}</output> micro</p>
       : <p className="self-wallet-result" role="status"><strong>{balance.currency}</strong> 暂无员工钱包账户（未显示为零余额）。</p> : null}
+  </section>
+}
+
+function validSelfRedemptionResult(raw: unknown, operationID: string): raw is SelfRedemptionResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const value = raw as Record<string, unknown>
+  return Object.keys(value).sort().join(',') === 'amount_micro,credited_at,currency,operation_id,replay' &&
+    value.operation_id === operationID && typeof value.replay === 'boolean' &&
+    typeof value.currency === 'string' && /^[A-Z]{3}$/.test(value.currency) &&
+    validPurchaseAmount(value.amount_micro) && typeof value.credited_at === 'string' &&
+    purchaseUTC.test(value.credited_at) && Number.isFinite(Date.parse(value.credited_at))
+}
+
+function newSelfRedemptionOperationID(): string {
+  const bytes = new Uint8Array(16)
+  globalThis.crypto.getRandomValues(bytes)
+  return `self-redeem-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
+}
+
+function SelfRedemptionPanel({ csrf }: { csrf: string }) {
+  const [result, setResult] = useState<SelfRedemptionResult | null>(null)
+  const [retry, setRetry] = useState<{ operationID: string; code: string; until: number } | null>(null)
+  const [reviewRequired, setReviewRequired] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+  const inFlight = useRef(false)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort(); pending.current = null }, [])
+  useEffect(() => {
+    if (!retry) return
+    const timer = window.setTimeout(() => abandonPending(), Math.max(0, retry.until - Date.now()))
+    return () => window.clearTimeout(timer)
+  }, [retry])
+
+  function abandonPending() {
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    inFlight.current = false
+    setRetry(null)
+    setResult(null)
+    setBusy(false)
+    setReviewRequired(true)
+    setError('待决信息已失效。请让管理员通过安全审计核对；不要另起操作重复兑换。')
+  }
+
+  function clear() {
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    inFlight.current = false
+    setRetry(null)
+    setResult(null)
+    setBusy(false)
+    setReviewRequired(false)
+    setError(null)
+  }
+
+  async function redeem(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (reviewRequired || inFlight.current || busy) return
+    if (retry && Date.now() >= retry.until) { abandonPending(); return }
+    const form = event.currentTarget
+    const data = new FormData(form)
+    let code = retry?.code ?? String(data.get('code') ?? '')
+    let current_password = String(data.get('current_password') ?? '')
+    form.reset()
+    const passwordBytes = new TextEncoder().encode(current_password).length
+    if (!code || new TextEncoder().encode(code).length > 256 || passwordBytes < 12 || passwordBytes > 72) {
+      code = ''; current_password = ''
+      clear()
+      setError('请填写兑换码和 12–72 个 UTF-8 字节的当前密码。')
+      return
+    }
+    let operationID = retry?.operationID ?? ''
+    if (!retry) {
+      try { operationID = newSelfRedemptionOperationID() } catch {
+        code = ''; current_password = ''
+        clear()
+        setError('无法生成兑换操作编号，请稍后重试。')
+        return
+      }
+    }
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const controller = new AbortController()
+    pending.current = controller
+    inFlight.current = true
+    setBusy(true)
+    setResult(null)
+    setError(null)
+    let requestTimer: number | undefined
+    let timedOut = false
+    try {
+      let body = JSON.stringify({ operation_id: operationID, code, current_password })
+      current_password = ''
+      const request = selfRequest<unknown>('/billing/redemptions', { method: 'POST', body, signal: controller.signal }, csrf)
+      body = ''
+      const raw = await Promise.race([request, new Promise<never>((_, reject) => {
+        requestTimer = window.setTimeout(() => { timedOut = true; controller.abort(); reject(new Error('redemption_request_timeout')) }, 10_000)
+      })])
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (!validSelfRedemptionResult(raw, operationID)) throw new Error('Invalid redemption response')
+      setRetry(null)
+      setResult(raw)
+    } catch (caught) {
+      if (generation.current !== requestGeneration || controller.signal.aborted && !timedOut) return
+      const uncertain = !(caught instanceof ApiError) || caught.status === 503
+      setResult(null)
+      if (uncertain) {
+        setRetry({ operationID, code, until: retry?.until ?? Date.now() + 2 * 60 * 1000 })
+        setError('结果未确认。请重新输入当前密码，显式重试同一兑换操作。')
+      } else {
+        setRetry(null)
+        setError(caught.status === 409 ? '兑换暂不可用；请向管理员核对兑换码。' : '兑换未完成，请重新输入兑换码并确认。')
+      }
+    } finally {
+      if (requestTimer !== undefined) window.clearTimeout(requestTimer)
+      code = ''; current_password = ''; operationID = ''
+      if (pending.current === controller) pending.current = null
+      if (generation.current === requestGeneration) inFlight.current = false
+      if (generation.current === requestGeneration) setBusy(false)
+    }
+  }
+
+  return <section className="self-redemption" aria-labelledby="self-redemption-title">
+    <h2 id="self-redemption-title">兑换码充值本人钱包</h2>
+    <p>仅使用管理员发放的兑换码，为你本人直属钱包增加码载明币种的余额。它不是付款、订阅或模型权益凭证；提交后可另行读取最新钱包余额。</p>
+    {error ? <p role="alert">{error}</p> : null}
+    {result ? <p className="self-redemption-result" role="status">{result.replay ? '已确认原兑换' : '兑换成功'}：本人 {result.currency} 钱包入账 <strong>{result.amount_micro} micro</strong>，时间 <time dateTime={result.credited_at}>{selfKeyDate(result.credited_at)}</time>。</p> : null}
+    {reviewRequired ? null : !retry ? <form key="redemption-new" className="self-redemption-form" onSubmit={(event) => { void redeem(event) }} autoComplete="off">
+      <Field label="管理员发放的兑换码"><input name="code" type="password" required maxLength={256} autoComplete="off" spellCheck={false} disabled={busy} onChange={() => setResult(null)} /></Field>
+      <Field label="当前密码"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} disabled={busy} /></Field>
+      <label className="self-plan-purchase-check"><input name="confirm" type="checkbox" required disabled={busy} />我确认将此码兑换入本人直属钱包。</label>
+      <div className="self-actions"><Button type="submit" disabled={busy}>{busy ? '正在确认…' : '确认兑换'}</Button></div>
+    </form> : <form key="redemption-retry" className="self-redemption-form" onSubmit={(event) => { void redeem(event) }} autoComplete="off">
+      <p>上次提交结果不确定；只用原操作编号和原兑换码显式重试，不会另起一笔。此待决信息仅短暂保留于本页面内存。</p>
+      <Field label="当前密码（重试原操作）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} disabled={busy} /></Field>
+      <label className="self-plan-purchase-check"><input name="confirm" type="checkbox" required disabled={busy} />我确认重试原兑换操作。</label>
+      <div className="self-actions"><Button type="submit" disabled={busy}>{busy ? '正在核对…' : '重试原兑换'}</Button><Button type="button" variant="secondary" disabled={busy} onClick={abandonPending}>放弃重试</Button></div>
+    </form>}
   </section>
 }
 
@@ -1767,6 +1913,8 @@ export function SelfApp() {
         <dl className="self-profile"><div><dt>员工 ID</dt><dd>{session.profile.id}</dd></div><div><dt>姓名</dt><dd>{session.profile.name}</dd></div><div><dt>部门</dt><dd>{session.profile.department || '未设置'}</dd></div><div><dt>状态</dt><dd>{session.profile.status === 'active' ? '启用' : '已停用'}</dd></div></dl>
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_plan_purchase !== true
           ? <SelfWalletBalancePanel key={`wallet:${session.profile.id}:${session.csrf_token}`} /> : null}
+        {session.features?.employee_self_redemption === true
+          ? <SelfRedemptionPanel key={`redemption:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} /> : null}
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true
           ? <SelfWalletActivityPanel key={`wallet-activity:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_subscription_status === true
