@@ -54,6 +54,10 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	if a.cfg.EmployeeSelfSubscriptionStatusEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/subscriptions", a.requireSelf(a.selfSubscriptionStatus, false))
 	}
+	if a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled {
+		mux.HandleFunc("GET /self/api/v1/billing/subscriptions/{id}/purchase-snapshot", a.requireSelf(a.selfSubscriptionPurchaseSnapshot, false))
+		mux.HandleFunc("GET /self/api/v1/billing/subscriptions/{id}/purchase-snapshot/{tail...}", a.requireSelf(a.selfSubscriptionPurchaseSnapshot, false))
+	}
 	if a.cfg.EmployeeSelfSubscriptionCancelEnabled {
 		mux.HandleFunc("POST /self/api/v1/billing/subscriptions/{id}/cancel", a.requireSelfReleased(a.selfSubscriptionCancel, true))
 	}
@@ -523,13 +527,14 @@ func (a *App) selfSessionInfo(w http.ResponseWriter, _ *http.Request, session se
 
 func (a *App) selfSessionResponse(csrf string, profile selfProfile) map[string]any {
 	return map[string]any{"csrf_token": csrf, "profile": profile, "features": map[string]bool{
-		"employee_self_wallet_balance":          a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled,
-		"employee_self_wallet_activity":         a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
-		"employee_self_subscription_status":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
-		"employee_self_subscription_cancel":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionCancelEnabled,
-		"employee_self_one_shot_renewal_disarm": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfOneShotRenewalDisarmEnabled,
-		"employee_self_plan_catalog":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled,
-		"employee_self_plan_purchase":           a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled && a.cfg.EmployeeSelfPlanPurchaseEnabled,
+		"employee_self_wallet_balance":                 a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled,
+		"employee_self_wallet_activity":                a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
+		"employee_self_subscription_status":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
+		"employee_self_subscription_purchase_snapshot": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled,
+		"employee_self_subscription_cancel":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionCancelEnabled,
+		"employee_self_one_shot_renewal_disarm":        a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfOneShotRenewalDisarmEnabled,
+		"employee_self_plan_catalog":                   a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled,
+		"employee_self_plan_purchase":                  a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled && a.cfg.EmployeeSelfPlanPurchaseEnabled,
 	}}
 }
 
