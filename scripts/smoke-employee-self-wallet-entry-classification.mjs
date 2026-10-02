@@ -2,9 +2,9 @@
 // Usage: CPA_CLOUD_ACCEPTANCE_TEMP_ROOT=<absolute scratch parent> node scripts/smoke-employee-self-wallet-entry-classification.mjs <absolute service exe> [--hold-browser]
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { adminClient, initialize, password as adminPassword, root, startServer, stopServer } from './next-batch-smoke-lib.mjs';
+import { adminClient, initialize, password as adminPassword, root, run, startServer, stopServer } from './next-batch-smoke-lib.mjs';
 
 const executable = process.argv[2];
 const holdBrowser = process.argv[3] === '--hold-browser';
@@ -29,6 +29,16 @@ async function selfCall(route, { method = 'GET', body, cookie = '', expected = 2
 
 try {
   await mkdir(root, { recursive: true });
+  for (const missing of [
+    ['--employee-self-wallet-entry-classification-enabled'],
+    ['--employee-self-service-enabled', '--employee-self-wallet-entry-classification-enabled'],
+    ['--employee-self-service-enabled', '--employee-self-wallet-balance-enabled', '--employee-self-wallet-entry-classification-enabled'],
+    ['--employee-self-service-enabled', '--employee-self-wallet-activity-enabled', '--employee-self-wallet-entry-classification-enabled'],
+  ]) {
+    const unwritten = path.join(root, `classification-rejected-${randomUUID()}`);
+    await run(executable, ['--data-dir', unwritten, '--init', ...missing], adminPassword + '\n', 1);
+    await assert.rejects(stat(unwritten), { code: 'ENOENT' }, 'rejected --init wrote data');
+  }
   await initialize(executable, scratch);
   processHandle = await startServer(executable, scratch, path.resolve('web/dist'));
   await selfCall('/billing/entry-classifications?currency=USD', { expected: 404 });

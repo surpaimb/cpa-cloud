@@ -11,6 +11,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"path"
+	"strings"
 	"time"
 
 	"cpacloud.local/server/internal/financial"
@@ -22,6 +24,52 @@ const (
 )
 
 var errSelfClassificationCursor = errors.New("invalid self wallet entry classification cursor")
+
+// Classify only paths that name this final route segment. ServeMux otherwise
+// redirects cleaned paths before the authenticated handler can reject them.
+func selfClassificationShapedPath(decoded string) bool {
+	lower := strings.ToLower(decoded)
+	clean := path.Clean(lower)
+	if clean == selfClassificationPath || strings.HasPrefix(clean, selfClassificationPath+"/") {
+		return true
+	}
+	parts := make([]string, 0, 10)
+	for _, segment := range strings.Split(lower, "/") {
+		if segment != "" && segment != "." {
+			parts = append(parts, segment)
+		}
+	}
+	lexical := "/" + strings.Join(parts, "/")
+	return lexical == selfClassificationPath || strings.HasPrefix(lexical, selfClassificationPath+"/")
+}
+
+func (a *App) selfClassificationRouteGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !selfClassificationShapedPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !a.cfg.EmployeeSelfWalletEntryClassificationEnabled {
+			w.Header().Set("Cache-Control", "no-store")
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path != selfClassificationPath || r.URL.EscapedPath() != selfClassificationPath {
+			a.requireSelf(func(w http.ResponseWriter, _ *http.Request, _ selfSession) {
+				selfError(w, http.StatusBadRequest, "invalid_request")
+			}, false)(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			a.requireSelf(func(w http.ResponseWriter, _ *http.Request, _ selfSession) {
+				w.Header().Set("Allow", http.MethodGet)
+				selfError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			}, false)(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func (a *App) selfWalletEntryClassifications(w http.ResponseWriter, r *http.Request, session selfSession) {
 	request, ok := parseSelfWalletActivityRequest(r.URL.RawQuery)
@@ -80,6 +128,11 @@ func (a *App) selfWalletEntryClassifications(w http.ResponseWriter, r *http.Requ
 		}
 		next = &encoded
 	}
+	// Initial authentication releases admission before the potentially slow
+	// ledger read. A writer lock here serializes the final check and success
+	// output against logout, password changes, and administrative disable.
+	a.admission.Lock()
+	defer a.admission.Unlock()
 	current, err := a.selfClassificationSessionCurrent(ctx, session)
 	if err != nil || ctx.Err() != nil {
 		selfError(w, http.StatusServiceUnavailable, "storage_unavailable")
@@ -88,6 +141,9 @@ func (a *App) selfWalletEntryClassifications(w http.ResponseWriter, r *http.Requ
 	if !current {
 		selfError(w, http.StatusUnauthorized, "authentication_required")
 		return
+	}
+	if a.selfClassificationBeforeWrite != nil {
+		a.selfClassificationBeforeWrite()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"currency": request.currency, "has_account": page.HasAccount,

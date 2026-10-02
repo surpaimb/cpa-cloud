@@ -4,6 +4,7 @@ package financial
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"math"
 	"time"
 )
@@ -186,11 +187,40 @@ func validateClassificationOperation(ctx context.Context, tx *sql.Tx, entry clas
 		!validClassificationActor(action, actorKind, adminID, adminType, employeeID, employeeType, systemID, systemType, version) {
 		return "", ErrSchema
 	}
+	if err := validateClassificationActorReference(ctx, tx, actorKind, adminID, employeeID); err != nil {
+		return "", err
+	}
 	wantsOriginal := entry.kind == EntryRefund || action == "refund" && entry.kind == EntryAdjustmentDebit
 	if wantsOriginal != entry.original.Valid || !validPostEntry(action, EntryInput{Kind: entry.kind, AmountMicro: entry.amount, OriginalEntryID: entry.original.String}) {
 		return "", ErrSchema
 	}
 	return action, nil
+}
+
+// Probe only actors of the selected operation (and original/sibling operations
+// reached from it), rather than scanning unrelated financial history.
+func validateClassificationActorReference(ctx context.Context, tx *sql.Tx, kind string, adminID, employeeID sql.NullString) error {
+	var statement, id string
+	switch kind {
+	case "admin":
+		statement, id = `SELECT 1 FROM admins WHERE id=?`, adminID.String
+	case "employee":
+		statement, id = `SELECT 1 FROM employees WHERE id=?`, employeeID.String
+	default:
+		return nil
+	}
+	var exists int
+	err := tx.QueryRowContext(ctx, statement, id).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrSchema
+	}
+	if err != nil {
+		return ErrUnavailable
+	}
+	if exists != 1 {
+		return ErrSchema
+	}
+	return nil
 }
 
 func validClassificationActor(action, kind string, admin sql.NullString, adminType string, employee sql.NullString, employeeType string, system sql.NullString, systemType string, version int64) bool {

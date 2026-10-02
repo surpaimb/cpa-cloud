@@ -69,6 +69,8 @@ type App struct {
 	// Production leaves both nil.
 	selfPasswordBeforeTx func()
 	selfPasswordCommit   func(*sql.Tx) error
+	// Test-only boundary after final session validation, before classification output.
+	selfClassificationBeforeWrite func()
 	// Independently authored for docs/employee-self-key-revocation-contract.md.
 	// Test-only SQL boundary hooks; production leaves both nil.
 	selfKeyRevokeBeforeTx func()
@@ -513,6 +515,7 @@ func (a *App) Handler() http.Handler {
 		handler = a.selfMonthlyRenewalRouteGuard(handler)
 	}
 	handler = a.selfRedemptionRouteGuard(handler)
+	handler = a.selfClassificationRouteGuard(handler)
 	return requestMiddleware(handler)
 }
 

@@ -66,7 +66,7 @@ func TestEmployeeClassificationKindsAndReversals(t *testing.T) {
 }
 
 func TestEmployeeClassificationFailsClosedOnLedgerDrift(t *testing.T) {
-	for _, variant := range []string{"schema", "operation-action", "operation-time", "operation-resource", "digest-length", "actor-shape", "entry-kind", "reversal-over", "commit", "cancel"} {
+	for _, variant := range []string{"schema", "operation-action", "operation-time", "operation-resource", "digest-length", "actor-shape", "orphan-admin-actor", "orphan-employee-actor", "entry-kind", "reversal-over", "commit", "cancel"} {
 		t.Run(variant, func(t *testing.T) {
 			db := openFinancialTestDB(t)
 			defer db.Close()
@@ -107,6 +107,16 @@ func TestEmployeeClassificationFailsClosedOnLedgerDrift(t *testing.T) {
 				change(`DROP TRIGGER financial_entries_no_update`)
 				change(`UPDATE financial_entries SET kind='usage_charge' WHERE id=?`, seed.ID)
 				change(entriesNoUpdateDDL)
+			case "orphan-admin-actor", "orphan-employee-actor":
+				change(`PRAGMA foreign_keys=OFF`)
+				change(`DROP TRIGGER financial_operations_no_update`)
+				if variant == "orphan-admin-actor" {
+					change(`UPDATE financial_operations SET actor_admin_id='missing-admin' WHERE operation_id='classification-seed'`)
+				} else {
+					change(`UPDATE financial_operations SET actor_kind='employee',actor_admin_id=NULL,actor_employee_id='missing-employee' WHERE operation_id='classification-seed'`)
+				}
+				change(operationsNoUpdateDDL)
+				change(`PRAGMA foreign_keys=ON`)
 			case "reversal-over":
 				classificationPost(t, ledger, "classification-refund-one", "refund", EntryAdjustmentDebit, -40, seed.ID, financialTestTime.Add(time.Second))
 				change(`INSERT INTO financial_operations(operation_id,action,actor_kind,actor_admin_id,resource_kind,resource_id,payload_digest,digest_version,created_at) VALUES('classification-over','refund','admin','admin-one','refund','classification-over',randomblob(32),2,?)`, financialTestTime.Add(2*time.Second).Format(time.RFC3339Nano))
@@ -126,6 +136,43 @@ func TestEmployeeClassificationFailsClosedOnLedgerDrift(t *testing.T) {
 			page, err := ledger.readEmployeeClassifications(context.Background(), query, hooks)
 			if !errors.Is(err, ErrUnavailable) || page.HasAccount || len(page.Items) != 0 {
 				t.Fatalf("%s page=%+v err=%v", variant, page, err)
+			}
+		})
+	}
+}
+
+func TestEmployeeClassificationRejectsOrphanActorsInReversalLinks(t *testing.T) {
+	for _, operation := range []string{"classification-original", "classification-older-sibling"} {
+		t.Run(operation, func(t *testing.T) {
+			db := openFinancialTestDB(t)
+			defer db.Close()
+			ledger := NewLedger(db)
+			if err := ledger.Migrate(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			original := classificationPost(t, ledger, "classification-original", "topup", EntryTopUp, 100, "", financialTestTime)
+			classificationPost(t, ledger, "classification-older-sibling", "refund", EntryAdjustmentDebit, -10, original.ID, financialTestTime.Add(time.Second))
+			classificationPost(t, ledger, "classification-selected", "refund", EntryAdjustmentDebit, -20, original.ID, financialTestTime.Add(2*time.Second))
+			if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`DROP TRIGGER financial_operations_no_update`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE financial_operations SET actor_admin_id='missing-admin' WHERE operation_id=?`, operation); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(operationsNoUpdateDDL); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+				t.Fatal(err)
+			}
+			start := financialTestTime.Add(2 * time.Second)
+			query := EmployeeActivityQuery{EmployeeID: "employee-one", Currency: "USD", Limit: 1, WindowStart: start, WindowEnd: start.Add(31 * 24 * time.Hour)}
+			page, err := ledger.ReadEmployeeClassifications(context.Background(), query)
+			if !errors.Is(err, ErrUnavailable) || page.HasAccount || len(page.Items) != 0 {
+				t.Fatalf("orphan %s page=%+v err=%v", operation, page, err)
 			}
 		})
 	}

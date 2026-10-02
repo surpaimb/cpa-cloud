@@ -117,6 +117,12 @@ func TestSelfClassificationGatesRolesAndStrictInput(t *testing.T) {
 	}
 	readSelfWalletResponse(t, r, 401)
 	readSelfWalletResponse(t, selfClassificationRequest(t, f.server.URL, "?currency=USD", "", "http://evil.invalid", f.cookie), 403)
+	readSelfWalletResponse(t, selfRequestTest(t, http.MethodPost, f.server.URL+selfClassificationPath+"?currency=USD", "", f.server.URL, f.cookie, ""), 405)
+	head := selfRequestTest(t, http.MethodHead, f.server.URL+selfClassificationPath+"?currency=USD", "", f.server.URL, f.cookie, "")
+	if head.StatusCode != 405 || head.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("HEAD status=%d cache=%q", head.StatusCode, head.Header.Get("Cache-Control"))
+	}
+	head.Body.Close()
 	for _, query := range []string{"", "?currency=", "?currency=usd", "?currency=US", "?currency=USDD", "?currency=%EF%BC%B5SD",
 		"?currency=USD&currency=EUR", "?currency=USD&employee_id=x", "?currency=USD&account_id=x", "?currency=USD&key_id=x",
 		"?currency=USD&bad=1", "?currency=USD&limit=0", "?currency=USD&limit=51", "?currency=USD&limit=01",
@@ -200,4 +206,189 @@ func TestSelfClassificationPageCursorSeparationAndRevocation(t *testing.T) {
 	}
 	r.Body.Close()
 	readSelfWalletResponse(t, selfClassificationRequest(t, server.URL, secondQuery, "", "", f.cookie), 401)
+}
+
+func TestSelfClassificationOrphanActorReturnsOnlyStorageError(t *testing.T) {
+	f := newSelfClassificationFixture(t)
+	activityPost(t, f, "classification-orphan-actor", financial.Owner{Kind: financial.OwnerEmployee, EmployeeID: f.id}, "USD",
+		financial.EntryAdjustmentCredit, 42, time.Now().UTC().Add(-time.Minute).Truncate(time.Second))
+	ctx := context.Background()
+	conn, err := f.app.store.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var triggerDDL string
+	if err := conn.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='financial_operations_no_update'`).Scan(&triggerDDL); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	for _, statement := range []string{`PRAGMA foreign_keys=OFF`, `DROP TRIGGER financial_operations_no_update`,
+		`UPDATE financial_operations SET actor_employee_id='missing-employee' WHERE operation_id='classification-orphan-actor'`,
+		triggerDDL, `PRAGMA foreign_keys=ON`} {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
+			conn.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	response := readSelfWalletResponse(t, selfClassificationRequest(t, f.server.URL, "?currency=USD", "", "", f.cookie), 503)
+	if len(response) != 1 || response["error"] == nil || response["items"] != nil || response["next_cursor"] != nil {
+		t.Fatalf("orphan actor leaked a partial page: %v", response)
+	}
+	errorBody, ok := response["error"].(map[string]any)
+	if !ok || errorBody["code"] != "storage_unavailable" {
+		t.Fatalf("orphan actor error=%v", response)
+	}
+}
+
+func TestSelfClassificationMalformedPathsDoNotRedirect(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "off", true: "on"}[enabled], func(t *testing.T) {
+			var f selfWalletFixture
+			if enabled {
+				f = newSelfClassificationFixture(t)
+			} else {
+				f = newSelfActivityFixture(t)
+			}
+			client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			for _, rawPath := range []string{
+				"/self/api/v1/billing//entry-classifications?currency=USD",
+				"/self/api/v1/billing/./entry-classifications?currency=USD",
+				"/self/api/v1/billing/entry-classifications/..?currency=USD",
+				"/self/api/v1/billing/%65ntry-classifications?currency=USD",
+				"/self/api/v1/billing%2Fentry-classifications?currency=USD",
+				"/self/api/v1/billing/entry-classifications%2F?currency=USD",
+				"/self/api/v1/billing/entry-classifications/../entries?currency=USD",
+			} {
+				for _, authenticated := range []bool{false, true} {
+					request, err := http.NewRequest(http.MethodGet, f.server.URL+rawPath, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if authenticated {
+						request.AddCookie(f.cookie)
+					}
+					response, err := client.Do(request)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := http.StatusNotFound
+					if enabled {
+						want = http.StatusUnauthorized
+						if authenticated {
+							want = http.StatusBadRequest
+						}
+					}
+					if response.StatusCode != want || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Location") != "" {
+						t.Fatalf("enabled=%t auth=%t path=%s status=%d location=%q cache=%q", enabled, authenticated, rawPath,
+							response.StatusCode, response.Header.Get("Location"), response.Header.Get("Cache-Control"))
+					}
+					response.Body.Close()
+				}
+			}
+		})
+	}
+}
+
+func TestSelfClassificationFinalOutputSerializesSessionRevocation(t *testing.T) {
+	for _, mutation := range []string{"logout", "password"} {
+		t.Run(mutation, func(t *testing.T) {
+			f := newSelfClassificationFixture(t)
+			atFinal, release := make(chan struct{}), make(chan struct{})
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
+			f.app.selfClassificationBeforeWrite = func() { close(atFinal); <-release }
+			mutationPath, method, body := "/self/api/v1/sessions", http.MethodDelete, ""
+			if mutation == "password" {
+				mutationPath, method, body = "/self/api/v1/password", http.MethodPost, selfPasswordBody(selfOldPassword, selfNewPassword)
+			}
+			arrived := make(chan struct{})
+			inner := f.app.Handler()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == mutationPath && r.Method == method {
+					close(arrived)
+				}
+				inner.ServeHTTP(w, r)
+			}))
+			defer server.Close()
+			type result struct {
+				response *http.Response
+				err      error
+			}
+			classificationRequest, err := http.NewRequest(http.MethodGet, server.URL+selfClassificationPath+"?currency=USD", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			classificationRequest.AddCookie(f.cookie)
+			classificationDone := make(chan result, 1)
+			go func() {
+				response, err := http.DefaultClient.Do(classificationRequest)
+				classificationDone <- result{response, err}
+			}()
+			select {
+			case <-atFinal:
+			case <-time.After(10 * time.Second):
+				t.Fatal("classification did not reach final output boundary")
+			}
+			mutationRequest, err := http.NewRequest(method, server.URL+mutationPath, strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutationRequest.AddCookie(f.cookie)
+			mutationRequest.Header.Set("Origin", server.URL)
+			mutationRequest.Header.Set("X-CSRF-Token", f.csrf)
+			mutationRequest.Header.Set("X-Self-Request", "1")
+			if body != "" {
+				mutationRequest.Header.Set("Content-Type", "application/json")
+			}
+			mutationDone := make(chan result, 1)
+			go func() {
+				response, err := http.DefaultClient.Do(mutationRequest)
+				mutationDone <- result{response, err}
+			}()
+			select {
+			case <-arrived:
+			case <-time.After(10 * time.Second):
+				t.Fatal("session mutation did not arrive")
+			}
+			select {
+			case result := <-mutationDone:
+				if result.response != nil {
+					result.response.Body.Close()
+				}
+				t.Fatalf("%s completed before classification output: %v", mutation, result.err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			close(release)
+			select {
+			case result := <-classificationDone:
+				if result.err != nil {
+					t.Fatal(result.err)
+				}
+				readClassificationPage(t, result.response)
+			case <-time.After(10 * time.Second):
+				t.Fatal("classification response stalled")
+			}
+			select {
+			case result := <-mutationDone:
+				if result.err != nil {
+					t.Fatal(result.err)
+				}
+				if result.response.StatusCode != http.StatusNoContent {
+					t.Fatalf("%s status=%d", mutation, result.response.StatusCode)
+				}
+				result.response.Body.Close()
+			case <-time.After(15 * time.Second):
+				t.Fatalf("%s response stalled", mutation)
+			}
+			readSelfWalletResponse(t, selfClassificationRequest(t, server.URL, "?currency=USD", "", "", f.cookie), 401)
+		})
+	}
 }

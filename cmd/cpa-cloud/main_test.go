@@ -170,6 +170,31 @@ func TestSelfRedemptionCLIRequiresBothPrerequisitesBeforeInitWrites(t *testing.T
 	}
 }
 
+// Independently authored for docs/employee-self-wallet-entry-classification-contract.md.
+func TestSelfWalletEntryClassificationCLIRequiresPrerequisitesBeforeInitWrites(t *testing.T) {
+	for _, flags := range [][]string{
+		{"--employee-self-wallet-entry-classification-enabled"},
+		{"--employee-self-service-enabled", "--employee-self-wallet-entry-classification-enabled"},
+		{"--employee-self-service-enabled", "--employee-self-wallet-balance-enabled", "--employee-self-wallet-entry-classification-enabled"},
+		{"--employee-self-service-enabled", "--employee-self-wallet-activity-enabled", "--employee-self-wallet-entry-classification-enabled"},
+	} {
+		for _, initialize := range []bool{false, true} {
+			dataDir := filepath.Join(t.TempDir(), "unused")
+			args := append([]string{"--data-dir", dataDir}, flags...)
+			if initialize {
+				args = append(args, "--init")
+			}
+			code, err := runCLI(args, strings.NewReader("a-valid-admin-password\n"), io.Discard)
+			if code != 1 || err == nil {
+				t.Fatalf("flags=%v initialize=%t code=%d err=%v", flags, initialize, code, err)
+			}
+			if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+				t.Fatalf("flags=%v initialize=%t wrote data: %v", flags, initialize, err)
+			}
+		}
+	}
+}
+
 // Independently authored for docs/employee-self-subscription-renewal-links-contract.md.
 func TestSelfRenewalLinksCLIRequiresBothPrerequisitesBeforeInitWrites(t *testing.T) {
 	for _, flags := range [][]string{

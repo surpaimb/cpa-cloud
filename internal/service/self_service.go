@@ -55,7 +55,7 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 		mux.HandleFunc("GET /self/api/v1/billing/entries", a.requireSelf(a.selfWalletActivity, false))
 	}
 	if a.cfg.EmployeeSelfWalletEntryClassificationEnabled {
-		mux.HandleFunc("GET /self/api/v1/billing/entry-classifications", a.requireSelf(a.selfWalletEntryClassifications, false))
+		mux.HandleFunc("GET /self/api/v1/billing/entry-classifications", a.requireSelfReleased(a.selfWalletEntryClassifications, false))
 	}
 	if a.cfg.EmployeeSelfSubscriptionStatusEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/subscriptions", a.requireSelf(a.selfSubscriptionStatus, false))
