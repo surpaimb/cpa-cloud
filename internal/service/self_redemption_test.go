@@ -92,6 +92,26 @@ func (f selfRedemptionFixture) count(t *testing.T, query string, args ...any) in
 	return n
 }
 
+func selfRedemptionNoRedirectRequest(t *testing.T, method, target, origin, body string, cookie *http.Cookie, csrf string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, target, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", origin)
+	req.Header.Set("X-Self-Request", "1")
+	req.Header.Set("X-CSRF-Token", csrf)
+	req.Header.Set("Content-Type", "application/json")
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	response, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
 func TestSelfRedemptionPrerequisitesRolesAndInput(t *testing.T) {
 	for _, cfg := range []Config{{EmployeeSelfRedemptionEnabled: true},
 		{EmployeeSelfServiceEnabled: true, EmployeeSelfRedemptionEnabled: true},
@@ -115,6 +135,11 @@ func TestSelfRedemptionPrerequisitesRolesAndInput(t *testing.T) {
 		t.Fatalf("disabled route status=%d", disabled.StatusCode)
 	}
 	disabled.Body.Close()
+	disabledAlias := selfRedemptionNoRedirectRequest(t, http.MethodPost, server.URL+selfRedemptionPath+"/..", server.URL, `{}`, nil, "")
+	if disabledAlias.StatusCode != http.StatusNotFound || disabledAlias.Header.Get("Location") != "" {
+		t.Fatalf("disabled alias status=%d location=%q", disabledAlias.StatusCode, disabledAlias.Header.Get("Location"))
+	}
+	disabledAlias.Body.Close()
 	server.Close()
 	_ = app.Close()
 	f := newSelfRedemptionFixture(t)
@@ -127,15 +152,46 @@ func TestSelfRedemptionPrerequisitesRolesAndInput(t *testing.T) {
 		t.Fatalf("wrong method status=%d allow=%q", wrongMethod.StatusCode, wrongMethod.Header.Get("Allow"))
 	}
 	wrongMethod.Body.Close()
-	alias := selfRequestTest(t, http.MethodPost, f.server.URL+"/self/api/v1/billing//redemptions", `{}`, f.server.URL, f.cookie, f.csrf)
-	if alias.StatusCode != http.StatusNotFound {
-		t.Fatalf("alias status=%d", alias.StatusCode)
+	for _, alias := range []string{
+		"/self/api/v1/billing//redemptions", "/self/api/v1/billing/redemptions/",
+		"/self/api/v1/billing/redemptions/extra", "/self/api/v1/billing/Redemptions",
+		"/self/api/v1/billing%2Fredemptions", "/self/api/v1/billing/redemptions/..",
+		"/self/api/v1/billing/redemptions/%2e%2e", "/self/api/v1/billing//redemptions/..",
+	} {
+		f.app.clearSelfFailures("127.0.0.1", f.id)
+		response := selfRedemptionNoRedirectRequest(t, http.MethodPost, f.server.URL+alias, f.server.URL, `{}`, f.cookie, f.csrf)
+		if response.StatusCode != http.StatusBadRequest || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Location") != "" {
+			t.Fatalf("malformed route %q status=%d cache=%q location=%q", alias, response.StatusCode, response.Header.Get("Cache-Control"), response.Header.Get("Location"))
+		}
+		var body map[string]map[string]string
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil || body["error"]["code"] != "invalid_request" {
+			t.Fatalf("malformed route %q body=%v err=%v", alias, body, err)
+		}
+		response.Body.Close()
 	}
-	alias.Body.Close()
+	f.app.clearSelfFailures("127.0.0.1", f.id)
+	readSelfWalletResponse(t, selfRequestTest(t, http.MethodPost, f.server.URL+"/self/api/v1/billing//redemptions", `{}`, f.server.URL, nil, f.csrf), 401)
+	readSelfWalletResponse(t, selfRequestTest(t, http.MethodPost, f.server.URL+"/self/api/v1/billing//redemptions", `{}`, "http://evil.invalid", f.cookie, f.csrf), 403)
+	pathParent := f.server.URL + selfRedemptionPath + "/.."
+	for _, probe := range []struct {
+		origin string
+		cookie *http.Cookie
+		csrf   string
+		want   int
+	}{{f.server.URL, nil, f.csrf, 401}, {"http://evil.invalid", f.cookie, f.csrf, 403}, {f.server.URL, f.cookie, "wrong", 403}} {
+		response := selfRedemptionNoRedirectRequest(t, http.MethodPost, pathParent, probe.origin, `{}`, probe.cookie, probe.csrf)
+		if response.StatusCode != probe.want || response.Header.Get("Location") != "" {
+			t.Fatalf("parent alias auth status=%d want=%d location=%q", response.StatusCode, probe.want, response.Header.Get("Location"))
+		}
+		response.Body.Close()
+	}
 	readSelfWalletResponse(t, f.redeem(t, "op-anon", "invalid", selfPurchaseTestPassword, nil, f.csrf), 401)
 	readSelfWalletResponse(t, f.redeem(t, "op-admin", "invalid", selfPurchaseTestPassword, f.adminCookie, f.csrf), 401)
 	readSelfWalletResponse(t, selfRequestTest(t, http.MethodPost, f.server.URL+selfRedemptionPath, `{}`, "http://evil.invalid", f.cookie, f.csrf), 403)
-	readSelfWalletResponse(t, selfRequestTest(t, http.MethodPost, f.server.URL+selfRedemptionPath, `{}`, f.server.URL, f.cookie, "wrong"), 403)
+	csrfRejected := readSelfWalletResponse(t, selfRequestTest(t, http.MethodPost, f.server.URL+selfRedemptionPath, `{}`, f.server.URL, f.cookie, "wrong"), 403)
+	if csrfRejected["error"].(map[string]any)["code"] != "request_rejected" {
+		t.Fatalf("CSRF error=%v", csrfRejected)
+	}
 	for _, body := range []string{`{}`, `[]`, `{"operation_id":"x","code":"x"}`, `{"operation_id":"x","code":"x","current_password":"x","owner":"employee"}`,
 		`{"operation_id":"x","code":"x","code":"y","current_password":"x"}`, `{"operation_id":"x","code":3,"current_password":"x"}`, `{"operation_id":"x","code":"x","current_password":"x"} {}`} {
 		f.app.clearSelfFailures("127.0.0.1", f.id)
@@ -282,6 +338,22 @@ func TestSelfRedemptionLastUseConcurrencyAndFaultRollback(t *testing.T) {
 	if n := f.count(t, `SELECT COUNT(*) FROM financial_accounts WHERE employee_id=? AND currency='JPY'`, f.id); n != 0 {
 		t.Fatalf("account partial=%d", n)
 	}
+	for _, query := range []string{
+		`SELECT COUNT(*) FROM financial_operations WHERE operation_id='commit-fault'`,
+		`SELECT COUNT(*) FROM financial_entries WHERE operation_id='commit-fault'`,
+		`SELECT COUNT(*) FROM financial_redemptions WHERE code_id=(SELECT id FROM financial_redemption_codes WHERE code_digest=?)`,
+	} {
+		args := []any{}
+		if strings.Contains(query, "code_digest=?") {
+			args = append(args, f.app.secrets.digest(billingWebhookPurpose, code2))
+		}
+		if n := f.count(t, query, args...); n != 0 {
+			t.Fatalf("commit fault partial %q=%d", query, n)
+		}
+	}
+	if n := f.count(t, `SELECT uses FROM financial_redemption_codes WHERE code_digest=?`, f.app.secrets.digest(billingWebhookPurpose, code2)); n != 0 {
+		t.Fatalf("commit fault changed uses=%d", n)
+	}
 	readSelfWalletResponse(t, f.redeem(t, "commit-fault", code2, selfPurchaseTestPassword, f.cookie, f.csrf), 201)
 }
 
@@ -307,4 +379,61 @@ func TestSelfRedemptionPasswordRaceAndCorruptReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	readSelfWalletResponse(t, g.redeem(t, "corrupt-replay", code2, selfPurchaseTestPassword, g.cookie, g.csrf), 503)
+}
+
+func TestSelfRedemptionInventoryDriftFailsClosedBeforeAnyNewWallet(t *testing.T) {
+	f := newSelfRedemptionFixture(t)
+	f.setCommercial(t, true)
+	code := f.issueCode(t, "EUR", 31, 2, time.Now().UTC().Add(time.Hour))
+	readSelfWalletResponse(t, f.redeem(t, "inventory-original", code, selfPurchaseTestPassword, f.cookie, f.csrf), 201)
+	other := selfCreateEmployee(t, f.server.URL, f.adminCookie, f.adminCSRF)
+	secret := selfIssue(t, f.server.URL, other.ID, f.adminCookie, f.adminCSRF)
+	otherCookie, otherCSRF := selfRedeem(t, f.server.URL, other.ID, secret)
+	if _, err := f.app.store.db.Exec(`UPDATE financial_redemption_codes SET uses=0 WHERE code_digest=?`,
+		f.app.secrets.digest(billingWebhookPurpose, code)); err != nil {
+		t.Fatal(err)
+	}
+	readSelfWalletResponse(t, f.redeem(t, "inventory-original", code, selfPurchaseTestPassword, f.cookie, f.csrf), 503)
+	readSelfWalletResponse(t, f.redeem(t, "inventory-new", code, selfPurchaseTestPassword, otherCookie, otherCSRF), 503)
+	if n := f.count(t, `SELECT COUNT(*) FROM financial_accounts WHERE employee_id=? AND currency='EUR'`, other.ID); n != 0 {
+		t.Fatalf("drift created other wallet=%d", n)
+	}
+	if n := f.count(t, `SELECT COUNT(*) FROM financial_entries WHERE kind='redemption'`); n != 1 {
+		t.Fatalf("drift entries=%d", n)
+	}
+	if n := f.count(t, `SELECT COUNT(*) FROM financial_redemptions`); n != 1 {
+		t.Fatalf("drift redemption rows=%d", n)
+	}
+	if n := f.count(t, `SELECT uses FROM financial_redemption_codes WHERE code_digest=?`, f.app.secrets.digest(billingWebhookPurpose, code)); n != 0 {
+		t.Fatalf("drift was rewritten to uses=%d", n)
+	}
+}
+
+func TestSelfRedemptionReplayRejectsNonCanonicalReceiptTimestamp(t *testing.T) {
+	f := newSelfRedemptionFixture(t)
+	f.setCommercial(t, true)
+	code := f.issueCode(t, "USD", 27, 1, time.Now().UTC().Add(time.Hour))
+	first := readSelfWalletResponse(t, f.redeem(t, "offset-replay", code, selfPurchaseTestPassword, f.cookie, f.csrf), 201)
+	credited, err := time.Parse(time.RFC3339Nano, first["credited_at"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var triggerDDL string
+	if err := f.app.store.db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='financial_commercial_operations_no_update'`).Scan(&triggerDDL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.app.store.db.Exec(`DROP TRIGGER financial_commercial_operations_no_update`); err != nil {
+		t.Fatal(err)
+	}
+	offset := credited.In(time.FixedZone("offset", 8*60*60)).Format(time.RFC3339Nano)
+	if _, err := f.app.store.db.Exec(`UPDATE financial_commercial_operations SET created_at=? WHERE operation_id='offset-replay'`, offset); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.app.store.db.Exec(triggerDDL); err != nil {
+		t.Fatal(err)
+	}
+	readSelfWalletResponse(t, f.redeem(t, "offset-replay", code, selfPurchaseTestPassword, f.cookie, f.csrf), 503)
+	if n := f.count(t, `SELECT COUNT(*) FROM financial_entries WHERE operation_id='offset-replay'`); n != 1 {
+		t.Fatalf("receipt corruption changed entries=%d", n)
+	}
 }

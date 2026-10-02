@@ -55,6 +55,19 @@ func employeeRedemptionPost(input EmployeeRedemptionInput, redemptionID, currenc
 			AmountMicro: amount, ResourceKind: "redemption", ResourceID: redemptionID}}}
 }
 
+// Redemption rows are immutable while uses is mutable. Never trust a lowered
+// counter as new inventory, including when reconstructing a committed replay.
+func employeeRedemptionInventory(ctx context.Context, tx *sql.Tx, codeID string, uses, maxUses int64) error {
+	var committed int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM financial_redemptions WHERE code_id=?`, codeID).Scan(&committed); err != nil {
+		return ErrUnavailable
+	}
+	if uses < 0 || maxUses < 1 || uses > maxUses || committed != uses {
+		return ErrSchema
+	}
+	return nil
+}
+
 // RedeemEmployeeCodeTx checks exact committed replay before any gate for a new
 // redemption. A successful return is provisional until the caller commits.
 func (c *Commercial) RedeemEmployeeCodeTx(ctx context.Context, tx *sql.Tx, input EmployeeRedemptionInput) (EmployeeRedemptionResult, error) {
@@ -118,6 +131,9 @@ func (c *Commercial) RedeemEmployeeCodeTx(ctx context.Context, tx *sql.Tx, input
 	if !validText(codeID, 256) || !equalBytes(storedDigest, input.CodeDigest[:]) || amount <= 0 ||
 		!validCurrency(currency) || maxUses < 1 || uses < 0 || uses > maxUses || (enabled != 0 && enabled != 1) {
 		return EmployeeRedemptionResult{}, ErrSchema
+	}
+	if err := employeeRedemptionInventory(ctx, tx, codeID, uses, maxUses); err != nil {
+		return EmployeeRedemptionResult{}, err
 	}
 	if enabled == 0 || uses >= maxUses {
 		return EmployeeRedemptionResult{}, ErrConflict
@@ -184,9 +200,16 @@ func (c *Commercial) RedeemEmployeeCodeTx(ctx context.Context, tx *sql.Tx, input
 	if changed != 1 {
 		return EmployeeRedemptionResult{}, ErrConflict
 	}
+	if c.employeeRedemptionBeforeInsert != nil {
+		if err := c.employeeRedemptionBeforeInsert(ctx, tx); err != nil {
+			return EmployeeRedemptionResult{}, ErrUnavailable
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO financial_redemptions(id,code_id,account_id,entry_id,created_at) VALUES(?,?,?,?,?)`,
 		redemptionID, codeID, accountID, posted[0].ID, formatCommercialTime(input.ObservedAt)); err != nil {
-		return EmployeeRedemptionResult{}, ErrConflict
+		// Business reuse was checked above. An arbitrary insert failure may be
+		// busy, cancelled, corrupt, or a random-ID collision: fail closed.
+		return EmployeeRedemptionResult{}, ErrUnavailable
 	}
 	receipt = CommercialReceipt{OperationID: input.OperationID, ResourceKind: "redemption", ResourceID: redemptionID,
 		Revision: 1, CreatedAt: input.ObservedAt}
@@ -197,22 +220,27 @@ func (c *Commercial) RedeemEmployeeCodeTx(ctx context.Context, tx *sql.Tx, input
 }
 
 func replayEmployeeRedemption(ctx context.Context, tx *sql.Tx, input EmployeeRedemptionInput, receipt CommercialReceipt) (EmployeeRedemptionResult, error) {
-	if receipt.ResourceKind != "redemption" || !validText(receipt.ResourceID, 256) || receipt.Revision != 1 ||
-		!validPurchaseStoredTime(formatCommercialTime(receipt.CreatedAt)) {
+	if receipt.ResourceKind != "redemption" || !validText(receipt.ResourceID, 256) || receipt.Revision != 1 {
+		return EmployeeRedemptionResult{}, ErrSchema
+	}
+	var receiptTime, receiptTimeType string
+	if err := tx.QueryRowContext(ctx, `SELECT created_at,typeof(created_at) FROM financial_commercial_operations WHERE operation_id=?`, input.OperationID).
+		Scan(&receiptTime, &receiptTimeType); err != nil || receiptTimeType != "text" ||
+		!validPurchaseStoredTime(receiptTime) || receiptTime != formatCommercialTime(receipt.CreatedAt) {
 		return EmployeeRedemptionResult{}, ErrSchema
 	}
 	var codeID, accountID, entryID, redeemedAt, codeCurrency, accountKind, accountKey, employeeID, resourceKind, resourceID, accountCurrency string
 	var entryOperation, entryAccount, entryKind, entryResourceKind, entryResourceID, entryAt string
 	var codeDigest []byte
-	var codeAmount, entryAmount int64
+	var codeAmount, codeMaxUses, codeUses, entryAmount int64
 	var keyID sql.NullString
 	err := tx.QueryRowContext(ctx, `SELECT r.code_id,r.account_id,r.entry_id,r.created_at,
-		c.code_digest,c.amount_micro,c.currency,
+		c.code_digest,c.amount_micro,c.currency,c.max_uses,c.uses,
 		a.owner_kind,a.owner_key,a.employee_id,a.key_id,a.resource_kind,a.resource_id,a.currency,
 		e.operation_id,e.account_id,e.kind,e.amount_micro,e.resource_kind,e.resource_id,e.created_at
 		FROM financial_redemptions r JOIN financial_redemption_codes c ON c.id=r.code_id
 		JOIN financial_accounts a ON a.id=r.account_id JOIN financial_entries e ON e.id=r.entry_id WHERE r.id=?`, receipt.ResourceID).
-		Scan(&codeID, &accountID, &entryID, &redeemedAt, &codeDigest, &codeAmount, &codeCurrency,
+		Scan(&codeID, &accountID, &entryID, &redeemedAt, &codeDigest, &codeAmount, &codeCurrency, &codeMaxUses, &codeUses,
 			&accountKind, &accountKey, &employeeID, &keyID, &resourceKind, &resourceID, &accountCurrency,
 			&entryOperation, &entryAccount, &entryKind, &entryAmount, &entryResourceKind, &entryResourceID, &entryAt)
 	if err != nil {
@@ -220,6 +248,9 @@ func replayEmployeeRedemption(ctx context.Context, tx *sql.Tx, input EmployeeRed
 	}
 	if !equalBytes(codeDigest, input.CodeDigest[:]) {
 		return EmployeeRedemptionResult{}, ErrConflict
+	}
+	if err := employeeRedemptionInventory(ctx, tx, codeID, codeUses, codeMaxUses); err != nil {
+		return EmployeeRedemptionResult{}, err
 	}
 	if !validText(codeID, 256) || !validText(entryID, 256) || !validText(accountID, 256) ||
 		!validCurrency(codeCurrency) || codeAmount <= 0 || accountKind != string(OwnerEmployee) ||

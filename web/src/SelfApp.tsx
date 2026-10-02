@@ -593,6 +593,7 @@ function newSelfRedemptionOperationID(): string {
 function SelfRedemptionPanel({ csrf }: { csrf: string }) {
   const [result, setResult] = useState<SelfRedemptionResult | null>(null)
   const [retry, setRetry] = useState<{ operationID: string; code: string; until: number } | null>(null)
+  const [reviewRequired, setReviewRequired] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const pending = useRef<AbortController | null>(null)
@@ -602,9 +603,21 @@ function SelfRedemptionPanel({ csrf }: { csrf: string }) {
   useEffect(() => () => { generation.current++; pending.current?.abort(); pending.current = null }, [])
   useEffect(() => {
     if (!retry) return
-    const timer = window.setTimeout(() => { generation.current++; pending.current?.abort(); inFlight.current = false; setRetry(null); setBusy(false) }, Math.max(0, retry.until - Date.now()))
+    const timer = window.setTimeout(() => abandonPending(), Math.max(0, retry.until - Date.now()))
     return () => window.clearTimeout(timer)
   }, [retry])
+
+  function abandonPending() {
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    inFlight.current = false
+    setRetry(null)
+    setResult(null)
+    setBusy(false)
+    setReviewRequired(true)
+    setError('待决信息已失效。请让管理员通过安全审计核对；不要另起操作重复兑换。')
+  }
 
   function clear() {
     generation.current++
@@ -614,12 +627,14 @@ function SelfRedemptionPanel({ csrf }: { csrf: string }) {
     setRetry(null)
     setResult(null)
     setBusy(false)
+    setReviewRequired(false)
     setError(null)
   }
 
   async function redeem(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (inFlight.current || busy || retry && Date.now() >= retry.until) { if (!inFlight.current) clear(); return }
+    if (reviewRequired || inFlight.current || busy) return
+    if (retry && Date.now() >= retry.until) { abandonPending(); return }
     const form = event.currentTarget
     const data = new FormData(form)
     let code = retry?.code ?? String(data.get('code') ?? '')
@@ -650,16 +665,22 @@ function SelfRedemptionPanel({ csrf }: { csrf: string }) {
     setBusy(true)
     setResult(null)
     setError(null)
+    let requestTimer: number | undefined
+    let timedOut = false
     try {
-      const raw = await selfRequest<unknown>('/billing/redemptions', {
-        method: 'POST', body: JSON.stringify({ operation_id: operationID, code, current_password }), signal: controller.signal,
-      }, csrf)
+      let body = JSON.stringify({ operation_id: operationID, code, current_password })
+      current_password = ''
+      const request = selfRequest<unknown>('/billing/redemptions', { method: 'POST', body, signal: controller.signal }, csrf)
+      body = ''
+      const raw = await Promise.race([request, new Promise<never>((_, reject) => {
+        requestTimer = window.setTimeout(() => { timedOut = true; controller.abort(); reject(new Error('redemption_request_timeout')) }, 10_000)
+      })])
       if (controller.signal.aborted || generation.current !== requestGeneration) return
       if (!validSelfRedemptionResult(raw, operationID)) throw new Error('Invalid redemption response')
       setRetry(null)
       setResult(raw)
     } catch (caught) {
-      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (generation.current !== requestGeneration || controller.signal.aborted && !timedOut) return
       const uncertain = !(caught instanceof ApiError) || caught.status === 503
       setResult(null)
       if (uncertain) {
@@ -670,10 +691,11 @@ function SelfRedemptionPanel({ csrf }: { csrf: string }) {
         setError(caught.status === 409 ? '兑换暂不可用；请向管理员核对兑换码。' : '兑换未完成，请重新输入兑换码并确认。')
       }
     } finally {
+      if (requestTimer !== undefined) window.clearTimeout(requestTimer)
       code = ''; current_password = ''; operationID = ''
       if (pending.current === controller) pending.current = null
       if (generation.current === requestGeneration) inFlight.current = false
-      if (!controller.signal.aborted && generation.current === requestGeneration) setBusy(false)
+      if (generation.current === requestGeneration) setBusy(false)
     }
   }
 
@@ -682,8 +704,8 @@ function SelfRedemptionPanel({ csrf }: { csrf: string }) {
     <p>仅使用管理员发放的兑换码，为你本人直属钱包增加码载明币种的余额。它不是付款、订阅或模型权益凭证；提交后可另行读取最新钱包余额。</p>
     {error ? <p role="alert">{error}</p> : null}
     {result ? <p className="self-redemption-result" role="status">{result.replay ? '已确认原兑换' : '兑换成功'}：本人 {result.currency} 钱包入账 <strong>{result.amount_micro} micro</strong>，时间 <time dateTime={result.credited_at}>{selfKeyDate(result.credited_at)}</time>。</p> : null}
-    {!retry ? <form key="redemption-new" className="self-redemption-form" onSubmit={(event) => { void redeem(event) }} autoComplete="off">
-      <Field label="管理员发放的兑换码"><input name="code" required maxLength={256} autoComplete="off" spellCheck={false} disabled={busy} onChange={() => setResult(null)} /></Field>
+    {reviewRequired ? null : !retry ? <form key="redemption-new" className="self-redemption-form" onSubmit={(event) => { void redeem(event) }} autoComplete="off">
+      <Field label="管理员发放的兑换码"><input name="code" type="password" required maxLength={256} autoComplete="off" spellCheck={false} disabled={busy} onChange={() => setResult(null)} /></Field>
       <Field label="当前密码"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} disabled={busy} /></Field>
       <label className="self-plan-purchase-check"><input name="confirm" type="checkbox" required disabled={busy} />我确认将此码兑换入本人直属钱包。</label>
       <div className="self-actions"><Button type="submit" disabled={busy}>{busy ? '正在确认…' : '确认兑换'}</Button></div>
@@ -691,7 +713,7 @@ function SelfRedemptionPanel({ csrf }: { csrf: string }) {
       <p>上次提交结果不确定；只用原操作编号和原兑换码显式重试，不会另起一笔。此待决信息仅短暂保留于本页面内存。</p>
       <Field label="当前密码（重试原操作）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} disabled={busy} /></Field>
       <label className="self-plan-purchase-check"><input name="confirm" type="checkbox" required disabled={busy} />我确认重试原兑换操作。</label>
-      <div className="self-actions"><Button type="submit" disabled={busy}>{busy ? '正在核对…' : '重试原兑换'}</Button><Button type="button" variant="secondary" disabled={busy} onClick={clear}>放弃重试</Button></div>
+      <div className="self-actions"><Button type="submit" disabled={busy}>{busy ? '正在核对…' : '重试原兑换'}</Button><Button type="button" variant="secondary" disabled={busy} onClick={abandonPending}>放弃重试</Button></div>
     </form>}
   </section>
 }

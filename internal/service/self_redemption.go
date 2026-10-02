@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"cpacloud.local/server/internal/financial"
@@ -19,17 +20,42 @@ import (
 
 const selfRedemptionPath = "/self/api/v1/billing/redemptions"
 
+func selfRedemptionShapedPath(decoded string) bool {
+	lower := strings.ToLower(decoded)
+	clean := path.Clean(lower)
+	if clean == selfRedemptionPath || strings.HasPrefix(clean, selfRedemptionPath+"/") {
+		return true
+	}
+	// Keep parent segments for classification. Cleaning them first can turn a
+	// code-bearing "/redemptions/.." POST into a ServeMux redirect.
+	parts := make([]string, 0, 10)
+	for _, segment := range strings.Split(lower, "/") {
+		if segment != "" && segment != "." {
+			parts = append(parts, segment)
+		}
+	}
+	lexical := "/" + strings.Join(parts, "/")
+	return lexical == selfRedemptionPath || strings.HasPrefix(lexical, selfRedemptionPath+"/")
+}
+
 func (a *App) selfRedemptionRouteGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// ServeMux can canonicalize encoded or doubled path separators before
 		// a route is selected; a code-bearing POST must never be redirected.
-		if r.URL.Path == selfRedemptionPath || path.Clean(r.URL.Path) == selfRedemptionPath {
-			if r.URL.Path != selfRedemptionPath || r.URL.EscapedPath() != selfRedemptionPath {
+		if selfRedemptionShapedPath(r.URL.Path) {
+			if !a.cfg.EmployeeSelfRedemptionEnabled {
 				http.NotFound(w, r)
 				return
 			}
-			if !a.cfg.EmployeeSelfRedemptionEnabled {
-				http.NotFound(w, r)
+			if r.URL.Path != selfRedemptionPath || r.URL.EscapedPath() != selfRedemptionPath || r.URL.RawQuery != "" || r.URL.ForceQuery {
+				a.requireSelfRedemption(func(w http.ResponseWriter, r *http.Request, session selfSession) {
+					peer, ok := a.selfGate(w, r, session.EmployeeID)
+					if !ok {
+						return
+					}
+					a.selfFailure(peer, session.EmployeeID)
+					selfError(w, http.StatusBadRequest, "invalid_request")
+				}, true)(w, r)
 				return
 			}
 			if r.Method != http.MethodPost {

@@ -19,7 +19,7 @@
 // docs/employee-self-monthly-renewal-contract.md.
 // docs/employee-self-subscription-renewal-links-contract.md.
 // docs/employee-self-redemption-contract.md.
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SelfApp } from '../SelfApp'
@@ -74,6 +74,7 @@ describe('employee self-service page', () => {
     render(<SelfApp />)
     const panel = await screen.findByRole('region', { name: '兑换码充值本人钱包' })
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/redemptions'))).toBe(false)
+    expect(within(panel).getByLabelText('管理员发放的兑换码')).toHaveAttribute('type', 'password')
     await userEvent.type(within(panel).getByLabelText('管理员发放的兑换码'), 'cpa_synthetic-code')
     await userEvent.type(within(panel).getByLabelText('当前密码'), 'a-long-self-password')
     await userEvent.click(within(panel).getByRole('checkbox', { name: /我确认将此码兑换/ }))
@@ -90,6 +91,50 @@ describe('employee self-service page', () => {
     expect(submitted[1]).toEqual(submitted[0])
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('cpa_synthetic-code'))).toHaveLength(0)
     expect(within(panel).queryByText('cpa_synthetic-code')).not.toBeInTheDocument()
+  })
+
+  it('bounds a hanging redemption and requires administrator review when the retry envelope expires', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const submitted: Array<{ operation_id: string }> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_redemption: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/redemptions')) {
+        submitted.push(JSON.parse(String(init?.body)) as { operation_id: string })
+        return new Promise<Response>(() => {})
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '兑换码充值本人钱包' })
+    vi.useFakeTimers()
+    try {
+      fireEvent.change(within(panel).getByLabelText('管理员发放的兑换码'), { target: { value: 'cpa_synthetic-code' } })
+      fireEvent.change(within(panel).getByLabelText('当前密码'), { target: { value: 'a-long-self-password' } })
+      fireEvent.click(within(panel).getByRole('checkbox', { name: /我确认将此码兑换/ }))
+      await act(async () => { fireEvent.submit(within(panel).getByRole('button', { name: '确认兑换' }).closest('form')!) })
+      expect(submitted).toHaveLength(1)
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+      expect(within(panel).getByRole('alert')).toHaveTextContent('结果未确认')
+      expect(within(panel).queryByLabelText('管理员发放的兑换码')).not.toBeInTheDocument()
+      expect(within(panel).getByLabelText('当前密码（重试原操作）')).toHaveValue('')
+      fireEvent.change(within(panel).getByLabelText('当前密码（重试原操作）'), { target: { value: 'a-long-self-password' } })
+      fireEvent.click(within(panel).getByRole('checkbox', { name: /我确认重试原兑换操作/ }))
+      await act(async () => { fireEvent.submit(within(panel).getByRole('button', { name: '重试原兑换' }).closest('form')!) })
+      expect(submitted).toHaveLength(2)
+      expect(submitted[1].operation_id).toBe(submitted[0].operation_id)
+      await act(async () => { await vi.advanceTimersByTimeAsync(2 * 60 * 1000) })
+      expect(within(panel).getByRole('alert')).toHaveTextContent('请让管理员通过安全审计核对')
+      expect(within(panel).queryByRole('button', { name: '确认兑换' })).not.toBeInTheDocument()
+      expect(within(panel).queryByRole('button', { name: '重试原兑换' })).not.toBeInTheDocument()
+      expect(within(panel).queryByLabelText('管理员发放的兑换码')).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('clears a definite redemption failure and ignores a late result after logout', async () => {

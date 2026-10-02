@@ -49,7 +49,7 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 		mux.HandleFunc("GET /self/api/v1/billing/balance", a.requireSelf(a.selfWalletBalance, false))
 	}
 	if a.cfg.EmployeeSelfRedemptionEnabled {
-		mux.HandleFunc("POST /self/api/v1/billing/redemptions", a.requireSelfReleased(a.selfRedeemCode, true))
+		mux.HandleFunc("POST /self/api/v1/billing/redemptions", a.requireSelfRedemption(a.selfRedeemCode, true))
 	}
 	if a.cfg.EmployeeSelfWalletActivityEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/entries", a.requireSelf(a.selfWalletActivity, false))
@@ -466,16 +466,21 @@ func (a *App) selfLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) requireSelf(next func(http.ResponseWriter, *http.Request, selfSession), write bool) http.HandlerFunc {
-	return a.requireSelfWithLock(next, write, true)
+	return a.requireSelfWithLock(next, write, true, "csrf_rejected")
 }
 
 // Mutations needing admission.Lock must finish initial session validation before
 // releasing the read lock; their final transaction revalidates that session.
 func (a *App) requireSelfReleased(next func(http.ResponseWriter, *http.Request, selfSession), write bool) http.HandlerFunc {
-	return a.requireSelfWithLock(next, write, false)
+	return a.requireSelfWithLock(next, write, false, "csrf_rejected")
 }
 
-func (a *App) requireSelfWithLock(next func(http.ResponseWriter, *http.Request, selfSession), write, holdLock bool) http.HandlerFunc {
+// The redemption contract uses one indistinguishable Origin/CSRF rejection.
+func (a *App) requireSelfRedemption(next func(http.ResponseWriter, *http.Request, selfSession), write bool) http.HandlerFunc {
+	return a.requireSelfWithLock(next, write, false, "request_rejected")
+}
+
+func (a *App) requireSelfWithLock(next func(http.ResponseWriter, *http.Request, selfSession), write, holdLock bool, csrfError string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if len(r.Header.Values("Origin")) > 1 || !validOptionalOrigin(r, a.cfg.TLSCert != "") {
 			selfError(w, 403, "request_rejected")
@@ -521,7 +526,7 @@ func (a *App) requireSelfWithLock(next func(http.ResponseWriter, *http.Request, 
 			}
 			provided := r.Header.Values("X-CSRF-Token")
 			if len(provided) != 1 || subtle.ConstantTimeCompare([]byte(provided[0]), []byte(session.CSRF)) != 1 {
-				selfError(w, 403, "csrf_rejected")
+				selfError(w, 403, csrfError)
 				return
 			}
 		}
