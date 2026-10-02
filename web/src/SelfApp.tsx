@@ -768,7 +768,9 @@ function SelfOneShotRenewalPanel({ id, csrf, selected, onSelect }: { id: string;
     pending.current = controller
     setStatus(null)
     setConfirm(false)
-    setRetry(null)
+    // A status refresh cannot establish which operation won an uncertain
+    // commit. Keep the original ID until explicit replay or abandonment.
+    if (afterDisarm) setRetry(null)
     if (!afterDisarm) setOutcome(null)
     setError(null)
     setLoading('read')
@@ -796,8 +798,8 @@ function SelfOneShotRenewalPanel({ id, csrf, selected, onSelect }: { id: string;
     const revision = retry?.revision ?? status?.revision
     if (revision !== 1 || new TextEncoder().encode(password).length < 12 || new TextEncoder().encode(password).length > 72) {
       password = ''
-      setStatus(null); setConfirm(false); setRetry(null); setOutcome(null)
-      setError('当前密码须为 12–72 个 UTF-8 字节；请重新读取预约状态。')
+      setStatus(null); setConfirm(false); setOutcome(null)
+      setError(retry ? '当前密码须为 12–72 个 UTF-8 字节；原撤销操作仍待确认，请重新输入密码。' : '当前密码须为 12–72 个 UTF-8 字节；请重新读取预约状态。')
       return
     }
     let operationID = retry?.operationID ?? ''
@@ -850,7 +852,7 @@ function SelfOneShotRenewalPanel({ id, csrf, selected, onSelect }: { id: string;
     {status ? <div className="self-one-shot-status"><p>{selfOneShotLabels[status.state]}</p>
       {status.due_at ? <p>冻结到期时刻：<time dateTime={status.due_at}>{selfKeyDate(status.due_at)}</time>；预约版本：{status.revision}。</p> : null}
       {status.terminal_at ? <p>终结时间：<time dateTime={status.terminal_at}>{selfKeyDate(status.terminal_at)}</time>；原因：{status.reason ? selfOneShotReasons[status.reason] : '本地续购已提交'}。</p> : null}
-      {status.state === 'armed' ? <Button variant="secondary" disabled={loading !== null} onClick={() => { setConfirm(true); setError(null); setOutcome(null) }}>撤销这一笔预约</Button> : null}
+      {status.state === 'armed' && !retry ? <Button variant="secondary" disabled={loading !== null} onClick={() => { setConfirm(true); setError(null); setOutcome(null) }}>撤销这一笔预约</Button> : null}
     </div> : null}
     {confirm && status?.state === 'armed' ? <form className="self-subscriptions-confirm" onSubmit={(event) => { void submitDisarm(event) }}>
       <h3>确认撤销一次性续购预约</h3>

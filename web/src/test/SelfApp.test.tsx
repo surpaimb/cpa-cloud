@@ -462,11 +462,12 @@ describe('employee self-service page', () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/sub-month/one-shot-renewal'))).toHaveLength(2)
   })
 
-  it('keeps an uncertain one-shot retry only in memory and aborts late reads on logout', async () => {
+  it('keeps an uncertain one-shot retry through a failed refresh and aborts late reads on logout', async () => {
     const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
     const due = '2026-11-01T08:00:00Z'
     const terminal = '2026-10-02T08:00:00Z'
     let attempts = 0
+    let reads = 0
     let pending: ((response: Response) => void) | undefined
     let pendingSignal: AbortSignal | undefined
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -477,6 +478,8 @@ describe('employee self-service page', () => {
       if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
       if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [{ subscription_id: 'sub-retry', interval: 'monthly', status: 'active', started_at: '2026-10-01T08:00:00Z', period_end_at: '2026-11-01T08:00:00.000000000Z', cancelled_at: null }], next_cursor: null })
       if (url.endsWith('/billing/subscriptions/sub-retry/one-shot-renewal') && init?.method !== 'POST') {
+        reads++
+        if (reads === 2) return reply(503, { error: { code: 'storage_unavailable' } })
         if (attempts > 1) { pendingSignal = init?.signal as AbortSignal; return new Promise<Response>((resolve) => { pending = resolve }) }
         return reply(200, { subscription_id: 'sub-retry', state: 'armed', revision: 1, due_at: due, reason: null, terminal_at: null })
       }
@@ -501,6 +504,10 @@ describe('employee self-service page', () => {
     await userEvent.click(within(panel).getByRole('button', { name: '确认撤销预约' }))
     expect(await within(panel).findByRole('alert')).toHaveTextContent('撤销结果未确认')
     expect(window.localStorage.length).toBe(0); expect(window.sessionStorage.length).toBe(0)
+    await userEvent.click(within(panel).getByRole('button', { name: '查看续购预约' }))
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('预约状态暂时无法读取')
+    expect(within(panel).getByLabelText('我确认显式重试原撤销操作。')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/one-shot-renewal/disarm'))).toHaveLength(1)
     await userEvent.click(within(panel).getByLabelText('我确认显式重试原撤销操作。'))
     await userEvent.type(within(panel).getByLabelText('当前密码（重试原撤销）'), 'a-long-self-password')
     await userEvent.click(within(panel).getByRole('button', { name: '确认重试撤销' }))
