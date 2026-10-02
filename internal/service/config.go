@@ -37,6 +37,7 @@ type Config struct {
 	EmployeeSelfRedemptionEnabled                   bool
 	EmployeeSelfWalletActivityEnabled               bool
 	EmployeeSelfWalletEntryClassificationEnabled    bool
+	EmployeeSelfRedemptionCreditHistoryEnabled      bool
 	EmployeeSelfSubscriptionStatusEnabled           bool
 	EmployeeSelfSubscriptionPurchaseSnapshotEnabled bool
 	EmployeeSelfSubscriptionRenewalLinksEnabled     bool
