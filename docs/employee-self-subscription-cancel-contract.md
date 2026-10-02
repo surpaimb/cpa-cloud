@@ -1,0 +1,39 @@
+# ID-05 / BILL-03 员工自助取消本人直属订阅契约
+
+状态：2026-10-02 独立设计合同，开发预览、默认关闭；本文件先于实现，不宣称功能或验收已完成。精确基线为已合并 `main` 的 `92b2f2fe0bd03c566564f42442b50f33aa8b8c4d`。本批只允许已开通的员工取消本人直属现存、仍有效的 `active` 订阅；它扩展[自助会话基础](employee-self-service-foundation-contract.md)、[本人订阅状态](employee-self-subscription-status-contract.md)、[单实例计费](single-instance-billing-contract.md)、[冻结月周期与到期](subscription-period-expiry-contract.md)、[一次性预约续购](subscription-one-shot-renewal-contract.md)及[财务 actor 来源](financial-actor-provenance-contract.md)。取消仅终结本地订阅记录，不是退款、撤回已授额度、模型权益判定或供应商/支付取消。GOV-02 仍开放。
+
+## 启用、兼容与最小只读增量
+
+新启动开关 `--employee-self-subscription-cancel-enabled` / `EmployeeSelfSubscriptionCancelEnabled` 默认 `false`。显式开启必须同时开启既有 `--employee-self-service-enabled` 和 `--employee-self-subscription-status-enabled`；缺少前置条件在更改存储前启动失败。它不自动开启其他能力，也不依赖钱包余额、套餐目录、员工购买开关或数据库的 `financial_settings.enabled`。商业执行关闭时，本人取消和已提交精确重放仍可用；不能把该开关放在本 POST 路由的前置中间件。取消 opt-in 关闭时新 POST 路由为 404、`features.employee_self_subscription_cancel=false`，浏览器不显示取消控件或发取消请求；原订阅状态只读功能保持原门禁。自助总开关关闭时 `/self/` 继续整体 404。
+
+现有 `GET /self/api/v1/billing/subscriptions` 的身份、显式点击、游标、排序、读事务和最小字段约定保持不变。**仅当新取消能力开启时**，每个既有 `items[]` 对象额外返回 `revision`：对应 `financial_subscriptions.revision` 的当前存储整数，范围 `1..9007199254740991`，不是按月到期投影虚构的新版本。关闭时保留旧的六字段 item 形状。该字段只供本人确认与 `expected_revision` CAS；列表仍不返回 plan/价格/额度/币种、账户、分录、操作或支付信息。月订阅在冻结 `period_end_at` 恰好到达时，即使存储尚为 `active`，只读有效状态也投影为 `expired`；这种行不能展示可执行取消按钮。页间仍不承诺同一快照，点击时会重新检查最终状态和版本。
+
+## 请求、身份和响应
+
+`POST /self/api/v1/billing/subscriptions/{id}/cancel` 只接受一个合法、规范编码的不透明现存订阅 ID 路径段（财务 ID 规则，1–256 UTF-8 字节），不接受空段、额外路径段或歧义转义；无任何 query 参数，包括空的 `?`。请求体不超过既有自助上限 4096 字节，合法 UTF-8、单个 JSON 对象，**恰好**包含 `operation_id`（1–128 字节不透明全局操作 ID）、`expected_revision`（JSON 整数，`1..9007199254740991`）和 `current_password`（字符串，既有 12–72 UTF-8 字节密码规则）。重复/缺失/未知字段、尾随 JSON、数组、错误类型、非规范数值、超限、非法 UTF-8 或 employee/owner/account/Key/resource/金额/退款/币种/plan/客户端时间选择器固定 `400 invalid_request`；版本达到不能递增的最大值不能新取消。`operation_id` 由浏览器每次新确认生成不可预测值；不确定提交只用**原 ID、原路径和原 expected_revision**显式重试。
+
+仅当前有效、已开通且 `active` 的员工自助会话可提交。本人身份只从服务端校验的 self cookie/会话取得，不能由订阅的账户 owner 推断 actor；管理员 Cookie、员工模型 Bearer Key、匿名、停用员工或其他员工的会话都不可代替。每次请求须有且仅有一个匹配的同源 `Origin`、`X-Self-Request: 1` 和当前会话 `X-CSRF-Token`；跨源/歧义在财务读取前拒绝。沿用 `HttpOnly`、`SameSite=Strict`、`Path=/self/` 及 TLS 下 `Secure` 的自助 cookie。每次**包括精确重放**均受 peer 与 employee 两维有界失败限流，并验证新输入的当前密码；合法形状但错误、缺失或已改密码使用统一脱敏 `401 invalid_credentials`，限流可返回 `429`。不得以旧 receipt 绕开当前身份、密码、Origin 或 CSRF。
+
+首次取消和精确重放均返回 `200`，成功 JSON **仅**含 `operation_id`、`subscription_id`、`replay`、`status:"cancelled"`、取消后的存储 `revision` 和规范 UTC `cancelled_at`。不返回账户 ID、owner、plan、价格、额度、币种、钱包余额、账本/预约 ID、密码或摘要；`Cache-Control: no-store` 用于成功与错误。不存在、他人直属、Key/资源账户名下及不属于本人直属账户的目标统一为不泄露归属的 `404 subscription_not_found`（在未命中全局操作 ID 冲突的普通新请求中）。本人但已取消/已到期/版本已变、恰好到期或并发败者统一 `409 cancel_unavailable`；已占用操作 ID 的 actor/action/目标/版本/指纹冲突同为脱敏 409。无成功头/字节的结构或存储故障、忙/快照升级、取消、超时及不确定提交固定 `503 storage_unavailable`；Origin/CSRF 分别按既有 self 固定 403 错误处理。错误不得暴露他人存在性、原摘要、SQL、账户或内部原因。
+
+## 单一事务、归属与状态转换
+
+严格解析和自助会话初验后，可在事务外取当前员工 bcrypt hash 并验证密码，但耗时 bcrypt 不持有跨服务写 admission 锁。进入最终临界区时取得本进程 admission 写锁并开启有界、可取消、**由 HTTP 外层持有并最终提交**的 `*sql.Tx`。在该事务内重验自助 schema、cookie selector/常量时间 verifier、持久 CSRF、会话仍未退出/到期、员工仍 `active` 且已开通、密码 hash 与刚验证的字节完全一致；提交前在同一事务再次检查这些可变授权条件和实际会话失效时间。改密、登出、停用、过期或 CSRF 变化令新取消与重放均回滚；外部连接写竞争不能沿用旧快照，必须失败关闭。本机锁一直持有至 commit/rollback。事务内只从已验证会话构造明确 `(actor_kind="employee", actor_employee_id)`，绝不从目标订阅、账户、旧管理员操作或请求输入推断。
+
+最终授权后，**先于**目标当前状态、版本、月到期和商业执行门禁，在同一事务以全局 `operation_id`、`subscription.cancel` action、该 typed employee actor 和服务端规范指纹探测已提交操作。指纹仅绑定 `{subscription_id:路径 ID, expected_revision:客户端确认的存储版本}`；密码、CSRF、会话和服务器观察时间不参与指纹，但每次请求仍重新验证它们。商业 receipt 必须是该员工、该 action/指纹、`resource_kind="subscription"`、同一目标 ID、`revision=expected_revision+1` 的完整既有事实；读取原订阅及其账户，验证仍为 `cancelled`、`cancelled_at` 与 receipt UTC 时间相同、版本与 receipt 相同、账户是该员工**直属**的规范 employee owner（非 Key/resource、他人或畸形 owner），并验证相关订阅/续购/预约链结构。取消操作不应有财务账本 operation 或分录；同 ID 若只在账本存在、任一 receipt 缺失/损坏或双表矛盾，冲突或 503 失败关闭，绝不补写或伪造成功。符合全部链的精确已提交重放返回原最小结果，**不**要求当前商业执行开启，也不因当前行已取消、时间后来到期或当前版本不再等于请求版本而转成新取消。不同 actor/目标/版本/指纹、旧管理员/系统/历史未知 actor 的同 ID 均不得提升为员工重放。
+
+只有证实全局 ID 尚未提交的新操作，才在**同一事务**读取目标订阅、直属既有钱包账户与相关续购/预约事实，严格验证财务 schema、列类型、时间、状态和 owner 不变量。目标须存储 `active`、有效状态仍 `active`、存储 `revision==expected_revision` 且可递增；`one_time` 可取消，`monthly` 仅在事务内捕获的单一 UTC 业务时刻严格早于冻结 `period_end_at` 时可取消，恰好到期不可。该时刻同时用于有效状态、CAS、`cancelled_at`、receipt 和预约终态；不读当前套餐、钱包余额或商业执行开关。以 `id/account_id/status/revision` 及 `period_end_at > 该时刻`（或 one-time 无终点）为条件做一行 CAS，要求恰好一行；同事务插入 employee-actor `subscription.cancel` 商业 receipt、版本为旧值加一，并把该订阅任何仍 `armed` 的 one-shot 预约终止为 `cancelled` / `predecessor_cancelled`，终态时间相同。已终态预约不被复活；已续购 successor 和既有链接不回滚。不得调用现有自行 `Begin/Commit`、只凭订阅 ID 的管理员 `CancelSubscription` 作为员工授权路径；需要新 caller-owned 原语或等价事务内组合，并复用现有财务 schema/receipt/预约校验。
+
+取消不生成退款、不收回已授 `subscription_credit`、不修改钱包余额或 `financial_entries` / `financial_operations`，不创建账户、套餐、付款或新的续购。CAS、receipt 和预约终态任一失败均整个事务回滚；失败前后账户主键集合、余额、账本和其他订阅不变。取消与到期 worker、管理员取消、one-shot worker、两个不同自助操作 ID 在 SQLite 单写者与 CAS 下 first-commit-wins；同 ID 的并发请求至多一个新写入，另一请求只能在重验身份/密码后精确重放。一次性预约先执行而生成 successor 后，取消不能追回它；取消先提交则预约不得再执行。对提交失败或结果未知绝不报成功，固定 503；若实际上已提交，同路径/版本/ID、重新输入密码的后续请求可按前述顺序恢复原结果，若未提交则按当时当前状态重新判断。没有跨实例协调或支付补偿承诺。
+
+## 网页与数据最小化
+
+`/self/` 仅当新 capability 与本人订阅状态 capability 同时为真时，在员工**明确点击**取得的本人列表中，对有效 `active` 行显示取消入口；`cancelled`、`expired` 和其他账户行无入口。点击后须展示两步确认：首先明确显示订阅 ID、当前存储 revision 和“只终结本地订阅；不退款、不撤回已授额度、不代表模型权益或外部支付取消”；其次要求独立确认和 native `type=password` 的当前密码，不能靠一次列表点击直接提交。列表不注入 plan/金额/账户/账本字段，前端不接受用户自填 employee、owner、Key、resource、金额或币种。
+
+密码仅短暂存在表单与请求内存，提交即重置；操作 ID、目标和待决重试信封只在组件内存，不进 URL、Web Storage、缓存或日志。切账号/session、登出、卸载、目标/版本变化、已知失败或取消确认清空密码与旧确认，AbortController 加代际校验阻止晚响应回填。结果不确定的窄情形可以保留仅内存的**原**路径/版本/operation ID 待决信封；不得自动重试或显示已取消，必须重新确认并输入当前密码后显式按同 ID 重试。提交明确成功后清空信封与陈旧列表，重新从本人订阅首页读取服务端权威状态；若刷新失败，保留已确认操作结果但清空旧列表并提示刷新不可用，不把网络失败伪装成取消失败。桌面和 390 px 真浏览器均须检查确认、失败、待决、成功与晚响应状态，无溢出。
+
+## 验收、来源与发布边界
+
+合同阶段只独立提交本文件，核相对链接、`git diff --check`、精确 HEAD/tree/merge-base/status，并待主任务只读审阅；不在此阶段跑全仓 Windows SQLite。实现后，独立测试至少覆盖默认关闭/前置 flag、商业执行关闭仍取消与重放、状态 GET 旧/新增 item 形状和存储版本；匿名/admin/Bearer/跨员工/未开通/停用、Origin/CSRF、peer+employee 限流及每次密码验证；bcrypt 与登出/改密/停用竞态；本人/他人/Key/resource/missing/坏账户隔离；one-time、月周期临界前/恰好到期、已取消与 stale revision；同/不同 ID 并发、admin/expiry/one-shot/手动续购竞争及 successor 保持；原商业 receipt/规范指纹/全局账本 ID 冲突、精确重放优先和不确定提交/重启恢复；坏 schema/列/时间/receipt/预约链、读/写/提交/取消故障零部分、账户和账本零变化；UI 能力门控、显式两步、秘密清理、权威刷新、晚响应及桌面/390 px。分别报告专项 Go/race/vet、Web typecheck/test/build、动态随机非 8787 进程/Chrome 和本批**精确 HEAD** GitHub 非缓存全 Go/CGO race/双 CLI/Web/隔离 smoke；PR46 或先前批次的 CI、固定 binary 或 G 验收均不能代替本批。独立 draft PR 只有在同 HEAD 固定实体 Git 源码/二进制双随机根黑盒和 CI 通过并经主任务核验后才可 ready；不部署、tag、package 或触发 native package workflow。
+
+本合同及后续新增源码、测试由 CPA Cloud 根据以上自有功能规格和公开技术资料独立编写，不复制、翻译或移植 CLIProxyAPI、Sub2API、归档 CPA 或邻近参考仓库；此前阅读参考材料，因此不称严格 clean-room。2026-10-02 查阅的公开技术依据：[Go `database/sql` 事务与 `BeginTx` 取消语义](https://pkg.go.dev/database/sql#DB.BeginTx)、[SQLite 事务与单写者](https://www.sqlite.org/lang_transaction.html)、[SQLite `UPDATE` 条件未命中为零行](https://www.sqlite.org/lang_update.html)、[Go `net/http` 请求与上下文](https://pkg.go.dev/net/http)、[Go bcrypt 密码校验](https://pkg.go.dev/golang.org/x/crypto/bcrypt)。本批不新增第三方 SDK、依赖、DDL 或素材；已有 Go、modernc SQLite、React 与测试依赖保留原许可，新增源码须标明本合同及实际使用的公开来源。
