@@ -37,6 +37,7 @@ type Config struct {
 	EmployeeSelfWalletActivityEnabled               bool
 	EmployeeSelfSubscriptionStatusEnabled           bool
 	EmployeeSelfSubscriptionPurchaseSnapshotEnabled bool
+	EmployeeSelfSubscriptionRenewalEnabled          bool
 	EmployeeSelfSubscriptionCancelEnabled           bool
 	// Independently authored for docs/employee-self-one-shot-disarm-contract.md.
 	EmployeeSelfOneShotRenewalDisarmEnabled bool
