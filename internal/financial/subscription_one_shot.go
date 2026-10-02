@@ -272,7 +272,7 @@ func readOneShotRecord(ctx context.Context, tx *sql.Tx, sub Subscription) (oneSh
 		return oneShotRecord{}, err
 	}
 	if record.disarmOperationID != "" {
-		if err := validateOneShotDisarmOperation(ctx, tx, record.disarmOperationID, sub.ID, *record.TerminalAt); err != nil {
+		if err := validateOneShotDisarmOperation(ctx, tx, record.disarmOperationID, sub, *record.TerminalAt); err != nil {
 			return oneShotRecord{}, err
 		}
 	}
@@ -333,25 +333,105 @@ func validateOneShotRecordShape(sub Subscription, record oneShotRecord) error {
 }
 
 func validateOneShotOperation(ctx context.Context, tx *sql.Tx, operationID, expectedAction, expectedActor, predecessorID string, expectedRevision int64, expectedAt time.Time, receiptRevision int64) error {
-	var action, actor, kind, resourceID, created string
+	return validateOneShotOperationForActor(ctx, tx, operationID, expectedAction, Actor{Kind: ActorAdmin, ID: expectedActor}, predecessorID, expectedRevision, expectedAt, receiptRevision)
+}
+
+// The actor migration validates existing one-shot rows before rebuilding the
+// exact pre-actor commercial table. That historical schema can only contain
+// administrator arm/disarm receipts; the employee path never uses it.
+func oneShotPreActorSchema(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var ddl string
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='financial_commercial_operations'`).Scan(&ddl); err != nil {
+		return false, ErrSchema
+	}
+	if normalize(ddl) == normalize(storedDDL(commercialOperationsBeforeActorDDL)) {
+		return true, nil
+	}
+	if normalize(ddl) != normalize(storedDDL(commercialOperationsDDL)) {
+		return false, ErrSchema
+	}
+	return false, nil
+}
+
+// Independently authored for docs/employee-self-one-shot-disarm-contract.md.
+// Arm remains administrator-only; only a disarm receipt may have the direct
+// employee owner as its typed actor.
+func validateOneShotOperationForActor(ctx context.Context, tx *sql.Tx, operationID, expectedAction string, expectedActor Actor, predecessorID string, expectedRevision int64, expectedAt time.Time, receiptRevision int64) error {
+	preActor, err := oneShotPreActorSchema(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if preActor {
+		if expectedActor.Kind != ActorAdmin {
+			return ErrSchema
+		}
+		var action, kind, resourceID, created string
+		var adminID sql.NullString
+		var digest []byte
+		var revision int64
+		if err := tx.QueryRowContext(ctx, `SELECT action,actor_admin_id,payload_digest,resource_kind,resource_id,revision,created_at FROM financial_commercial_operations WHERE operation_id=?`, operationID).Scan(&action, &adminID, &digest, &kind, &resourceID, &revision, &created); err != nil {
+			return ErrSchema
+		}
+		expectedDigest := oneShotPayload(predecessorID, expectedRevision)
+		if action != expectedAction || !adminID.Valid || adminID.String != expectedActor.ID || !equalBytes(digest, expectedDigest[:]) || kind != "subscription_one_shot" || resourceID != predecessorID || revision != receiptRevision || created != formatCommercialTime(expectedAt) {
+			return ErrSchema
+		}
+		return nil
+	}
+	var action, actorKind, kind, resourceID, created string
+	var adminID, employeeID, systemID sql.NullString
 	var digest []byte
 	var revision int64
-	if err := tx.QueryRowContext(ctx, `SELECT action,COALESCE(actor_admin_id,''),payload_digest,resource_kind,resource_id,revision,created_at FROM financial_commercial_operations WHERE operation_id=?`, operationID).Scan(&action, &actor, &digest, &kind, &resourceID, &revision, &created); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT action,actor_kind,actor_admin_id,actor_employee_id,actor_system_id,payload_digest,resource_kind,resource_id,revision,created_at FROM financial_commercial_operations WHERE operation_id=?`, operationID).Scan(&action, &actorKind, &adminID, &employeeID, &systemID, &digest, &kind, &resourceID, &revision, &created); err != nil {
 		return ErrSchema
 	}
 	expectedDigest := oneShotPayload(predecessorID, expectedRevision)
-	if action != expectedAction || actor != expectedActor || !equalBytes(digest, expectedDigest[:]) || kind != "subscription_one_shot" || resourceID != predecessorID || revision != receiptRevision || created != formatCommercialTime(expectedAt) {
+	if action != expectedAction || !actorMatchesColumns(expectedActor, actorKind, adminID, employeeID, systemID) || !equalBytes(digest, expectedDigest[:]) || kind != "subscription_one_shot" || resourceID != predecessorID || revision != receiptRevision || created != formatCommercialTime(expectedAt) {
 		return ErrSchema
 	}
 	return nil
 }
 
-func validateOneShotDisarmOperation(ctx context.Context, tx *sql.Tx, operationID, predecessorID string, at time.Time) error {
-	var actor string
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(actor_admin_id,'') FROM financial_commercial_operations WHERE operation_id=?`, operationID).Scan(&actor); err != nil || !validCommercialText(actor, 256) {
+func validateOneShotDisarmOperation(ctx context.Context, tx *sql.Tx, operationID string, sub Subscription, at time.Time) error {
+	preActor, err := oneShotPreActorSchema(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if preActor {
+		var adminID sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT actor_admin_id FROM financial_commercial_operations WHERE operation_id=?`, operationID).Scan(&adminID); err != nil || !adminID.Valid || !validCommercialText(adminID.String, 256) {
+			return ErrSchema
+		}
+		return validateOneShotOperation(ctx, tx, operationID, "subscription.one_shot.disarm", adminID.String, sub.ID, 1, at, 2)
+	}
+	var kind string
+	var adminID, employeeID, systemID sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT actor_kind,actor_admin_id,actor_employee_id,actor_system_id FROM financial_commercial_operations WHERE operation_id=?`, operationID).Scan(&kind, &adminID, &employeeID, &systemID); err != nil {
 		return ErrSchema
 	}
-	return validateOneShotOperation(ctx, tx, operationID, "subscription.one_shot.disarm", actor, predecessorID, 1, at, 2)
+	var actor Actor
+	switch ActorKind(kind) {
+	case ActorAdmin:
+		if !adminID.Valid || !validCommercialText(adminID.String, 256) {
+			return ErrSchema
+		}
+		actor = Actor{Kind: ActorAdmin, ID: adminID.String}
+	case ActorEmployee:
+		if !employeeID.Valid || !validCommercialText(employeeID.String, 256) {
+			return ErrSchema
+		}
+		ownerOK, err := employeeSubscriptionCancelOwner(ctx, tx, sub, employeeID.String)
+		if err != nil || !ownerOK {
+			return ErrSchema
+		}
+		actor = Actor{Kind: ActorEmployee, ID: employeeID.String}
+	default:
+		return ErrSchema
+	}
+	if !actorMatchesColumns(actor, kind, adminID, employeeID, systemID) {
+		return ErrSchema
+	}
+	return validateOneShotOperationForActor(ctx, tx, operationID, "subscription.one_shot.disarm", actor, sub.ID, 1, at, 2)
 }
 
 func validateOneShotRenewals(ctx context.Context, tx *sql.Tx) error {

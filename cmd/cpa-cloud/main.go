@@ -71,6 +71,8 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.BoolVar(&cfg.EmployeeSelfWalletActivityEnabled, "employee-self-wallet-activity-enabled", false, "allow enrolled employees to read recent changes to their own employee-owned wallet (requires self service and wallet balance)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionStatusEnabled, "employee-self-subscription-status-enabled", false, "allow enrolled employees to read minimal status of their own existing subscriptions (requires self service)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionCancelEnabled, "employee-self-subscription-cancel-enabled", false, "allow enrolled employees to cancel their own active subscriptions (requires self service and subscription status)")
+	// Independently authored for docs/employee-self-one-shot-disarm-contract.md.
+	flags.BoolVar(&cfg.EmployeeSelfOneShotRenewalDisarmEnabled, "employee-self-one-shot-renewal-disarm-enabled", false, "allow enrolled employees to read and disarm their own one-shot renewal (requires self service and subscription status)")
 	flags.BoolVar(&cfg.EmployeeSelfPlanCatalogEnabled, "employee-self-plan-catalog-enabled", false, "allow enrolled employees to read the current minimal enabled plan catalog (requires self service)")
 	flags.BoolVar(&cfg.EmployeeSelfPlanPurchaseEnabled, "employee-self-plan-purchase-enabled", false, "allow enrolled employees to buy a one-time plan with their existing wallet (requires self service, wallet balance, and plan catalog)")
 	flags.BoolVar(&cfg.ResponsesStatefulResources, "responses-stateful-resources", false, "enable encrypted employee-owned Responses resources (development preview)")
@@ -122,6 +124,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	if cfg.EmployeeSelfSubscriptionCancelEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled) {
 		return 1, errors.New("--employee-self-subscription-cancel-enabled requires --employee-self-service-enabled and --employee-self-subscription-status-enabled")
+	}
+	if cfg.EmployeeSelfOneShotRenewalDisarmEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled) {
+		return 1, errors.New("--employee-self-one-shot-renewal-disarm-enabled requires --employee-self-service-enabled and --employee-self-subscription-status-enabled")
 	}
 	if cfg.EmployeeSelfPlanCatalogEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return 1, errors.New("--employee-self-plan-catalog-enabled requires --employee-self-service-enabled")
