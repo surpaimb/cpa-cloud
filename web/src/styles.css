@@ -769,6 +769,14 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
 .self-subscriptions-list dt { color: var(--muted); }
 .self-subscriptions-list dd { margin: 3px 0 0; overflow-wrap: anywhere; }
 @media (max-width: 520px) { .self-subscriptions-list dl { grid-template-columns: minmax(0, 1fr); } }
+/* Independently authored for docs/employee-self-subscription-cancel-contract.md. */
+.self-subscriptions-list .button { margin-top: 12px; }
+.self-subscriptions-confirm { display: grid; gap: 12px; margin-top: 14px; padding: 16px; border: 1px solid #b6c8e4; border-radius: 9px; background: #f5f8fc; min-width: 0; }
+.self-subscriptions-confirm h3, .self-subscriptions-confirm p { margin: 0; overflow-wrap: anywhere; }
+.self-subscriptions-confirm h3 { color: var(--navy); font-size: 16px; }
+.self-subscriptions-confirm p { font-size: 13px; line-height: 1.6; }
+.self-subscriptions-success { margin-top: 14px !important; padding: 12px 14px; border: 1px solid #bfe3d5; border-radius: 9px; background: #f2f9f6; color: var(--navy) !important; overflow-wrap: anywhere; }
+@media (max-width: 520px) { .self-subscriptions-confirm .button { width: 100%; } }
 /* Independently authored for docs/employee-self-plan-catalog-contract.md. */
 .self-plan-catalog { margin: 0 0 24px; padding-top: 20px; border-top: 1px solid var(--border); }
 .self-plan-catalog h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }

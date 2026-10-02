@@ -105,10 +105,14 @@ func (a *App) selfSubscriptionStatus(w http.ResponseWriter, r *http.Request, ses
 	}
 	items := make([]map[string]any, 0, len(page.Items))
 	for _, item := range page.Items {
-		items = append(items, map[string]any{
+		view := map[string]any{
 			"subscription_id": item.SubscriptionID, "interval": item.Interval, "status": item.Status,
 			"started_at": item.StartedAt, "period_end_at": item.PeriodEndAt, "cancelled_at": item.CancelledAt,
-		})
+		}
+		if a.cfg.EmployeeSelfSubscriptionCancelEnabled {
+			view["revision"] = item.Revision
+		}
+		items = append(items, view)
 	}
 	var next *string
 	if page.NextPosition != "" {

@@ -14,6 +14,7 @@ type EmployeeSubscriptionItem struct {
 	StartedAt      string
 	PeriodEndAt    *string
 	CancelledAt    *string
+	Revision       int64
 }
 
 type EmployeeSubscriptionPage struct {
@@ -45,7 +46,7 @@ func (c *Commercial) readEmployeeSubscriptions(ctx context.Context, employeeID, 
 		return EmployeeSubscriptionPage{}, ErrUnavailable
 	}
 	query := `SELECT s.id,typeof(s.id),s.interval,typeof(s.interval),s.status,typeof(s.status),
-		s.started_at,typeof(s.started_at),s.period_end_at,typeof(s.period_end_at),s.cancelled_at,typeof(s.cancelled_at),
+		s.started_at,typeof(s.started_at),s.period_end_at,typeof(s.period_end_at),s.cancelled_at,typeof(s.cancelled_at),s.revision,typeof(s.revision),
 		s.currency,typeof(s.currency),a.id,typeof(a.id),a.owner_key,typeof(a.owner_key),a.key_id,
 		a.resource_kind,typeof(a.resource_kind),a.resource_id,typeof(a.resource_id),a.currency,typeof(a.currency),
 		a.created_at,typeof(a.created_at)
@@ -107,12 +108,14 @@ func scanEmployeeSubscription(rows *sql.Rows, employeeID string, asOf time.Time)
 	var id, idType, interval, intervalType, status, statusType, started, startedType string
 	var end, cancelled sql.NullString
 	var endType, cancelledType, subscriptionCurrency, subscriptionCurrencyType string
+	var revision int64
+	var revisionType string
 	var accountID, accountIDType, accountOwnerKey, accountOwnerKeyType string
 	var keyID sql.NullString
 	var resourceKind, resourceKindType, resourceID, resourceIDType, accountCurrency, accountCurrencyType string
 	var accountCreated, accountCreatedType string
 	if err := rows.Scan(&id, &idType, &interval, &intervalType, &status, &statusType,
-		&started, &startedType, &end, &endType, &cancelled, &cancelledType,
+		&started, &startedType, &end, &endType, &cancelled, &cancelledType, &revision, &revisionType,
 		&subscriptionCurrency, &subscriptionCurrencyType, &accountID, &accountIDType,
 		&accountOwnerKey, &accountOwnerKeyType, &keyID, &resourceKind, &resourceKindType,
 		&resourceID, &resourceIDType, &accountCurrency, &accountCurrencyType,
@@ -122,7 +125,7 @@ func scanEmployeeSubscription(rows *sql.Rows, employeeID string, asOf time.Time)
 	created, createdErr := time.Parse(time.RFC3339Nano, accountCreated)
 	if idType != "text" || !validCommercialText(id, 256) || intervalType != "text" || statusType != "text" ||
 		startedType != "text" || (endType != "null" && endType != "text") ||
-		(cancelledType != "null" && cancelledType != "text") ||
+		(cancelledType != "null" && cancelledType != "text") || revisionType != "integer" || revision < 1 || revision > subscriptionRevisionMax ||
 		subscriptionCurrencyType != "text" || accountCurrencyType != "text" ||
 		!validCurrency(subscriptionCurrency) || accountCurrency != subscriptionCurrency ||
 		accountIDType != "text" || !validCommercialText(accountID, 256) ||
@@ -153,7 +156,7 @@ func scanEmployeeSubscription(rows *sql.Rows, employeeID string, asOf time.Time)
 	if err := effectiveSubscription(&subscription, asOf); err != nil {
 		return EmployeeSubscriptionItem{}, ErrSchema
 	}
-	return EmployeeSubscriptionItem{SubscriptionID: id, Interval: interval, Status: subscription.Status,
+	return EmployeeSubscriptionItem{SubscriptionID: id, Interval: interval, Status: subscription.Status, Revision: revision,
 		StartedAt: started, PeriodEndAt: nullableSubscriptionText(end), CancelledAt: nullableSubscriptionText(cancelled)}, nil
 }
 

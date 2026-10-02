@@ -30,6 +30,8 @@
 
 本人订阅状态另由默认关闭的 `--employee-self-subscription-status-enabled` 开启，仅依赖员工自助总开关，与钱包只读或商业执行开关无关。员工明确点击后，可按订阅 ID 稳定分页查看自己直接拥有的现存订阅最小状态（含只读计算的月订阅到期状态）；不展示套餐、价格、余额、权益、支付或购买入口，也不合并 Key/资源子账户。页间不是同一快照；这不是完整账单或可用权益证明，GOV-02 仍开放。本能力不在 preview.3 包中。详见[本人订阅状态契约](docs/employee-self-subscription-status-contract.md)。
 
+本人订阅取消另由默认关闭的 `--employee-self-subscription-cancel-enabled` 开启，必须同时开启员工自助和本人订阅状态。员工明确读取列表并两步确认、输入当前密码后，才可取消本人直属且仍有效的 active 订阅；仅终结本地记录，不退款、不撤回已授额度，也不代表模型权益或外部支付取消。取消及原操作重放不依赖商业执行开关；当前开发预览不在 preview.3 包中，GOV-02 仍开放。详见[本人订阅取消契约](docs/employee-self-subscription-cancel-contract.md)。
+
 当前分支另提供默认关闭的 `--employee-self-plan-catalog-enabled`，仅依赖员工自助总开关。已开通且有效的员工须输入三位大写币种并明确点击，才会读取当前商业执行开关开启时该币种已启用套餐的名称、周期、现价和额度；可按套餐 ID 分页。商业执行关闭时返回不可用并清除已显示结果。它不是本人订阅、权益、固定报价或购买入口，不开启支付或续费；页间管理员可修改套餐，GOV-02 仍开放，也不在 preview.3 包中。详见[员工自助套餐目录契约](docs/employee-self-plan-catalog-contract.md)。
 
 ## Codex 会员文件导入实验（仅最新源码）

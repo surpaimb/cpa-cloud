@@ -88,6 +88,12 @@ type App struct {
 	selfPlanPurchaseBeforeCommit func(*sql.Tx)
 	selfPlanPurchaseCommit       func(*sql.Tx) error
 	selfPlanQuoteCommit          func(*sql.Tx) error
+	// Independently authored for docs/employee-self-subscription-cancel-contract.md.
+	// SQL and clock boundaries are test-only; production leaves them nil.
+	selfSubscriptionCancelNow          func() time.Time
+	selfSubscriptionCancelBeforeTx     func()
+	selfSubscriptionCancelBeforeCommit func(*sql.Tx)
+	selfSubscriptionCancelCommit       func(*sql.Tx) error
 	// Independently authored for docs/employee-self-key-token-summary-contract.md.
 	// Test-only snapshot and commit boundaries; production leaves both nil.
 	selfKeyTokenSummaryAfterOwnership func()
@@ -121,6 +127,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	}
 	if cfg.EmployeeSelfSubscriptionStatusEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return nil, errors.New("employee self subscription status requires employee self service")
+	}
+	if cfg.EmployeeSelfSubscriptionCancelEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled) {
+		return nil, errors.New("employee self subscription cancel requires employee self service and subscription status")
 	}
 	if cfg.EmployeeSelfPlanCatalogEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return nil, errors.New("employee self plan catalog requires employee self service")
@@ -518,6 +527,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"employee_self_subscription_status": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
 			"employee_self_plan_catalog":        a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled,
 			"employee_self_plan_purchase":       a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled && a.cfg.EmployeeSelfPlanPurchaseEnabled,
+			"employee_self_subscription_cancel": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionCancelEnabled,
 			"employee_self_key_issuance":        a.cfg.EmployeeSelfServiceEnabled,
 			"codex_membership_import":           a.cfg.ExperimentalCodexMembership,
 			"responses_api":                     true,

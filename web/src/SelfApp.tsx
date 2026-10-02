@@ -13,12 +13,13 @@
 // docs/employee-self-subscription-status-contract.md.
 // docs/employee-self-plan-catalog-contract.md.
 // docs/employee-self-plan-purchase-contract.md.
+// docs/employee-self-subscription-cancel-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_wallet_activity?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_cancel?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -34,8 +35,9 @@ type SelfTokenSummary = {
 type SelfWalletBalance = { currency: string; has_account: boolean; amount_micro: string | null }
 type SelfWalletActivityItem = { occurred_at: string; delta_micro: string }
 type SelfWalletActivityPage = { currency: string; has_account: boolean; window_start: string; window_end: string; items: SelfWalletActivityItem[]; next_cursor: string | null }
-type SelfSubscriptionItem = { subscription_id: string; interval: 'one_time' | 'monthly'; status: 'active' | 'cancelled' | 'expired'; started_at: string; period_end_at: string | null; cancelled_at: string | null }
+type SelfSubscriptionItem = { subscription_id: string; interval: 'one_time' | 'monthly'; status: 'active' | 'cancelled' | 'expired'; started_at: string; period_end_at: string | null; cancelled_at: string | null; revision?: number }
 type SelfSubscriptionPage = { items: SelfSubscriptionItem[]; next_cursor: string | null }
+type SelfSubscriptionCancelResult = { operation_id: string; subscription_id: string; replay: boolean; status: 'cancelled'; revision: number; cancelled_at: string }
 type SelfPlanCatalogItem = { plan_id: string; name: string; interval: 'one_time' | 'monthly'; price_micro: string; credit_micro: string; revision: number }
 type SelfPlanCatalogPage = { currency: string; available: boolean; items: SelfPlanCatalogItem[]; next_cursor: string | null }
 type SelfPlanPurchaseQuote = { quote_token: string; plan_id: string; revision: number; currency: string; interval: 'one_time'; price_micro: string; credit_micro: string; expires_at: string }
@@ -656,7 +658,7 @@ function SelfWalletActivityPanel() {
   </section>
 }
 
-function validSelfSubscriptionPage(raw: unknown, previous?: SelfSubscriptionPage): raw is SelfSubscriptionPage {
+function validSelfSubscriptionPage(raw: unknown, cancelEnabled: boolean, previous?: SelfSubscriptionPage): raw is SelfSubscriptionPage {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
   const page = raw as Record<string, unknown>
   if (Object.keys(page).sort().join(',') !== 'items,next_cursor' || !Array.isArray(page.items) || page.items.length > 20 ||
@@ -667,7 +669,7 @@ function validSelfSubscriptionPage(raw: unknown, previous?: SelfSubscriptionPage
   for (const rawItem of page.items) {
     if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) return false
     const item = rawItem as Record<string, unknown>
-    if (Object.keys(item).sort().join(',') !== 'cancelled_at,interval,period_end_at,started_at,status,subscription_id' ||
+    if (Object.keys(item).sort().join(',') !== (cancelEnabled ? 'cancelled_at,interval,period_end_at,revision,started_at,status,subscription_id' : 'cancelled_at,interval,period_end_at,started_at,status,subscription_id') ||
       typeof item.subscription_id !== 'string' || item.subscription_id.length < 1 || item.subscription_id.length > 256 ||
       item.subscription_id.trim() !== item.subscription_id || (priorID !== '' && item.subscription_id >= priorID) ||
       (item.interval !== 'one_time' && item.interval !== 'monthly') ||
@@ -675,7 +677,8 @@ function validSelfSubscriptionPage(raw: unknown, previous?: SelfSubscriptionPage
       typeof item.started_at !== 'string' || !date.test(item.started_at) || !Number.isFinite(Date.parse(item.started_at)) ||
       (item.interval === 'monthly' ? typeof item.period_end_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/.test(item.period_end_at) || !Number.isFinite(Date.parse(item.period_end_at)) : item.period_end_at !== null) ||
       (item.status === 'cancelled' ? typeof item.cancelled_at !== 'string' || !date.test(item.cancelled_at) || !Number.isFinite(Date.parse(item.cancelled_at)) : item.cancelled_at !== null) ||
-      (item.interval === 'one_time' && item.status === 'expired')) return false
+      (item.interval === 'one_time' && item.status === 'expired') ||
+      (cancelEnabled && (typeof item.revision !== 'number' || !Number.isSafeInteger(item.revision) || item.revision < 1))) return false
     priorID = item.subscription_id
   }
   return true
@@ -683,20 +686,38 @@ function validSelfSubscriptionPage(raw: unknown, previous?: SelfSubscriptionPage
 
 const selfSubscriptionStatus: Record<SelfSubscriptionItem['status'], string> = { active: '有效', cancelled: '已取消', expired: '已到期' }
 
-function SelfSubscriptionStatusPanel() {
+function validSelfSubscriptionCancelResult(raw: unknown, operationID: string, subscriptionID: string, expectedRevision: number): raw is SelfSubscriptionCancelResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const value = raw as Record<string, unknown>
+  return Object.keys(value).sort().join(',') === 'cancelled_at,operation_id,replay,revision,status,subscription_id' &&
+    value.operation_id === operationID && value.subscription_id === subscriptionID && value.status === 'cancelled' &&
+    typeof value.replay === 'boolean' && value.revision === expectedRevision + 1 &&
+    typeof value.cancelled_at === 'string' && purchaseUTC.test(value.cancelled_at) && Number.isFinite(Date.parse(value.cancelled_at))
+}
+
+function newSelfSubscriptionCancelOperationID(): string {
+  const bytes = new Uint8Array(16)
+  globalThis.crypto.getRandomValues(bytes)
+  return `self-cancel-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
+}
+
+function SelfSubscriptionStatusPanel({ csrf, cancelEnabled }: { csrf: string; cancelEnabled: boolean }) {
   const [page, setPage] = useState<SelfSubscriptionPage | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(false)
+  const [loading, setLoading] = useState<'read' | 'cancel' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState<SelfSubscriptionItem | null>(null)
+  const [retry, setRetry] = useState<{ id: string; revision: number; operationID: string } | null>(null)
+  const [outcome, setOutcome] = useState<SelfSubscriptionCancelResult | null>(null)
   const pending = useRef<AbortController | null>(null)
   const generation = useRef(0)
 
   useEffect(() => () => { generation.current++; pending.current?.abort() }, [])
 
-  async function readPage(cursor?: string) {
+  async function readPage(cursor?: string, afterCancel = false) {
     const prior = cursor ? page : null
     if (cursor && (!prior || prior.next_cursor !== cursor)) {
       setPage(null)
-      setError(true)
+      setError('订阅状态暂时无法读取，请稍后重试。')
       return
     }
     generation.current++
@@ -704,39 +725,120 @@ function SelfSubscriptionStatusPanel() {
     const requestGeneration = generation.current
     const controller = new AbortController()
     pending.current = controller
+    setConfirm(null)
+    setRetry(null)
+    if (!afterCancel) setOutcome(null)
     if (!cursor) setPage(null)
-    setError(false)
-    setLoading(true)
+    setError(null)
+    setLoading('read')
     try {
       const path = `/billing/subscriptions?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
       const value = await selfRequest<unknown>(path, { signal: controller.signal })
       if (controller.signal.aborted || generation.current !== requestGeneration) return
-      if (!validSelfSubscriptionPage(value, prior ?? undefined)) throw new Error('Invalid subscription status response')
+      if (!validSelfSubscriptionPage(value, cancelEnabled, prior ?? undefined)) throw new Error('Invalid subscription status response')
       setPage(prior ? { items: [...prior.items, ...value.items], next_cursor: value.next_cursor } : value)
     } catch {
       if (controller.signal.aborted || generation.current !== requestGeneration) return
       setPage(null)
-      setError(true)
+      setError(afterCancel ? '取消已确认，但最新列表暂时无法读取；请手动刷新。' : '订阅状态暂时无法读取，请稍后重试。')
     } finally {
       if (pending.current === controller) pending.current = null
-      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(false)
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(null)
+    }
+  }
+
+  async function submitCancel(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!cancelEnabled || loading !== null || (!confirm && !retry)) return
+    const form = event.currentTarget
+    let password = String(new FormData(form).get('current_password') ?? '')
+    form.reset()
+    const revision = retry?.revision ?? confirm?.revision
+    const id = retry?.id ?? confirm?.subscription_id
+    if (!id || !revision || !Number.isSafeInteger(revision) || new TextEncoder().encode(password).length < 12 || new TextEncoder().encode(password).length > 72) {
+      password = ''
+      setConfirm(null)
+      setRetry(null)
+      setPage(null)
+      setError('当前密码须为 12–72 个 UTF-8 字节；请重新读取订阅状态。')
+      return
+    }
+    let operationID = retry?.operationID ?? ''
+    if (!retry) {
+      try { operationID = newSelfSubscriptionCancelOperationID() } catch {
+        password = ''
+        setConfirm(null)
+        setPage(null)
+        setError('无法生成取消操作编号，请稍后重试。')
+        return
+      }
+    }
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const controller = new AbortController()
+    pending.current = controller
+    setLoading('cancel')
+    setError(null)
+    setConfirm(null)
+    setRetry(null)
+    setPage(null)
+    setOutcome(null)
+    try {
+      const raw = await selfRequest<unknown>(`/billing/subscriptions/${encodeURIComponent(id)}/cancel`, {
+        method: 'POST', body: JSON.stringify({ operation_id: operationID, expected_revision: revision, current_password: password }), signal: controller.signal,
+      }, csrf)
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (!validSelfSubscriptionCancelResult(raw, operationID, id, revision)) throw new Error('Invalid cancellation response')
+      setOutcome(raw)
+      pending.current = null
+      setLoading(null)
+      void readPage(undefined, true)
+    } catch (caught) {
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      const uncertain = !(caught instanceof ApiError) || caught.status === 503
+      setError(uncertain ? '取消结果未确认；请重新输入当前密码，显式重试同一操作。' : '取消未完成；请重新读取本人订阅状态。')
+      if (uncertain) setRetry({ id, revision, operationID })
+    } finally {
+      password = ''
+      operationID = ''
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(null)
     }
   }
 
   return <section className="self-subscriptions" aria-labelledby="self-subscriptions-title">
     <h2 id="self-subscriptions-title">我的订阅状态</h2>
     <p>仅按需查看你本人直接名下既有订阅的期限与状态，不含 Key 或资源子账户。这不是模型使用权益、账单或购买入口；列表按订阅 ID 稳定排列，不代表时间先后。</p>
-    <Button variant="secondary" disabled={loading} onClick={() => { void readPage() }}>{loading ? '正在读取…' : '读取我的订阅状态'}</Button>
-    {error ? <p role="alert">订阅状态暂时无法读取，请稍后重试。</p> : null}
+    <Button variant="secondary" disabled={loading !== null} onClick={() => { void readPage() }}>{loading === 'read' ? '正在读取…' : '读取我的订阅状态'}</Button>
+    {error ? <p role="alert">{error}</p> : null}
+    {outcome ? <p className="self-subscriptions-success" role="status">{outcome.replay ? '已确认原取消' : '取消已确认'}：订阅 {outcome.subscription_id}，版本 {outcome.revision}；取消时间 <time dateTime={outcome.cancelled_at}>{selfKeyDate(outcome.cancelled_at)}</time>。</p> : null}
     {page && !error ? <div className="self-subscriptions-result" role="status">
       {page.items.length === 0 ? <p>目前没有可显示的本人订阅记录。</p> : <ol className="self-subscriptions-list">{page.items.map((item) => <li key={item.subscription_id}>
         <div className="self-subscriptions-heading"><strong>{item.subscription_id}</strong><span className={`self-subscriptions-status self-subscriptions-status--${item.status}`}>{selfSubscriptionStatus[item.status]}</span></div>
         <dl><div><dt>周期</dt><dd>{item.interval === 'monthly' ? '单月' : '一次性'}</dd></div><div><dt>开始</dt><dd><time dateTime={item.started_at}>{selfKeyDate(item.started_at)}</time></dd></div>
           <div><dt>期限结束</dt><dd>{item.period_end_at ? <time dateTime={item.period_end_at}>{selfKeyDate(item.period_end_at)}</time> : '无固定结束时间'}</dd></div>
-          <div><dt>取消时间</dt><dd>{item.cancelled_at ? <time dateTime={item.cancelled_at}>{selfKeyDate(item.cancelled_at)}</time> : '未取消'}</dd></div></dl>
+          <div><dt>取消时间</dt><dd>{item.cancelled_at ? <time dateTime={item.cancelled_at}>{selfKeyDate(item.cancelled_at)}</time> : '未取消'}</dd></div>
+          {cancelEnabled ? <div><dt>存储版本</dt><dd>{item.revision}</dd></div> : null}</dl>
+        {cancelEnabled && item.status === 'active' && item.revision ? <Button variant="secondary" disabled={loading !== null} onClick={() => { setConfirm(item); setRetry(null); setOutcome(null); setError(null) }}>取消此订阅</Button> : null}
       </li>)}</ol>}
-      {page.next_cursor ? <Button variant="secondary" disabled={loading} onClick={() => { void readPage(page.next_cursor ?? undefined) }}>{loading ? '正在读取…' : '加载更多订阅'}</Button> : null}
+      {page.next_cursor ? <Button variant="secondary" disabled={loading !== null} onClick={() => { void readPage(page.next_cursor ?? undefined) }}>{loading === 'read' ? '正在读取…' : '加载更多订阅'}</Button> : null}
     </div> : null}
+    {confirm ? <form className="self-subscriptions-confirm" onSubmit={(event) => { void submitCancel(event) }}>
+      <h3>确认取消本人订阅</h3>
+      <p>订阅 ID：<strong>{confirm.subscription_id}</strong>；当前存储版本：<strong>{confirm.revision}</strong>。</p>
+      <p>这只终结本地订阅；不退款、不撤回已授额度，也不代表模型权益或外部支付取消。</p>
+      <label className="self-plan-purchase-check"><input name="confirm" type="checkbox" required />我已阅读并确认取消这条订阅。</label>
+      <Field label="当前密码（确认取消）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} /></Field>
+      <div className="self-actions"><Button type="submit" disabled={loading !== null}>{loading === 'cancel' ? '正在确认…' : '确认取消订阅'}</Button><Button type="button" variant="secondary" disabled={loading !== null} onClick={() => setConfirm(null)}>返回列表</Button></div>
+    </form> : null}
+    {retry ? <form className="self-subscriptions-confirm" onSubmit={(event) => { void submitCancel(event) }}>
+      <h3>上次取消结果未确认</h3>
+      <p>仅对订阅 {retry.id} 的原版本 {retry.revision} 使用原操作编号重试；不会自动重试。</p>
+      <label className="self-plan-purchase-check"><input name="confirm" type="checkbox" required />我确认显式重试原取消操作。</label>
+      <Field label="当前密码（重试原操作）"><input name="current_password" type="password" autoComplete="current-password" required minLength={12} /></Field>
+      <div className="self-actions"><Button type="submit" disabled={loading !== null}>{loading === 'cancel' ? '正在确认…' : '确认重试取消'}</Button><Button type="button" variant="secondary" disabled={loading !== null} onClick={() => { setRetry(null); setError(null) }}>放弃重试</Button></div>
+    </form> : null}
   </section>
 }
 
@@ -1178,7 +1280,7 @@ export function SelfApp() {
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true
           ? <SelfWalletActivityPanel key={`wallet-activity:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_subscription_status === true
-          ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} /> : null}
+          ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} cancelEnabled={session.features?.employee_self_subscription_cancel === true} /> : null}
         {session.features?.employee_self_plan_catalog === true && session.features?.employee_self_plan_purchase !== true
           ? <SelfPlanCatalogPanel key={`plan-catalog:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_plan_catalog === true && session.features?.employee_self_plan_purchase === true
