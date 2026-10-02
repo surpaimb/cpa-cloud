@@ -52,12 +52,24 @@ func selfMonthlyRenewalShape(r *http.Request) string {
 	const prefix = "/self/api/v1/billing/subscriptions/"
 	escaped, decoded := r.URL.EscapedPath(), r.URL.Path
 	for _, suffix := range []string{"/renewal-quotes", "/renew"} {
-		if strings.HasPrefix(escaped, prefix) && strings.Contains(strings.TrimPrefix(escaped, prefix), suffix) ||
-			strings.HasPrefix(decoded, prefix) && strings.Contains(strings.TrimPrefix(decoded, prefix), suffix) {
+		if selfMonthlyRenewalSegment(escaped, prefix, suffix) || selfMonthlyRenewalSegment(decoded, prefix, suffix) {
 			return suffix
 		}
 	}
 	return ""
+}
+
+// Independently authored sibling-route boundary for
+// docs/employee-self-subscription-renewal-links-contract.md.
+func selfMonthlyRenewalSegment(path, prefix, suffix string) bool {
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	tail := strings.TrimPrefix(path, prefix)
+	// A route name must end at a path-segment boundary. A substring match on
+	// "/renew" would otherwise intercept sibling routes such as
+	// "/renewal-links" before their own guard or handler can run.
+	return strings.HasSuffix(tail, suffix) || strings.Contains(tail, suffix+"/")
 }
 
 func malformedSelfMonthlyRenewalPath(r *http.Request, suffix string) bool {

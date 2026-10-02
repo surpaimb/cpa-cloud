@@ -71,6 +71,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.BoolVar(&cfg.EmployeeSelfWalletActivityEnabled, "employee-self-wallet-activity-enabled", false, "allow enrolled employees to read recent changes to their own employee-owned wallet (requires self service and wallet balance)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionStatusEnabled, "employee-self-subscription-status-enabled", false, "allow enrolled employees to read minimal status of their own existing subscriptions (requires self service)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled, "employee-self-subscription-purchase-snapshot-enabled", false, "allow enrolled employees to read a verified local wallet purchase snapshot for one own subscription (requires self service, subscription status, and wallet balance)")
+	flags.BoolVar(&cfg.EmployeeSelfSubscriptionRenewalLinksEnabled, "employee-self-subscription-renewal-links-enabled", false, "allow enrolled employees to read verified predecessor/successor IDs for one own subscription (requires self service and subscription status)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionRenewalEnabled, "employee-self-subscription-renewal-enabled", false, "allow enrolled employees to renew one expired own monthly subscription from an existing wallet (requires self service, subscription status, and wallet balance)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionCancelEnabled, "employee-self-subscription-cancel-enabled", false, "allow enrolled employees to cancel their own active subscriptions (requires self service and subscription status)")
 	// Independently authored for docs/employee-self-one-shot-disarm-contract.md.
@@ -123,6 +124,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	if cfg.EmployeeSelfSubscriptionStatusEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return 1, errors.New("--employee-self-subscription-status-enabled requires --employee-self-service-enabled")
+	}
+	if cfg.EmployeeSelfSubscriptionRenewalLinksEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled) {
+		return 1, errors.New("--employee-self-subscription-renewal-links-enabled requires --employee-self-service-enabled and --employee-self-subscription-status-enabled")
 	}
 	if cfg.EmployeeSelfSubscriptionCancelEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled) {
 		return 1, errors.New("--employee-self-subscription-cancel-enabled requires --employee-self-service-enabled and --employee-self-subscription-status-enabled")

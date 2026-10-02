@@ -146,6 +146,29 @@ func TestSelfSubscriptionCancelCLIRequiresBothPrerequisitesBeforeStorage(t *test
 	}
 }
 
+// Independently authored for docs/employee-self-subscription-renewal-links-contract.md.
+func TestSelfRenewalLinksCLIRequiresBothPrerequisitesBeforeInitWrites(t *testing.T) {
+	for _, flags := range [][]string{
+		{"--employee-self-subscription-renewal-links-enabled"},
+		{"--employee-self-service-enabled", "--employee-self-subscription-renewal-links-enabled"},
+	} {
+		for _, initialize := range []bool{false, true} {
+			dataDir := filepath.Join(t.TempDir(), "unused")
+			args := append([]string{"--data-dir", dataDir}, flags...)
+			if initialize {
+				args = append(args, "--init")
+			}
+			code, err := runCLI(args, strings.NewReader("a-valid-admin-password\n"), io.Discard)
+			if code != 1 || err == nil || !strings.Contains(err.Error(), "--employee-self-subscription-renewal-links-enabled requires") {
+				t.Fatalf("flags=%v initialize=%t code=%d err=%v", flags, initialize, code, err)
+			}
+			if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+				t.Fatalf("flags=%v initialize=%t wrote data: %v", flags, initialize, err)
+			}
+		}
+	}
+}
+
 // Independently authored for docs/employee-self-one-shot-disarm-contract.md.
 func TestSelfOneShotDisarmCLIRequiresBothPrerequisitesBeforeStorage(t *testing.T) {
 	for _, flags := range [][]string{
