@@ -67,6 +67,8 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.StringVar(&cfg.BackupKeyProviderStoreDir, "backup-key-provider-store-dir", "", "host-protected backup key directory (default: a separate sibling of the data directory)")
 	flags.BoolVar(&cfg.ExperimentalCodexMembership, "experimental-codex-membership", false, "enable experimental Codex membership credential import and routing")
 	flags.BoolVar(&cfg.EmployeeSelfServiceEnabled, "employee-self-service-enabled", false, "enable the development-preview employee self-service page and API")
+	// Independently authored for docs/employee-self-upstream-estimated-cost-summary-contract.md.
+	flags.BoolVar(&cfg.EmployeeSelfUpstreamEstimatedCostSummaryEnabled, "employee-self-upstream-estimated-cost-summary-enabled", false, "allow enrolled employees to read their own recent upstream internal estimated cost summary (requires self service)")
 	flags.BoolVar(&cfg.EmployeeSelfWalletBalanceEnabled, "employee-self-wallet-balance-enabled", false, "allow enrolled employees to read their own employee-owned wallet balance (requires employee self service)")
 	flags.BoolVar(&cfg.EmployeeSelfRedemptionEnabled, "employee-self-redemption-enabled", false, "allow enrolled employees to redeem an issued code into their own direct wallet (requires self service and wallet balance)")
 	flags.BoolVar(&cfg.EmployeeSelfWalletActivityEnabled, "employee-self-wallet-activity-enabled", false, "allow enrolled employees to read recent changes to their own employee-owned wallet (requires self service and wallet balance)")
@@ -123,6 +125,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	if cfg.EmployeeSelfWalletBalanceEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return 1, errors.New("--employee-self-wallet-balance-enabled requires --employee-self-service-enabled")
+	}
+	if cfg.EmployeeSelfUpstreamEstimatedCostSummaryEnabled && !cfg.EmployeeSelfServiceEnabled {
+		return 1, errors.New("--employee-self-upstream-estimated-cost-summary-enabled requires --employee-self-service-enabled")
 	}
 	if cfg.EmployeeSelfRedemptionEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled) {
 		return 1, errors.New("--employee-self-redemption-enabled requires --employee-self-service-enabled and --employee-self-wallet-balance-enabled")

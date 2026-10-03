@@ -1,6 +1,6 @@
 # 员工本人近 24 小时上游内部估算成本摘要契约
 
-状态：2026-10-03，**仅独立设计合同**；尚无本批实现、测试、CI、PR 或部署证据。精确基线为已合并 `main` `d7a997a20bc7e0977b635fb67c513436ee587cd0`，tree `a2513949c255d33d002950e47c536146d60960bf`。本合同依照本项目[产品计划](product-plan.md)、[独立实现规则](independent-implementation.md)、[开发计划](development-plan.md)、[预览契约](preview-contract.md)、[员工自助基础](employee-self-service-foundation-contract.md)、[现有本人 Token 摘要](employee-self-token-summary-contract.md)、[用量管理](usage-management-contract.md)、[内部账本](usage-ledger-contract.md)、[协议用量映射](usage-protocol-mapping.md)和[账号组内部成本分摊](account-group-cost-allocation-contract.md)制定；没有参考相邻或归档项目实现。根全文只读审前不得据此实施代码、push、PR 或 CI。
+状态：2026-10-03，独立设计合同与同分支实施范围记录；合同先于实施单独提交。本地定向 Go、Web、隔离二进制与真实 Chrome 验收已有通过记录；Windows 全仓 Go 在 15 分钟上限超时，本机无 C 编译器而未运行 race，不能据此声称全仓或生产验收通过。实施提交仍须核验其精确 HEAD 的 GitHub CI 结果；本合同不授权生产开启、发布或部署。精确设计基线为已合并 `main` `d7a997a20bc7e0977b635fb67c513436ee587cd0`，tree `a2513949c255d33d002950e47c536146d60960bf`。本合同依照本项目[产品计划](product-plan.md)、[独立实现规则](independent-implementation.md)、[开发计划](development-plan.md)、[预览契约](preview-contract.md)、[员工自助基础](employee-self-service-foundation-contract.md)、[现有本人 Token 摘要](employee-self-token-summary-contract.md)、[用量管理](usage-management-contract.md)、[内部账本](usage-ledger-contract.md)、[协议用量映射](usage-protocol-mapping.md)和[账号组内部成本分摊](account-group-cost-allocation-contract.md)制定；没有参考相邻或归档项目实现。
 
 ## 语义、开关与披露政策
 
@@ -8,13 +8,13 @@
 
 独立命令行开关 `--employee-self-upstream-estimated-cost-summary-enabled` 默认为 false。唯一前置是既有 `--employee-self-service-enabled`；前者为 true 而后者为 false 时，普通启动和 `--init` 都必须在任何持久写入、迁移或服务监听前拒绝。钱包、商业执行、管理员用量与本能力不互相隐式开启。仅完成后端、网页和故障验收才在 self session 中声明 `features.employee_self_upstream_estimated_cost_summary=true`；关闭时新路由为 404，旧服务缺能力位时网页不探测。无新 DDL、账本/财务写入、provider 调用、worker 或依赖。
 
-[README](../README.md) 目前在本人总览和单 Key 总览两处明确承诺自助页不展示成本/费用或账单。本合同提出**默认关闭的可选内部成本披露政策变更**，不是声称该承诺已变更；实施同批必须同步修订这两处说明为“默认不展示；仅独立显式开启后展示此有限估算摘要”，并保留不展示 Key 策略、账单/售价等边界。`GOV-02` 的员工告知、角色授权、留存、备份/恢复和内部成本可见性政策仍未批准；生产必须保持本开关关闭。关闭页面不删除既有账本、WAL 或备份事实。
+[README](../README.md) 的本人总览和单 Key 总览两处说明已同步修订为默认不展示成本；仅独立显式开启后展示此有限估算摘要，仍不展示 Key 策略、账单或售价。本合同定义的是**默认关闭的可选内部成本披露政策变更**，并不替代治理批准。`GOV-02` 的员工告知、角色授权、留存、备份/恢复和内部成本可见性政策仍未批准；生产必须保持本开关关闭。关闭页面不删除既有账本、WAL 或备份事实。
 
 ## 唯一 HTTP 面与最小响应
 
 唯一入口是字面、区分大小写的 `GET /self/api/v1/usage/estimated-cost-summary`，**零 query、零正文**：连裸 `?`、编码别名、重复/未知参数、非零 `Content-Length`、chunked 或未知长度正文也拒绝。关位时精确及形似路径都 404；开启时在 `ServeMux`/WebDir 清理、重定向或静态 fallback 前截获形似路径，转义、反斜线、双斜杠、尾斜杠和附加段不得变成成功或 301/307/308；精确路径非 GET 返回 405 和 `Allow: GET`，其余非法形状/输入固定 400 `invalid_request`。使用现有 self session 的有效期、员工 active/已开通状态与可选同源 `Origin`；匿名、管理员 Cookie、员工模型 Bearer Key 或其他员工 session 不可代替。GET 不要求密码、CSRF 或 `X-Self-Request`。所有成功与错误均 `Cache-Control: no-store`，不经管理员 HTTP API。
 
-服务在首页接收时冻结 `to = UTC now` 的**下一整秒**，`from = to - 24h`，按本人父 `accounting_requests.started_at` 的真实时间半开 `[from,to)` 定界；没有客户端时间、员工/Key、币种、模型、账号、状态选择器，也没有分页或游标。成功 JSON **恰好**如下顶层和嵌套字段；示例仅说明格式，并非已实现响应：
+服务在首页接收时冻结 `to = UTC now` 的**下一整秒**，`from = to - 24h`，按本人父 `accounting_requests.started_at` 的真实时间半开 `[from,to)` 定界；没有客户端时间、员工/Key、币种、模型、账号、状态选择器，也没有分页或游标。成功 JSON **恰好**如下顶层和嵌套字段；示例仅说明字段形状与含义，不代表实时返回值或供应商账单：
 
 ```json
 {
@@ -52,8 +52,8 @@ SQL/scan/迭代/`Rows.Close`、事务 commit、schema/FK/index/trigger、V2/更�
 
 实施后用独立编写的自动测试与隔离进程验证：默认关/四类角色和会话隔离、唯一前置缺失在正常启动与 `--init` 写前拒绝、严格 literal path/Origin/no-store/零 query-body/405、旧接口兼容、父窗口整秒与纳秒边界、零 attempt、多次重试、pending 与四终态、同币/跨币/null 分组、已知零/未知、改价前后冻结快照、四生成协议加 Embeddings input-only、流式与失败用量、合法 legacy 和未派发恢复、V2 partial/orphan/错状态、base 与多次更正/重放、错误 delta/超过 200、更正与读并发、`250000+1` 上限、坏类型/schema/FK/index/trigger、Rows/Close/commit/context/overflow 与无部分响应、logout/改密/admin-disable 最终输出竞态及敏感日志。固定二进制在动态非 8787 端口以合成上游和临时员工复现多币种、重试、unknown、重启；真实 Chrome 验证显式点击、能力门控、失败/晚响应清理、桌面/390px 与无浏览器持久化。再分别报告定向 Go、非缓存全 Go/race/vet、Web typecheck/tests/build、精确 HEAD GitHub CI 与独立二进制验收；**本合同和本地文档提交均不是这些证据**。
 
-本位增加员工可见内部成本，须由 `GOV-02` 明确告知、角色、内部价格敏感性、保留/删除、WAL/备份恢复及审计责任后才可讨论生产开启。没有真实供应商发票核对、资金链、汇率、员工收费或跨实例一致性保证。根审本合同后才能进入实施；无 tag、native package、发布或部署。
+本位增加员工可见内部成本，须由 `GOV-02` 明确告知、角色、内部价格敏感性、保留/删除、WAL/备份恢复及审计责任后才可讨论生产开启。没有真实供应商发票核对、资金链、汇率、员工收费或跨实例一致性保证。本合同不授权 tag、native package、发布或部署。
 
 ## 来源、许可与独立性
 
-上述协议链接和 [OpenAI 缓存说明](https://developers.openai.com/api/docs/guides/prompt-caching)、[Anthropic 流式说明](https://platform.claude.com/docs/en/build-with-claude/streaming)、[Google Gemini thinking](https://ai.google.dev/gemini-api/docs/generate-content/thinking)于 2026-10-03 按官方公开文档核对；[Go `database/sql` 事务](https://pkg.go.dev/database/sql#DB.BeginTx)、[SQLite 事务](https://www.sqlite.org/lang_transaction.html)、[SQLite 外键](https://www.sqlite.org/foreignkeys.html)及 [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339.html)只支持通用机制。它们不证明 CPA Cloud 的内部定价、员工披露权或供应商实际结算。新源码与测试须显式标本合同 provenance，不能复制、翻译、逐行改写或移植 CLIProxyAPI、Sub2API、归档 CPA 或相邻参考仓库；此前曾阅读参考资料，故不宣称严格 clean-room。本 docs-only 批次未引入依赖、SDK、素材或许可证变更；既有第三方依赖各守原许可证，见[依赖许可记录](research/dependency-notices.md)。
+上述协议链接和 [OpenAI 缓存说明](https://developers.openai.com/api/docs/guides/prompt-caching)、[Anthropic 流式说明](https://platform.claude.com/docs/en/build-with-claude/streaming)、[Google Gemini thinking](https://ai.google.dev/gemini-api/docs/generate-content/thinking)于 2026-10-03 按官方公开文档核对；[Go `database/sql` 事务](https://pkg.go.dev/database/sql#DB.BeginTx)、[SQLite 事务](https://www.sqlite.org/lang_transaction.html)、[SQLite 外键](https://www.sqlite.org/foreignkeys.html)及 [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339.html)只支持通用机制。它们不证明 CPA Cloud 的内部定价、员工披露权或供应商实际结算。新源码与测试须显式标本合同 provenance，不能复制、翻译、逐行改写或移植 CLIProxyAPI、Sub2API、归档 CPA 或相邻参考仓库；此前曾阅读参考资料，故不宣称严格 clean-room。本能力的合同与实施未引入新的依赖、SDK、素材或许可证变更；既有第三方依赖各守原许可证，见[依赖许可记录](research/dependency-notices.md)。

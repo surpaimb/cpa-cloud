@@ -22,12 +22,13 @@
 // docs/employee-self-redemption-contract.md.
 // docs/employee-self-redemption-credit-history-contract.md.
 // docs/employee-self-admin-adjustment-history-contract.md.
+// docs/employee-self-upstream-estimated-cost-summary-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_redemption?: boolean; employee_self_wallet_activity?: boolean; employee_self_wallet_entry_classification?: boolean; employee_self_redemption_credit_history?: boolean; employee_self_admin_adjustment_history?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_purchase_snapshot?: boolean; employee_self_subscription_renewal_links?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_subscription_renewal?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_upstream_estimated_cost_summary?: boolean; employee_self_wallet_balance?: boolean; employee_self_redemption?: boolean; employee_self_wallet_activity?: boolean; employee_self_wallet_entry_classification?: boolean; employee_self_redemption_credit_history?: boolean; employee_self_admin_adjustment_history?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_purchase_snapshot?: boolean; employee_self_subscription_renewal_links?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_subscription_renewal?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -40,6 +41,8 @@ type SelfTokenSummary = {
   requests: { total: string; pending: string; succeeded: string; failed: string; cancelled: string; interrupted: string }
   attempts: { total: string; pending: string; input_tokens: SelfTokenCounts; output_tokens: SelfTokenCounts; cache_read_tokens: SelfTokenCounts; cache_write_tokens: SelfTokenCounts }
 }
+type SelfEstimatedCostGroup = { price_currency: string | null; attempts: string; known_estimated_cost_micro: string; unknown_cost_attempts: string }
+type SelfEstimatedCostSummary = { from: string; to: string; attempts: { total: string; pending: string; terminal: string }; costs: SelfEstimatedCostGroup[] }
 type SelfWalletBalance = { currency: string; has_account: boolean; amount_micro: string | null }
 type SelfRedemptionResult = { operation_id: string; replay: boolean; currency: string; amount_micro: string; credited_at: string }
 type SelfWalletActivityItem = { occurred_at: string; delta_micro: string }
@@ -510,6 +513,95 @@ function SelfTokenSummaryPanel() {
         <strong>{label}</strong>
         <dl><div><dt>已知 Token（上游尝试）</dt><dd>{counts.known_total}</dd></div><div><dt>未知尝试</dt><dd>{counts.unknown_attempts}</dd></div></dl>
       </li>)}</ul>
+    </> : null}
+  </section>
+}
+
+const selfCostDecimal = (value: unknown): value is string => typeof value === 'string' && value.length <= 19 && /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 9223372036854775807n
+const selfCostTime = (value: unknown): value is string => {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value)) return false
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value.replace(/Z$/, '.000Z')
+}
+
+function validSelfEstimatedCostSummary(raw: unknown): raw is SelfEstimatedCostSummary {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const value = raw as Record<string, unknown>
+  if (Object.keys(value).sort().join(',') !== 'attempts,costs,from,to' || !selfCostTime(value.from) || !selfCostTime(value.to) ||
+    Date.parse(value.to) - Date.parse(value.from) !== 24 * 60 * 60 * 1000 ||
+    !value.attempts || typeof value.attempts !== 'object' || Array.isArray(value.attempts) || !Array.isArray(value.costs)) return false
+  const attempts = value.attempts as Record<string, unknown>
+  if (Object.keys(attempts).sort().join(',') !== 'pending,terminal,total' || !selfCostDecimal(attempts.total) || !selfCostDecimal(attempts.pending) || !selfCostDecimal(attempts.terminal) ||
+    BigInt(attempts.total) !== BigInt(attempts.pending) + BigInt(attempts.terminal)) return false
+  let terminal = 0n
+  let previous = ''
+  for (const rawGroup of value.costs) {
+    if (!rawGroup || typeof rawGroup !== 'object' || Array.isArray(rawGroup)) return false
+    const group = rawGroup as Record<string, unknown>
+    if (Object.keys(group).sort().join(',') !== 'attempts,known_estimated_cost_micro,price_currency,unknown_cost_attempts' ||
+      !selfCostDecimal(group.attempts) || !selfCostDecimal(group.known_estimated_cost_micro) || !selfCostDecimal(group.unknown_cost_attempts) ||
+      BigInt(group.unknown_cost_attempts) > BigInt(group.attempts) || BigInt(group.attempts) === 0n ||
+      !(group.price_currency === null || typeof group.price_currency === 'string' && /^[A-Z]{3}$/.test(group.price_currency))) return false
+    if (group.price_currency === null && (group.known_estimated_cost_micro !== '0' || group.unknown_cost_attempts !== group.attempts)) return false
+    const key = group.price_currency === null ? 'ZZZZ' : group.price_currency as string
+    if (previous !== '' && key <= previous) return false
+    previous = key
+    terminal += BigInt(group.attempts)
+  }
+  return terminal === BigInt(attempts.terminal)
+}
+
+function selfCostAmount(micro: string) {
+  const value = BigInt(micro)
+  return `${value / 1000000n}.${(value % 1000000n).toString().padStart(6, '0')}`
+}
+
+function SelfEstimatedCostPanel() {
+  const [summary, setSummary] = useState<SelfEstimatedCostSummary | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort(); pending.current = null }, [])
+
+  async function read() {
+    generation.current++
+    pending.current?.abort()
+    const controller = new AbortController()
+    pending.current = controller
+    const current = generation.current
+    setSummary(null)
+    setError(false)
+    setLoading(true)
+    try {
+      const raw = await selfRequest<unknown>('/usage/estimated-cost-summary', { signal: controller.signal })
+      if (controller.signal.aborted || current !== generation.current) return
+      if (!validSelfEstimatedCostSummary(raw)) throw new Error('Invalid estimated cost response')
+      setSummary(raw)
+    } catch {
+      if (controller.signal.aborted || current !== generation.current) return
+      setSummary(null)
+      setError(true)
+    } finally {
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && current === generation.current) setLoading(false)
+    }
+  }
+
+  return <section className="self-summary self-estimated-cost" aria-labelledby="self-estimated-cost-title">
+    <h2 id="self-estimated-cost-title">上游内部估算成本</h2>
+    <p>仅按本人上游尝试的冻结内部价格计算，不是供应商账单、员工应付金额、钱包扣款或模型权益。未知尝试不当作零费用。</p>
+    <Button variant="secondary" disabled={loading} onClick={() => { void read() }}>{loading ? '正在读取…' : '查看最近 24 小时估算'}</Button>
+    {loading ? <p role="status">正在读取上游内部估算…</p> : null}
+    {error ? <p role="alert">估算摘要暂时无法读取，已清除旧结果；请稍后重试。</p> : null}
+    {summary ? <>
+      <p className="self-summary-window">统计时间：<time dateTime={summary.from}>{selfKeyDate(summary.from)}</time> 至 <time dateTime={summary.to}>{selfKeyDate(summary.to)}</time>（不含结束时刻）</p>
+      <dl className="self-summary-counts"><div><dt>上游尝试</dt><dd>{summary.attempts.total}</dd></div><div><dt>待结束尝试</dt><dd>{summary.attempts.pending}</dd></div><div><dt>已终结尝试</dt><dd>{summary.attempts.terminal}</dd></div></dl>
+      {summary.costs.length === 0 ? <p>本窗口暂无已终结的上游尝试。</p> : <ul className="self-summary-tokens">{summary.costs.map((group) => <li key={group.price_currency ?? 'unpriced'}>
+        <strong>{group.price_currency ?? '未配置价格'}</strong>
+        <dl><div><dt>已知估算部分</dt><dd>{selfCostAmount(group.known_estimated_cost_micro)}{group.price_currency ? ` ${group.price_currency}` : '（无定价）'}</dd></div><div><dt>未知成本尝试</dt><dd>{group.unknown_cost_attempts}</dd></div><div><dt>已终结尝试</dt><dd>{group.attempts}</dd></div></dl>
+      </li>)}</ul>}
     </> : null}
   </section>
 }
@@ -2221,6 +2313,8 @@ export function SelfApp() {
         <SelfKeyIssuance key={`issue:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} onIssued={() => setKeyInventoryRevision((value) => value + 1)} />
         <SelfKeyInventory key={`keys:${session.profile.id}:${session.csrf_token}:${keyInventoryRevision}`} csrf={session.csrf_token} />
         <SelfTokenSummaryPanel key={`summary:${session.profile.id}:${session.csrf_token}`} />
+        {session.features?.employee_self_upstream_estimated_cost_summary === true
+          ? <SelfEstimatedCostPanel key={`estimated-cost:${session.profile.id}:${session.csrf_token}`} /> : null}
         <SelfRequestHistory key={`requests:${session.profile.id}:${session.csrf_token}`} />
         <SelfSignOutOthers key={`sessions:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} />
         {changingPassword ? <form className="self-form self-password-form" onSubmit={async (event) => {

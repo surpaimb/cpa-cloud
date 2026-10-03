@@ -22,6 +22,7 @@
 // docs/employee-self-redemption-contract.md.
 // docs/employee-self-redemption-credit-history-contract.md.
 // docs/employee-self-admin-adjustment-history-contract.md.
+// docs/employee-self-upstream-estimated-cost-summary-contract.md.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -37,6 +38,109 @@ const emptyTokenSummary = {
 describe('employee self-service page', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
+  it('gates the internal upstream estimate and only reads after an explicit click', async () => {
+    const profile = { id: 'emp-cost', name: 'Cost Reader', department: '', status: 'active' }
+    let enabled = false
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'cost-csrf', profile, features: enabled ? { employee_self_upstream_estimated_cost_summary: true } : {} })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/usage/estimated-cost-summary')) return reply(200, {
+        from: '2026-10-02T12:00:00Z', to: '2026-10-03T12:00:00Z', attempts: { total: '4', pending: '1', terminal: '3' },
+        costs: [
+          { price_currency: 'EUR', attempts: '1', known_estimated_cost_micro: '0', unknown_cost_attempts: '1' },
+          { price_currency: 'USD', attempts: '1', known_estimated_cost_micro: '1234567', unknown_cost_attempts: '0' },
+          { price_currency: null, attempts: '1', known_estimated_cost_micro: '0', unknown_cost_attempts: '1' },
+        ],
+      })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const first = render(<SelfApp />)
+    expect(await screen.findByRole('heading', { name: '你好，Cost Reader' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '上游内部估算成本' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/usage/estimated-cost-summary'))).toBe(false)
+    first.unmount()
+    enabled = true
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '上游内部估算成本' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/usage/estimated-cost-summary'))).toBe(false)
+    await userEvent.click(within(panel).getByRole('button', { name: '查看最近 24 小时估算' }))
+    expect(await within(panel).findByText('1.234567 USD')).toBeInTheDocument()
+    expect(within(panel).getByText('未配置价格')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/usage/estimated-cost-summary'))).toHaveLength(1)
+  })
+
+  it('clears an estimate on failure and ignores a late response after logout', async () => {
+    const profile = { id: 'emp-cost', name: 'Cost Reader', department: '', status: 'active' }
+    let reads = 0
+    let resolveLate: ((response: Response) => void) | undefined
+    const valid = { from: '2026-10-02T12:00:00Z', to: '2026-10-03T12:00:00Z', attempts: { total: '1', pending: '0', terminal: '1' },
+      costs: [{ price_currency: 'USD', attempts: '1', known_estimated_cost_micro: '1000000', unknown_cost_attempts: '0' }] }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'cost-csrf', profile, features: { employee_self_upstream_estimated_cost_summary: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/usage/estimated-cost-summary')) {
+        reads++
+        if (reads === 1) return reply(200, valid)
+        if (reads === 2) return reply(503, { error: { code: 'storage_unavailable' } })
+        return new Promise<Response>(resolve => { resolveLate = resolve })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '上游内部估算成本' })
+    await userEvent.click(within(panel).getByRole('button', { name: '查看最近 24 小时估算' }))
+    expect(await within(panel).findByText('1.000000 USD')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '查看最近 24 小时估算' }))
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('已清除旧结果')
+    expect(within(panel).queryByText('1.000000 USD')).not.toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '查看最近 24 小时估算' }))
+    expect(resolveLate).toBeDefined()
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(screen.queryByRole('region', { name: '上游内部估算成本' })).not.toBeInTheDocument()
+    await act(async () => { resolveLate!(new Response(JSON.stringify(valid), { status: 200, headers: { 'Content-Type': 'application/json' } })) })
+    expect(screen.queryByText('1.000000 USD')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['impossible UTC calendar date', { from: '2026-02-30T00:00:00Z', to: '2026-03-03T00:00:00Z',
+      attempts: { total: '1', pending: '0', terminal: '1' }, costs: [{ price_currency: 'USD', attempts: '1', known_estimated_cost_micro: '1000000', unknown_cost_attempts: '0' }] }],
+    ['unpriced positive known cost', { from: '2026-10-02T12:00:00Z', to: '2026-10-03T12:00:00Z',
+      attempts: { total: '1', pending: '0', terminal: '1' }, costs: [{ price_currency: null, attempts: '1', known_estimated_cost_micro: '1', unknown_cost_attempts: '1' }] }],
+    ['unpriced attempt not marked unknown', { from: '2026-10-02T12:00:00Z', to: '2026-10-03T12:00:00Z',
+      attempts: { total: '1', pending: '0', terminal: '1' }, costs: [{ price_currency: null, attempts: '1', known_estimated_cost_micro: '0', unknown_cost_attempts: '0' }] }],
+  ])('rejects %s and clears a previously displayed estimate', async (_name, malformed) => {
+    const profile = { id: 'emp-cost', name: 'Cost Reader', department: '', status: 'active' }
+    const valid = { from: '2026-10-02T12:00:00Z', to: '2026-10-03T12:00:00Z', attempts: { total: '1', pending: '0', terminal: '1' },
+      costs: [{ price_currency: 'USD', attempts: '1', known_estimated_cost_micro: '1000000', unknown_cost_attempts: '0' }] }
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'cost-csrf', profile, features: { employee_self_upstream_estimated_cost_summary: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/usage/estimated-cost-summary')) return reply(200, reads++ === 0 ? valid : malformed)
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '上游内部估算成本' })
+    await userEvent.click(within(panel).getByRole('button', { name: '查看最近 24 小时估算' }))
+    expect(await within(panel).findByText('1.000000 USD')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '查看最近 24 小时估算' }))
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('已清除旧结果')
+    expect(within(panel).queryByText('1.000000 USD')).not.toBeInTheDocument()
+  })
 
   it('keeps the wallet control absent without its independent capability', async () => {
     const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
