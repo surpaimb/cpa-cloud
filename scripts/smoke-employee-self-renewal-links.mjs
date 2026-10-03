@@ -41,11 +41,11 @@ async function selfCall(route, { method = 'GET', cookie = '', body, expected = 2
 
 // Send the literal request-target and never follow a ServeMux cleaning redirect.
 // WHATWG fetch URL construction would normalize dot segments before dispatch.
-async function rawBoundaryCall(route, { method = 'GET', cookie = '', expected, code = '', allow = '' } = {}) {
-  const origin = new URL(processHandle.origin);
+async function rawBoundaryCall(route, { method = 'GET', cookie = '', expected, code = '', allow = '', origin = processHandle.origin } = {}) {
+  const serviceOrigin = new URL(processHandle.origin);
   const result = await new Promise((resolve, reject) => {
-    const request = http.request({ hostname: origin.hostname, port: origin.port, method, path: route,
-      headers: cookie ? { Cookie: cookie } : {} }, response => {
+    const request = http.request({ hostname: serviceOrigin.hostname, port: serviceOrigin.port, method, path: route,
+      headers: { ...(cookie ? { Cookie: cookie } : {}), ...(origin === null ? {} : { Origin: origin }) } }, response => {
       let body = '';
       response.setEncoding('utf8');
       response.on('data', chunk => { body += chunk; });
@@ -59,15 +59,24 @@ async function rawBoundaryCall(route, { method = 'GET', cookie = '', expected, c
   assert.equal(result.headers.location, undefined, `${method} ${route} redirected`);
   assert.equal(result.headers.allow ?? '', allow, `${method} ${route} Allow`);
   assert.equal(result.headers['cache-control'], 'no-store', `${method} ${route} Cache-Control`);
-  if (code && method !== 'HEAD') assert.equal(JSON.parse(result.body).error.code, code, `${method} ${route} error code`);
+  if (code && method !== 'HEAD') {
+    assert.match(result.headers['content-type'] ?? '', /application\/json/, `${method} ${route} Content-Type`);
+    assert.equal(JSON.parse(result.body).error.code, code, `${method} ${route} error code`);
+  }
 }
 
+const encodedDotPaths = [
+  '/self/api/v1/billing/subscriptions/id/renewal-links/%2e%2e/cancel',
+  '/self/api/v1/billing/subscriptions/id/renewal-links/%252e%252e/cancel',
+];
 const boundaryPaths = [
   '/self/api/v1/billing/subscriptions/absent/renewal-links',
   '/self/api/v1/billing/subscriptions/absent/../absent/renewal-links',
   '/self//api/v1/billing/subscriptions/absent/renewal-links',
   '/self/api/./v1/billing/subscriptions/absent/renewal-links',
+  ...encodedDotPaths,
 ];
+const literalCancelSibling = '/self/api/v1/billing/subscriptions/id/renewal-links/../cancel';
 const boundaryMethods = ['GET', 'HEAD', 'POST', 'DELETE'];
 
 async function makeDue(subscriptionID) {
@@ -93,6 +102,8 @@ try {
   for (const route of boundaryPaths) for (const method of boundaryMethods) {
     await rawBoundaryCall(route, { method, expected: 404 });
   }
+  await rawBoundaryCall(encodedDotPaths[0], { expected: 404, origin: 'https://other.example' });
+  await rawBoundaryCall(literalCancelSibling, { expected: 404 });
   await selfCall('/self/api/v1/billing/subscriptions/absent/renewal-links', { expected: 404 });
   await stopServer(processHandle);
 
@@ -115,6 +126,12 @@ try {
       allow: canonical && method !== 'GET' ? 'GET' : '',
     });
   }
+  for (const route of encodedDotPaths) for (const method of ['GET', 'POST']) {
+    await rawBoundaryCall(route, { method, expected: 401, code: 'authentication_required' });
+    await rawBoundaryCall(route, { method, cookie: admin.cookie(), expected: 401, code: 'authentication_required' });
+    await rawBoundaryCall(route, { method, cookie, origin: 'https://other.example', expected: 403, code: 'request_rejected' });
+  }
+  await rawBoundaryCall(literalCancelSibling, { cookie, expected: 404 });
   const session = (await selfCall('/self/api/v1/session', { cookie })).value;
   assert.equal(session.features.employee_self_subscription_renewal_links, true);
   assert.equal(session.features.employee_self_wallet_balance, false);

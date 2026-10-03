@@ -37,6 +37,7 @@ func TestSelfRenewalLinksRouteBoundaryShapeAndSiblings(t *testing.T) {
 		{prefix + "id/%72enewal-links", true, false},
 		{prefix + "id/%2572enewal-links", true, false},
 		{prefix + "id/renewal-links/%2e%2e/cancel", true, false},
+		{prefix + "id/renewal-links/%252e%252e/cancel", true, false},
 		{prefix + "id/%72enewal-links/%2e%2e/cancel", true, false},
 		{prefix + "id%2Frenewal-links", false, false},
 		{prefix + "id%252Frenewal-links", false, false},
@@ -76,6 +77,7 @@ func TestSelfRenewalLinksRouteBoundaryDisabledNoRedirect(t *testing.T) {
 		"/self/api/v1/billing/subscriptions/id/%72enewal-links",
 		"/self/api/v1/billing/subscriptions/id/renewal-links/extra",
 		"/self/api/v1/billing/subscriptions/id/renewal-links/%2e%2e/cancel",
+		"/self/api/v1/billing/subscriptions/id/renewal-links/%252e%252e/cancel",
 	} {
 		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodDelete} {
 			t.Run(method+" "+target, func(t *testing.T) {
@@ -102,7 +104,11 @@ func TestSelfRenewalLinksRouteBoundaryEnabledPriorities(t *testing.T) {
 	f := newSelfRenewalLinksFixture(t, true)
 	const canonical = "/self/api/v1/billing/subscriptions/missing/renewal-links"
 	const malformed = "/self//api/v1/billing/subscriptions/missing/renewal-links"
-	for _, target := range []string{canonical, malformed} {
+	for _, target := range []string{
+		canonical, malformed,
+		"/self/api/v1/billing/subscriptions/id/renewal-links/%2e%2e/cancel",
+		"/self/api/v1/billing/subscriptions/id/renewal-links/%252e%252e/cancel",
+	} {
 		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodDelete} {
 			wantStatus, wantCode, wantAllow := 400, "invalid_request", ""
 			if target == canonical {
@@ -245,6 +251,17 @@ func TestSelfRenewalLinksRouteBoundaryPreservesSiblingOwners(t *testing.T) {
 				t.Fatalf("sibling changed without=%+v with=%+v", before, after)
 			}
 		})
+	}
+	// With both features enabled, an encoded dot tail is still a malformed
+	// renewal-links request, not a cancel write-auth request.
+	for _, target := range []string{
+		prefix + "renewal-links/%2e%2e/cancel",
+		prefix + "renewal-links/%252e%252e/cancel",
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			assertRenewalBoundaryResponse(t, renewalBoundaryRequest(t, with, method, target, with.cookie, ""),
+				400, "invalid_request", "")
+		}
 	}
 }
 
