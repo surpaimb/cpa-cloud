@@ -45,6 +45,24 @@ func TestCheckInitializedExitCodesAndModeExclusion(t *testing.T) {
 	}
 }
 
+// Independently authored for docs/employee-self-upstream-estimated-cost-summary-contract.md.
+func TestEmployeeSelfEstimatedCostRequiresSelfBeforeAnyInitWrite(t *testing.T) {
+	for _, mode := range []string{"service", "init"} {
+		dataDir := filepath.Join(t.TempDir(), "must-stay-missing")
+		args := []string{"--data-dir", dataDir, "--employee-self-upstream-estimated-cost-summary-enabled"}
+		if mode == "init" {
+			args = append(args, "--init")
+		}
+		code, err := runCLI(args, strings.NewReader("a-valid-admin-password\n"), io.Discard)
+		if code != 1 || err == nil || !strings.Contains(err.Error(), "--employee-self-upstream-estimated-cost-summary-enabled requires") {
+			t.Fatalf("mode=%s code=%d err=%v", mode, code, err)
+		}
+		if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+			t.Fatalf("mode=%s wrote data: %v", mode, err)
+		}
+	}
+}
+
 func TestShutdownOnStdinEOFGracefullyStopsServer(t *testing.T) {
 	dataDir := t.TempDir()
 	if err := service.Initialize(context.Background(), dataDir, strings.NewReader("a-valid-admin-password\n")); err != nil {

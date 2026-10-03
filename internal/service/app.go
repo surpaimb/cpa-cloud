@@ -132,6 +132,9 @@ type App struct {
 	// Test-only snapshot and commit boundaries; production leaves both nil.
 	selfKeyRequestAfterOwnership func()
 	selfKeyRequestCommit         func(*sql.Tx) error
+	// Test-only synchronization for the final self cost session check.
+	// Independently authored for docs/employee-self-upstream-estimated-cost-summary-contract.md.
+	selfEstimatedCostBeforeFinal func()
 	catalogMu                    sync.Mutex
 	catalogs                     map[string]codexCatalogCacheEntry
 	codexCatalog                 codexCatalogLister
@@ -149,6 +152,9 @@ type loginAttempt struct {
 }
 
 func Open(ctx context.Context, cfg Config) (*App, error) {
+	if cfg.EmployeeSelfUpstreamEstimatedCostSummaryEnabled && !cfg.EmployeeSelfServiceEnabled {
+		return nil, errors.New("employee self upstream estimated cost summary requires employee self service")
+	}
 	if cfg.EmployeeSelfWalletBalanceEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return nil, errors.New("employee self wallet balance requires employee self service")
 	}
@@ -528,6 +534,7 @@ func (a *App) Handler() http.Handler {
 	handler = a.selfClassificationRouteGuard(handler)
 	handler = a.selfRedemptionHistoryRouteGuard(handler)
 	handler = a.selfAdminAdjustmentRouteGuard(handler)
+	handler = a.selfEstimatedCostRouteGuard(handler)
 	return requestMiddleware(handler)
 }
 
@@ -589,67 +596,68 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 		"ready":   true,
 		"storage": "sqlite-wal",
 		"features": map[string]bool{
-			"employee_self_service":                        a.cfg.EmployeeSelfServiceEnabled,
-			"employee_self_wallet_balance":                 a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled,
-			"employee_self_redemption":                     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfRedemptionEnabled,
-			"employee_self_wallet_activity":                a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
-			"employee_self_wallet_entry_classification":    a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled,
-			"employee_self_redemption_credit_history":      a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled && a.cfg.EmployeeSelfRedemptionCreditHistoryEnabled,
-			"employee_self_admin_adjustment_history":       a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled && a.cfg.EmployeeSelfAdminAdjustmentHistoryEnabled,
-			"employee_self_subscription_status":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
-			"employee_self_subscription_purchase_snapshot": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled,
-			"employee_self_subscription_renewal_links":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionRenewalLinksEnabled,
-			"employee_self_subscription_renewal":           a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionRenewalEnabled,
-			"employee_self_plan_catalog":                   a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled,
-			"employee_self_plan_purchase":                  a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled && a.cfg.EmployeeSelfPlanPurchaseEnabled,
-			"employee_self_subscription_cancel":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionCancelEnabled,
-			"employee_self_one_shot_renewal_disarm":        a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfOneShotRenewalDisarmEnabled,
-			"employee_self_key_issuance":                   a.cfg.EmployeeSelfServiceEnabled,
-			"codex_membership_import":                      a.cfg.ExperimentalCodexMembership,
-			"responses_api":                                true,
-			"openai_embeddings":                            true,
-			"responses_streaming":                          true,
-			"responses_stateful_resources":                 a.cfg.ResponsesStatefulResources,
-			"responses_background_tasks":                   a.cfg.ResponsesStatefulResources && a.cfg.ResponsesBackgroundTasks && a.backgroundResponses != nil,
-			"managed_tools":                                false,
-			"codex_membership_oauth":                       a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
-			"gemini_native_api":                            true,
-			"anthropic_native_api":                         true,
-			"codex_model_discovery":                        a.cfg.ExperimentalCodexMembership,
-			"upstream_batch_import":                        true,
-			"upstream_account_tests":                       a.healthTests != nil,
-			"scheduled_tests_configuration":                a.scheduledTests != nil,
-			"scheduled_tests_running":                      a.scheduledTests != nil && a.cfg.ScheduledTestsEnabled,
-			"scheduled_tests_daily_local":                  a.scheduledTests != nil,
-			"channel_monitor_configuration":                a.channelMonitors != nil,
-			"channel_monitor_running":                      a.channelMonitors != nil && a.cfg.ChannelMonitorsEnabled,
-			"channel_monitor_retained_summary":             a.channelMonitors != nil,
-			"automated_backups_configuration":              a.backupAutomation != nil,
-			"backup_key_provider_ready":                    a.backupAutomation != nil && a.backupAutomation.Ready(),
-			"automated_backups_running":                    a.backupAutomation != nil && a.backupAutomation.Running(),
-			"upstream_cooldown_management":                 a.accountPool != nil,
-			"account_pool_configuration":                   true,
-			"account_pool_runtime_observation":             a.accountPool != nil,
-			"account_group_cost_allocation":                a.accountGroupAllocationRequired,
-			"admin_audit_overview":                         true,
-			"admin_audit_financial_source":                 true,
-			"admin_audit_csv_export":                       true,
-			"account_pool_routing":                         a.accountPool != nil,
-			"account_pool_preflight_failover":              a.accountPool != nil,
-			"usage_reporting":                              true,
-			"versioned_cost_prices":                        true,
-			"reliable_usage_accounting":                    true,
-			"general_budget_enforcement":                   true,
-			"single_instance_billing":                      true,
-			"billing_one_shot_renewal":                     true,
-			"system_probe_accounting":                      a.systemProbes != nil,
-			"account_recovery":                             a.recovery != nil,
-			"codex_membership_auto_refresh":                a.refresh != nil && a.refresh.enabled(),
-			"account_lifecycle_management":                 true,
-			"key_access_policy":                            true,
-			"key_source_policy":                            true,
-			"key_account_group_policy":                     true,
-			"trusted_proxy_source":                         a.trustedProxies.Enabled(),
+			"employee_self_service":                         a.cfg.EmployeeSelfServiceEnabled,
+			"employee_self_upstream_estimated_cost_summary": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfUpstreamEstimatedCostSummaryEnabled,
+			"employee_self_wallet_balance":                  a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled,
+			"employee_self_redemption":                      a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfRedemptionEnabled,
+			"employee_self_wallet_activity":                 a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
+			"employee_self_wallet_entry_classification":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled,
+			"employee_self_redemption_credit_history":       a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled && a.cfg.EmployeeSelfRedemptionCreditHistoryEnabled,
+			"employee_self_admin_adjustment_history":        a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled && a.cfg.EmployeeSelfAdminAdjustmentHistoryEnabled,
+			"employee_self_subscription_status":             a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
+			"employee_self_subscription_purchase_snapshot":  a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled,
+			"employee_self_subscription_renewal_links":      a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionRenewalLinksEnabled,
+			"employee_self_subscription_renewal":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionRenewalEnabled,
+			"employee_self_plan_catalog":                    a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled,
+			"employee_self_plan_purchase":                   a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfPlanCatalogEnabled && a.cfg.EmployeeSelfPlanPurchaseEnabled,
+			"employee_self_subscription_cancel":             a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionCancelEnabled,
+			"employee_self_one_shot_renewal_disarm":         a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfOneShotRenewalDisarmEnabled,
+			"employee_self_key_issuance":                    a.cfg.EmployeeSelfServiceEnabled,
+			"codex_membership_import":                       a.cfg.ExperimentalCodexMembership,
+			"responses_api":                                 true,
+			"openai_embeddings":                             true,
+			"responses_streaming":                           true,
+			"responses_stateful_resources":                  a.cfg.ResponsesStatefulResources,
+			"responses_background_tasks":                    a.cfg.ResponsesStatefulResources && a.cfg.ResponsesBackgroundTasks && a.backgroundResponses != nil,
+			"managed_tools":                                 false,
+			"codex_membership_oauth":                        a.cfg.ExperimentalCodexMembership && a.codexOAuthConfigured(),
+			"gemini_native_api":                             true,
+			"anthropic_native_api":                          true,
+			"codex_model_discovery":                         a.cfg.ExperimentalCodexMembership,
+			"upstream_batch_import":                         true,
+			"upstream_account_tests":                        a.healthTests != nil,
+			"scheduled_tests_configuration":                 a.scheduledTests != nil,
+			"scheduled_tests_running":                       a.scheduledTests != nil && a.cfg.ScheduledTestsEnabled,
+			"scheduled_tests_daily_local":                   a.scheduledTests != nil,
+			"channel_monitor_configuration":                 a.channelMonitors != nil,
+			"channel_monitor_running":                       a.channelMonitors != nil && a.cfg.ChannelMonitorsEnabled,
+			"channel_monitor_retained_summary":              a.channelMonitors != nil,
+			"automated_backups_configuration":               a.backupAutomation != nil,
+			"backup_key_provider_ready":                     a.backupAutomation != nil && a.backupAutomation.Ready(),
+			"automated_backups_running":                     a.backupAutomation != nil && a.backupAutomation.Running(),
+			"upstream_cooldown_management":                  a.accountPool != nil,
+			"account_pool_configuration":                    true,
+			"account_pool_runtime_observation":              a.accountPool != nil,
+			"account_group_cost_allocation":                 a.accountGroupAllocationRequired,
+			"admin_audit_overview":                          true,
+			"admin_audit_financial_source":                  true,
+			"admin_audit_csv_export":                        true,
+			"account_pool_routing":                          a.accountPool != nil,
+			"account_pool_preflight_failover":               a.accountPool != nil,
+			"usage_reporting":                               true,
+			"versioned_cost_prices":                         true,
+			"reliable_usage_accounting":                     true,
+			"general_budget_enforcement":                    true,
+			"single_instance_billing":                       true,
+			"billing_one_shot_renewal":                      true,
+			"system_probe_accounting":                       a.systemProbes != nil,
+			"account_recovery":                              a.recovery != nil,
+			"codex_membership_auto_refresh":                 a.refresh != nil && a.refresh.enabled(),
+			"account_lifecycle_management":                  true,
+			"key_access_policy":                             true,
+			"key_source_policy":                             true,
+			"key_account_group_policy":                      true,
+			"trusted_proxy_source":                          a.trustedProxies.Enabled(),
 		},
 		"limitations": limitations,
 	})

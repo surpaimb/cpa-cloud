@@ -57,6 +57,8 @@ type Config struct {
 
 	// Independently authored for docs/employee-self-admin-adjustment-history-contract.md.
 	EmployeeSelfAdminAdjustmentHistoryEnabled bool
+	// Independently authored for docs/employee-self-upstream-estimated-cost-summary-contract.md.
+	EmployeeSelfUpstreamEstimatedCostSummaryEnabled bool
 }
 
 const (
