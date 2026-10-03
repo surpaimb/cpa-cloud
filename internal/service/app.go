@@ -521,9 +521,6 @@ func (a *App) Handler() http.Handler {
 		mux.HandleFunc("/", a.serveWeb)
 	}
 	var handler http.Handler = mux
-	if a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled {
-		handler = a.selfPurchaseSnapshotRouteGuard(handler)
-	}
 	if a.cfg.EmployeeSelfSubscriptionRenewalLinksEnabled {
 		handler = a.selfRenewalLinksRouteGuard(handler)
 	}
@@ -537,6 +534,11 @@ func (a *App) Handler() http.Handler {
 	handler = a.selfEstimatedCostRouteGuard(handler)
 	handler = a.selfOneShotRouteGuard(handler)
 	handler = a.selfCancelRouteGuard(handler)
+	// Independently authored for
+	// docs/employee-self-subscription-purchase-snapshot-route-boundary-contract.md.
+	// Run outside sibling guards so a cleaning redirect into a disabled
+	// snapshot is rejected before ServeMux exposes the canonical route.
+	handler = a.selfPurchaseSnapshotRouteGuard(handler)
 	return requestMiddleware(handler)
 }
 

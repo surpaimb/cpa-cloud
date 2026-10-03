@@ -1,6 +1,7 @@
 package service
 
-// Independently authored tests for docs/employee-self-subscription-purchase-snapshot-contract.md.
+// Independently authored tests for docs/employee-self-subscription-purchase-snapshot-contract.md
+// and docs/employee-self-subscription-purchase-snapshot-route-boundary-contract.md.
 
 import (
 	"context"
@@ -18,16 +19,24 @@ import (
 )
 
 func newSelfPurchaseSnapshotFixture(t *testing.T, enabled bool) selfWalletFixture {
+	return newSelfPurchaseSnapshotConfiguredFixture(t, enabled, nil)
+}
+
+func newSelfPurchaseSnapshotConfiguredFixture(t *testing.T, enabled bool, configure func(*Config)) selfWalletFixture {
 	t.Helper()
 	dir := t.TempDir()
 	if err := Initialize(context.Background(), dir, strings.NewReader("a-strong-preview-password\n")); err != nil {
 		t.Fatal(err)
 	}
-	app, err := Open(context.Background(), Config{
+	cfg := Config{
 		DataDir: dir, Listen: "127.0.0.1:0", Version: "test",
 		EmployeeSelfServiceEnabled: true, EmployeeSelfWalletBalanceEnabled: true,
 		EmployeeSelfSubscriptionStatusEnabled: true, EmployeeSelfSubscriptionPurchaseSnapshotEnabled: enabled,
-	})
+	}
+	if configure != nil {
+		configure(&cfg)
+	}
+	app, err := Open(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
