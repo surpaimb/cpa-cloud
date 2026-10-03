@@ -123,6 +123,14 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	if cfg.ResponsesBackgroundTasks && !cfg.ResponsesStatefulResources {
 		return 1, errors.New("--responses-background-tasks requires --responses-stateful-resources")
 	}
+	// Independently authored for docs/employee-self-cli-preinit-prerequisites-contract.md.
+	// Both modes must reject incomplete opt-ins before --init can touch storage.
+	if cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled || !cfg.EmployeeSelfWalletBalanceEnabled) {
+		return 1, errors.New("--employee-self-subscription-purchase-snapshot-enabled requires --employee-self-service-enabled, --employee-self-subscription-status-enabled, and --employee-self-wallet-balance-enabled")
+	}
+	if cfg.EmployeeSelfSubscriptionRenewalEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfSubscriptionStatusEnabled || !cfg.EmployeeSelfWalletBalanceEnabled) {
+		return 1, errors.New("--employee-self-subscription-renewal-enabled requires --employee-self-service-enabled, --employee-self-subscription-status-enabled, and --employee-self-wallet-balance-enabled")
+	}
 	if cfg.EmployeeSelfWalletBalanceEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return 1, errors.New("--employee-self-wallet-balance-enabled requires --employee-self-service-enabled")
 	}
