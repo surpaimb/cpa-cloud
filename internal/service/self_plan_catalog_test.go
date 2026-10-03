@@ -1,4 +1,5 @@
-// Independently authored tests for docs/employee-self-plan-catalog-contract.md.
+// Independently authored tests for docs/employee-self-plan-catalog-contract.md
+// and docs/employee-self-plan-catalog-copy-truth-contract.md.
 package service
 
 import (
@@ -140,6 +141,91 @@ func TestSelfPlanCatalogGatesRolesAndStrictInput(t *testing.T) {
 	features, _ := value["features"].(map[string]any)
 	if features["employee_self_plan_catalog"] != true || features["employee_self_wallet_balance"] != false || features["employee_self_subscription_status"] != false {
 		t.Fatalf("independent capability=%+v", features)
+	}
+}
+
+func TestSelfPlanCatalogCrossCapabilityTruth(t *testing.T) {
+	tests := []struct {
+		name          string
+		wallet        bool
+		cancel        bool
+		renewal       bool
+		enabledRoute  string
+		disabledRoute string
+	}{
+		{
+			name:          "catalog and own cancellation without purchase",
+			cancel:        true,
+			enabledRoute:  "/self/api/v1/billing/subscriptions/sub-example/cancel",
+			disabledRoute: "/self/api/v1/billing/subscriptions/sub-example/renewal-quotes",
+		},
+		{
+			name:          "catalog and own monthly renewal without purchase",
+			wallet:        true,
+			renewal:       true,
+			enabledRoute:  "/self/api/v1/billing/subscriptions/sub-example/renewal-quotes",
+			disabledRoute: "/self/api/v1/billing/subscriptions/sub-example/cancel",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := Initialize(context.Background(), dir, strings.NewReader("a-strong-preview-password\n")); err != nil {
+				t.Fatal(err)
+			}
+			app, err := Open(context.Background(), Config{
+				DataDir: dir, Listen: "127.0.0.1:0", Version: "test",
+				EmployeeSelfServiceEnabled: true, EmployeeSelfPlanCatalogEnabled: true,
+				EmployeeSelfSubscriptionStatusEnabled: true, EmployeeSelfWalletBalanceEnabled: test.wallet,
+				EmployeeSelfSubscriptionCancelEnabled: test.cancel, EmployeeSelfSubscriptionRenewalEnabled: test.renewal,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = app.Close() })
+			server := httptest.NewServer(app.Handler())
+			t.Cleanup(server.Close)
+			adminCookie, adminCSRF := loginTestAdmin(t, server.URL)
+			employee := selfCreateEmployee(t, server.URL, adminCookie, adminCSRF)
+			secret := selfIssue(t, server.URL, employee.ID, adminCookie, adminCSRF)
+			cookie, csrf := selfRedeem(t, server.URL, employee.ID, secret)
+
+			session := readSelfWalletResponse(t, selfRequestTest(t, http.MethodGet, server.URL+"/self/api/v1/session", "", "", cookie, ""), 200)
+			features, ok := session["features"].(map[string]any)
+			if !ok || features["employee_self_plan_catalog"] != true || features["employee_self_subscription_status"] != true ||
+				features["employee_self_wallet_balance"] != test.wallet || features["employee_self_subscription_cancel"] != test.cancel ||
+				features["employee_self_subscription_renewal"] != test.renewal || features["employee_self_plan_purchase"] != false {
+				t.Fatalf("cross-capability session=%+v", session)
+			}
+			catalog := readSelfPlanCatalogPage(t, requestSelfPlanCatalog(t, server.URL, "?currency=USD", "", "", cookie))
+			if catalog.Currency != "USD" || catalog.Available || len(catalog.Items) != 0 || catalog.NextCursor != nil {
+				t.Fatalf("commercial-off catalog=%+v", catalog)
+			}
+			subscriptions := readSelfSubscriptionPage(t, selfSubscriptionRequest(t, server.URL, "?limit=20", "", "", cookie))
+			if len(subscriptions.Items) != 0 || subscriptions.NextCursor != nil {
+				t.Fatalf("empty own subscriptions=%+v", subscriptions)
+			}
+			for _, route := range []string{"/self/api/v1/billing/plan-purchase-quotes", "/self/api/v1/billing/subscriptions"} {
+				response := selfRequestTest(t, http.MethodPost, server.URL+route, `{}`, server.URL, cookie, csrf)
+				if response.StatusCode != http.StatusNotFound {
+					t.Errorf("disabled purchase route %s status=%d", route, response.StatusCode)
+				}
+				response.Body.Close()
+			}
+			for _, probe := range []struct {
+				route  string
+				status int
+			}{
+				{test.enabledRoute, http.StatusMethodNotAllowed},
+				{test.disabledRoute, http.StatusNotFound},
+			} {
+				response := selfRequestTest(t, http.MethodGet, server.URL+probe.route, "", "", cookie, "")
+				if response.StatusCode != probe.status || (probe.status == http.StatusMethodNotAllowed && response.Header.Get("Allow") != http.MethodPost) {
+					t.Errorf("independent operation route %s status=%d allow=%q", probe.route, response.StatusCode, response.Header.Get("Allow"))
+				}
+				response.Body.Close()
+			}
+		})
 	}
 }
 

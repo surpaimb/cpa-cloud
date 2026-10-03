@@ -1947,7 +1947,7 @@ function SelfPlanCatalogPanel() {
 
   return <section className="self-plan-catalog" aria-labelledby="self-plan-catalog-title">
     <h2 id="self-plan-catalog-title">当前可用套餐目录</h2>
-    <p>仅展示查询时该币种已启用套餐的当前信息，不是权益或持久报价；购买、取消与续购仍须管理员操作。</p>
+    <p>仅展示查询时该币种已启用套餐的当前信息，不是权益或持久报价。此目录只读，不会在这里购买、取消或续购；本人能否执行这些操作，以各自独立授权入口及服务端资格校验为准。</p>
     <form className="self-plan-catalog-form" onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void readPage(currency) }}>
       <Field label="套餐币种（三位大写字母，如 USD）"><input name="plan_currency" value={currency} onChange={(event) => changeCurrency(event.target.value)} required maxLength={3} pattern="[A-Z]{3}" autoComplete="off" spellCheck={false} /></Field>
       <Button type="submit" disabled={loading}>{loading ? '正在读取…' : '读取当前套餐'}</Button>
