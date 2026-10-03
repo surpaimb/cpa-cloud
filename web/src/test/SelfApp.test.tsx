@@ -23,6 +23,7 @@
 // docs/employee-self-redemption-contract.md.
 // docs/employee-self-redemption-credit-history-contract.md.
 // docs/employee-self-admin-adjustment-history-contract.md.
+// docs/employee-self-topup-credit-history-contract.md.
 // docs/employee-self-upstream-estimated-cost-summary-contract.md.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -701,6 +702,86 @@ describe('employee self-service page', () => {
     await waitFor(() => expect(within(panel).queryByText('+999 micro')).not.toBeInTheDocument())
     await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
     expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+  })
+
+  it('gates local callback credits and reads only after an explicit currency click', async () => {
+    const profile = { id: 'emp-topup', name: 'Topup Reader', department: '', status: 'active' }
+    const window = { window_start: '2026-09-03T12:00:00Z', window_end: '2026-10-04T12:00:00Z' }
+    let enabled = false
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'topup-csrf', profile, features: { employee_self_wallet_balance: true, employee_self_wallet_activity: true, employee_self_wallet_entry_classification: true, employee_self_topup_credit_history: enabled } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/topup-credits?currency=JPY&limit=20')) return reply(200, { currency: 'JPY', has_account: false, ...window, items: [], next_cursor: null })
+      if (url.endsWith('/billing/topup-credits?currency=USD&limit=20')) return reply(200, { currency: 'USD', has_account: true, ...window, items: [{ credited_at: '2026-10-04T11:59:59Z', amount_micro: '42' }], next_cursor: 'opaque-topup-next' })
+      if (url.endsWith('/billing/topup-credits?currency=USD&limit=20&cursor=opaque-topup-next')) return reply(200, { currency: 'USD', has_account: true, ...window, items: [{ credited_at: '2026-10-04T11:59:58Z', amount_micro: '43' }], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const first = render(<SelfApp />)
+    expect(await screen.findByRole('heading', { name: '你好，Topup Reader' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '回调入账原始毛额' })).not.toBeInTheDocument()
+    first.unmount()
+    enabled = true
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '回调入账原始毛额' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/topup-credits'))).toBe(false)
+    const field = within(panel).getByLabelText('回调入账币种（三位大写字母，如 USD）')
+    await userEvent.type(field, 'JPY')
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/topup-credits'))).toBe(false)
+    await userEvent.click(within(panel).getByRole('button', { name: '读取回调入账毛额' }))
+    expect(await within(panel).findByText(/暂无员工钱包账户/)).toBeInTheDocument()
+    await userEvent.clear(field)
+    expect(within(panel).queryByText(/暂无员工钱包账户/)).not.toBeInTheDocument()
+    await userEvent.type(field, 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取回调入账毛额' }))
+    expect(await within(panel).findByText('+42 micro')).toBeInTheDocument()
+    await userEvent.click(within(panel).getByRole('button', { name: '加载更多回调入账' }))
+    expect(await within(panel).findByText('+43 micro')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/billing/topup-credits'))).toHaveLength(3)
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/entries') || String(url).includes('/billing/entry-classifications'))).toBe(false)
+  })
+
+  it('clears local callback credits on failed read, currency switch, late response and logout', async () => {
+    const profile = { id: 'emp-topup', name: 'Topup Reader', department: '', status: 'active' }
+    const window = { window_start: '2026-09-03T12:00:00Z', window_end: '2026-10-04T12:00:00Z' }
+    let finishUSD: ((value: Response) => void) | undefined
+    let failEUR = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'topup-csrf', profile, features: { employee_self_wallet_balance: true, employee_self_wallet_activity: true, employee_self_wallet_entry_classification: true, employee_self_topup_credit_history: true } })
+      if (url.endsWith('/sessions') && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/topup-credits?currency=USD&limit=20')) return new Promise<Response>((resolve) => { finishUSD = resolve })
+      if (url.endsWith('/billing/topup-credits?currency=EUR&limit=20')) return failEUR
+        ? reply(503, { error: { code: 'storage_unavailable' } })
+        : reply(200, { currency: 'EUR', has_account: true, ...window, items: [{ credited_at: '2026-10-04T11:59:59Z', amount_micro: '7' }], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const panel = await screen.findByRole('region', { name: '回调入账原始毛额' })
+    const field = within(panel).getByLabelText('回调入账币种（三位大写字母，如 USD）')
+    await userEvent.type(field, 'USD')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取回调入账毛额' }))
+    await waitFor(() => expect(finishUSD).toBeTypeOf('function'))
+    await userEvent.clear(field)
+    await userEvent.type(field, 'EUR')
+    await userEvent.click(within(panel).getByRole('button', { name: '读取回调入账毛额' }))
+    expect(await within(panel).findByText('+7 micro')).toBeInTheDocument()
+    finishUSD?.(new Response(JSON.stringify({ currency: 'USD', has_account: true, ...window, items: [{ credited_at: '2026-10-04T11:59:59Z', amount_micro: '999' }], next_cursor: null }), { status: 200 }))
+    await waitFor(() => expect(within(panel).queryByText('+999 micro')).not.toBeInTheDocument())
+    failEUR = true
+    await userEvent.click(within(panel).getByRole('button', { name: '读取回调入账毛额' }))
+    expect(await within(panel).findByRole('alert')).toBeInTheDocument()
+    expect(within(panel).queryByText('+7 micro')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    expect(await screen.findByRole('heading', { name: '员工登录' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '回调入账原始毛额' })).not.toBeInTheDocument()
   })
 
   it('keeps subscription status absent without its independent capability', async () => {
