@@ -535,6 +535,7 @@ func (a *App) Handler() http.Handler {
 	handler = a.selfRedemptionHistoryRouteGuard(handler)
 	handler = a.selfAdminAdjustmentRouteGuard(handler)
 	handler = a.selfEstimatedCostRouteGuard(handler)
+	handler = a.selfCancelRouteGuard(handler)
 	return requestMiddleware(handler)
 }
 
