@@ -1,6 +1,7 @@
 package service
 
-// Independently authored for docs/employee-self-subscription-purchase-snapshot-contract.md.
+// Independently authored for docs/employee-self-subscription-purchase-snapshot-contract.md
+// and docs/employee-self-subscription-purchase-snapshot-route-boundary-contract.md.
 
 import (
 	"context"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -15,13 +17,23 @@ import (
 	"cpacloud.local/server/internal/financial"
 )
 
-// ServeMux may reject escaped separators before a wildcard handler runs. This
-// narrow guard classifies malformed snapshot-shaped GETs before mux routing,
-// while leaving other self routes and feature-off behavior unchanged.
+// Classify snapshot-shaped requests before ServeMux can clean or redirect a
+// path. The classification views are only used to reject; no view is passed
+// to the business handler as a rewritten URL or PathValue.
 func (a *App) selfPurchaseSnapshotRouteGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !snapshotShapedRawPath(r) {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if !a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled {
+			http.NotFound(w, r)
+			return
+		}
+		if malformedPurchaseSnapshotRawPath(r) {
+			a.requireSelf(func(w http.ResponseWriter, _ *http.Request, _ selfSession) {
+				selfError(w, http.StatusBadRequest, "invalid_request")
+			}, false)(w, r)
 			return
 		}
 		if r.Method != http.MethodGet {
@@ -31,33 +43,84 @@ func (a *App) selfPurchaseSnapshotRouteGuard(next http.Handler) http.Handler {
 			}, false)(w, r)
 			return
 		}
-		if malformedPurchaseSnapshotRawPath(r) {
-			a.requireSelf(func(w http.ResponseWriter, _ *http.Request, _ selfSession) {
-				selfError(w, http.StatusBadRequest, "invalid_request")
-			}, false)(w, r)
-			return
-		}
 		next.ServeHTTP(w, r)
 	})
 }
 
+const snapshotRoutePrefix = "/self/api/v1/billing/subscriptions/"
+
+func snapshotRouteViews(r *http.Request) []string {
+	view := r.URL.EscapedPath()
+	views := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		views = append(views, view)
+		decoded, err := url.PathUnescape(view)
+		if err != nil || decoded == view {
+			break
+		}
+		view = decoded
+	}
+	return views
+}
+
+func snapshotRouteOperation(view string) (string, bool) {
+	if !strings.HasPrefix(view, snapshotRoutePrefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(view, snapshotRoutePrefix)
+	separator := strings.IndexByte(rest, '/')
+	if separator < 0 {
+		return "", false
+	}
+	for _, segment := range strings.Split(rest[separator+1:], "/") {
+		if segment != "" && segment != "." && segment != ".." {
+			return segment, true
+		}
+	}
+	return "", true
+}
+
 func snapshotShapedRawPath(r *http.Request) bool {
-	const prefix = "/self/api/v1/billing/subscriptions/"
-	const suffix = "/purchase-snapshot"
-	escaped := r.URL.EscapedPath()
-	decoded := r.URL.Path
-	return strings.HasPrefix(escaped, prefix) && strings.Contains(strings.TrimPrefix(escaped, prefix), suffix) ||
-		strings.HasPrefix(decoded, prefix) && strings.Contains(strings.TrimPrefix(decoded, prefix), suffix)
+	views := snapshotRouteViews(r)
+	// A cleaning redirect into this endpoint is ours to reject, even when
+	// the original path contains dot segments or repeated prefix slashes.
+	for _, view := range views {
+		cleaned := path.Clean(view)
+		if cleaned != view {
+			if operation, ok := snapshotRouteOperation(cleaned); ok {
+				if operation == "purchase-snapshot" {
+					return true
+				}
+				if operation != "" && !strings.ContainsRune(operation, '%') {
+					return false
+				}
+			}
+		}
+	}
+	// The first unambiguous operation owns the path. In particular, a later
+	// snapshot segment in a sibling or unknown tail does not steal that route.
+	for _, view := range views {
+		operation, ok := snapshotRouteOperation(view)
+		if !ok {
+			continue
+		}
+		if operation == "purchase-snapshot" {
+			return true
+		}
+		if !strings.ContainsRune(operation, '%') {
+			return false
+		}
+	}
+	return false
 }
 
 func malformedPurchaseSnapshotRawPath(r *http.Request) bool {
-	const prefix = "/self/api/v1/billing/subscriptions/"
 	const suffix = "/purchase-snapshot"
 	escaped := r.URL.EscapedPath()
-	if !strings.HasPrefix(escaped, prefix) {
+	if !strings.HasPrefix(escaped, snapshotRoutePrefix) {
 		return true
 	}
-	rest := strings.TrimPrefix(escaped, prefix)
+	rest := strings.TrimPrefix(escaped, snapshotRoutePrefix)
 	if !strings.HasSuffix(rest, suffix) {
 		return true
 	}
