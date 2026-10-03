@@ -86,6 +86,11 @@ jobs:
           CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-redemption-credit-history
           CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
         run: node scripts/smoke-employee-self-redemption-credit-history.mjs "$RUNNER_TEMP/cpa-cloud"
+      - name: Test opt-in employee self admin adjustment history against an isolated process
+        env:
+          CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-admin-adjustment-history
+          CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
+        run: node scripts/smoke-employee-self-admin-adjustment-history.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee subscription status against an isolated process
         run: node scripts/smoke-employee-self-subscription-status.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee self-cancellation against an isolated process
