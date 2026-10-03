@@ -61,6 +61,9 @@ func (a *App) registerSelfHandlers(mux *http.ServeMux) {
 	if a.cfg.EmployeeSelfRedemptionCreditHistoryEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/redemption-credits", a.requireSelfReleased(a.selfRedemptionCreditHistory, false))
 	}
+	if a.cfg.EmployeeSelfAdminAdjustmentHistoryEnabled {
+		mux.HandleFunc("GET /self/api/v1/billing/admin-adjustments", a.requireSelfReleased(a.selfAdminAdjustmentHistory, false))
+	}
 	if a.cfg.EmployeeSelfSubscriptionStatusEnabled {
 		mux.HandleFunc("GET /self/api/v1/billing/subscriptions", a.requireSelf(a.selfSubscriptionStatus, false))
 	}
@@ -557,6 +560,7 @@ func (a *App) selfSessionResponse(csrf string, profile selfProfile) map[string]a
 		"employee_self_wallet_activity":                a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled,
 		"employee_self_wallet_entry_classification":    a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled,
 		"employee_self_redemption_credit_history":      a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled && a.cfg.EmployeeSelfRedemptionCreditHistoryEnabled,
+		"employee_self_admin_adjustment_history":       a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled && a.cfg.EmployeeSelfAdminAdjustmentHistoryEnabled,
 		"employee_self_subscription_status":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
 		"employee_self_subscription_purchase_snapshot": a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled,
 		"employee_self_subscription_renewal_links":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionRenewalLinksEnabled,

@@ -1,6 +1,6 @@
 # ID-05 / BILL-04 员工本人直属钱包管理员本地调整记录契约
 
-状态：2026-10-03，**仅设计契约**；本能力尚无实施代码、测试、GitHub CI、PR 或部署证据。精确基线是已合并的 `main` `f21de90812c6a785ca88a1b0f82ba7b8a3c47e77`。本合同从本项目的[产品计划](product-plan.md)、[独立实现规则](independent-implementation.md)、[开发计划](development-plan.md)、[预览契约](preview-contract.md)、[单实例财务契约](single-instance-billing-contract.md)、[员工自助基础](employee-self-service-foundation-contract.md)、[钱包余额](employee-self-wallet-balance-contract.md)、[最近钱包变动](employee-self-wallet-activity-contract.md)、[原始分录分类](employee-self-wallet-entry-classification-contract.md)及[财务 actor 来源](financial-actor-provenance-contract.md)制定。本批只增加一个员工显式读取、默认关闭的本地事实视图；不提供调整原因、付款证明、充值、退款、工资、补偿、账单或外部资金来源判断。
+状态（2026-10-03 本地预推送审核记录）：**本分支已有本地实施与下述验证；在该审核时点，本批实施差异尚待只读审核、尚未提交或 push，亦未建 PR、触发本批 GitHub CI 或部署。后续状态须以实际 PR、CI 和精确提交 HEAD 的记录为准。**契约基线是已合并的 `main` `f21de90812c6a785ca88a1b0f82ba7b8a3c47e77`。本合同从本项目的[产品计划](product-plan.md)、[独立实现规则](independent-implementation.md)、[开发计划](development-plan.md)、[预览契约](preview-contract.md)、[单实例财务契约](single-instance-billing-contract.md)、[员工自助基础](employee-self-service-foundation-contract.md)、[钱包余额](employee-self-wallet-balance-contract.md)、[最近钱包变动](employee-self-wallet-activity-contract.md)、[原始分录分类](employee-self-wallet-entry-classification-contract.md)及[财务 actor 来源](financial-actor-provenance-contract.md)制定。本批只增加一个员工显式读取、默认关闭的本地事实视图；不提供调整原因、付款证明、充值、退款、工资、补偿、账单或外部资金来源判断。
 
 ## 范围与能力开关
 
@@ -60,8 +60,14 @@ SQL/query/scan/迭代/`Rows.Close`、schema/trigger/FK、选中或 lookahead 链
 
 实施后须以**新实现精确 HEAD**分别检验：默认关闭、四前置任一缺失在普通启动/`--init` 持久写前拒绝；新旧路由/JSON/cursor 不交叉；匿名/admin/Bearer/Origin/失效身份、严格路径和 405、query/body；缺账户/空历史、正负号及同币种；本人直属与 Key/resource/异员工、admin 与 employee/system/`legacy_unknown`；管理员调整与商业退款 `adjustment_debit` 的 action 区分；v1 迁移 admin 与 v2 新 admin 摘要、admin FK、唯一 operation/entry、schema/FK/trigger、错类型/时间/resource/摘要；同存储时间、混合精度、分页、跨目的/跨 session/过期游标和并发写；选中/lookahead 损坏、SQL/scan/Rows.Close/commit/context/RNG 故障皆整页 503；logout/改密/admin-disable 最终输出竞态；无财务写、无敏感日志或内部字段泄露；UI 显式点击、翻页、清理及桌面/390px。分别报告本地测试、构建/lint、隔离进程/浏览器与 GitHub CI 的实际证据；本合同完成不等于这些已测试。
 
-本阶段不触发 GitHub 自动编译：目前只有设计文档，尚无本批代码或 PR。根审核合同后才能进入实施、独立测试、CI 和验收。`GOV-02` 的告知、角色、保留与恢复决策仍开放，不能生产默认开启；单实例预览不承诺多实例一致性。无 tag、package、native release、发布或部署。
+本地实施差异须先经只读审核；审核放行后才可提交、push 独立 Draft PR，并在**新精确 HEAD**重钉 GitHub CI、固定二进制与独立验收，不能借用旧批次证据。`GOV-02` 的告知、角色、保留与恢复决策仍开放，不能生产默认开启；单实例预览不承诺多实例一致性。无 tag、package、native release、发布或部署。
+
+## 本地验证与未覆盖
+
+截至本地预推送审核时：新增财务、服务和 CLI 定向 Go 测试通过；财务回归额外注入孤立管理员 FK、跨账户同操作分录及按 `RequireNonNegative=false` 重算的有效格式错误摘要，均确认整页失败且无部分结果；最终输出与 logout 的序列化测试连续运行十次通过；`go vet ./...` 通过。Web 生产构建与全量 Vitest 通过（22 个文件、242 个测试）。本批新隔离进程 smoke 对本地最终重编二进制通过：四项前置缺失在正常启动和 `--init` 都不落盘，默认关为 404，启用后严格身份/路径/query、管理员正负调整、resource 子账户隔离、分页/旧游标隔离和重启后的历史读取均通过；首次启用进程退出后还核对了管理员密码/session/CSRF、员工 enrollment secret/密码/session 未出现在该进程输出中；工作流已接入该 smoke，CI 计划测试 12/12 通过。真实 Chrome 以合成员工在动态非 8787 端口验证：登录后无自动新 GET，明确点击后显示 `+42`/`-7`，改币种立即清旧结果，JPY 无账户；1280px 和 390px 的 `documentElement.scrollWidth == clientWidth`。控制台唯一错误为未登录时预期的 `/self/api/v1/session` 401。所有账号、金额和密码均为临时合成事实，没有真实凭据、外部请求或部署。
+
+本地预推送审核时未完成/不能宣称：GitHub CI、PR 固定 HEAD、Linux/macOS 构建、正式发布及生产环境。后续 PR、CI 与固定二进制验收须逐项核对新精确 HEAD 的实际结果，不得由本段本地证据推定通过。Windows 上 `go test ./... -count=1 -timeout=10m` 的 service 包在现有 `TestAcquireCodexRecoveryUncertainOutcomePausesWithoutSecretOrReplay` 用例的 SQLite `FlushFileBuffers` 路径超时；其他已输出包通过，不能算全量 Go 通过。本机缺少 `gcc`，`go test -race` 在 `runtime/cgo` 编译前置处失败，未得到 race 结果。管理员禁用/改密与输出之间的独立竞态、并发写入时跨页覆盖范围、真浏览器失败态及各平台真实 TLS 仍待后续核验；现有定向 logout 测试不能代替这些证据。
 
 ## 来源与许可
 
-本合同依据 CPA Cloud 自有功能规格和已合并仓库结构的只读核对独立撰写；曾看过参考代码，因此不宣称严格 clean-room，亦未复制、翻译、逐行改写或移植 CLIProxyAPI、Sub2API、归档 CPA 或相邻参考仓库的代码、测试、迁移、素材和文档。2026-10-03 核对的公开技术资料：[Go `database/sql` 事务及 Rows](https://pkg.go.dev/database/sql)、[Go `cipher.AEAD`](https://pkg.go.dev/crypto/cipher#AEAD)、[SQLite 隔离](https://www.sqlite.org/isolation.html)、[SQLite 外键](https://www.sqlite.org/foreignkeys.html)、[SQLite 触发器](https://www.sqlite.org/lang_createtrigger.html)、[SQLite SELECT 排序](https://www.sqlite.org/lang_select.html)、[RFC 9111 `no-store`](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.5)。上述公开资料只支持通用机制，不提供本项目身份、分类和证明链的业务结论。本合同未新增依赖、SDK 或素材；后续新源码须显式记录 provenance，已有依赖各守原许可证，见[依赖许可记录](research/dependency-notices.md)。
+本合同依据 CPA Cloud 自有功能规格和已合并仓库结构的只读核对独立撰写；曾看过参考代码，因此不宣称严格 clean-room，亦未复制、翻译、逐行改写或移植 CLIProxyAPI、Sub2API、归档 CPA 或相邻参考仓库的代码、测试、迁移、素材和文档。2026-10-03 核对的公开技术资料：[Go `database/sql` 事务及 Rows](https://pkg.go.dev/database/sql)、[Go `cipher.AEAD`](https://pkg.go.dev/crypto/cipher#AEAD)、[SQLite 隔离](https://www.sqlite.org/isolation.html)、[SQLite 外键](https://www.sqlite.org/foreignkeys.html)、[SQLite 触发器](https://www.sqlite.org/lang_createtrigger.html)、[SQLite SELECT 排序](https://www.sqlite.org/lang_select.html)、[RFC 9111 `no-store`](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.5)。上述公开资料只支持通用机制，不提供本项目身份、分类和证明链的业务结论。本批未新增依赖、SDK 或素材；新文件及修改处已标本合同 provenance，已有依赖各守原许可证，见[依赖许可记录](research/dependency-notices.md)。

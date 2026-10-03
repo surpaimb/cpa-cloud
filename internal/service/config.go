@@ -54,6 +54,9 @@ type Config struct {
 	InstanceID                              string
 	Version                                 string
 	backupAutomationRehearsal               bool
+
+	// Independently authored for docs/employee-self-admin-adjustment-history-contract.md.
+	EmployeeSelfAdminAdjustmentHistoryEnabled bool
 }
 
 const (

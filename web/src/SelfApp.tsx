@@ -21,12 +21,13 @@
 // docs/employee-self-subscription-renewal-links-contract.md.
 // docs/employee-self-redemption-contract.md.
 // docs/employee-self-redemption-credit-history-contract.md.
+// docs/employee-self-admin-adjustment-history-contract.md.
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api'
 import { Button, Field, FormError } from './ui'
 
 type Profile = { id: string; name: string; department: string; status: 'active' | 'disabled' }
-type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_redemption?: boolean; employee_self_wallet_activity?: boolean; employee_self_wallet_entry_classification?: boolean; employee_self_redemption_credit_history?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_purchase_snapshot?: boolean; employee_self_subscription_renewal_links?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_subscription_renewal?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
+type SelfSession = { csrf_token: string; profile: Profile; features?: { employee_self_wallet_balance?: boolean; employee_self_redemption?: boolean; employee_self_wallet_activity?: boolean; employee_self_wallet_entry_classification?: boolean; employee_self_redemption_credit_history?: boolean; employee_self_admin_adjustment_history?: boolean; employee_self_subscription_status?: boolean; employee_self_subscription_purchase_snapshot?: boolean; employee_self_subscription_renewal_links?: boolean; employee_self_subscription_cancel?: boolean; employee_self_one_shot_renewal_disarm?: boolean; employee_self_subscription_renewal?: boolean; employee_self_plan_catalog?: boolean; employee_self_plan_purchase?: boolean } }
 type SelfKey = { id: string; name: string; created_at: string; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type SelfKeyPage = { items: SelfKey[]; next_cursor: string | null }
 type SelfKeySlot = { id: string; name: string; expires_at: string | null }
@@ -1017,6 +1018,87 @@ function SelfRedemptionCreditHistoryPanel() {
             <strong className="self-wallet-activity-positive">+{item.amount_micro} micro</strong>
           </li>)}</ol>}
       {page.next_cursor ? <Button variant="secondary" disabled={loading} onClick={() => { void readPage(page.next_cursor ?? undefined) }}>{loading ? '正在读取…' : '加载更多自助兑换入账'}</Button> : null}
+    </div> : null}
+  </section>
+}
+
+function validSelfAdminAdjustmentPage(raw: unknown, currency: string, previous?: SelfWalletActivityPage): raw is SelfWalletActivityPage {
+  if (!validSelfWalletActivityPage(raw, currency, previous)) return false
+  return raw.items.every((item) => {
+    const amount = BigInt(item.delta_micro)
+    return amount >= -9223372036854775808n && amount <= 9223372036854775807n
+  })
+}
+
+function SelfAdminAdjustmentHistoryPanel() {
+  const [currency, setCurrency] = useState('')
+  const [page, setPage] = useState<SelfWalletActivityPage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const pending = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+
+  useEffect(() => () => { generation.current++; pending.current?.abort() }, [])
+
+  function changeCurrency(value: string) {
+    generation.current++
+    pending.current?.abort()
+    pending.current = null
+    setCurrency(value)
+    setPage(null)
+    setError(false)
+    setLoading(false)
+  }
+
+  async function readPage(cursor?: string) {
+    const requestedCurrency = currency
+    const prior = cursor ? page : null
+    if (!/^[A-Z]{3}$/.test(requestedCurrency) || (cursor && (!prior || prior.next_cursor !== cursor))) {
+      setPage(null)
+      setError(true)
+      return
+    }
+    generation.current++
+    pending.current?.abort()
+    const requestGeneration = generation.current
+    const controller = new AbortController()
+    pending.current = controller
+    if (!cursor) setPage(null)
+    setError(false)
+    setLoading(true)
+    try {
+      const path = `/billing/admin-adjustments?currency=${requestedCurrency}&limit=20${cursor ? `&cursor=${cursor}` : ''}`
+      const value = await selfRequest<unknown>(path, { signal: controller.signal })
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      if (!validSelfAdminAdjustmentPage(value, requestedCurrency, prior ?? undefined)) throw new Error('Invalid self admin adjustment response')
+      setPage(prior ? { ...value, items: [...prior.items, ...value.items] } : value)
+    } catch {
+      if (controller.signal.aborted || generation.current !== requestGeneration) return
+      setPage(null)
+      setError(true)
+    } finally {
+      if (pending.current === controller) pending.current = null
+      if (!controller.signal.aborted && generation.current === requestGeneration) setLoading(false)
+    }
+  }
+
+  return <section className="self-wallet-activity" aria-labelledby="self-admin-adjustment-title">
+    <h2 id="self-admin-adjustment-title">管理员本地钱包调整记录</h2>
+    <p>仅按需显示管理员对你本人直属钱包近 31 天的本地金额调整。正负号只表示钱包增减，不说明调整原因，也不是付款、退款或完整账单。</p>
+    <form className="self-wallet-form" onSubmit={(event) => { event.preventDefault(); void readPage() }}>
+      <Field label="本地调整币种（三位大写字母，如 USD）"><input name="admin_adjustment_currency" value={currency} onChange={(event) => changeCurrency(event.target.value)} required maxLength={3} pattern="[A-Z]{3}" autoComplete="off" spellCheck={false} /></Field>
+      <Button type="submit" disabled={loading}>{loading ? '正在读取…' : '读取本地调整记录'}</Button>
+    </form>
+    {error ? <p role="alert">管理员本地钱包调整记录暂时无法读取，请检查币种或稍后重试。</p> : null}
+    {page && !error ? <div className="self-wallet-activity-result" role="status">
+      <p>查询窗口：<time dateTime={page.window_start}>{selfKeyDate(page.window_start)}</time> 至 <time dateTime={page.window_end}>{selfKeyDate(page.window_end)}</time>（不含结束时刻）</p>
+      {!page.has_account ? <p><strong>{page.currency}</strong> 暂无员工钱包账户（未显示为零余额）。</p>
+        : page.items.length === 0 ? <p><strong>{page.currency}</strong> 员工钱包在此窗口暂无已验证的管理员本地调整；这不代表余额为零。</p>
+          : <ol className="self-wallet-activity-list">{page.items.map((item, index) => <li key={`${item.occurred_at}:${item.delta_micro}:${index}`}>
+            <time dateTime={item.occurred_at}>{selfKeyDate(item.occurred_at)}</time>
+            <strong className={item.delta_micro.startsWith('-') ? 'self-wallet-activity-negative' : 'self-wallet-activity-positive'}>{item.delta_micro.startsWith('-') ? '' : '+'}{item.delta_micro} micro</strong>
+          </li>)}</ol>}
+      {page.next_cursor ? <Button variant="secondary" disabled={loading} onClick={() => { void readPage(page.next_cursor ?? undefined) }}>{loading ? '正在读取…' : '加载更多本地调整'}</Button> : null}
     </div> : null}
   </section>
 }
@@ -2128,6 +2210,8 @@ export function SelfApp() {
           ? <SelfClassificationPanel key={`wallet-classification:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true && session.features?.employee_self_wallet_entry_classification === true && session.features?.employee_self_redemption_credit_history === true
           ? <SelfRedemptionCreditHistoryPanel key={`redemption-history:${session.profile.id}:${session.csrf_token}`} /> : null}
+        {session.features?.employee_self_wallet_balance === true && session.features?.employee_self_wallet_activity === true && session.features?.employee_self_wallet_entry_classification === true && session.features?.employee_self_admin_adjustment_history === true
+          ? <SelfAdminAdjustmentHistoryPanel key={`admin-adjustment-history:${session.profile.id}:${session.csrf_token}`} /> : null}
         {session.features?.employee_self_subscription_status === true
           ? <SelfSubscriptionStatusPanel key={`subscriptions:${session.profile.id}:${session.csrf_token}`} csrf={session.csrf_token} cancelEnabled={session.features?.employee_self_subscription_cancel === true} oneShotEnabled={session.features?.employee_self_one_shot_renewal_disarm === true} purchaseSnapshotEnabled={session.features?.employee_self_subscription_purchase_snapshot === true} renewalLinksEnabled={session.features?.employee_self_subscription_renewal_links === true} renewalEnabled={session.features?.employee_self_subscription_renewal === true} /> : null}
         {session.features?.employee_self_plan_catalog === true && session.features?.employee_self_plan_purchase !== true
