@@ -521,9 +521,6 @@ func (a *App) Handler() http.Handler {
 		mux.HandleFunc("/", a.serveWeb)
 	}
 	var handler http.Handler = mux
-	if a.cfg.EmployeeSelfSubscriptionRenewalLinksEnabled {
-		handler = a.selfRenewalLinksRouteGuard(handler)
-	}
 	if a.cfg.EmployeeSelfSubscriptionRenewalEnabled {
 		handler = a.selfMonthlyRenewalRouteGuard(handler)
 	}
@@ -539,6 +536,11 @@ func (a *App) Handler() http.Handler {
 	// Run outside sibling guards so a cleaning redirect into a disabled
 	// snapshot is rejected before ServeMux exposes the canonical route.
 	handler = a.selfPurchaseSnapshotRouteGuard(handler)
+	// Independently authored for
+	// docs/employee-self-subscription-renewal-links-route-boundary-contract.md.
+	// This must wrap sibling guards as well as ServeMux: their decoded cleaning
+	// views may otherwise claim an encoded renewal-links tail as their own.
+	handler = a.selfRenewalLinksRouteGuard(handler)
 	return requestMiddleware(handler)
 }
 
