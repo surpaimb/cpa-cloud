@@ -521,9 +521,10 @@ func (a *App) Handler() http.Handler {
 		mux.HandleFunc("/", a.serveWeb)
 	}
 	var handler http.Handler = mux
-	if a.cfg.EmployeeSelfSubscriptionRenewalLinksEnabled {
-		handler = a.selfRenewalLinksRouteGuard(handler)
-	}
+	// Independently authored for
+	// docs/employee-self-subscription-renewal-links-route-boundary-contract.md.
+	// Classify before ServeMux can redirect into a disabled renewal-links route.
+	handler = a.selfRenewalLinksRouteGuard(handler)
 	if a.cfg.EmployeeSelfSubscriptionRenewalEnabled {
 		handler = a.selfMonthlyRenewalRouteGuard(handler)
 	}

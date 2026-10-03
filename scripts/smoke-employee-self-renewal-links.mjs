@@ -1,11 +1,13 @@
 // Independently authored isolated-process acceptance for
-// docs/employee-self-subscription-renewal-links-contract.md.
+// docs/employee-self-subscription-renewal-links-contract.md and
+// docs/employee-self-subscription-renewal-links-route-boundary-contract.md.
 // Usage: CPA_CLOUD_ACCEPTANCE_TEMP_ROOT=<absolute scratch parent> node scripts/smoke-employee-self-renewal-links.mjs <absolute service exe> <go exe>
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdir, rm, stat } from 'node:fs/promises';
+import http from 'node:http';
 import path from 'node:path';
 import { adminClient, initialize, password as adminPassword, root, startServer, stopServer } from './next-batch-smoke-lib.mjs';
 
@@ -37,6 +39,37 @@ async function selfCall(route, { method = 'GET', cookie = '', body, expected = 2
   };
 }
 
+// Send the literal request-target and never follow a ServeMux cleaning redirect.
+// WHATWG fetch URL construction would normalize dot segments before dispatch.
+async function rawBoundaryCall(route, { method = 'GET', cookie = '', expected, code = '', allow = '' } = {}) {
+  const origin = new URL(processHandle.origin);
+  const result = await new Promise((resolve, reject) => {
+    const request = http.request({ hostname: origin.hostname, port: origin.port, method, path: route,
+      headers: cookie ? { Cookie: cookie } : {} }, response => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => { body += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body }));
+    });
+    request.setTimeout(10000, () => request.destroy(new Error('raw route timeout')));
+    request.on('error', reject);
+    request.end();
+  });
+  assert.equal(result.status, expected, `${method} ${route}: ${result.body.slice(0, 250)}`);
+  assert.equal(result.headers.location, undefined, `${method} ${route} redirected`);
+  assert.equal(result.headers.allow ?? '', allow, `${method} ${route} Allow`);
+  assert.equal(result.headers['cache-control'], 'no-store', `${method} ${route} Cache-Control`);
+  if (code && method !== 'HEAD') assert.equal(JSON.parse(result.body).error.code, code, `${method} ${route} error code`);
+}
+
+const boundaryPaths = [
+  '/self/api/v1/billing/subscriptions/absent/renewal-links',
+  '/self/api/v1/billing/subscriptions/absent/../absent/renewal-links',
+  '/self//api/v1/billing/subscriptions/absent/renewal-links',
+  '/self/api/./v1/billing/subscriptions/absent/renewal-links',
+];
+const boundaryMethods = ['GET', 'HEAD', 'POST', 'DELETE'];
+
 async function makeDue(subscriptionID) {
   const helper = spawn(go, ['run', './scripts/acceptance-set-renewal-links-due', '--db', path.join(scratch, 'cpa-cloud.db'), '--subscription', subscriptionID], {
     cwd: path.resolve(import.meta.dirname, '..'), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
@@ -57,6 +90,9 @@ try {
   await assert.rejects(stat(rejectedDir), { code: 'ENOENT' }, 'rejected --init must not create a data directory');
   await initialize(executable, scratch);
   processHandle = await startServer(executable, scratch, path.resolve('web/dist'));
+  for (const route of boundaryPaths) for (const method of boundaryMethods) {
+    await rawBoundaryCall(route, { method, expected: 404 });
+  }
   await selfCall('/self/api/v1/billing/subscriptions/absent/renewal-links', { expected: 404 });
   await stopServer(processHandle);
 
@@ -71,6 +107,14 @@ try {
   } });
   const cookie = signedIn.cookie;
   assert.ok(cookie);
+  for (const [index, route] of boundaryPaths.entries()) for (const method of boundaryMethods) {
+    const canonical = index === 0;
+    await rawBoundaryCall(route, { method, cookie,
+      expected: canonical ? (method === 'GET' ? 404 : 405) : 400,
+      code: canonical ? (method === 'GET' ? 'not_found' : 'method_not_allowed') : 'invalid_request',
+      allow: canonical && method !== 'GET' ? 'GET' : '',
+    });
+  }
   const session = (await selfCall('/self/api/v1/session', { cookie })).value;
   assert.equal(session.features.employee_self_subscription_renewal_links, true);
   assert.equal(session.features.employee_self_wallet_balance, false);
