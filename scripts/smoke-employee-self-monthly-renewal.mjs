@@ -69,9 +69,11 @@ try {
   })).plan;
   const original = (await admin.request('/billing/subscriptions', 'POST', { operation_id: randomUUID(), owner, plan_id: plan.id })).subscription;
   const browser = (await admin.request('/billing/subscriptions', 'POST', { operation_id: randomUUID(), owner, plan_id: plan.id })).subscription;
+  const mobile = (await admin.request('/billing/subscriptions', 'POST', { operation_id: randomUUID(), owner, plan_id: plan.id })).subscription;
   await stopServer(processHandle);
   await makeDue(original.id);
   await makeDue(browser.id);
+  await makeDue(mobile.id);
   processHandle = await startServer(executable, scratch, path.resolve('web/dist'), flags);
   admin = adminClient(processHandle.origin);
   await admin.login();
@@ -101,7 +103,7 @@ try {
   const linked = (await admin.request(`/billing/subscriptions/${original.id}`)).successor_id;
   assert.equal(linked, first.subscription_id);
   const balance = await admin.request(`/billing/balances?owner_kind=employee&employee_id=${employee.id}&currency=USD`);
-  assert.equal(balance.balance_micro, '230');
+  assert.equal(balance.balance_micro, '240');
   const entries = await admin.request(`/billing/entries?resource_kind=subscription&resource_id=${first.subscription_id}`);
   assert.equal(entries.items.length, 2);
   await admin.request('/billing/settings', 'PUT', { operation_id: randomUUID(), expected_revision: 2, enabled: false });
@@ -116,7 +118,7 @@ try {
     admin = adminClient(processHandle.origin);
     await admin.login();
     await admin.request('/billing/settings', 'PUT', { operation_id: randomUUID(), expected_revision: 3, enabled: true });
-    console.log(`browser origin=${processHandle.origin} employee=${employee.id} target=${browser.id}`);
+    console.log(`browser origin=${processHandle.origin} employee=${employee.id} desktop=${browser.id} mobile=${mobile.id}`);
     process.stdin.resume();
     await new Promise(resolve => process.stdin.once('end', resolve));
   }

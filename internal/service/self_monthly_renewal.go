@@ -1,6 +1,7 @@
 package service
 
-// Independently authored for docs/employee-self-monthly-renewal-contract.md.
+// Independently authored for docs/employee-self-monthly-renewal-contract.md
+// and docs/employee-self-monthly-renewal-route-boundary-contract.md.
 // Both HTTP writes retain current-password and session checks through commit.
 
 import (
@@ -49,27 +50,87 @@ func (a *App) selfMonthlyRenewalTime() time.Time {
 }
 
 func selfMonthlyRenewalShape(r *http.Request) string {
-	const prefix = "/self/api/v1/billing/subscriptions/"
-	escaped, decoded := r.URL.EscapedPath(), r.URL.Path
-	for _, suffix := range []string{"/renewal-quotes", "/renew"} {
-		if selfMonthlyRenewalSegment(escaped, prefix, suffix) || selfMonthlyRenewalSegment(decoded, prefix, suffix) {
+	escaped := r.URL.EscapedPath()
+	if len(escaped) > 32768 || !strings.HasPrefix(escaped, "/") {
+		return ""
+	}
+	segments := strings.Split(strings.TrimPrefix(escaped, "/"), "/")
+	if len(segments) > 256 {
+		return ""
+	}
+	// Literal ServeMux cleaning has first claim: an alias whose cleaned
+	// destination is a sibling must not be taken by this route's guard.
+	if suffix, decided := selfMonthlyRenewalOperation(selfMonthlyRenewalClean(segments)); decided {
+		return suffix
+	}
+	views := make([][]string, 0, 3)
+	for pass := 0; pass < 3; pass++ {
+		views = append(views, segments)
+		decoded := make([]string, len(segments))
+		changed := false
+		for i, segment := range segments {
+			value, err := url.PathUnescape(segment)
+			if err != nil {
+				return ""
+			}
+			decoded[i] = value
+			changed = changed || value != segment
+		}
+		if !changed {
+			break
+		}
+		segments = decoded
+	}
+	for _, view := range views {
+		if suffix, decided := selfMonthlyRenewalOperation(view); decided {
+			return suffix
+		}
+	}
+	for _, view := range views {
+		if suffix, decided := selfMonthlyRenewalOperation(selfMonthlyRenewalClean(view)); decided {
 			return suffix
 		}
 	}
 	return ""
 }
 
-// Independently authored sibling-route boundary for
-// docs/employee-self-subscription-renewal-links-contract.md.
-func selfMonthlyRenewalSegment(path, prefix, suffix string) bool {
-	if !strings.HasPrefix(path, prefix) {
-		return false
+func selfMonthlyRenewalClean(segments []string) []string {
+	cleaned := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		switch segment {
+		case "", ".":
+			continue
+		case "..":
+			if len(cleaned) != 0 {
+				cleaned = cleaned[:len(cleaned)-1]
+			}
+		default:
+			cleaned = append(cleaned, segment)
+		}
 	}
-	tail := strings.TrimPrefix(path, prefix)
-	// A route name must end at a path-segment boundary. A substring match on
-	// "/renew" would otherwise intercept sibling routes such as
-	// "/renewal-links" before their own guard or handler can run.
-	return strings.HasSuffix(tail, suffix) || strings.Contains(tail, suffix+"/")
+	return cleaned
+}
+
+func selfMonthlyRenewalOperation(segments []string) (string, bool) {
+	if len(segments) < 7 || segments[0] != "self" || segments[1] != "api" ||
+		segments[2] != "v1" || segments[3] != "billing" || segments[4] != "subscriptions" {
+		return "", false
+	}
+	for _, operation := range segments[6:] {
+		if operation == "" || operation == "." || operation == ".." {
+			continue
+		}
+		switch operation {
+		case "renewal-quotes":
+			return "/renewal-quotes", true
+		case "renew":
+			return "/renew", true
+		default:
+			// Encoded operation names may need one more decoding pass.
+			return "", !strings.ContainsRune(operation, '%')
+		}
+	}
+	return "", false
 }
 
 func malformedSelfMonthlyRenewalPath(r *http.Request, suffix string) bool {
@@ -98,6 +159,10 @@ func (a *App) selfMonthlyRenewalRouteGuard(next http.Handler) http.Handler {
 		suffix := selfMonthlyRenewalShape(r)
 		if suffix == "" {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if !a.cfg.EmployeeSelfSubscriptionRenewalEnabled {
+			http.NotFound(w, r)
 			return
 		}
 		if malformedSelfMonthlyRenewalPath(r, suffix) {

@@ -521,9 +521,6 @@ func (a *App) Handler() http.Handler {
 		mux.HandleFunc("/", a.serveWeb)
 	}
 	var handler http.Handler = mux
-	if a.cfg.EmployeeSelfSubscriptionRenewalEnabled {
-		handler = a.selfMonthlyRenewalRouteGuard(handler)
-	}
 	handler = a.selfRedemptionRouteGuard(handler)
 	handler = a.selfClassificationRouteGuard(handler)
 	handler = a.selfRedemptionHistoryRouteGuard(handler)
@@ -541,6 +538,11 @@ func (a *App) Handler() http.Handler {
 	// This must wrap sibling guards as well as ServeMux: their decoded cleaning
 	// views may otherwise claim an encoded renewal-links tail as their own.
 	handler = a.selfRenewalLinksRouteGuard(handler)
+	// Independently authored for
+	// docs/employee-self-monthly-renewal-route-boundary-contract.md.
+	// Reject monthly route aliases before sibling guards and ServeMux cleaning,
+	// including while the monthly feature is disabled.
+	handler = a.selfMonthlyRenewalRouteGuard(handler)
 	return requestMiddleware(handler)
 }
 
