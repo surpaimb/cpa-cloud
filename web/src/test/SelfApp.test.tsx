@@ -13,6 +13,7 @@
 // docs/employee-self-wallet-entry-classification-contract.md.
 // docs/employee-self-subscription-status-contract.md.
 // docs/employee-self-plan-catalog-contract.md.
+// docs/employee-self-plan-catalog-copy-truth-contract.md.
 // docs/employee-self-plan-purchase-contract.md.
 // docs/employee-self-subscription-cancel-contract.md.
 // docs/employee-self-one-shot-disarm-contract.md.
@@ -29,6 +30,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SelfApp } from '../SelfApp'
 
 const reply = (status: number, body: unknown) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
+const neutralCatalogCopy = '仅展示查询时该币种已启用套餐的当前信息，不是权益或持久报价。此目录只读，不会在这里购买、取消或续购；本人能否执行这些操作，以各自独立授权入口及服务端资格校验为准。'
 const emptyTokenSummary = {
   from: '2026-09-30T00:00:00Z', to: '2026-10-01T00:00:00Z',
   requests: { total: '0', pending: '0', succeeded: '0', failed: '0', cancelled: '0', interrupted: '0' },
@@ -1199,6 +1201,7 @@ describe('employee self-service page', () => {
     render(<SelfApp />)
     expect(await screen.findByRole('heading', { name: '你好，Alice' })).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '当前可用套餐目录' })).not.toBeInTheDocument()
+    expect(screen.queryByText(neutralCatalogCopy)).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/plans'))).toBe(false)
   })
 
@@ -1226,7 +1229,10 @@ describe('employee self-service page', () => {
     await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
     expect(await within(panel).findByText('Current monthly')).toBeInTheDocument()
     expect(within(panel).getByText('13 micro USD')).toBeInTheDocument()
-    expect(within(panel).getByText(/购买、取消与续购仍须管理员操作/)).toBeInTheDocument()
+    expect(within(panel).getByText(neutralCatalogCopy)).toBeInTheDocument()
+    expect(within(panel).queryByText(/购买、取消与续购仍须管理员操作/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '本人钱包购买一次性套餐' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('purchase-quotes'))).toBe(false)
     await userEvent.click(within(panel).getByRole('button', { name: '加载更多套餐' }))
     expect(await within(panel).findByText('Current once')).toBeInTheDocument()
     expect(within(panel).getByText('Current monthly')).toBeInTheDocument()
@@ -1237,6 +1243,70 @@ describe('employee self-service page', () => {
     expect(await within(panel).findByText('当前套餐目录不可用；未展示旧报价。')).toBeInTheDocument()
     expect(within(panel).queryByText('Current monthly')).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/billing/plans'))).toHaveLength(3)
+  })
+
+  it('keeps the catalog read-only while separately authorized cancellation remains available', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_plan_catalog: true, employee_self_plan_purchase: false, employee_self_subscription_status: true, employee_self_subscription_cancel: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/plans?currency=USD&limit=20')) return reply(200, { currency: 'USD', available: true, items: [{ plan_id: 'plan-one', name: 'Current one-time', interval: 'one_time', price_micro: '13', credit_micro: '29', revision: 2 }], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [{ subscription_id: 'sub-active', interval: 'one_time', status: 'active', revision: 1, started_at: '2026-10-01T08:00:00Z', period_end_at: null, cancelled_at: null }], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const catalog = await screen.findByRole('region', { name: '当前可用套餐目录' })
+    const subscriptions = screen.getByRole('region', { name: '我的订阅状态' })
+    expect(within(catalog).getByText(neutralCatalogCopy)).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '本人钱包购买一次性套餐' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/plans') || String(url).includes('/billing/subscriptions'))).toBe(false)
+    await userEvent.type(within(catalog).getByLabelText('套餐币种（三位大写字母，如 USD）'), 'USD')
+    await userEvent.click(within(catalog).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(catalog).findByText('Current one-time')).toBeInTheDocument()
+    expect(within(catalog).queryByRole('button', { name: /购买|取消|续购/ })).not.toBeInTheDocument()
+    await userEvent.click(within(subscriptions).getByRole('button', { name: '读取我的订阅状态' }))
+    await within(subscriptions).findByText('sub-active')
+    await userEvent.click(within(subscriptions).getByRole('button', { name: '取消此订阅' }))
+    expect(within(subscriptions).getByRole('heading', { name: '确认取消本人订阅' })).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('purchase-quotes') || String(url).endsWith('/cancel'))).toBe(false)
+  })
+
+  it('keeps the catalog read-only while separately authorized monthly renewal remains available', async () => {
+    const profile = { id: 'emp-1', name: 'Alice', department: '', status: 'active' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/session')) return reply(200, { csrf_token: 'self-csrf', profile, features: { employee_self_plan_catalog: true, employee_self_plan_purchase: false, employee_self_wallet_balance: true, employee_self_subscription_status: true, employee_self_subscription_renewal: true } })
+      if (url.endsWith('/keys')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/requests')) return reply(200, { items: [], next_cursor: null })
+      if (url.endsWith('/usage/summary')) return reply(200, emptyTokenSummary)
+      if (url.endsWith('/billing/plans?currency=USD&limit=20')) return reply(200, { currency: 'USD', available: true, items: [{ plan_id: 'plan-monthly', name: 'Current monthly', interval: 'monthly', price_micro: '13', credit_micro: '29', revision: 2 }], next_cursor: null })
+      if (url.endsWith('/billing/subscriptions?limit=20')) return reply(200, { items: [
+        { subscription_id: 'sub-expired', interval: 'monthly', status: 'expired', started_at: '2026-01-31T08:00:00Z', period_end_at: '2026-02-28T08:00:00.000000000Z', cancelled_at: null },
+        { subscription_id: 'sub-active', interval: 'monthly', status: 'active', started_at: '2026-10-01T08:00:00Z', period_end_at: '2026-11-01T08:00:00.000000000Z', cancelled_at: null },
+      ], next_cursor: null })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SelfApp />)
+    const catalog = await screen.findByRole('region', { name: '当前可用套餐目录' })
+    const subscriptions = screen.getByRole('region', { name: '我的订阅状态' })
+    expect(within(catalog).getByText(neutralCatalogCopy)).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '本人钱包购买一次性套餐' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/plans') || String(url).includes('/billing/subscriptions') || String(url).includes('/billing/balance'))).toBe(false)
+    await userEvent.type(within(catalog).getByLabelText('套餐币种（三位大写字母，如 USD）'), 'USD')
+    await userEvent.click(within(catalog).getByRole('button', { name: '读取当前套餐' }))
+    expect(await within(catalog).findByText('Current monthly')).toBeInTheDocument()
+    expect(within(catalog).queryByRole('button', { name: /购买|取消|续购/ })).not.toBeInTheDocument()
+    await userEvent.click(within(subscriptions).getByRole('button', { name: '读取我的订阅状态' }))
+    const renewal = await within(subscriptions).findByRole('region', { name: '订阅 sub-expired 的月度续购' })
+    expect(within(renewal).getByRole('button', { name: '获取此订阅的续购报价' })).toBeInTheDocument()
+    expect(within(subscriptions).getAllByRole('button', { name: '获取此订阅的续购报价' })).toHaveLength(1)
+    expect(within(subscriptions).queryByRole('button', { name: '取消此订阅' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('purchase-quotes') || String(url).includes('renewal-quotes') || String(url).endsWith('/renew'))).toBe(false)
   })
 
   it('accepts catalog page order using the server UTF-8 ID order', async () => {
@@ -2207,6 +2277,8 @@ describe('employee self plan purchase', () => {
     vi.stubGlobal('fetch', fetchMock)
     render(<SelfApp />)
     const panel = await screen.findByRole('region', { name: '本人钱包购买一次性套餐' })
+    expect(screen.queryByRole('region', { name: '当前可用套餐目录' })).not.toBeInTheDocument()
+    expect(screen.queryByText(neutralCatalogCopy)).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/billing/'))).toBe(false)
     await userEvent.type(within(panel).getByLabelText('购买币种（三位大写字母，如 USD）'), 'USD')
     await userEvent.click(within(panel).getByRole('button', { name: '读取当前套餐' }))
