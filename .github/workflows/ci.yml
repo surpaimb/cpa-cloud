@@ -74,6 +74,11 @@ jobs:
           CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-redemption
           CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
         run: node scripts/smoke-employee-self-redemption.mjs "$RUNNER_TEMP/cpa-cloud"
+      - name: Test employee self redemption route boundary against isolated processes
+        env:
+          CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-redemption-route-boundary
+          CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
+        run: node scripts/smoke-employee-self-redemption-route-boundary.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee wallet activity against an isolated process
         run: node scripts/smoke-employee-self-wallet-activity.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee wallet entry classifications against an isolated process
