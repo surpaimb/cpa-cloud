@@ -76,6 +76,8 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags.BoolVar(&cfg.EmployeeSelfRedemptionCreditHistoryEnabled, "employee-self-redemption-credit-history-enabled", false, "allow enrolled employees to read verified history of their own self-redemption credits (requires self service, wallet balance, wallet activity, and entry classification)")
 	// Independently authored for docs/employee-self-admin-adjustment-history-contract.md.
 	flags.BoolVar(&cfg.EmployeeSelfAdminAdjustmentHistoryEnabled, "employee-self-admin-adjustment-history-enabled", false, "allow enrolled employees to read verified local administrator adjustments to their direct wallet (requires self service, wallet balance, wallet activity, and entry classification)")
+	// Independently authored for docs/employee-self-topup-credit-history-contract.md.
+	flags.BoolVar(&cfg.EmployeeSelfTopupCreditHistoryEnabled, "employee-self-topup-credit-history-enabled", false, "allow enrolled employees to read verified gross local callback credits in their direct wallet (requires self service, wallet balance, wallet activity, and entry classification)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionStatusEnabled, "employee-self-subscription-status-enabled", false, "allow enrolled employees to read minimal status of their own existing subscriptions (requires self service)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled, "employee-self-subscription-purchase-snapshot-enabled", false, "allow enrolled employees to read a verified local wallet purchase snapshot for one own subscription (requires self service, subscription status, and wallet balance)")
 	flags.BoolVar(&cfg.EmployeeSelfSubscriptionRenewalLinksEnabled, "employee-self-subscription-renewal-links-enabled", false, "allow enrolled employees to read verified predecessor/successor IDs for one own subscription (requires self service and subscription status)")
@@ -151,6 +153,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	if cfg.EmployeeSelfAdminAdjustmentHistoryEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled || !cfg.EmployeeSelfWalletActivityEnabled || !cfg.EmployeeSelfWalletEntryClassificationEnabled) {
 		return 1, errors.New("--employee-self-admin-adjustment-history-enabled requires --employee-self-service-enabled, --employee-self-wallet-balance-enabled, --employee-self-wallet-activity-enabled, and --employee-self-wallet-entry-classification-enabled")
+	}
+	if cfg.EmployeeSelfTopupCreditHistoryEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled || !cfg.EmployeeSelfWalletActivityEnabled || !cfg.EmployeeSelfWalletEntryClassificationEnabled) {
+		return 1, errors.New("--employee-self-topup-credit-history-enabled requires --employee-self-service-enabled, --employee-self-wallet-balance-enabled, --employee-self-wallet-activity-enabled, and --employee-self-wallet-entry-classification-enabled")
 	}
 	if cfg.EmployeeSelfSubscriptionStatusEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return 1, errors.New("--employee-self-subscription-status-enabled requires --employee-self-service-enabled")

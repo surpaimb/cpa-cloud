@@ -75,6 +75,9 @@ type App struct {
 	// Independently authored for docs/employee-self-admin-adjustment-history-contract.md.
 	selfAdminAdjustmentBeforeWrite func()
 	selfAdminAdjustmentNonce       func([]byte) (int, error)
+	// Independently authored for docs/employee-self-topup-credit-history-contract.md.
+	selfTopupCreditBeforeWrite func()
+	selfTopupCreditNonce       func([]byte) (int, error)
 	// Independently authored for docs/employee-self-key-revocation-contract.md.
 	// Test-only SQL boundary hooks; production leaves both nil.
 	selfKeyRevokeBeforeTx func()
@@ -172,6 +175,9 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	}
 	if cfg.EmployeeSelfAdminAdjustmentHistoryEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled || !cfg.EmployeeSelfWalletActivityEnabled || !cfg.EmployeeSelfWalletEntryClassificationEnabled) {
 		return nil, errors.New("employee self admin adjustment history requires employee self service, wallet balance, wallet activity, and entry classification")
+	}
+	if cfg.EmployeeSelfTopupCreditHistoryEnabled && (!cfg.EmployeeSelfServiceEnabled || !cfg.EmployeeSelfWalletBalanceEnabled || !cfg.EmployeeSelfWalletActivityEnabled || !cfg.EmployeeSelfWalletEntryClassificationEnabled) {
+		return nil, errors.New("employee self topup credit history requires employee self service, wallet balance, wallet activity, and entry classification")
 	}
 	if cfg.EmployeeSelfSubscriptionStatusEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return nil, errors.New("employee self subscription status requires employee self service")
@@ -525,6 +531,7 @@ func (a *App) Handler() http.Handler {
 	handler = a.selfClassificationRouteGuard(handler)
 	handler = a.selfRedemptionHistoryRouteGuard(handler)
 	handler = a.selfAdminAdjustmentRouteGuard(handler)
+	handler = a.selfTopupCreditRouteGuard(handler)
 	handler = a.selfEstimatedCostRouteGuard(handler)
 	handler = a.selfOneShotRouteGuard(handler)
 	handler = a.selfCancelRouteGuard(handler)
@@ -612,6 +619,7 @@ func (a *App) systemStatus(w http.ResponseWriter, _ *http.Request, _ adminSessio
 			"employee_self_wallet_entry_classification":     a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled,
 			"employee_self_redemption_credit_history":       a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled && a.cfg.EmployeeSelfRedemptionCreditHistoryEnabled,
 			"employee_self_admin_adjustment_history":        a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled && a.cfg.EmployeeSelfAdminAdjustmentHistoryEnabled,
+			"employee_self_topup_credit_history":            a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfWalletActivityEnabled && a.cfg.EmployeeSelfWalletEntryClassificationEnabled && a.cfg.EmployeeSelfTopupCreditHistoryEnabled,
 			"employee_self_subscription_status":             a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled,
 			"employee_self_subscription_purchase_snapshot":  a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfWalletBalanceEnabled && a.cfg.EmployeeSelfSubscriptionPurchaseSnapshotEnabled,
 			"employee_self_subscription_renewal_links":      a.cfg.EmployeeSelfServiceEnabled && a.cfg.EmployeeSelfSubscriptionStatusEnabled && a.cfg.EmployeeSelfSubscriptionRenewalLinksEnabled,
