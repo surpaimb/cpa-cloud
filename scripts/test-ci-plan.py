@@ -74,6 +74,13 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(result['core'])
         self.assertFalse(any(result[key] for key in ('windows', 'linux', 'macos')))
 
+    # Independently authored for docs/employee-self-estimated-cost-route-boundary-contract.md.
+    def test_estimated_cost_boundary_smoke_runs_only_core(self):
+        result = plan.classify(['scripts/smoke-employee-self-estimated-cost-route-boundary.mjs'])
+        self.assertTrue(result['core'])
+        self.assertFalse(result['web'])
+        self.assertFalse(any(result[key] for key in ('windows', 'linux', 'macos')))
+
 
 class ServiceRaceShardTests(unittest.TestCase):
     def test_default_case_parser_excludes_benchmarks_and_rejects_unknown_output(self):

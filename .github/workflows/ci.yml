@@ -107,6 +107,12 @@ jobs:
           CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-estimated-cost
           CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
         run: node scripts/smoke-employee-self-estimated-cost-summary.mjs "$RUNNER_TEMP/cpa-cloud"
+      # Independently authored for docs/employee-self-estimated-cost-route-boundary-contract.md.
+      - name: Test employee estimated-cost route boundary against isolated processes
+        env:
+          CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-estimated-cost-route-boundary
+          CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
+        run: node scripts/smoke-employee-self-estimated-cost-route-boundary.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee subscription status against an isolated process
         run: node scripts/smoke-employee-self-subscription-status.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee self-cancellation against an isolated process
