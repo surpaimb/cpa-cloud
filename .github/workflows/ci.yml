@@ -127,6 +127,12 @@ jobs:
         run: node scripts/smoke-employee-self-one-shot-disarm.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee plan catalog against an isolated process
         run: node scripts/smoke-employee-self-plan-catalog.mjs "$RUNNER_TEMP/cpa-cloud"
+      # Independently authored for docs/employee-self-plan-purchase-route-boundary-contract.md.
+      - name: Test employee plan-purchase POST route boundary against isolated processes
+        env:
+          CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-plan-purchase-route-boundary
+          CPA_CLOUD_ACCEPTANCE_FORBID_PORT: '8787'
+        run: node scripts/smoke-employee-self-plan-purchase-route-boundary.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee monthly renewal against an isolated process
         env:
           CPA_CLOUD_ACCEPTANCE_TEMP_ROOT: ${{ runner.temp }}/employee-self-monthly-renewal
