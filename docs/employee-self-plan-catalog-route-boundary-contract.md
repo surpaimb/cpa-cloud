@@ -1,12 +1,12 @@
 # ID-05 / BILL-03 员工套餐目录 GET 路由形状边界合同
 
-状态：2026-10-04，开发预览、合同先行。起点固定为已合并 `main` `c03c9f7f81ffbe5dde006607ce8cc055277f42a7`（tree `a8026de908fa2a1f46ea75cec25c991a6eabdae3`）。本文只规定未来一处默认关闭的本人目录**读取路由形状**修复；目前没有据此完成修前动态证伪、实现、测试、GitHub 编译或发布。业务语义仍由[套餐目录合同](employee-self-plan-catalog-contract.md)规定，身份来自[员工自助基础合同](employee-self-service-foundation-contract.md)；[购买 POST 边界合同](employee-self-plan-purchase-route-boundary-contract.md)及[订阅状态合同](employee-self-subscription-status-contract.md)各自拥有原路由。整体约束见[产品计划](product-plan.md)、[独立实现规则](independent-implementation.md)、[开发计划](development-plan.md)和[预览接口](preview-contract.md)。
+状态：2026-10-04，开发预览、合同先行；本合同原本以本地文档提交 `ea7fdd36ce55120d6c4982c9f7ea48b68f541ae7` 独立冻结。起点固定为已合并 `main` `c03c9f7f81ffbe5dde006607ce8cc055277f42a7`（tree `a8026de908fa2a1f46ea75cec25c991a6eabdae3`）。根任务审合同后，已对旧基线做独立修前真 TCP 证伪，证据登记见下文；这不代表本批修后测试、GitHub 编译或发布已通过。本文仅规定默认关闭的本人目录**读取路由形状**修复。业务语义仍由[套餐目录合同](employee-self-plan-catalog-contract.md)规定，身份来自[员工自助基础合同](employee-self-service-foundation-contract.md)；[购买 POST 边界合同](employee-self-plan-purchase-route-boundary-contract.md)及[订阅状态合同](employee-self-subscription-status-contract.md)各自拥有原路由。整体约束见[产品计划](product-plan.md)、[独立实现规则](independent-implementation.md)、[开发计划](development-plan.md)和[预览接口](preview-contract.md)。
 
 ## 要保护的入口和静态理由
 
 本合同把 `P = /self/api/v1/billing/plans` 作为唯一目录路径。既有 `--employee-self-plan-catalog-enabled` 默认关闭，且启用要求员工自助总开关；本批不改 flag、前置条件或 capability。开启时原注册为 Go `ServeMux` 的 `GET P`，其模式**也匹配 `HEAD P`**；不能另加 HEAD handler、把 HEAD 当作错误方法，或把 HEAD 响应伪装为完整 GET 正文。目录实际成功仍需当前有效的 self 会话，并遵从原 `currency`、`limit`、`cursor`、正文和商业开关处理。关闭时 canonical GET/HEAD 仍是 404。
 
-只读静态核对发现，[`self_service.go`](../internal/service/self_service.go) 只在目录开关开启时注册 canonical `GET P`；[`app.go`](../internal/service/app.go) 的守卫链在 `ServeMux` 外，但没有目录专属的路径守卫。Go 的 `ServeMux` 会在分派前为点段和重复斜线发出清理重定向。因此“开关关闭时不注册路由”本身不足以证明畸形目录目标不会先得到 `Location`；这仅是**待动态证伪的风险**，不是已观察到的本基线行为，更不是越权读取证据。不得把旧购买 POST 的修前红套用到 GET/HEAD 目录。
+只读静态核对发现，[`self_service.go`](../internal/service/self_service.go) 只在目录开关开启时注册 canonical `GET P`；原 [`app.go`](../internal/service/app.go) 的守卫链在 `ServeMux` 外，但没有目录专属的路径守卫。Go 的 `ServeMux` 会在分派前为点段和重复斜线发出清理重定向。下文旧基线实测证明“开关关闭时不注册路由”不足以阻止这两类畸形目录目标先得到 `Location`；这**不是越权读取证据**，也不借用购买 POST 的修前红。
 
 ## 路径归属：只用别名证据拒绝
 
@@ -33,11 +33,13 @@
 
 管理员 Cookie、员工模型 Bearer Key 和匿名请求不是 self 读会话。关态 404 早于这些身份及 Origin 失败；开态畸形形状的认证优先于 400。canonical 保持原 `requireSelf` 的先后顺序，不把“先形状后认证”的新增拒绝策略倒灌到业务 handler。新守卫不触发 bcrypt、限流、财务事务、写入、上游请求或日志中敏感字段；允许原 self 会话校验查询持久状态。目录成功、价格、分页与错误投影一律不改。
 
-## 后续先证伪、再实现的门槛
+## 旧基线修前证据与后续验收门槛
 
-根任务审完本地 doc-only 提交之前，不运行修前红、不启动服务/浏览器/测试、不改 Go/Web/脚本/测试、不 push、不开 PR/Ready、不手动触发 GitHub CI 或 native 包工作流。后续若获单独放行，先从**精确旧 main `c03c9f7...`** 的固定源码构建旧可执行文件，使用隔离 data-dir/WebDir、至少两个真实随机且非 `8787` 的回环监听端口；以原始 TCP 发送 origin-form 目标，客户端**不自动跟随重定向**。记录每个请求的首个 wire status、`Location`、`Allow`、`Cache-Control`、Content-Type、脱敏错误码与 WebDir marker，并在受控 Go 入口捕获同一请求的 `RequestURI`、`Path`、`RawPath`、`EscapedPath()`；不能把按规范推断的字段说成实际观测。所有进程结束后核对无遗留。
+根任务审完原 doc-only 提交后，从精确旧 `main c03c9f7...`/tree `a8026de...` 生成独立 `source.tar`（SHA-256 `A2C1C3BA4E3260903CB73E185FEDA645F53D6F21C26C618F584BAE369C1E94A1`），以 Go 1.26.8 编译固定旧 exe（SHA-256 `E4E30B54BE523B862E6650EA50EC063FE412A2FD64696896F5219BC4F18DDE20`）。隔离 data-dir/WebDir 与随机非 `8787` 回环端口下，原始 TCP origin-form、无自动跟随重定向共记录 **94** 个首响应；另有 **20** 个同版本 Go 解析器独立捕获，字段为 `RequestURI`、`Path`、`RawPath`、`EscapedPath()`。该捕获器**不是旧服务内埋点**，不能冒称旧 exe 直接输出字段。脱敏本地证据 `evidence-v2.json` 的 SHA-256 为 `A11163EEBD3B807C713C5F8ECC46B9C3E1E92BD3D7CE1BAAF2F208A7F897A553`；捕获端口 `53414`、服务关/开端口 `53437`/`53499` 及相应 PID 已核对退出、端口关闭。
 
-修前矩阵至少覆盖目录 flag 关/开 × 匿名/有效 self 读会话 × GET/HEAD，目标包括 canonical `P?currency=USD`、`/self/api/v1/billing//plans`、`/self/api/v1/billing/./plans`、`P/extra`、大小写/编码别名及 `plansx`、`plans-other`、`plans%2Dother`，并记录 POST P、购买 Q/S 与 GET 订阅路径的邻居对照；Origin 错/重复、管理员 Cookie/模型 Key、长 query、预算边缘、多层编码作为扩展证据。只有实际观察到至少一条可复现的**首个**不合约重定向，并保留对应开关、身份、方法对照，才可据此说明旧基线缺口；若旧行为、Go 字段或外层兄弟优先级与本文假设不符，应停下向根任务报告，不扩大归属或先写修复。静态推测和 `httptest` 单独都不算修前 wire 证明。
+目录 flag 关/开 × 匿名/有效 self 读会话 × GET/HEAD 的双斜线 `/self/api/v1/billing//plans?currency=USD` 与点段 `/self/api/v1/billing/./plans?currency=USD` 共 **16** 个首跳均为 `307`、`Location: /self/api/v1/billing/plans?currency=USD`、无 `Allow`、有 `Cache-Control: no-store`、`text/html`；GET 返回 75 字节重定向 HTML，HEAD 无正文，均无 WebDir marker。canonical 关态 404、开态匿名 401/有效 self 200；`plansx`、`plans-other`、`plans%2Dother` 保持 404。旧 `GET S` 仍为 200，`GET` 订阅点段仍首跳 307；购买 Q/S POST 则受其各自开关和现有守卫控制。`%70lans` 旧开态有效 self 实际到达目录并返回 200，修后只能用作拒绝证据。旧对照的目录关/开同时改变了购买 flag，故**不能仅凭此证明 catalog-only 下购买 owner 不变**；修后必须另做独立开关组合。独立 Go 捕获对双斜线/点段保留了原 `RequestURI` 与 `Path`，两者 `RawPath` 为空；编码字母视图记录了已解码 `Path` 与保留编码的 `RawPath`。静态推测或 `httptest` 单独均不替代这些首跳证据。
+
+当前根任务仅放行**本地未暂存**最小实现与验证；根二审前不 stage/commit 实施，不 push、不开 PR/Ready、不手动触发 GitHub CI 或 native 包工作流。若修后 Go 字段、兄弟优先级或预算归属与本文合同冲突，先停报根任务，不扩范围。
 
 获准实现后，以独立撰写的分类单测和真实 wire 集成测试交叉覆盖上述矩阵、HEAD 无正文、开态 Origin/会话优先级、关态不进认证/DB、canonical 原 query/正文错误、wrong-method 原 owner、兄弟前后顺序、无 `Location`/`Allow`/有 no-store、无 WebDir 内容及财务读写。预算要专测 8191/8192/8193 字节 path、恰在边界的 `?`、长 query/`RawPath`、第 16/17 层才显露完整段、截断后伪终点，以及编码问号/井号和 percent dash 邻居。不可归属只能走原 owner。再分别报告定向 Go 测试、race/vet/build 与固定 HEAD 的 GitHub CI；不能把本合同、旧 PR67 的证据或未来计划写成已测试的结果。
 
