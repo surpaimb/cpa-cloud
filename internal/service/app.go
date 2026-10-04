@@ -527,6 +527,10 @@ func (a *App) Handler() http.Handler {
 		mux.HandleFunc("/", a.serveWeb)
 	}
 	var handler http.Handler = mux
+	// Independently authored for
+	// docs/employee-self-plan-purchase-route-boundary-contract.md.
+	// Existing self guards keep their precedence; only ServeMux is inside.
+	handler = a.selfPlanPurchaseRouteGuard(handler)
 	handler = a.selfRedemptionRouteGuard(handler)
 	handler = a.selfClassificationRouteGuard(handler)
 	handler = a.selfRedemptionHistoryRouteGuard(handler)
