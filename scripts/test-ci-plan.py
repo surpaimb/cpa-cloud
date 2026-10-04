@@ -51,6 +51,13 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(result['core'])
         self.assertFalse(any(result[key] for key in ('windows', 'linux', 'macos')))
 
+    # Independently authored for docs/employee-self-wallet-balance-route-boundary-contract.md.
+    def test_employee_wallet_balance_boundary_smoke_runs_only_core(self):
+        result = plan.classify(['scripts/smoke-employee-self-wallet-balance-route-boundary.mjs'])
+        self.assertTrue(result['core'])
+        self.assertFalse(result['web'])
+        self.assertFalse(any(result[key] for key in ('windows', 'linux', 'macos')))
+
     def test_employee_redemption_history_smoke_runs_core_without_packaging(self):
         result = plan.classify(['scripts/smoke-employee-self-redemption-credit-history.mjs'])
         self.assertTrue(result['core'])
