@@ -528,6 +528,10 @@ func (a *App) Handler() http.Handler {
 	}
 	var handler http.Handler = mux
 	// Independently authored for
+	// docs/employee-self-subscription-status-route-boundary-contract.md.
+	// Existing sibling guards run first; this only wraps ServeMux.
+	handler = a.selfSubscriptionCollectionRouteGuard(handler)
+	// Independently authored for
 	// docs/employee-self-wallet-balance-route-boundary-contract.md.
 	// Existing self guards run first; this guard only wraps ServeMux.
 	handler = a.selfWalletBalanceRouteGuard(handler)
