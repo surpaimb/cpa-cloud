@@ -163,9 +163,9 @@ fn validate_minimax_code_paths(
 }
 
 fn native_lock_path(config_path: &Path) -> Result<PathBuf, AppError> {
-    let parent = config_path.parent().ok_or_else(|| {
-        AppError::Config("MiniMax Code config.yaml 必须位于数据目录中".into())
-    })?;
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| AppError::Config("MiniMax Code config.yaml 必须位于数据目录中".into()))?;
     Ok(parent.join("config.yaml.lock"))
 }
 
@@ -276,9 +276,7 @@ mod tests {
         );
 
         let source = String::from_utf8(plan.config.desired_bytes.to_vec()).unwrap();
-        assert!(source.contains(
-            "defaultModel: \"custom_provider:cpa-cloud/vendor/model.beta\""
-        ));
+        assert!(source.contains("defaultModel: \"custom_provider:cpa-cloud/vendor/model.beta\""));
         assert!(source.contains("api: \"openai-responses\""));
         assert!(source.contains("apiKey: \"employee-secret\""));
         assert!(source.contains("baseURL: \"https://cpa.example.test/company/v1\""));
