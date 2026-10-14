@@ -83,8 +83,7 @@ pub fn plan_new_codex(
     let previous_ownership = read_optional(ownership_path)?;
     if previous_config.is_some() || previous_ownership.is_some() {
         return Err(AppError::Conflict(
-            "Codex 已存在 config.toml 或 CPA 所有权文件；create-only 安全阶段不会替换它们"
-                .into(),
+            "Codex 已存在 config.toml 或 CPA 所有权文件；create-only 安全阶段不会替换它们".into(),
         ));
     }
 
@@ -95,8 +94,7 @@ pub fn plan_new_codex(
     let mut provider = Table::new();
     provider["name"] = value("CPA Cloud");
     provider["base_url"] = value(normalize_cpa_base_url(&profile.base_url)?);
-    provider["experimental_bearer_token"] =
-        value(profile.employee_key.expose_secret().trim());
+    provider["experimental_bearer_token"] = value(profile.employee_key.expose_secret().trim());
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(false);
     provider["supports_websockets"] = value(false);
@@ -154,10 +152,7 @@ pub fn apply_new_codex(
     .map_err(|error| transaction_error("Codex", error))
 }
 
-fn validate_codex_paths(
-    config_relative: &Path,
-    ownership_relative: &Path,
-) -> Result<(), AppError> {
+fn validate_codex_paths(config_relative: &Path, ownership_relative: &Path) -> Result<(), AppError> {
     let config_name = config_relative.file_name().and_then(|value| value.to_str());
     let ownership_name = ownership_relative
         .file_name()
@@ -168,8 +163,7 @@ fn validate_codex_paths(
         || config_relative == ownership_relative
     {
         return Err(AppError::Config(
-            "Codex 安全写入只接受同一配置目录内的 config.toml 和 cpa-cloud.ownership.json"
-                .into(),
+            "Codex 安全写入只接受同一配置目录内的 config.toml 和 cpa-cloud.ownership.json".into(),
         ));
     }
     Ok(())
