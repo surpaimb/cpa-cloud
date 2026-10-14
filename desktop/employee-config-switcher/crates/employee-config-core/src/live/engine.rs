@@ -954,7 +954,7 @@ where
     // Revalidate the state parsed after sealing rather than trusting the
     // earlier parse. A same-length mutation between the two reads must not be
     // able to substitute a target, digest or recorded identity.
-    for (index, planned) in &sealed_state.files {
+    for planned in sealed_state.files.values() {
         let target = checked_target(root, &planned.target)?;
         let parent = target
             .parent()
@@ -981,7 +981,7 @@ where
     // every missing target is linked, prove that the held journal and its path
     // still identify the same, byte-for-byte sealed record. Re-check after
     // publication as well so observed concurrent mutation preserves evidence.
-    for planned in sealed_state.files.values() {
+    for (index, planned) in &sealed_state.files {
         let target = checked_target(root, &planned.target)?;
         let parent = target
             .parent()
