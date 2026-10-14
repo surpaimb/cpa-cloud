@@ -584,12 +584,14 @@ fn open_recovery_journal(path: &Path) -> Result<(File, bool), TransactionError> 
 #[cfg(windows)]
 fn open_recovery_journal(path: &Path) -> Result<(File, bool), TransactionError> {
     use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
 
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .share_mode(0)
+        // Permit the engine's own read-only path-identity probes, but deny any
+        // second writer for the lifetime of this recovery handle.
+        .share_mode(FILE_SHARE_READ)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .map_err(|source| io_error(path, source))?;
@@ -940,6 +942,7 @@ where
     if state.complete {
         before_cleanup(&journal_path)?;
         validate_journal_snapshot(&journal_path, &journal, &initial_snapshot)?;
+        drop(journal);
         cleanup_workspace(workspace, &state)?;
         return Ok(true);
     }
@@ -950,6 +953,7 @@ where
     if state.files.is_empty() {
         before_cleanup(&journal_path)?;
         validate_journal_snapshot(&journal_path, &journal, &initial_snapshot)?;
+        drop(journal);
         cleanup_workspace(workspace, &state)?;
         return Ok(false);
     }
@@ -968,6 +972,7 @@ where
         }
         before_cleanup(&journal_path)?;
         validate_journal_snapshot(&journal_path, &journal, &initial_snapshot)?;
+        drop(journal);
         cleanup_workspace(workspace, &state)?;
         return Ok(false);
     }
@@ -1111,6 +1116,10 @@ where
         }
     }
     validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
+    // Windows intentionally denies write/delete sharing during publication.
+    // Release that handle only after the final snapshot check; cleanup remains
+    // a separately documented path-based gate.
+    drop(journal);
     cleanup_workspace(workspace, &sealed_state)?;
     Ok(true)
 }

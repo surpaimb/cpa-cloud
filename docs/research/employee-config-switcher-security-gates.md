@@ -90,7 +90,7 @@ restart recovery verifies the target and completes cleanup. Parsed cleanup
 branches revalidate their initial snapshot before deleting known state.
 The prepared journal is sealed before the first target publication. Unix
 changes the held single-link journal to owner-read-only mode while retaining an
-exclusive advisory lock; Windows holds the journal with exclusive share mode.
+exclusive advisory lock; Windows holds the journal with write sharing denied.
 A new fault hook in the former snapshot-check-to-hard-link interval proves that
 a newly opened append writer is refused on Linux, macOS and Windows before the
 target is created. A writer that already held a Unix descriptor before sealing
