@@ -137,6 +137,7 @@ enum FaultPoint {
     Never,
     AfterWorkspace,
     AfterJournalCreated,
+    AfterBegin,
     AfterManifest,
     AfterPlanning,
     AfterStageBeforeJournal(usize),
@@ -207,6 +208,9 @@ fn apply_create_only_inner(
 
     let result = (|| {
         append_event(&mut journal, &journal_path, &JournalEvent::Begin)?;
+        if fault == FaultPoint::AfterBegin {
+            return Err(TransactionError::InjectedCrash);
+        }
         for (index, plan) in files.iter().enumerate() {
             let target = checked_target(&root, &plan.relative_path)?;
             let parent = target
@@ -666,6 +670,14 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
     if state.complete {
         cleanup_workspace(workspace, &state)?;
         return Ok(true);
+    }
+    // `Begin` is durable before any `Planned` event, secret stage, or target
+    // publication. A begun journal with no files is therefore an uncommitted
+    // pre-manifest orphan, never an all-staged transaction (where `all()` on an
+    // empty iterator would otherwise return true).
+    if state.files.is_empty() {
+        cleanup_workspace(workspace, &state)?;
+        return Ok(false);
     }
 
     let all_staged = state
@@ -1369,6 +1381,34 @@ mod tests {
             .unwrap()
             .path();
         assert_eq!(fs::metadata(workspace.join(JOURNAL_FILE)).unwrap().len(), 0);
+
+        recover_create_only(root.path()).unwrap();
+        assert_eq!(fs::read_dir(transaction_root).unwrap().count(), 0);
+        assert!(!root.path().join("tool/config.json").exists());
+    }
+
+    #[test]
+    fn crash_after_begin_before_first_plan_is_not_committed() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterBegin,
+        )
+        .expect_err("fault is injected");
+
+        let transaction_root = root.path().join(TRANSACTION_DIRECTORY);
+        let workspace = fs::read_dir(&transaction_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            fs::read_to_string(workspace.join(JOURNAL_FILE)).unwrap(),
+            "{\"state\":\"begin\"}\n"
+        );
 
         recover_create_only(root.path()).unwrap();
         assert_eq!(fs::read_dir(transaction_root).unwrap().count(), 0);
