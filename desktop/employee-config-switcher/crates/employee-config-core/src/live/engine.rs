@@ -1992,8 +1992,9 @@ mod tests {
             .unwrap()
             .path();
         let journal = workspace.join(JOURNAL_FILE);
+        let checked = checked_root(root.path()).unwrap();
 
-        let error = recover_workspace_inner(root.path(), &workspace, |path| {
+        let error = recover_workspace_inner(&checked, &workspace, |path| {
             let mut external = OpenOptions::new()
                 .append(true)
                 .open(path)
@@ -2005,7 +2006,10 @@ mod tests {
         })
         .expect_err("concurrent journal growth must block publication");
 
-        assert!(matches!(error, TransactionError::CorruptJournal(_)));
+        assert!(
+            matches!(error, TransactionError::CorruptJournal(_)),
+            "unexpected error: {error:?}"
+        );
         assert!(!root.path().join("tool/config.json").exists());
         assert_eq!(fs::read(&journal).unwrap().last(), Some(&b' '));
     }
@@ -2027,8 +2031,9 @@ mod tests {
             .unwrap()
             .path();
         let journal = workspace.join(JOURNAL_FILE);
+        let checked = checked_root(root.path()).unwrap();
 
-        let error = recover_workspace_inner(root.path(), &workspace, |_| {
+        let error = recover_workspace_inner(&checked, &workspace, |_| {
             Err(TransactionError::InjectedCrash)
         })
         .expect_err("restart is injected after preparation");
