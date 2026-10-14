@@ -11,8 +11,8 @@ pub mod discovery;
 pub mod error;
 pub mod jsonc_document;
 pub mod live;
-pub mod opencode;
 pub mod openclaw;
+pub mod opencode;
 pub mod pi;
 pub mod plan;
 pub mod secret;
@@ -20,10 +20,8 @@ pub mod secret;
 pub use detection::{detect_clients, ClientDetection};
 pub use discovery::{discover_configuration, ClientConfiguration, DiscoveryRequest};
 pub use error::AppError;
+pub use openclaw::{apply_new_openclaw, plan_new_openclaw, OpenClawPlan, OpenClawProfile};
 pub use opencode::{apply_new_opencode, plan_opencode, ConfigurationProfile, OpenCodePlan};
-pub use openclaw::{
-    apply_new_openclaw, plan_new_openclaw, OpenClawPlan, OpenClawProfile,
-};
 pub use pi::{apply_new_pi, plan_new_pi, PiPlan, PiProfile};
 pub use plan::FilePlan;
 pub use secret::SecretString;

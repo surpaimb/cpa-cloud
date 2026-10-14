@@ -148,8 +148,7 @@ fn validate_pi_paths(models_relative: &Path, ownership_relative: &Path) -> Resul
         || models_relative == ownership_relative
     {
         return Err(AppError::Config(
-            "Pi 安全写入只接受同一配置目录内的 models.json 和 cpa-cloud.ownership.json"
-                .into(),
+            "Pi 安全写入只接受同一配置目录内的 models.json 和 cpa-cloud.ownership.json".into(),
         ));
     }
     Ok(())

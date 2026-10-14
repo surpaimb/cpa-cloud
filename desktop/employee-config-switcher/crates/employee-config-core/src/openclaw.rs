@@ -280,11 +280,10 @@ mod tests {
         .unwrap();
         assert_eq!(receipt.created.len(), 2);
         assert!(temp.path().join(".openclaw/openclaw.json").exists());
-        assert!(
-            temp.path()
-                .join(".openclaw/cpa-cloud.ownership.json")
-                .exists()
-        );
+        assert!(temp
+            .path()
+            .join(".openclaw/cpa-cloud.ownership.json")
+            .exists());
     }
 
     #[test]
