@@ -19,6 +19,7 @@ License: MIT, copyright 2025 Jason Young. The upstream license is retained at
 | `crates/employee-config-core/src/live/patch/dotenv.rs` | `src-tauri/src/live/patch/dotenv.rs` | `43f246cdb22ab3c9127e15c814ce8c5e2fed2345` | `f8d931536323fd1a4f23055732e1de8f5894378a138ccefc249f06c8b3f18cb4` |
 | `crates/employee-config-core/src/live/patch/json.rs` | `src-tauri/src/live/patch/json.rs` | `46e0571b03aa781570b086ffbd64f87db4bc9ad3` | `b392b14a795eec9cca766a10e45f822c660bec52e3a0de09a79a88cdb6908ed9` |
 | `crates/employee-config-core/src/live/patch/toml.rs` | `src-tauri/src/live/patch/toml.rs` | `630153d77838deb52e97c0f62bf9163cd9f4792a` | `1abf777fe8a9169a318793da2ded9b37c9f96d55ac0ad12ebdbb6b50eee139b8` |
+| `crates/tests/config/claudeKeyFields.json` | `tests/config/claudeKeyFields.json` | `15afe94d5c828715b7606a7bdcc79023678ce51b` | `fc107056946a4290ef1fd12c9ce597329025906b5ffe7371d1a63b4b0ec76059` |
 
 These modules are the parser/patch substrate only. `live/engine.rs` in this
 workspace is newly authored CPA code containing only the digest helper required
