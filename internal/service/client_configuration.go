@@ -67,23 +67,16 @@ func (a *App) clientConfigurationModels(r *http.Request, auth employeeAuth, prot
 	}
 	wire := string(protocol)
 	geminiOnly := protocol == keypolicy.ProtocolGeminiGenerate
+	routeSQL, routeArgs := a.clientConfigurationRouteWitnessSQL("m", "u", wire, geminiOnly, auth.Policy.AccountGroupMode == keypolicy.ModeSelected, auth.KeyID)
 	query := `SELECT DISTINCT m.id FROM models m JOIN upstreams u ON u.id=m.upstream_id
-		WHERE m.enabled=1 AND m.archived=0 AND m.model_kind='generation' AND ` + a.availableModelRouteSQL(geminiOnly) + `
-		AND ((NOT EXISTS(SELECT 1 FROM model_account_pool_configs pc WHERE pc.model_id=m.id)
-			AND m.wire_protocol=? AND u.enabled=1 AND u.archived=0)
-		OR EXISTS(SELECT 1 FROM model_account_pool_routes pr JOIN upstreams pu ON pu.id=pr.upstream_id
-			WHERE pr.model_id=m.id AND pr.wire_protocol=? AND pu.enabled=1 AND pu.archived=0))`
-	args := []any{wire, wire}
+		WHERE m.enabled=1 AND m.archived=0 AND m.model_kind='generation' AND ` + routeSQL
+	args := routeArgs
 	if auth.Mode == "selected" {
 		query += ` AND EXISTS(SELECT 1 FROM employee_models em WHERE em.employee_id=? AND em.model_id=m.id)`
 		args = append(args, auth.EmployeeID)
 	}
 	if auth.Policy.ModelMode == keypolicy.ModeSelected {
 		query += ` AND EXISTS(SELECT 1 FROM access_key_policy_models kpm WHERE kpm.key_id=? AND kpm.model_id=m.id)`
-		args = append(args, auth.KeyID)
-	}
-	if auth.Policy.AccountGroupMode == keypolicy.ModeSelected {
-		query += ` AND ` + a.keyAccountGroupModelFilterSQL("m", geminiOnly)
 		args = append(args, auth.KeyID)
 	}
 	query += ` ORDER BY m.id`
@@ -107,4 +100,47 @@ func (a *App) clientConfigurationModels(r *http.Request, auth employeeAuth, prot
 	}
 	sort.Strings(models)
 	return models, nil
+}
+
+// clientConfigurationRouteWitnessSQL requires one route row to satisfy every
+// route-local condition for the requested client protocol. Keeping wire,
+// provider eligibility, recovery state and selected account group in the same
+// EXISTS prevents different pool members from jointly exposing a model that no
+// real dispatch can select.
+func (a *App) clientConfigurationRouteWitnessSQL(modelAlias, upstreamAlias, wire string, geminiOnly, selectedGroup bool, keyID string) (string, []any) {
+	if a.accountPool == nil {
+		if selectedGroup {
+			return "0", nil
+		}
+		return "(" + modelAlias + ".wire_protocol=? AND " + a.eligibleUpstreamSQL(upstreamAlias, geminiOnly) + ")", []any{wire}
+	}
+	if selectedGroup {
+		return `EXISTS(
+			SELECT 1
+			FROM model_account_pool_routes discovery_route
+			JOIN upstreams discovery_upstream ON discovery_upstream.id=discovery_route.upstream_id
+			JOIN account_channels discovery_channel ON discovery_channel.id=discovery_route.channel_id
+			JOIN access_key_policy_account_group_members discovery_group
+			  ON discovery_group.account_group_id=discovery_channel.group_id
+			WHERE discovery_route.model_id=` + modelAlias + `.id
+			  AND discovery_route.wire_protocol=?
+			  AND discovery_group.key_id=?
+			  AND ` + a.eligibleUpstreamSQL("discovery_upstream", geminiOnly) + `
+			  AND NOT EXISTS(SELECT 1 FROM account_recovery_states discovery_recovery WHERE discovery_recovery.account_id=discovery_upstream.id)
+		)`, []any{wire, keyID}
+	}
+	return `(
+		(NOT EXISTS(SELECT 1 FROM model_account_pool_configs discovery_pool WHERE discovery_pool.model_id=` + modelAlias + `.id)
+		 AND ` + modelAlias + `.wire_protocol=?
+		 AND ` + a.eligibleUpstreamSQL(upstreamAlias, geminiOnly) + `)
+		OR EXISTS(
+			SELECT 1
+			FROM model_account_pool_routes discovery_route
+			JOIN upstreams discovery_upstream ON discovery_upstream.id=discovery_route.upstream_id
+			WHERE discovery_route.model_id=` + modelAlias + `.id
+			  AND discovery_route.wire_protocol=?
+			  AND ` + a.eligibleUpstreamSQL("discovery_upstream", geminiOnly) + `
+			  AND NOT EXISTS(SELECT 1 FROM account_recovery_states discovery_recovery WHERE discovery_recovery.account_id=discovery_upstream.id)
+		)
+	)`, []any{wire, wire}
 }
