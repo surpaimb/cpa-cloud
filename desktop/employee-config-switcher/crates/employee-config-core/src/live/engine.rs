@@ -866,16 +866,18 @@ fn validate_journal_snapshot(
 /// Returns `true` when the transaction is or becomes committed, `false` when
 /// no target had been published and incomplete staging was safely abandoned.
 fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionError> {
-    recover_workspace_inner(root, workspace, |_| Ok(()))
+    recover_workspace_inner(root, workspace, |_| Ok(()), |_| Ok(()))
 }
 
-fn recover_workspace_inner<F>(
+fn recover_workspace_inner<P, C>(
     root: &Path,
     workspace: &Path,
-    mut before_publish: F,
+    mut before_publish: P,
+    mut before_cleanup: C,
 ) -> Result<bool, TransactionError>
 where
-    F: FnMut(&Path) -> Result<(), TransactionError>,
+    P: FnMut(&Path) -> Result<(), TransactionError>,
+    C: FnMut(&Path) -> Result<(), TransactionError>,
 {
     validate_private_recovery_directory(workspace)?;
     let journal_path = workspace.join(JOURNAL_FILE);
@@ -900,8 +902,10 @@ where
         .open(&journal_path)
         .map_err(|source| io_error(&journal_path, source))?;
     enforce_private_permissions(&journal_path, &journal)?;
-    let (state, _) = read_journal_from_file(&journal_path, &journal)?;
+    let (state, initial_snapshot) = read_journal_from_file(&journal_path, &journal)?;
     if state.complete {
+        before_cleanup(&journal_path)?;
+        validate_journal_snapshot(&journal_path, &journal, &initial_snapshot)?;
         cleanup_workspace(workspace, &state)?;
         return Ok(true);
     }
@@ -910,6 +914,8 @@ where
     // pre-manifest orphan, never an all-staged transaction (where `all()` on an
     // empty iterator would otherwise return true).
     if state.files.is_empty() {
+        before_cleanup(&journal_path)?;
+        validate_journal_snapshot(&journal_path, &journal, &initial_snapshot)?;
         cleanup_workspace(workspace, &state)?;
         return Ok(false);
     }
@@ -926,6 +932,8 @@ where
         if any_published_path {
             return Err(TransactionError::RecoveryConflict(workspace.to_path_buf()));
         }
+        before_cleanup(&journal_path)?;
+        validate_journal_snapshot(&journal_path, &journal, &initial_snapshot)?;
         cleanup_workspace(workspace, &state)?;
         return Ok(false);
     }
@@ -945,7 +953,15 @@ where
         if identity_for_path(parent)? != planned.parent_identity {
             return Err(TransactionError::RecoveryConflict(parent.to_path_buf()));
         }
-        let stage_identity = verify_stage(workspace, planned)?;
+        let stage_path = workspace.join(&planned.stage);
+        let target_exists = path_exists(&target)?;
+        let stage_identity = if state.prepared && target_exists && !path_exists(&stage_path)? {
+            planned
+                .stage_identity
+                .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?
+        } else {
+            verify_stage(workspace, planned)?
+        };
 
         let target_identity = match fs::symlink_metadata(&target) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => stage_identity,
@@ -1047,41 +1063,8 @@ where
         validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
     }
     validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
-    replace_prepared_with_complete(&journal_path, &mut journal, &sealed_snapshot)?;
-    let (complete_state, _) = read_journal_from_file(&journal_path, &journal)?;
-    if !complete_state.complete || complete_state.prepared {
-        return Err(TransactionError::CorruptJournal(journal_path));
-    }
-    cleanup_workspace(workspace, &complete_state)?;
+    cleanup_workspace(workspace, &sealed_state)?;
     Ok(true)
-}
-
-fn replace_prepared_with_complete(
-    path: &Path,
-    journal: &mut File,
-    snapshot: &JournalSnapshot,
-) -> Result<(), TransactionError> {
-    validate_journal_snapshot(path, journal, snapshot)?;
-    let prepared = encode_journal_event(path, &JournalEvent::Prepared)?;
-    let complete = encode_journal_event(path, &JournalEvent::Complete)?;
-    if prepared.len() != complete.len()
-        || !snapshot
-            .bytes
-            .ends_with(&[prepared.as_slice(), b"\n"].concat())
-    {
-        return Err(TransactionError::CorruptJournal(path.to_path_buf()));
-    }
-    let offset = snapshot.bytes.len() - prepared.len() - 1;
-    journal
-        .seek(SeekFrom::Start(offset as u64))
-        .map_err(|source| io_error(path, source))?;
-    journal
-        .write_all(&complete)
-        .map_err(|source| io_error(path, source))?;
-    journal
-        .write_all(b"\n")
-        .map_err(|source| io_error(path, source))?;
-    journal.sync_all().map_err(|source| io_error(path, source))
 }
 
 fn validate_recovery_journal_capacity(
@@ -1994,16 +1977,21 @@ mod tests {
         let journal = workspace.join(JOURNAL_FILE);
         let checked = checked_root(root.path()).unwrap();
 
-        let error = recover_workspace_inner(&checked, &workspace, |path| {
-            let mut external = OpenOptions::new()
-                .append(true)
-                .open(path)
-                .map_err(|source| io_error(path, source))?;
-            external
-                .write_all(b" ")
-                .map_err(|source| io_error(path, source))?;
-            external.sync_all().map_err(|source| io_error(path, source))
-        })
+        let error = recover_workspace_inner(
+            &checked,
+            &workspace,
+            |path| {
+                let mut external = OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .map_err(|source| io_error(path, source))?;
+                external
+                    .write_all(b" ")
+                    .map_err(|source| io_error(path, source))?;
+                external.sync_all().map_err(|source| io_error(path, source))
+            },
+            |_| Ok(()),
+        )
         .expect_err("concurrent journal growth must block publication");
 
         assert!(
@@ -2012,6 +2000,51 @@ mod tests {
         );
         assert!(!root.path().join("tool/config.json").exists());
         assert_eq!(fs::read(&journal).unwrap().last(), Some(&b' '));
+    }
+
+    #[test]
+    fn concurrent_journal_growth_blocks_parsed_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterBegin,
+        )
+        .expect_err("fault is injected");
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let journal = workspace.join(JOURNAL_FILE);
+        let checked = checked_root(root.path()).unwrap();
+
+        let error = recover_workspace_inner(
+            &checked,
+            &workspace,
+            |_| Ok(()),
+            |path| {
+                let mut external = OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .map_err(|source| io_error(path, source))?;
+                external
+                    .write_all(b" ")
+                    .map_err(|source| io_error(path, source))?;
+                external.sync_all().map_err(|source| io_error(path, source))
+            },
+        )
+        .expect_err("concurrent journal growth must block cleanup");
+
+        assert!(
+            matches!(error, TransactionError::CorruptJournal(_)),
+            "unexpected error: {error:?}"
+        );
+        assert!(workspace.exists());
+        assert_eq!(fs::read(&journal).unwrap().last(), Some(&b' '));
+        assert!(!root.path().join("tool/config.json").exists());
     }
 
     #[test]
@@ -2033,9 +2066,12 @@ mod tests {
         let journal = workspace.join(JOURNAL_FILE);
         let checked = checked_root(root.path()).unwrap();
 
-        let error = recover_workspace_inner(&checked, &workspace, |_| {
-            Err(TransactionError::InjectedCrash)
-        })
+        let error = recover_workspace_inner(
+            &checked,
+            &workspace,
+            |_| Err(TransactionError::InjectedCrash),
+            |_| Ok(()),
+        )
         .expect_err("restart is injected after preparation");
         assert!(
             matches!(error, TransactionError::InjectedCrash),

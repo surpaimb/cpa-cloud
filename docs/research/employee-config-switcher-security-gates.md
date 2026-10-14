@@ -80,13 +80,17 @@ remaining `Published` and `Verified` records followed by a fixed-size `Prepared`
 roll-forward marker before creating a missing target. The engine reads the
 bounded journal twice to obtain a stable byte snapshot and, immediately before
 each first publication and again afterward, checks the held file identity, the
-path identity, length and exact bytes. Once every target verifies, `Prepared` is
-replaced in place by the same-length `Complete` marker and flushed, retaining
-manifest-last completion without a capacity-dependent append after publication.
-Observed concurrent growth or replacement blocks publication or cleanup and
-preserves the workspace. A negative test injects a non-cooperating append after
-preparation and proves that the first target remains absent. This does not
-replace the handle-relative target and workspace traversal still required below.
+path identity, length and exact bytes. `Prepared` is itself the durable recovery
+decision: after every target verifies, recovery cleans the known workspace
+without another journal write. A crash before or during cleanup therefore
+replays the same prepared roll-forward instead of depending on an in-place
+terminal-marker rewrite. Parsed cleanup branches also revalidate their initial
+snapshot before deleting known state. Observed concurrent growth or replacement
+blocks the checked publication or cleanup boundary and preserves the workspace.
+Negative tests inject a non-cooperating append after preparation and before a
+parsed cleanup: the first target remains absent, and cleanup preserves the
+workspace. This detection still has a check/use window and does not replace the
+handle-relative target and workspace traversal required below.
 
 Before scanning recovery state, the engine now requires the transaction root
 and each workspace to retain their stable file identity and private directory
