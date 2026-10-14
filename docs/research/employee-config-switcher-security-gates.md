@@ -158,11 +158,20 @@ fail-closed.
 
 ## Encrypted rollback-material foundation
 
+The bounded replacement state machine, restart-key custody interface and
+platform review gates are specified separately in the
+[replacement transaction contract](employee-config-replacement-transaction-contract.md).
+
 The next bounded synthetic-root slice prepares, but does not yet consume, a
-durable encrypted pre-image for one existing leaf file on Unix. The caller
+durable encrypted pre-image for one existing leaf file on Unix. Format version
+2 authenticates the original owner UID, group GID and private mode, requires
+owner-read access, and refuses group/world access or special permission bits
+before creating backup material.
+The caller
 supplies a 256-bit recovery key that remains in zeroizing memory; the slice uses
 AES-256-GCM with a fresh random nonce and binds the ciphertext to the root and
-target identities, target name, original digest, and length. The ciphertext is
+target identities, target name, original digest, length and Unix security
+metadata. The ciphertext is
 flushed before a non-secret manifest is published last. Tests reload the
 pre-image using only durable state and the supplied key, scan the transaction
 workspace for the old employee-Key substring and recovery key, reject the wrong
@@ -190,7 +199,7 @@ This remains a foundation, not a replacement transaction: no target is
 modified and the pre-image identity check cannot restore a target after future
 publication. No rollback is attempted. Orphan discovery/cleanup before the
 manifest, a durable decision and publish/verify/rollback journal, recovery-key
-custody, permission/ACL preservation, and Windows support remain open. The
+custody, full ACL preservation, and Windows support remain open. The
 Tauri command and all real client writes therefore remain fail-closed.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted

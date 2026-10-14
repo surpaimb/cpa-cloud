@@ -27,7 +27,7 @@ use zeroize::Zeroizing;
 const BACKUP_DIRECTORY: &str = ".cpa-cloud-employee-config-backups";
 const BACKUP_FILE: &str = "rollback.aes256gcm";
 const MANIFEST_FILE: &str = "rollback.json";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const MAX_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 const NONCE_BYTES: usize = 12;
@@ -80,6 +80,8 @@ pub enum BackupError {
     InvalidWorkspace,
     #[error("target is too large for the bounded backup slice: {0}")]
     TooLarge(PathBuf),
+    #[error("backup target permissions are not private: {0}")]
+    UnsafePermissions(PathBuf),
     #[error("target or root identity changed; recovery refuses to continue: {0}")]
     RecoveryConflict(PathBuf),
     #[error("encrypted rollback manifest is corrupt")]
@@ -109,6 +111,9 @@ struct BackupManifest {
     target: String,
     root_identity: FileIdentity,
     target_identity: FileIdentity,
+    original_mode: u32,
+    original_uid: u32,
+    original_gid: u32,
     original_digest: String,
     original_len: usize,
     nonce: String,
@@ -162,15 +167,25 @@ fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn associated_data(manifest: &BackupManifest) -> Vec<u8> {
     format!(
-        "cpa-cloud-employee-config-backup-v{}\n{}\n{}:{}\n{}:{}\n{}\n{}",
+        "cpa-cloud-employee-config-backup-v{}\n{}\n{}:{}\n{}:{}\n{:o}:{}:{}\n{}\n{}",
         manifest.version,
         manifest.target,
         manifest.root_identity.volume,
         manifest.root_identity.file,
         manifest.target_identity.volume,
         manifest.target_identity.file,
+        manifest.original_mode,
+        manifest.original_uid,
+        manifest.original_gid,
         manifest.original_digest,
         manifest.original_len,
     )
@@ -267,11 +282,22 @@ mod platform {
         {
             return Err(BackupError::RecoveryConflict(root.join(target)));
         }
+        let original_mode = metadata.mode() & 0o7777;
+        if original_mode & 0o400 == 0 || original_mode & 0o077 != 0 || original_mode & 0o7000 != 0 {
+            return Err(BackupError::UnsafePermissions(root.join(target)));
+        }
         let target_identity =
             identity(&target_file).map_err(|source| io_error(root.join(target), source))?;
         let plaintext = read_bounded(&mut target_file, MAX_TARGET_BYTES, root.join(target))?;
+        let final_metadata = target_file
+            .metadata()
+            .map_err(|source| io_error(root.join(target), source))?;
         if identity(&target_file).map_err(|source| io_error(root.join(target), source))?
             != target_identity
+            || final_metadata.nlink() != 1
+            || final_metadata.mode() & 0o7777 != original_mode
+            || final_metadata.uid() != metadata.uid()
+            || final_metadata.gid() != metadata.gid()
         {
             return Err(BackupError::RecoveryConflict(root.join(target)));
         }
@@ -298,6 +324,9 @@ mod platform {
             target: target_text.to_owned(),
             root_identity,
             target_identity,
+            original_mode,
+            original_uid: metadata.uid(),
+            original_gid: metadata.gid(),
             original_digest: digest(&plaintext),
             original_len: plaintext.len(),
             nonce: hex::encode(nonce_bytes),
@@ -385,8 +414,12 @@ mod platform {
             serde_json::from_slice(&manifest_bytes).map_err(|_| BackupError::CorruptManifest)?;
         if manifest.version != FORMAT_VERSION
             || manifest.original_len > MAX_TARGET_BYTES
-            || manifest.original_digest.len() != 64
-            || manifest.ciphertext_digest.len() != 64
+            || manifest.original_mode & 0o400 == 0
+            || manifest.original_mode & 0o077 != 0
+            || manifest.original_mode & 0o7000 != 0
+            || manifest.original_uid != unsafe { libc::geteuid() }
+            || !is_sha256_digest(&manifest.original_digest)
+            || !is_sha256_digest(&manifest.ciphertext_digest)
         {
             return Err(BackupError::CorruptManifest);
         }
@@ -402,6 +435,17 @@ mod platform {
             0,
         )
         .map_err(|source| io_error(root.join(&target_path), source))?;
+        let target_metadata = target_file
+            .metadata()
+            .map_err(|source| io_error(root.join(&target_path), source))?;
+        if !target_metadata.is_file()
+            || target_metadata.nlink() != 1
+            || target_metadata.mode() & 0o7777 != manifest.original_mode
+            || target_metadata.uid() != manifest.original_uid
+            || target_metadata.gid() != manifest.original_gid
+        {
+            return Err(BackupError::RecoveryConflict(root.join(&target_path)));
+        }
         if identity(&target_file).map_err(|source| io_error(root.join(&target_path), source))?
             != manifest.target_identity
         {
@@ -409,7 +453,17 @@ mod platform {
         }
         let target_bytes =
             read_bounded(&mut target_file, MAX_TARGET_BYTES, root.join(&target_path))?;
-        if digest(&target_bytes) != manifest.original_digest {
+        let final_metadata = target_file
+            .metadata()
+            .map_err(|source| io_error(root.join(&target_path), source))?;
+        if identity(&target_file).map_err(|source| io_error(root.join(&target_path), source))?
+            != manifest.target_identity
+            || final_metadata.nlink() != 1
+            || final_metadata.mode() & 0o7777 != manifest.original_mode
+            || final_metadata.uid() != manifest.original_uid
+            || final_metadata.gid() != manifest.original_gid
+            || digest(&target_bytes) != manifest.original_digest
+        {
             return Err(BackupError::RecoveryConflict(root.join(target_path)));
         }
 
@@ -659,6 +713,14 @@ mod tests {
         fs::canonicalize(root.path()).unwrap()
     }
 
+    #[cfg(unix)]
+    fn write_private(path: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     #[test]
     fn key_debug_is_redacted() {
         let key = fixed_key(0x42);
@@ -684,7 +746,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let key_sentinel = b"old-employee-key-sentinel";
         let original = b"old-employee-key-sentinel\nuser-setting=true\n";
-        fs::write(root.path().join("config.json"), original).unwrap();
+        write_private(&root.path().join("config.json"), original);
         let root_path = stable_root(&root);
         let key = fixed_key(0x5a);
 
@@ -728,7 +790,7 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let original = b"old-employee-key-sentinel\n";
-        fs::write(root.path().join("config.json"), original).unwrap();
+        write_private(&root.path().join("config.json"), original);
         let root_path = stable_root(&root);
         let receipt =
             prepare_encrypted_backup(&root_path, Path::new("config.json"), &fixed_key(0x33))
@@ -756,7 +818,7 @@ mod tests {
     #[test]
     fn wrong_key_and_ciphertext_tampering_fail_authentication() {
         let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("config.json"), b"old-secret").unwrap();
+        write_private(&root.path().join("config.json"), b"old-secret");
         let root_path = stable_root(&root);
         let receipt =
             prepare_encrypted_backup(&root_path, Path::new("config.json"), &fixed_key(1)).unwrap();
@@ -783,7 +845,7 @@ mod tests {
     fn target_replacement_is_a_recovery_conflict() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("config.json");
-        fs::write(&target, b"old-secret").unwrap();
+        write_private(&target, b"old-secret");
         let root_path = stable_root(&root);
         let key = fixed_key(3);
         let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
@@ -794,6 +856,72 @@ mod tests {
             Err(BackupError::RecoveryConflict(_))
         ));
         assert_eq!(fs::read(&target).unwrap(), b"external-edit");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_target_permissions_are_refused_before_backup_material() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config.json");
+        fs::write(&target, b"old-secret").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        let root_path = stable_root(&root);
+
+        assert!(matches!(
+            prepare_encrypted_backup(&root_path, Path::new("config.json"), &fixed_key(8)),
+            Err(BackupError::UnsafePermissions(_))
+        ));
+        assert!(!root.path().join(BACKUP_DIRECTORY).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_change_after_backup_is_a_recovery_conflict() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config.json");
+        write_private(&target, b"old-secret");
+        let root_path = stable_root(&root);
+        let key = fixed_key(9);
+        let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
+
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(matches!(
+            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            Err(BackupError::RecoveryConflict(_))
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"old-secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_metadata_is_authenticated_by_the_backup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config.json");
+        write_private(&target, b"old-secret");
+        let root_path = stable_root(&root);
+        let key = fixed_key(10);
+        let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
+        let manifest_path = root_path
+            .join(BACKUP_DIRECTORY)
+            .join(&receipt.workspace)
+            .join(MANIFEST_FILE);
+        let mut manifest: BackupManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.original_mode = 0o400;
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o400)).unwrap();
+
+        assert!(matches!(
+            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            Err(BackupError::Authentication)
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"old-secret");
     }
 
     #[cfg(unix)]
@@ -820,7 +948,7 @@ mod tests {
         let real_parent = parent_path.join("real-parent");
         let real_root = real_parent.join("root");
         fs::create_dir_all(&real_root).unwrap();
-        fs::write(real_root.join("config.json"), b"old-secret").unwrap();
+        write_private(&real_root.join("config.json"), b"old-secret");
         symlink(&real_parent, parent_path.join("linked-parent")).unwrap();
 
         let linked_root = parent_path.join("linked-parent").join("root");
@@ -836,7 +964,7 @@ mod tests {
     fn root_parent_traversal_is_refused() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("child")).unwrap();
-        fs::write(root.path().join("config.json"), b"old-secret").unwrap();
+        write_private(&root.path().join("config.json"), b"old-secret");
 
         let root_path = stable_root(&root);
         let traversing_root = root_path.join("child").join("..");
