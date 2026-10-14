@@ -1,13 +1,16 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
 
 use crate::jsonc_document::JsoncDocument;
 use crate::live::engine::{
-    apply_create_only, digest, CreateFilePlan, CreateOnlyReceipt, TransactionError,
+    apply_create_only, CreateFilePlan, CreateOnlyReceipt,
+};
+use crate::plan::{
+    file_plan, normalize_cpa_base_url, read_optional, transaction_error,
+    validate_transaction_relative, FilePlan,
 };
 use crate::{AppError, ClientConfiguration, SecretString};
 
@@ -42,27 +45,6 @@ impl ConfigurationProfile {
             employee_key,
             models,
         })
-    }
-}
-
-#[derive(Clone, Serialize, PartialEq, Eq)]
-pub struct FilePlan {
-    pub path: PathBuf,
-    pub expected_pre_digest: Option<String>,
-    pub desired_digest: String,
-    #[serde(skip)]
-    pub desired_bytes: Zeroizing<Vec<u8>>,
-}
-
-impl std::fmt::Debug for FilePlan {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("FilePlan")
-            .field("path", &self.path)
-            .field("expected_pre_digest", &self.expected_pre_digest)
-            .field("desired_digest", &self.desired_digest)
-            .field("desired_bytes", &"[REDACTED]")
-            .finish()
     }
 }
 
@@ -163,8 +145,8 @@ pub fn apply_new_opencode(
     ownership_relative: &Path,
     profile: &ConfigurationProfile,
 ) -> Result<CreateOnlyReceipt, AppError> {
-    validate_transaction_relative(config_relative)?;
-    validate_transaction_relative(ownership_relative)?;
+    validate_transaction_relative(config_relative, "OpenCode")?;
+    validate_transaction_relative(ownership_relative, "OpenCode")?;
     let plan = plan_opencode(
         &root.join(config_relative),
         &root.join(ownership_relative),
@@ -182,42 +164,11 @@ pub fn apply_new_opencode(
             CreateFilePlan::new(ownership_relative, plan.ownership.desired_bytes.to_vec()),
         ],
     )
-    .map_err(transaction_error)
-}
-
-fn validate_transaction_relative(path: &Path) -> Result<(), AppError> {
-    if path.as_os_str().is_empty()
-        || path.components().any(|part| {
-            matches!(
-                part,
-                Component::Prefix(_)
-                    | Component::RootDir
-                    | Component::ParentDir
-                    | Component::CurDir
-            )
-        })
-    {
-        return Err(AppError::Config(
-            "OpenCode 安全写入只接受配置根目录内的相对路径".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn transaction_error(error: TransactionError) -> AppError {
-    match error {
-        TransactionError::Collision(path)
-        | TransactionError::LinkedPath(path)
-        | TransactionError::RecoveryConflict(path) => AppError::Conflict(format!(
-            "OpenCode 安全写入检测到文件冲突：{}；未覆盖任何已有配置",
-            path.display()
-        )),
-        other => AppError::Config(format!("OpenCode 安全写入失败：{other}")),
-    }
+    .map_err(|error| transaction_error("OpenCode", error))
 }
 
 fn provider_value(profile: &ConfigurationProfile) -> Result<Value, AppError> {
-    let base_url = normalize_openai_base_url(&profile.base_url)?;
+    let base_url = normalize_cpa_base_url(&profile.base_url)?;
     let mut models = serde_json::Map::new();
     for model in &profile.models {
         models.insert(model.clone(), json!({"name": model}));
@@ -272,33 +223,6 @@ fn validate_profile(profile: &ConfigurationProfile) -> Result<(), AppError> {
         return Err(AppError::Config("模型标识无效".into()));
     }
     Ok(())
-}
-
-fn normalize_openai_base_url(input: &str) -> Result<String, AppError> {
-    let mut url = crate::discovery::discovery_endpoint(input)?;
-    let path = url
-        .path()
-        .trim_end_matches("/client-configuration")
-        .to_owned();
-    url.set_path(&path);
-    Ok(url.to_string().trim_end_matches('/').to_string())
-}
-
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(AppError::io(path, err)),
-    }
-}
-
-fn file_plan(path: &Path, previous: Option<&[u8]>, desired_bytes: Vec<u8>) -> FilePlan {
-    FilePlan {
-        path: path.to_path_buf(),
-        expected_pre_digest: digest(previous),
-        desired_digest: digest(Some(&desired_bytes)).expect("bytes always have a digest"),
-        desired_bytes: Zeroizing::new(desired_bytes),
-    }
 }
 
 fn value_digest(value: &Value) -> Result<String, AppError> {

@@ -62,3 +62,11 @@ This is not clearance for live writes. Native handle-relative traversal must
 still replace the current path re-checks to close adversarial rename races, and
 replacement of existing files still needs encrypted or non-persistent rollback
 material. Consequently `apply_configuration` remains fail-closed.
+
+The same synthetic-root primitive now also has a Pi projection slice adapted
+from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret
+ownership record together only when both are absent. It deliberately leaves
+Pi-owned `auth.json` and `settings.json` untouched, so it registers a provider
+without claiming to select or activate a default model. Existing Pi
+`models.json` files remain blocked until the replacement transaction contract
+above is implemented.

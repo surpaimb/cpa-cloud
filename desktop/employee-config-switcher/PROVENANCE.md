@@ -26,12 +26,26 @@ workspace is newly authored CPA code containing the digest helper and the
 create-only transaction experiment. It is not CC Switch's transaction engine;
 no upstream transaction or recovery implementation was copied or translated.
 
+## Files adapted with source edits
+
+| Destination | Upstream path | Git blob OID | Upstream SHA-256 | Retained boundary |
+| --- | --- | --- | --- | --- |
+| `crates/employee-config-core/src/pi.rs` | `src-tauri/src/pi_config/mod.rs` | `947e1b1d43eb18ddc4d4b31d72a6c2fa161a32bc` | `f660fa5678d990dd3d14e0fcca546ec3302f029daa9b8f1fac33717aabe0e25d` | Pi `models.json.providers.<id>` node shape and the rule that `auth.json`/`settings.json` remain Pi-owned |
+
+The Pi file does not adopt CC Switch's writer, lock, revision, backup, settings,
+or authentication code. CPA protocol selection, URL normalization, ownership
+record, secret handling, and create-only transaction integration are newly
+authored. The adapter registers a provider only; it does not select a default
+provider or model.
+
 ## Newly authored CPA code
 
 - `discovery.rs`: HTTPS/loopback validation and authenticated discovery client.
 - `detection.rs`: read-only client location detection with documented home-directory overrides.
 - `live/engine.rs`: CPA-authored create-only staging, journal, locking and recovery experiment.
 - `opencode.rs`: CPA profile projection, JSONC planning, fail-closed ownership proof, and synthetic-root create-only integration.
+- `plan.rs`: shared redacted file-plan and create-only transaction helpers.
+- `pi.rs`: CPA profile mapping and ownership/transaction integration around the narrowly adapted Pi provider schema.
 - Tauri command shell and the React interface.
 
 The app icon is a newly generated CPA brand asset created for this client with

@@ -6,9 +6,10 @@
 - 本机十工具候选检测；
 - 通过 `GET /v1/client-configuration` 读取当前 Key 真正可见的协议模型；
 - OpenCode JSONC 保留式配置计划、compare-before-commit 摘要和 provider 所有权冲突拒绝；
+- OpenCode 与 Pi 的隔离合成目录 create-only 事务测试；Pi 只注册 provider，不改 `auth.json`、`settings.json` 或默认模型；
 - `detect_clients`、`discover_configuration`、`apply_configuration` 三条窄 IPC。
 
-`apply_configuration` 当前故意失败关闭，不写真实配置。Windows 私有 DACL、持久 journal、发布后验证、并发安全回滚和启动恢复全部通过测试与安全复核后，才会启用写盘。
+`apply_configuration` 当前故意失败关闭，不写真实配置。现有 create-only 引擎只服务于隔离合成根目录；既有配置替换仍需加密备份、handle-relative 路径约束、逐工具恢复与固定客户端验收后才会启用。
 
 ## 本地验证
 
