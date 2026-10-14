@@ -55,7 +55,9 @@ and after `Begin` but before the first `Planned` event. Recovery treats all
 three as uncommitted and removes only the known empty/metadata-only shapes. A
 zero-length journal is cleaned only when it is the workspace's sole entry; any
 additional entry makes the orphan ambiguous, blocks recovery, and remains
-untouched for operator inspection.
+untouched for operator inspection. A separate ordinary I/O fault after `Begin`
+proves the same-process recovery path returns the original error rather than a
+false success receipt.
 
 A persistent owner-private lock file combines an in-process mutex with an OS
 lock (`flock` on POSIX; an exclusive-sharing file handle on Windows), so a

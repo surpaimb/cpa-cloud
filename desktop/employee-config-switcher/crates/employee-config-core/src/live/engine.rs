@@ -138,6 +138,7 @@ enum FaultPoint {
     AfterWorkspace,
     AfterJournalCreated,
     AfterBegin,
+    AfterBeginIoFailure,
     AfterManifest,
     AfterPlanning,
     AfterStageBeforeJournal(usize),
@@ -210,6 +211,12 @@ fn apply_create_only_inner(
         append_event(&mut journal, &journal_path, &JournalEvent::Begin)?;
         if fault == FaultPoint::AfterBegin {
             return Err(TransactionError::InjectedCrash);
+        }
+        if fault == FaultPoint::AfterBeginIoFailure {
+            return Err(io_error(
+                &journal_path,
+                io::Error::other("injected pre-plan I/O failure"),
+            ));
         }
         for (index, plan) in files.iter().enumerate() {
             let target = checked_target(&root, &plan.relative_path)?;
@@ -1412,6 +1419,28 @@ mod tests {
 
         recover_create_only(root.path()).unwrap();
         assert_eq!(fs::read_dir(transaction_root).unwrap().count(), 0);
+        assert!(!root.path().join("tool/config.json").exists());
+    }
+
+    #[test]
+    fn io_failure_after_begin_returns_error_instead_of_success_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+
+        let error = apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterBeginIoFailure,
+        )
+        .expect_err("ordinary I/O failure must not become a successful receipt");
+
+        assert!(matches!(error, TransactionError::Io { .. }));
+        assert_eq!(
+            fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+                .unwrap()
+                .count(),
+            0
+        );
         assert!(!root.path().join("tool/config.json").exists());
     }
 
