@@ -292,7 +292,7 @@ fn apply_create_only_inner(
         // for restart recovery. `recover_workspace_inner` records every final
         // target identity and verification plus `Prepared` before it creates
         // the first target, and it never appends to the journal afterward.
-        if !recover_workspace_inner(&root, &workspace, fault, |_| Ok(()), |_| Ok(()))? {
+        if !recover_workspace_inner(&root, &workspace, fault, |_| Ok(()), |_| Ok(()), |_| Ok(()))? {
             return Err(TransactionError::CorruptJournal(journal_path));
         }
         Ok(CreateOnlyReceipt {
@@ -552,6 +552,93 @@ fn create_workspace(transaction_root: &Path) -> Result<PathBuf, TransactionError
     ))
 }
 
+#[cfg(unix)]
+fn open_recovery_journal(path: &Path) -> Result<(File, bool), TransactionError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+    ensure_not_link(path, &metadata)?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || !matches!(mode, 0o600 | 0o400)
+    {
+        return Err(TransactionError::RecoveryConflict(path.to_path_buf()));
+    }
+
+    let writable = mode == 0o600;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(writable)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    Ok((file, writable))
+}
+
+#[cfg(windows)]
+fn open_recovery_journal(path: &Path) -> Result<(File, bool), TransactionError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    Ok((file, true))
+}
+
+#[cfg(unix)]
+fn validate_private_journal(path: &Path, file: &File) -> Result<(), TransactionError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || !matches!(mode, 0o600 | 0o400)
+    {
+        return Err(TransactionError::RecoveryConflict(path.to_path_buf()));
+    }
+    #[cfg(target_os = "macos")]
+    verify_no_macos_extended_acl(file, path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_private_journal(path: &Path, file: &File) -> Result<(), TransactionError> {
+    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+    if !metadata.is_file() {
+        return Err(TransactionError::RecoveryConflict(path.to_path_buf()));
+    }
+    file_identity(file, path)?;
+    verify_private_windows_dacl(path)
+}
+
+#[cfg(unix)]
+fn seal_journal(path: &Path, file: &File) -> Result<(), TransactionError> {
+    use std::os::fd::AsRawFd;
+
+    if unsafe { libc::fchmod(file.as_raw_fd(), 0o400) } != 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    file.sync_all().map_err(|source| io_error(path, source))
+}
+
+#[cfg(windows)]
+fn seal_journal(path: &Path, file: &File) -> Result<(), TransactionError> {
+    file.sync_all().map_err(|source| io_error(path, source))
+}
+
 fn append_event(
     journal: &mut File,
     path: &Path,
@@ -807,18 +894,27 @@ fn validate_journal_snapshot(
 /// Returns `true` when the transaction is or becomes committed, `false` when
 /// no target had been published and incomplete staging was safely abandoned.
 fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionError> {
-    recover_workspace_inner(root, workspace, FaultPoint::Never, |_| Ok(()), |_| Ok(()))
+    recover_workspace_inner(
+        root,
+        workspace,
+        FaultPoint::Never,
+        |_| Ok(()),
+        |_| Ok(()),
+        |_| Ok(()),
+    )
 }
 
-fn recover_workspace_inner<P, C>(
+fn recover_workspace_inner<P, A, C>(
     root: &Path,
     workspace: &Path,
     fault: FaultPoint,
     mut before_publish: P,
+    mut after_snapshot_before_publish: A,
     mut before_cleanup: C,
 ) -> Result<bool, TransactionError>
 where
     P: FnMut(&Path) -> Result<(), TransactionError>,
+    A: FnMut(&Path) -> Result<(), TransactionError>,
     C: FnMut(&Path) -> Result<(), TransactionError>,
 {
     validate_private_recovery_directory(workspace)?;
@@ -838,12 +934,8 @@ where
         return Ok(false);
     }
 
-    let mut journal = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&journal_path)
-        .map_err(|source| io_error(&journal_path, source))?;
-    enforce_private_permissions(&journal_path, &journal)?;
+    let (mut journal, journal_writable) = open_recovery_journal(&journal_path)?;
+    validate_private_journal(&journal_path, &journal)?;
     let (state, initial_snapshot) = read_journal_from_file(&journal_path, &journal)?;
     if state.complete {
         before_cleanup(&journal_path)?;
@@ -881,6 +973,9 @@ where
     }
 
     if !state.prepared {
+        if !journal_writable {
+            return Err(TransactionError::CorruptJournal(journal_path));
+        }
         validate_recovery_journal_capacity(&journal_path, &journal, &state)?;
     }
 
@@ -945,6 +1040,7 @@ where
     if !state.prepared {
         append_event(&mut journal, &journal_path, &JournalEvent::Prepared)?;
     }
+    seal_journal(&journal_path, &journal)?;
     sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
     let (sealed_state, sealed_snapshot) = read_journal_from_file(&journal_path, &journal)?;
     if !sealed_state.prepared || sealed_state.complete {
@@ -989,6 +1085,7 @@ where
         if !path_exists(&target)? {
             before_publish(&journal_path)?;
             validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
+            after_snapshot_before_publish(&journal_path)?;
             let recorded = planned
                 .target_identity
                 .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?;
@@ -1927,31 +2024,77 @@ mod tests {
             .path();
         let journal = workspace.join(JOURNAL_FILE);
         let checked = checked_root(root.path()).unwrap();
+        let mut external = OpenOptions::new().append(true).open(&journal).unwrap();
 
         let error = recover_workspace_inner(
             &checked,
             &workspace,
             FaultPoint::Never,
             |path| {
-                let mut external = OpenOptions::new()
-                    .append(true)
-                    .open(path)
-                    .map_err(|source| io_error(path, source))?;
                 external
                     .write_all(b" ")
                     .map_err(|source| io_error(path, source))?;
                 external.sync_all().map_err(|source| io_error(path, source))
             },
             |_| Ok(()),
+            |_| Ok(()),
         )
         .expect_err("concurrent journal growth must block publication");
 
         assert!(
-            matches!(error, TransactionError::CorruptJournal(_)),
+            matches!(
+                error,
+                TransactionError::CorruptJournal(_) | TransactionError::Io { .. }
+            ),
             "unexpected error: {error:?}"
         );
         assert!(!root.path().join("tool/config.json").exists());
+        #[cfg(unix)]
         assert_eq!(fs::read(&journal).unwrap().last(), Some(&b' '));
+    }
+
+    #[test]
+    fn sealed_journal_refuses_writer_in_snapshot_to_publish_window() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterPlanning,
+        )
+        .expect_err("fault is injected");
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let checked = checked_root(root.path()).unwrap();
+
+        let committed = recover_workspace_inner(
+            &checked,
+            &workspace,
+            FaultPoint::Never,
+            |_| Ok(()),
+            |path| {
+                let opened = OpenOptions::new().append(true).open(path);
+                if opened.is_ok() {
+                    return Err(io_error(
+                        path,
+                        io::Error::other("sealed journal unexpectedly opened for append"),
+                    ));
+                }
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .expect("sealed publication must complete");
+
+        assert!(committed);
+        assert_eq!(
+            fs::read_to_string(root.path().join("tool/config.json")).unwrap(),
+            "synthetic-key"
+        );
     }
 
     #[test]
@@ -1978,6 +2121,7 @@ mod tests {
             &workspace,
             FaultPoint::Never,
             |_| Ok(()),
+            |_| Ok(()),
             |path| {
                 let mut external = OpenOptions::new()
                     .append(true)
@@ -1992,10 +2136,14 @@ mod tests {
         .expect_err("concurrent journal growth must block cleanup");
 
         assert!(
-            matches!(error, TransactionError::CorruptJournal(_)),
+            matches!(
+                error,
+                TransactionError::CorruptJournal(_) | TransactionError::Io { .. }
+            ),
             "unexpected error: {error:?}"
         );
         assert!(workspace.exists());
+        #[cfg(unix)]
         assert_eq!(fs::read(&journal).unwrap().last(), Some(&b' '));
         assert!(!root.path().join("tool/config.json").exists());
     }
@@ -2025,6 +2173,7 @@ mod tests {
             FaultPoint::Never,
             |_| Err(TransactionError::InjectedCrash),
             |_| Ok(()),
+            |_| Ok(()),
         )
         .expect_err("restart is injected after preparation");
         assert!(
@@ -2035,6 +2184,14 @@ mod tests {
         assert!(fs::read_to_string(&journal)
             .unwrap()
             .contains("\"prepared\""));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&journal).unwrap().permissions().mode() & 0o777,
+                0o400
+            );
+        }
 
         recover_create_only(root.path()).expect("prepared recovery must roll forward");
         assert_eq!(
