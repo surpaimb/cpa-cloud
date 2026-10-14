@@ -1,7 +1,40 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import App from "./App";
+
+vi.mock("./api", () => ({
+  detectClients: vi.fn().mockResolvedValue([
+    ["claude-code", "Claude Code", true],
+    ["codex", "Codex CLI", true],
+    ["gemini", "Gemini CLI", true],
+    ["claude-desktop", "Claude Desktop", true],
+    ["grok-build", "Grok Build", true],
+    ["opencode", "OpenCode", true],
+    ["openclaw", "OpenClaw", true],
+    ["hermes", "Hermes", true],
+    ["pi", "Pi", false],
+    ["minimax-code", "MiniMax Code", false],
+  ].map(([id, name, detected]) => ({
+    id: String(id),
+    name: String(name),
+    detected: Boolean(detected),
+    detail: detected ? "显式测试 fixture：已检测" : "显式测试 fixture：未检测",
+  }))),
+  discoverConfiguration: vi.fn(async (_baseUrl: string, employeeKey: string) => {
+    if (!employeeKey.trim()) throw new Error("员工 Key 不能为空");
+    await new Promise((resolve) => window.setTimeout(resolve, 260));
+    return {
+      schema_version: 1,
+      protocols: [
+        { protocol: "anthropic-messages", candidates: ["claude-sonnet"], default_model: "claude-sonnet", default_source: "public_id_ascending" },
+        { protocol: "openai-responses", candidates: ["gpt-codex"], default_model: "gpt-codex", default_source: "public_id_ascending" },
+        { protocol: "gemini-generate-content", candidates: ["gemini-pro"], default_model: "gemini-pro", default_source: "public_id_ascending" },
+        { protocol: "openai-chat", candidates: ["general-chat"], default_model: "general-chat", default_source: "public_id_ascending" },
+      ],
+    };
+  }),
+}));
 
 test("keeps employee key masked and exposes the ten-tool workflow", async () => {
   const user = userEvent.setup();
