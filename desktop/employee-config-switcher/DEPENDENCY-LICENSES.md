@@ -1,6 +1,6 @@
 # Rust dependency license inventory
 
-Generated from the committed Rust 1.90-compatible `Cargo.lock` produced by GitHub Actions run `38533429363` for commit `b899a58863a1179b0208468fe475aee01cc9e596` on 2026-10-14. The downloaded artifact digest was `sha256:dcabc554bc1f0a28b512241d2e450021071bec4ced3e65ab568d7d7e1e925777`.
+The package inventory was generated from the Rust 1.90-compatible `Cargo.lock` produced by GitHub Actions run `38533429363` for commit `b899a58863a1179b0208468fe475aee01cc9e596` on 2026-10-14. The downloaded artifact digest was `sha256:dcabc554bc1f0a28b512241d2e450021071bec4ced3e65ab568d7d7e1e925777`. The current lock only promotes already-listed `libc`, `windows-sys`, and `ring` packages to direct dependencies; it adds no package or version to this inventory. Its current SHA-256 is `b9cc39b69071f266fe79a16235b22762c69417f119c1c92c5c43ebc9550ebb1f`.
 
 This records package metadata license expressions; it does not replace each dependency's license text or notices. Release packaging remains disabled and must preserve the applicable upstream license files before distribution.
 

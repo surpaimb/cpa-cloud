@@ -21,7 +21,9 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use zeroize::Zeroizing;
 
-const TRANSACTION_DIRECTORY: &str = ".cpa-cloud-employee-config-transactions";
+// Keep rollback material outside the create-only engine namespace. That engine
+// treats every child of its transaction directory as one of its own journals.
+const BACKUP_DIRECTORY: &str = ".cpa-cloud-employee-config-backups";
 const BACKUP_FILE: &str = "rollback.aes256gcm";
 const MANIFEST_FILE: &str = "rollback.json";
 const FORMAT_VERSION: u32 = 1;
@@ -273,12 +275,17 @@ mod platform {
 
         let transaction_dir = open_or_create_private_dir(
             root_dir.as_raw_fd(),
-            OsStr::new(TRANSACTION_DIRECTORY),
-            root.join(TRANSACTION_DIRECTORY),
+            OsStr::new(BACKUP_DIRECTORY),
+            root.join(BACKUP_DIRECTORY),
         )?;
+        // Persist a freshly created backup-directory entry in the synthetic
+        // root before reporting any child workspace as durable.
+        root_dir
+            .sync_all()
+            .map_err(|source| io_error(root, source))?;
         let (workspace, workspace_dir) = create_workspace(
             transaction_dir.as_raw_fd(),
-            root.join(TRANSACTION_DIRECTORY),
+            root.join(BACKUP_DIRECTORY),
         )?;
 
         let mut nonce_bytes = [0_u8; NONCE_BYTES];
@@ -301,7 +308,7 @@ mod platform {
         let mut backup_file = create_private_file_at(
             workspace_dir.as_raw_fd(),
             OsStr::new(BACKUP_FILE),
-            root.join(TRANSACTION_DIRECTORY)
+            root.join(BACKUP_DIRECTORY)
                 .join(&workspace)
                 .join(BACKUP_FILE),
         )?;
@@ -320,7 +327,7 @@ mod platform {
         let mut manifest_file = create_private_file_at(
             workspace_dir.as_raw_fd(),
             OsStr::new(MANIFEST_FILE),
-            root.join(TRANSACTION_DIRECTORY)
+            root.join(BACKUP_DIRECTORY)
                 .join(&workspace)
                 .join(MANIFEST_FILE),
         )?;
@@ -335,7 +342,7 @@ mod platform {
             .map_err(|source| io_error(root.join(&workspace), source))?;
         transaction_dir
             .sync_all()
-            .map_err(|source| io_error(root.join(TRANSACTION_DIRECTORY), source))?;
+            .map_err(|source| io_error(root.join(BACKUP_DIRECTORY), source))?;
 
         Ok(BackupReceipt {
             workspace,
@@ -353,16 +360,16 @@ mod platform {
         let root_dir = open_root(root)?;
         let transaction_dir = open_private_dir_at(
             root_dir.as_raw_fd(),
-            OsStr::new(TRANSACTION_DIRECTORY),
-            root.join(TRANSACTION_DIRECTORY),
+            OsStr::new(BACKUP_DIRECTORY),
+            root.join(BACKUP_DIRECTORY),
         )?;
         let workspace_dir = open_private_dir_at(
             transaction_dir.as_raw_fd(),
             OsStr::new(workspace),
-            root.join(TRANSACTION_DIRECTORY).join(workspace),
+            root.join(BACKUP_DIRECTORY).join(workspace),
         )?;
         let manifest_path = root
-            .join(TRANSACTION_DIRECTORY)
+            .join(BACKUP_DIRECTORY)
             .join(workspace)
             .join(MANIFEST_FILE);
         let mut manifest_file = open_file_at(
@@ -406,7 +413,7 @@ mod platform {
         }
 
         let backup_path = root
-            .join(TRANSACTION_DIRECTORY)
+            .join(BACKUP_DIRECTORY)
             .join(workspace)
             .join(BACKUP_FILE);
         let mut backup_file = open_file_at(
@@ -627,22 +634,25 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let root = tempfile::tempdir().unwrap();
-        let secret = b"old-employee-key-sentinel\nuser-setting=true\n";
-        fs::write(root.path().join("config.json"), secret).unwrap();
+        let key_sentinel = b"old-employee-key-sentinel";
+        let original = b"old-employee-key-sentinel\nuser-setting=true\n";
+        fs::write(root.path().join("config.json"), original).unwrap();
         let key = fixed_key(0x5a);
 
         let receipt =
             prepare_encrypted_backup(root.path(), Path::new("config.json"), &key).unwrap();
         let workspace = root
             .path()
-            .join(TRANSACTION_DIRECTORY)
+            .join(BACKUP_DIRECTORY)
             .join(&receipt.workspace);
         let backup = fs::read(workspace.join(BACKUP_FILE)).unwrap();
         let manifest = fs::read(workspace.join(MANIFEST_FILE)).unwrap();
-        assert!(!backup.windows(secret.len()).any(|window| window == secret));
+        assert!(!backup
+            .windows(key_sentinel.len())
+            .any(|window| window == key_sentinel));
         assert!(!manifest
-            .windows(secret.len())
-            .any(|window| window == secret));
+            .windows(key_sentinel.len())
+            .any(|window| window == key_sentinel));
         assert!(!backup
             .windows(KEY_BYTES)
             .any(|window| window == [0x5a; KEY_BYTES]));
@@ -663,7 +673,37 @@ mod tests {
         );
 
         let reloaded = load_encrypted_backup(root.path(), &receipt.workspace, &key).unwrap();
-        assert_eq!(&*reloaded, secret);
+        assert_eq!(&*reloaded, original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_namespace_coexists_with_create_only_recovery_after_restart() {
+        use crate::live::engine::{apply_create_only, recover_create_only, CreateFilePlan};
+
+        let root = tempfile::tempdir().unwrap();
+        let original = b"old-employee-key-sentinel\n";
+        fs::write(root.path().join("config.json"), original).unwrap();
+        let receipt = prepare_encrypted_backup(
+            root.path(),
+            Path::new("config.json"),
+            &fixed_key(0x33),
+        )
+        .unwrap();
+        let workspace = receipt.workspace.clone();
+        drop(receipt);
+
+        recover_create_only(root.path()).unwrap();
+        apply_create_only(
+            root.path(),
+            vec![CreateFilePlan::new("created.json", b"new-file".to_vec())],
+        )
+        .unwrap();
+        recover_create_only(root.path()).unwrap();
+
+        let reloaded = load_encrypted_backup(root.path(), &workspace, &fixed_key(0x33)).unwrap();
+        assert_eq!(&*reloaded, original);
+        assert_eq!(fs::read(root.path().join("created.json")).unwrap(), b"new-file");
     }
 
     #[cfg(unix)]
@@ -680,7 +720,7 @@ mod tests {
 
         let backup_path = root
             .path()
-            .join(TRANSACTION_DIRECTORY)
+            .join(BACKUP_DIRECTORY)
             .join(&receipt.workspace)
             .join(BACKUP_FILE);
         let mut bytes = fs::read(&backup_path).unwrap();

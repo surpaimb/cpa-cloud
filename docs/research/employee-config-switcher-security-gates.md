@@ -72,22 +72,31 @@ AES-256-GCM with a fresh random nonce and binds the ciphertext to the root and
 target identities, target name, original digest, and length. The ciphertext is
 flushed before a non-secret manifest is published last. Tests reload the
 pre-image using only durable state and the supplied key, scan the transaction
-workspace for the old employee-key sentinel and recovery key, reject the wrong
+workspace for the old employee-Key substring and recovery key, reject the wrong
 key and ciphertext tampering, and refuse a replaced target identity without
-overwriting the external edit.
+overwriting the external edit. The encrypted-backup directory has a separate
+namespace from the create-only transaction engine; a restart/coexistence
+regression runs create-only recovery and publication while the durable backup
+remains reloadable.
 
-On Unix, the root, target, transaction directory, workspace, ciphertext, and
-manifest are all opened relative to already-held directory descriptors with
-no-follow semantics. This first slice deliberately accepts only one UTF-8 leaf
-name owned by the current user, with one hard link and at most 4 MiB. Windows
-returns an explicit unsupported-platform error until equivalent native
-handle-relative traversal and protected-key integration exist.
+On Unix, the synthetic root is opened once by path with final-component
+no-follow semantics. The target, separate backup directory, workspace,
+ciphertext, and manifest are then opened relative to already-held directory
+descriptors with no-follow semantics. A newly created backup-directory entry is
+made durable by flushing the root descriptor before success. This does not yet
+walk or pin every ancestor of the caller-supplied root. The slice deliberately
+accepts only one UTF-8 leaf name owned by the current user, with one hard link
+and at most 4 MiB. Windows returns an explicit unsupported-platform error until
+equivalent native handle-relative traversal and protected-key integration
+exist.
 
 This remains a foundation, not a replacement transaction: no target is
-modified, no rollback is attempted, orphan cleanup before the manifest, a
-durable publish/verify/rollback state machine, permission/ACL preservation,
-platform key storage, and Windows support remain open. The Tauri command and
-all real client writes therefore remain fail-closed.
+modified and the pre-image identity check cannot restore a target after future
+publication. No rollback is attempted. Orphan discovery/cleanup before the
+manifest, a durable decision and publish/verify/rollback journal, recovery-key
+custody, permission/ACL preservation, full ancestor pinning, and Windows support
+remain open. The Tauri command and all real client writes therefore remain
+fail-closed.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret
