@@ -79,24 +79,26 @@ namespace from the create-only transaction engine; a restart/coexistence
 regression runs create-only recovery and publication while the durable backup
 remains reloadable.
 
-On Unix, the synthetic root is opened once by path with final-component
-no-follow semantics. The target, separate backup directory, workspace,
-ciphertext, and manifest are then opened relative to already-held directory
-descriptors with no-follow semantics. A newly created backup-directory entry is
-made durable by flushing the root descriptor before success. This does not yet
-walk or pin every ancestor of the caller-supplied root. The slice deliberately
-accepts only one UTF-8 leaf name owned by the current user, with one hard link
-and at most 4 MiB. Windows returns an explicit unsupported-platform error until
-equivalent native handle-relative traversal and protected-key integration
-exist.
+On Unix, the synthetic root is opened by anchoring at `/` for absolute paths or
+`.` for relative paths, then opening every normal root-path component relative
+to the held parent descriptor with no-follow semantics. Parent traversal and
+symbolic-link ancestors are refused. The target, separate backup directory,
+workspace, ciphertext, and manifest are likewise opened relative to
+already-held directory descriptors with no-follow semantics. A newly created
+backup-directory entry is made durable by flushing the root descriptor before
+success. Regression tests refuse both a symbolic-link root ancestor and an
+explicit parent-traversal component without creating backup material. The slice
+deliberately accepts only one UTF-8 leaf name owned by the current user, with
+one hard link and at most 4 MiB. Windows returns an explicit
+unsupported-platform error until equivalent native handle-relative traversal
+and protected-key integration exist.
 
 This remains a foundation, not a replacement transaction: no target is
 modified and the pre-image identity check cannot restore a target after future
 publication. No rollback is attempted. Orphan discovery/cleanup before the
 manifest, a durable decision and publish/verify/rollback journal, recovery-key
-custody, permission/ACL preservation, full ancestor pinning, and Windows support
-remain open. The Tauri command and all real client writes therefore remain
-fail-closed.
+custody, permission/ACL preservation, and Windows support remain open. The
+Tauri command and all real client writes therefore remain fail-closed.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret

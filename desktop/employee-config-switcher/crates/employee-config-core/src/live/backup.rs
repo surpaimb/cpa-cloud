@@ -1,10 +1,10 @@
 //! Durable encrypted rollback material for a bounded synthetic-root slice.
 //!
 //! This module deliberately does not publish or replace a configuration file.
-//! On Unix it opens the synthetic root once by path with final-component
-//! no-follow semantics, then opens the target, separate backup directory,
-//! workspace, ciphertext, and manifest relative to held directory descriptors.
-//! Full ancestor pinning remains intentionally unresolved. Windows remains
+//! On Unix it anchors at `/` or `.`, opens every normal root-path component
+//! relative to a held directory descriptor with no-follow semantics, and then
+//! does the same for the target, separate backup directory, workspace,
+//! ciphertext, and manifest. Parent traversal is rejected. Windows remains
 //! explicitly unsupported until the equivalent handle-relative implementation
 //! exists. The Tauri apply command remains fail-closed.
 
@@ -74,6 +74,8 @@ pub enum BackupError {
     UnsupportedPlatform,
     #[error("backup target must be one non-empty relative path component: {0}")]
     InvalidTarget(PathBuf),
+    #[error("backup root must not be empty or contain parent traversal: {0}")]
+    InvalidRoot(PathBuf),
     #[error("backup workspace identifier is invalid")]
     InvalidWorkspace,
     #[error("target is too large for the bounded backup slice: {0}")]
@@ -434,23 +436,62 @@ mod platform {
     }
 
     fn open_root(path: &Path) -> Result<File, BackupError> {
-        let c_path = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| BackupError::InvalidTarget(path.to_path_buf()))?;
+        if path.as_os_str().is_empty() {
+            return Err(BackupError::InvalidRoot(path.to_path_buf()));
+        }
+
+        // Anchor once at a stable process namespace entry, then make every
+        // caller-controlled component the final component of an `openat` call.
+        // `O_NOFOLLOW` therefore applies to every ancestor rather than only to
+        // the caller-supplied root's final component.
+        let anchor = if path.is_absolute() {
+            Path::new("/")
+        } else {
+            Path::new(".")
+        };
+        let c_anchor = CString::new(anchor.as_os_str().as_bytes())
+            .expect("Unix root anchors have no NUL");
         let fd = unsafe {
             libc::open(
-                c_path.as_ptr(),
+                c_anchor.as_ptr(),
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
         if fd < 0 {
-            return Err(io_error(path, io::Error::last_os_error()));
+            return Err(io_error(anchor, io::Error::last_os_error()));
         }
-        let file = unsafe { File::from_raw_fd(fd) };
-        let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+        let mut directory = unsafe { File::from_raw_fd(fd) };
+        let mut display = anchor.to_path_buf();
+
+        for component in path.components() {
+            match component {
+                Component::RootDir | Component::CurDir => continue,
+                Component::Normal(name) => {
+                    display.push(name);
+                    directory = open_file_at(
+                        directory.as_raw_fd(),
+                        name,
+                        libc::O_RDONLY
+                            | libc::O_DIRECTORY
+                            | libc::O_CLOEXEC
+                            | libc::O_NOFOLLOW,
+                        0,
+                    )
+                    .map_err(|source| io_error(&display, source))?;
+                }
+                Component::ParentDir | Component::Prefix(_) => {
+                    return Err(BackupError::InvalidRoot(path.to_path_buf()));
+                }
+            }
+        }
+
+        let metadata = directory
+            .metadata()
+            .map_err(|source| io_error(path, source))?;
         if !metadata.is_dir() {
             return Err(BackupError::RecoveryConflict(path.to_path_buf()));
         }
-        Ok(file)
+        Ok(directory)
     }
 
     fn open_or_create_private_dir(
@@ -757,6 +798,47 @@ mod tests {
         assert!(
             prepare_encrypted_backup(root.path(), Path::new("config.json"), &fixed_key(4)).is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_root_ancestor_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let real_parent = parent.path().join("real-parent");
+        let real_root = real_parent.join("root");
+        fs::create_dir_all(&real_root).unwrap();
+        fs::write(real_root.join("config.json"), b"old-secret").unwrap();
+        symlink(&real_parent, parent.path().join("linked-parent")).unwrap();
+
+        let linked_root = parent.path().join("linked-parent").join("root");
+        assert!(prepare_encrypted_backup(
+            &linked_root,
+            Path::new("config.json"),
+            &fixed_key(6)
+        )
+        .is_err());
+        assert!(!real_root.join(BACKUP_DIRECTORY).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_parent_traversal_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("child")).unwrap();
+        fs::write(root.path().join("config.json"), b"old-secret").unwrap();
+
+        let traversing_root = root.path().join("child").join("..");
+        assert!(matches!(
+            prepare_encrypted_backup(
+                &traversing_root,
+                Path::new("config.json"),
+                &fixed_key(7)
+            ),
+            Err(BackupError::InvalidRoot(_))
+        ));
+        assert!(!root.path().join(BACKUP_DIRECTORY).exists());
     }
 
     #[cfg(windows)]
