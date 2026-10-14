@@ -1167,7 +1167,10 @@ fn enforce_private_permissions(path: &Path) -> Result<(), TransactionError> {
     if token_user.User.Sid.is_null() {
         return Err(io_error(
             path,
-            io::Error::new(io::ErrorKind::PermissionDenied, "process user SID is missing"),
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "process user SID is missing",
+            ),
         ));
     }
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
