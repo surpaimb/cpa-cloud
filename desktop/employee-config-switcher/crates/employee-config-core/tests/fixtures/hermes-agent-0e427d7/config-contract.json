@@ -1,6 +1,12 @@
 {
   "source_commit": "0e427d788d253630d38a3a51cd76849e73cd6925",
-  "config_path": "~/.hermes/config.yaml",
+  "config_path": "<resolved-hermes-home>/config.yaml",
+  "home_resolution": {
+    "posix_default": "~/.hermes",
+    "windows_default": "%LOCALAPPDATA%\\hermes",
+    "explicit_override": "HERMES_HOME",
+    "default_suffix": "HERMES_DATA_DIR_SUFFIX"
+  },
   "model_section": ["provider", "default", "base_url", "api_mode"],
   "provider_map": "providers.<name>",
   "provider_selector": "custom:<name>",

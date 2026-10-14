@@ -164,9 +164,15 @@ state remain byte-for-byte untouched, including identity and modification time
 for the tested sentinels. Any existing config or ownership file is a hard
 conflict. No native Hermes binary is available locally, so fixed native
 parsing/transport evidence and the replacement transaction contract remain
-blockers for real writes. A future live caller must derive the configuration
-parent through Hermes' existing `HERMES_HOME`-aware detection rather than
-accepting an arbitrary directory.
+blockers for real writes. The fixed official source defines `~/.hermes` only
+as the POSIX default; native Windows defaults to `%LOCALAPPDATA%\\hermes`.
+`HERMES_HOME` wins after Hermes-style `~`/environment expansion, while
+`HERMES_DATA_DIR_SUFFIX` is appended literally only to the platform default.
+The current detector is best-effort and does not reproduce every one of those
+native resolution rules. A future live caller must either implement and test
+the exact fixed-version rules or fail closed when an override cannot be
+resolved; it must never accept an arbitrary configuration parent from its
+caller.
 
 MiniMax Code now has a separate synthetic-root create-only projection based on
 the official signed `v0.5.6` release and its public BYOK contract. It creates

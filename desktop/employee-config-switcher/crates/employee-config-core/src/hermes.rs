@@ -278,7 +278,20 @@ mod tests {
             "../tests/fixtures/hermes-agent-0e427d7/config-contract.json"
         ))
         .unwrap();
-        assert_eq!(fixture["config_path"], "~/.hermes/config.yaml");
+        assert_eq!(fixture["config_path"], "<resolved-hermes-home>/config.yaml");
+        assert_eq!(fixture["home_resolution"]["posix_default"], "~/.hermes");
+        assert_eq!(
+            fixture["home_resolution"]["windows_default"],
+            "%LOCALAPPDATA%\\hermes"
+        );
+        assert_eq!(
+            fixture["home_resolution"]["explicit_override"],
+            "HERMES_HOME"
+        );
+        assert_eq!(
+            fixture["home_resolution"]["default_suffix"],
+            "HERMES_DATA_DIR_SUFFIX"
+        );
         assert_eq!(fixture["provider_selector"], "custom:<name>");
         assert_eq!(fixture["transport"], "chat_completions");
         assert_eq!(fixture["inline_credential_field"], "api_key");
