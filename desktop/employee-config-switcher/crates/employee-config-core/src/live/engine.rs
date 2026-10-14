@@ -967,12 +967,13 @@ where
     validate_private_recovery_directory(workspace)?;
     let journal_path = workspace.join(JOURNAL_FILE);
     if !path_exists(&journal_path)? {
-        if fs::read_dir(workspace)
-            .map_err(|source| io_error(workspace, source))?
-            .next()
-            .is_none()
-        {
-            fs::remove_dir(workspace).map_err(|source| io_error(workspace, source))?;
+        if stable_directory_names(workspace_directory)?.is_empty() {
+            let transaction_directory = &recovery_chain[recovery_chain.len() - 2];
+            delete_held_directory(transaction_directory, workspace_directory)?;
+            transaction_directory
+                .file
+                .sync_all()
+                .map_err(|source| io_error(&transaction_directory.path, source))?;
             return Ok(false);
         }
         return Err(TransactionError::CorruptJournal(journal_path));
@@ -1264,14 +1265,17 @@ fn cleanup_pre_begin_workspace(
     let workspace_directory = recovery_chain
         .last()
         .ok_or_else(|| TransactionError::RecoveryConflict(workspace.to_path_buf()))?;
-    let (journal, _) = open_recovery_journal(journal_path, workspace_directory)?;
-    validate_private_journal(journal_path, &journal)?;
-    let metadata = journal
+    let inspected =
+        open_stable_child_file(workspace_directory, std::ffi::OsStr::new(JOURNAL_FILE))?;
+    validate_private_journal(journal_path, &inspected)?;
+    let metadata = inspected
         .metadata()
         .map_err(|source| io_error(journal_path, source))?;
     if metadata.len() != 0 {
         return Ok(false);
     }
+    drop(inspected);
+    let (journal, _) = open_recovery_journal(journal_path, workspace_directory)?;
 
     let names = stable_directory_names(workspace_directory)?;
     if names.len() != 1 || names[0] != std::ffi::OsStr::new(JOURNAL_FILE) {
