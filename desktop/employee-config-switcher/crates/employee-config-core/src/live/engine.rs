@@ -159,7 +159,7 @@ enum FaultPoint {
     AfterManifest,
     AfterPlanning,
     AfterStageBeforeJournal(usize),
-    AfterPublishBeforeJournal(usize),
+    AfterPublishBeforeVerification(usize),
     AfterPublished(usize),
     AfterVerified(usize),
 }
@@ -223,8 +223,6 @@ fn apply_create_only_inner(
     if fault == FaultPoint::AfterJournalCreated {
         return Err(TransactionError::InjectedCrash);
     }
-    let mut created = Vec::with_capacity(files.len());
-
     let result = (|| {
         append_event(&mut journal, &journal_path, &JournalEvent::Begin)?;
         if fault == FaultPoint::AfterBegin {
@@ -288,82 +286,25 @@ fn apply_create_only_inner(
         if fault == FaultPoint::AfterPlanning {
             return Err(TransactionError::InjectedCrash);
         }
+        drop(journal);
 
-        for (index, plan) in files.iter().enumerate() {
-            let target = checked_target(&root, &plan.relative_path)?;
-            let parent = target
-                .parent()
-                .ok_or_else(|| TransactionError::InvalidTarget(plan.relative_path.clone()))?;
-            let state = read_journal(&journal_path)?;
-            let planned = state
-                .files
-                .get(&index)
-                .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?;
-            if identity_for_path(parent)? != planned.parent_identity {
-                return Err(TransactionError::RecoveryConflict(parent.to_path_buf()));
-            }
-            let stage_identity = planned
-                .stage_identity
-                .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?;
-            ensure_absent(&target)?;
-
-            let stage_path = workspace.join(&planned.stage);
-            let stage_file =
-                File::open(&stage_path).map_err(|source| io_error(&stage_path, source))?;
-            if file_identity(&stage_file, &stage_path)? != stage_identity {
-                return Err(TransactionError::RecoveryConflict(stage_path));
-            }
-            fs::hard_link(&stage_path, &target).map_err(|source| {
-                if source.kind() == io::ErrorKind::AlreadyExists {
-                    TransactionError::Collision(target.clone())
-                } else {
-                    io_error(&target, source)
-                }
-            })?;
-            sync_directory(parent).map_err(|source| io_error(parent, source))?;
-            if fault == FaultPoint::AfterPublishBeforeJournal(index) {
-                return Err(TransactionError::InjectedCrash);
-            }
-
-            let target_file = File::open(&target).map_err(|source| io_error(&target, source))?;
-            let target_identity = file_identity(&target_file, &target)?;
-            if target_identity != stage_identity {
-                return Err(TransactionError::RecoveryConflict(target));
-            }
-            append_event(
-                &mut journal,
-                &journal_path,
-                &JournalEvent::Published {
-                    index,
-                    target_identity,
-                },
-            )?;
-            if fault == FaultPoint::AfterPublished(index) {
-                return Err(TransactionError::InjectedCrash);
-            }
-
-            verify_target(&target, planned)?;
-            append_event(
-                &mut journal,
-                &journal_path,
-                &JournalEvent::Verified { index },
-            )?;
-            created.push(plan.relative_path.clone());
-            if fault == FaultPoint::AfterVerified(index) {
-                return Err(TransactionError::InjectedCrash);
-            }
+        // Use the same durable roll-forward decision for the initial apply and
+        // for restart recovery. `recover_workspace_inner` records every final
+        // target identity and verification plus `Prepared` before it creates
+        // the first target, and it never appends to the journal afterward.
+        if !recover_workspace_inner(&root, &workspace, fault, |_| Ok(()), |_| Ok(()))? {
+            return Err(TransactionError::CorruptJournal(journal_path));
         }
-
-        append_event(&mut journal, &journal_path, &JournalEvent::Complete)?;
-        sync_directory(&workspace).map_err(|source| io_error(&workspace, source))?;
-        Ok(CreateOnlyReceipt { created })
+        Ok(CreateOnlyReceipt {
+            created: files
+                .iter()
+                .map(|plan| plan.relative_path.clone())
+                .collect(),
+        })
     })();
 
     match result {
-        Ok(receipt) => {
-            cleanup_workspace(&workspace, &read_journal(&journal_path)?)?;
-            Ok(receipt)
-        }
+        Ok(receipt) => Ok(receipt),
         Err(TransactionError::InjectedCrash) => Err(TransactionError::InjectedCrash),
         Err(error) => match recover_workspace(&root, &workspace) {
             Ok(true) => Ok(CreateOnlyReceipt {
@@ -504,7 +445,7 @@ fn validate_generated_journal_bounds(
         )?);
         total = total.saturating_add(journal_event_len(path, &JournalEvent::Verified { index })?);
     }
-    total = total.saturating_add(journal_event_len(path, &JournalEvent::Complete)?);
+    total = total.saturating_add(journal_event_len(path, &JournalEvent::Prepared)?);
     if total > MAX_JOURNAL_BYTES {
         return Err(TransactionError::TooLarge(path.to_path_buf()));
     }
@@ -866,12 +807,13 @@ fn validate_journal_snapshot(
 /// Returns `true` when the transaction is or becomes committed, `false` when
 /// no target had been published and incomplete staging was safely abandoned.
 fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionError> {
-    recover_workspace_inner(root, workspace, |_| Ok(()), |_| Ok(()))
+    recover_workspace_inner(root, workspace, FaultPoint::Never, |_| Ok(()), |_| Ok(()))
 }
 
 fn recover_workspace_inner<P, C>(
     root: &Path,
     workspace: &Path,
+    fault: FaultPoint,
     mut before_publish: P,
     mut before_cleanup: C,
 ) -> Result<bool, TransactionError>
@@ -1012,7 +954,7 @@ where
     // Revalidate the state parsed after sealing rather than trusting the
     // earlier parse. A same-length mutation between the two reads must not be
     // able to substitute a target, digest or recorded identity.
-    for planned in sealed_state.files.values() {
+    for (index, planned) in &sealed_state.files {
         let target = checked_target(root, &planned.target)?;
         let parent = target
             .parent()
@@ -1058,9 +1000,18 @@ where
             fs::hard_link(workspace.join(&planned.stage), &target)
                 .map_err(|source| io_error(&target, source))?;
             sync_directory(parent).map_err(|source| io_error(parent, source))?;
+            if fault == FaultPoint::AfterPublishBeforeVerification(*index) {
+                return Err(TransactionError::InjectedCrash);
+            }
         }
         verify_target(&target, planned)?;
+        if fault == FaultPoint::AfterPublished(*index) {
+            return Err(TransactionError::InjectedCrash);
+        }
         validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
+        if fault == FaultPoint::AfterVerified(*index) {
+            return Err(TransactionError::InjectedCrash);
+        }
     }
     validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
     cleanup_workspace(workspace, &sealed_state)?;
@@ -1980,6 +1931,7 @@ mod tests {
         let error = recover_workspace_inner(
             &checked,
             &workspace,
+            FaultPoint::Never,
             |path| {
                 let mut external = OpenOptions::new()
                     .append(true)
@@ -2024,6 +1976,7 @@ mod tests {
         let error = recover_workspace_inner(
             &checked,
             &workspace,
+            FaultPoint::Never,
             |_| Ok(()),
             |path| {
                 let mut external = OpenOptions::new()
@@ -2069,6 +2022,7 @@ mod tests {
         let error = recover_workspace_inner(
             &checked,
             &workspace,
+            FaultPoint::Never,
             |_| Err(TransactionError::InjectedCrash),
             |_| Ok(()),
         )
@@ -2198,20 +2152,60 @@ mod tests {
     }
 
     #[test]
-    fn crash_after_unjournaled_publish_is_safely_rolled_forward() {
+    fn crash_after_prepared_publish_is_safely_rolled_forward() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("tool")).unwrap();
         let error = apply_create_only_inner(
             root.path(),
             vec![plan("tool/config.json", "synthetic-key")],
-            FaultPoint::AfterPublishBeforeJournal(0),
+            FaultPoint::AfterPublishBeforeVerification(0),
         )
         .expect_err("fault is injected");
         assert!(matches!(error, TransactionError::InjectedCrash));
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let journal = fs::read_to_string(workspace.join(JOURNAL_FILE)).unwrap();
+        assert!(journal.contains("\"state\":\"prepared\""));
         recover_create_only(root.path()).unwrap();
         assert_eq!(
             fs::read_to_string(root.path().join("tool/config.json")).unwrap(),
             "synthetic-key"
+        );
+    }
+
+    #[test]
+    fn prepared_recovery_tolerates_stage_removed_after_target_publication() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterPublishBeforeVerification(0),
+        )
+        .expect_err("fault is injected");
+
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::remove_file(workspace.join("stage-0000.bin")).unwrap();
+
+        recover_create_only(root.path()).expect("prepared recovery must finish cleanup");
+        assert_eq!(
+            fs::read_to_string(root.path().join("tool/config.json")).unwrap(),
+            "synthetic-key"
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+                .unwrap()
+                .count(),
+            0
         );
     }
 
