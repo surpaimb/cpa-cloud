@@ -439,6 +439,11 @@ mod platform {
         if path.as_os_str().is_empty() {
             return Err(BackupError::InvalidRoot(path.to_path_buf()));
         }
+        if path.components().any(|component| {
+            matches!(component, Component::ParentDir | Component::Prefix(_))
+        }) {
+            return Err(BackupError::InvalidRoot(path.to_path_buf()));
+        }
 
         // Anchor once at a stable process namespace entry, then make every
         // caller-controlled component the final component of an `openat` call.
@@ -449,8 +454,8 @@ mod platform {
         } else {
             Path::new(".")
         };
-        let c_anchor = CString::new(anchor.as_os_str().as_bytes())
-            .expect("Unix root anchors have no NUL");
+        let c_anchor =
+            CString::new(anchor.as_os_str().as_bytes()).expect("Unix root anchors have no NUL");
         let fd = unsafe {
             libc::open(
                 c_anchor.as_ptr(),
@@ -471,10 +476,7 @@ mod platform {
                     directory = open_file_at(
                         directory.as_raw_fd(),
                         name,
-                        libc::O_RDONLY
-                            | libc::O_DIRECTORY
-                            | libc::O_CLOEXEC
-                            | libc::O_NOFOLLOW,
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                         0,
                     )
                     .map_err(|source| io_error(&display, source))?;
@@ -651,6 +653,11 @@ mod tests {
         BackupKey::from_bytes([byte; KEY_BYTES])
     }
 
+    #[cfg(unix)]
+    fn stable_root(root: &tempfile::TempDir) -> PathBuf {
+        fs::canonicalize(root.path()).unwrap()
+    }
+
     #[test]
     fn key_debug_is_redacted() {
         let key = fixed_key(0x42);
@@ -677,11 +684,11 @@ mod tests {
         let key_sentinel = b"old-employee-key-sentinel";
         let original = b"old-employee-key-sentinel\nuser-setting=true\n";
         fs::write(root.path().join("config.json"), original).unwrap();
+        let root_path = stable_root(&root);
         let key = fixed_key(0x5a);
 
-        let receipt =
-            prepare_encrypted_backup(root.path(), Path::new("config.json"), &key).unwrap();
-        let workspace = root.path().join(BACKUP_DIRECTORY).join(&receipt.workspace);
+        let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
+        let workspace = root_path.join(BACKUP_DIRECTORY).join(&receipt.workspace);
         let backup = fs::read(workspace.join(BACKUP_FILE)).unwrap();
         let manifest = fs::read(workspace.join(MANIFEST_FILE)).unwrap();
         assert!(!backup
@@ -709,7 +716,7 @@ mod tests {
             0o600
         );
 
-        let reloaded = load_encrypted_backup(root.path(), &receipt.workspace, &key).unwrap();
+        let reloaded = load_encrypted_backup(&root_path, &receipt.workspace, &key).unwrap();
         assert_eq!(&*reloaded, original);
     }
 
@@ -721,8 +728,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let original = b"old-employee-key-sentinel\n";
         fs::write(root.path().join("config.json"), original).unwrap();
+        let root_path = stable_root(&root);
         let receipt =
-            prepare_encrypted_backup(root.path(), Path::new("config.json"), &fixed_key(0x33))
+            prepare_encrypted_backup(&root_path, Path::new("config.json"), &fixed_key(0x33))
                 .unwrap();
         let workspace = receipt.workspace.clone();
         drop(receipt);
@@ -735,7 +743,7 @@ mod tests {
         .unwrap();
         recover_create_only(root.path()).unwrap();
 
-        let reloaded = load_encrypted_backup(root.path(), &workspace, &fixed_key(0x33)).unwrap();
+        let reloaded = load_encrypted_backup(&root_path, &workspace, &fixed_key(0x33)).unwrap();
         assert_eq!(&*reloaded, original);
         assert_eq!(
             fs::read(root.path().join("created.json")).unwrap(),
@@ -748,15 +756,15 @@ mod tests {
     fn wrong_key_and_ciphertext_tampering_fail_authentication() {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("config.json"), b"old-secret").unwrap();
+        let root_path = stable_root(&root);
         let receipt =
-            prepare_encrypted_backup(root.path(), Path::new("config.json"), &fixed_key(1)).unwrap();
+            prepare_encrypted_backup(&root_path, Path::new("config.json"), &fixed_key(1)).unwrap();
         assert!(matches!(
-            load_encrypted_backup(root.path(), &receipt.workspace, &fixed_key(2)),
+            load_encrypted_backup(&root_path, &receipt.workspace, &fixed_key(2)),
             Err(BackupError::Authentication)
         ));
 
-        let backup_path = root
-            .path()
+        let backup_path = root_path
             .join(BACKUP_DIRECTORY)
             .join(&receipt.workspace)
             .join(BACKUP_FILE);
@@ -764,7 +772,7 @@ mod tests {
         bytes[0] ^= 0x80;
         fs::write(&backup_path, bytes).unwrap();
         assert!(matches!(
-            load_encrypted_backup(root.path(), &receipt.workspace, &fixed_key(1)),
+            load_encrypted_backup(&root_path, &receipt.workspace, &fixed_key(1)),
             Err(BackupError::Authentication)
         ));
     }
@@ -775,13 +783,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("config.json");
         fs::write(&target, b"old-secret").unwrap();
+        let root_path = stable_root(&root);
         let key = fixed_key(3);
-        let receipt =
-            prepare_encrypted_backup(root.path(), Path::new("config.json"), &key).unwrap();
+        let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
         fs::rename(&target, root.path().join("moved.json")).unwrap();
         fs::write(&target, b"external-edit").unwrap();
         assert!(matches!(
-            load_encrypted_backup(root.path(), &receipt.workspace, &key),
+            load_encrypted_backup(&root_path, &receipt.workspace, &key),
             Err(BackupError::RecoveryConflict(_))
         ));
         assert_eq!(fs::read(&target).unwrap(), b"external-edit");
@@ -795,8 +803,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::NamedTempFile::new().unwrap();
         symlink(outside.path(), root.path().join("config.json")).unwrap();
+        let root_path = stable_root(&root);
         assert!(
-            prepare_encrypted_backup(root.path(), Path::new("config.json"), &fixed_key(4)).is_err()
+            prepare_encrypted_backup(&root_path, Path::new("config.json"), &fixed_key(4)).is_err()
         );
     }
 
@@ -806,19 +815,18 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let parent = tempfile::tempdir().unwrap();
-        let real_parent = parent.path().join("real-parent");
+        let parent_path = stable_root(&parent);
+        let real_parent = parent_path.join("real-parent");
         let real_root = real_parent.join("root");
         fs::create_dir_all(&real_root).unwrap();
         fs::write(real_root.join("config.json"), b"old-secret").unwrap();
-        symlink(&real_parent, parent.path().join("linked-parent")).unwrap();
+        symlink(&real_parent, parent_path.join("linked-parent")).unwrap();
 
-        let linked_root = parent.path().join("linked-parent").join("root");
-        assert!(prepare_encrypted_backup(
-            &linked_root,
-            Path::new("config.json"),
-            &fixed_key(6)
-        )
-        .is_err());
+        let linked_root = parent_path.join("linked-parent").join("root");
+        assert!(
+            prepare_encrypted_backup(&linked_root, Path::new("config.json"), &fixed_key(6))
+                .is_err()
+        );
         assert!(!real_root.join(BACKUP_DIRECTORY).exists());
     }
 
@@ -829,13 +837,10 @@ mod tests {
         fs::create_dir(root.path().join("child")).unwrap();
         fs::write(root.path().join("config.json"), b"old-secret").unwrap();
 
-        let traversing_root = root.path().join("child").join("..");
+        let root_path = stable_root(&root);
+        let traversing_root = root_path.join("child").join("..");
         assert!(matches!(
-            prepare_encrypted_backup(
-                &traversing_root,
-                Path::new("config.json"),
-                &fixed_key(7)
-            ),
+            prepare_encrypted_backup(&traversing_root, Path::new("config.json"), &fixed_key(7)),
             Err(BackupError::InvalidRoot(_))
         ));
         assert!(!root.path().join(BACKUP_DIRECTORY).exists());
