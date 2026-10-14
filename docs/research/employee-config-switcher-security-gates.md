@@ -96,9 +96,30 @@ a newly opened append writer is refused on Linux, macOS and Windows before the
 target is created. A writer that already held a Unix descriptor before sealing
 can still ignore the advisory lock; the post-publication snapshot detects that
 mutation, but cannot undo the already-created target. This same-user adversarial
-case therefore remains outside the accepted real-write boundary. Parsed cleanup
-also remains path-based after its snapshot check. Full handle-relative target
-and workspace traversal/deletion is still required below.
+case therefore remains outside the accepted real-write boundary.
+
+Publication and cleanup now retain a stable directory chain from the configured
+root through every target parent and transaction workspace. Linux and macOS open
+children with `openat(..., O_NOFOLLOW)`, publish with descriptor-relative
+`linkat`, enumerate through the held workspace descriptor, and clean known
+children/workspaces with `unlinkat`. Windows holds every directory without
+delete sharing, opens the journal and stage with write/delete sharing denied,
+and marks the exact verified file or directory handle for deletion with
+`SetFileInformationByHandle`. A target parent on another volume/device is
+rejected before publication, so a mount point or junction cannot silently move
+the hard-link destination across a filesystem boundary. Fault tests rename a
+target parent after the sealed snapshot and rename a workspace immediately
+before cleanup; both paths stop without publishing into or deleting the
+replacement object. Unknown workspace entries are enumerated from the stable
+directory and block deletion before any known entry is removed.
+
+The remaining Unix boundary is explicit: an equally privileged process running
+as the same OS user can ignore `flock`, restore owner-write permission, and race
+an individual directory entry between the final `fstatat` identity comparison
+and `linkat`/`unlinkat`. POSIX descriptors keep ancestor rename, symlink and
+mount redirection from changing the base directory, but portable Linux/macOS
+APIs cannot unlink a regular file solely by its already-open descriptor. This
+same-user adversarial case remains outside the accepted real-write boundary.
 
 Before scanning recovery state, the engine now requires the transaction root
 and each workspace to retain their stable file identity and private directory
@@ -107,7 +128,8 @@ ACL entries on macOS, or both ownership by the current process user SID and the
 verified protected owner-only DACL on Windows. Workspace names
 must exactly match the engine-generated `tx-<pid>-<nonce>-<counter>` form. Unknown names or weakened
 permissions block recovery and preserve the workspace. These checks remain
-path-based and do not replace the still-required handle-relative traversal.
+path read-backs, but subsequent publication and cleanup are anchored to the
+retained native handles described above.
 
 A persistent owner-private lock file combines an in-process mutex with an OS
 lock (`flock` on POSIX; an exclusive-sharing file handle on Windows), so a
@@ -125,10 +147,10 @@ Native negative recovery tests also reject a macOS workspace ACL and a removed
 macOS lock path. These behaviors must pass native runtime tests, not only
 cross-platform compilation.
 
-This is not clearance for live writes. Native handle-relative traversal must
-still replace the current path re-checks to close adversarial rename races, and
-replacement of existing files still needs encrypted or non-persistent rollback
-material. Consequently `apply_configuration` remains fail-closed.
+This is not clearance for live writes. The same-user Unix entry race described
+above remains open, and replacement of existing files still needs encrypted or
+non-persistent rollback material. Consequently `apply_configuration` remains
+fail-closed.
 
 ## Encrypted rollback-material foundation
 

@@ -149,6 +149,16 @@ struct TransactionGuard {
     _file: File,
 }
 
+/// A directory whose live handle is retained across every operation that
+/// depends on its name. On Windows the handle denies delete sharing, which
+/// prevents rename/reparse replacement. On Unix callers use the descriptor as
+/// the base for `*at` operations so an ancestor rename cannot redirect them.
+struct StableDirectory {
+    path: PathBuf,
+    file: File,
+    identity: FileIdentity,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FaultPoint {
     Never,
@@ -553,9 +563,13 @@ fn create_workspace(transaction_root: &Path) -> Result<PathBuf, TransactionError
 }
 
 #[cfg(unix)]
-fn open_recovery_journal(path: &Path) -> Result<(File, bool), TransactionError> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+fn open_recovery_journal(
+    path: &Path,
+    workspace: &StableDirectory,
+) -> Result<(File, bool), TransactionError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
     ensure_not_link(path, &metadata)?;
@@ -569,12 +583,24 @@ fn open_recovery_journal(path: &Path) -> Result<(File, bool), TransactionError> 
     }
 
     let writable = mode == 0o600;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(writable)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|source| io_error(path, source))?;
+    let name = std::ffi::CString::new(
+        path.file_name()
+            .ok_or_else(|| TransactionError::CorruptJournal(path.to_path_buf()))?
+            .as_bytes(),
+    )
+    .map_err(|_| TransactionError::CorruptJournal(path.to_path_buf()))?;
+    let flags = libc::O_NOFOLLOW
+        | libc::O_CLOEXEC
+        | if writable {
+            libc::O_RDWR
+        } else {
+            libc::O_RDONLY
+        };
+    let fd = unsafe { libc::openat(workspace.file.as_raw_fd(), name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(io_error(path, io::Error::last_os_error()));
     }
@@ -582,19 +608,19 @@ fn open_recovery_journal(path: &Path) -> Result<(File, bool), TransactionError> 
 }
 
 #[cfg(windows)]
-fn open_recovery_journal(path: &Path) -> Result<(File, bool), TransactionError> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+fn open_recovery_journal(
+    path: &Path,
+    workspace: &StableDirectory,
+) -> Result<(File, bool), TransactionError> {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_SHARE_READ};
 
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        // Permit the engine's own read-only path-identity probes, but deny any
-        // second writer for the lifetime of this recovery handle.
-        .share_mode(FILE_SHARE_READ)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|source| io_error(path, source))?;
+    workspace.validate_path()?;
+    // Permit the engine's own read-only identity probes, but deny any second
+    // writer or delete/rename holder for the lifetime of this handle. DELETE
+    // access lets cleanup mark this exact object for deletion by handle.
+    let file =
+        open_windows_path_shared(path, GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ)?;
     Ok((file, true))
 }
 
@@ -919,6 +945,13 @@ where
     A: FnMut(&Path) -> Result<(), TransactionError>,
     C: FnMut(&Path) -> Result<(), TransactionError>,
 {
+    let workspace_relative = workspace
+        .strip_prefix(root)
+        .map_err(|_| TransactionError::RecoveryConflict(workspace.to_path_buf()))?;
+    let recovery_chain = open_directory_chain(root, workspace_relative)?;
+    let workspace_directory = recovery_chain
+        .last()
+        .ok_or_else(|| TransactionError::RecoveryConflict(workspace.to_path_buf()))?;
     validate_private_recovery_directory(workspace)?;
     let journal_path = workspace.join(JOURNAL_FILE);
     if !path_exists(&journal_path)? {
@@ -932,18 +965,18 @@ where
         }
         return Err(TransactionError::CorruptJournal(journal_path));
     }
-    if cleanup_pre_begin_workspace(workspace, &journal_path)? {
+    if cleanup_pre_begin_workspace(workspace, &journal_path, &recovery_chain)? {
         return Ok(false);
     }
 
-    let (mut journal, journal_writable) = open_recovery_journal(&journal_path)?;
+    let (mut journal, journal_writable) =
+        open_recovery_journal(&journal_path, workspace_directory)?;
     validate_private_journal(&journal_path, &journal)?;
     let (state, initial_snapshot) = read_journal_from_file(&journal_path, &journal)?;
     if state.complete {
         before_cleanup(&journal_path)?;
         validate_journal_snapshot(&journal_path, &journal, &initial_snapshot)?;
-        drop(journal);
-        cleanup_workspace(workspace, &state)?;
+        cleanup_workspace(workspace, &recovery_chain, &state, journal)?;
         return Ok(true);
     }
     // `Begin` is durable before any `Planned` event, secret stage, or target
@@ -953,8 +986,7 @@ where
     if state.files.is_empty() {
         before_cleanup(&journal_path)?;
         validate_journal_snapshot(&journal_path, &journal, &initial_snapshot)?;
-        drop(journal);
-        cleanup_workspace(workspace, &state)?;
+        cleanup_workspace(workspace, &recovery_chain, &state, journal)?;
         return Ok(false);
     }
 
@@ -972,8 +1004,7 @@ where
         }
         before_cleanup(&journal_path)?;
         validate_journal_snapshot(&journal_path, &journal, &initial_snapshot)?;
-        drop(journal);
-        cleanup_workspace(workspace, &state)?;
+        cleanup_workspace(workspace, &recovery_chain, &state, journal)?;
         return Ok(false);
     }
 
@@ -989,29 +1020,33 @@ where
     // identity, so the terminal identities can be journaled before publication.
     for (index, planned) in &state.files {
         let target = checked_target(root, &planned.target)?;
-        let parent = target
-            .parent()
-            .ok_or_else(|| TransactionError::InvalidTarget(planned.target.clone()))?;
-        if identity_for_path(parent)? != planned.parent_identity {
-            return Err(TransactionError::RecoveryConflict(parent.to_path_buf()));
+        let relative_parent = planned.target.parent().unwrap_or_else(|| Path::new(""));
+        let target_chain = open_directory_chain(root, relative_parent)?;
+        let parent = target_chain.last().expect("root directory is retained");
+        if parent.identity != planned.parent_identity {
+            return Err(TransactionError::RecoveryConflict(parent.path.clone()));
         }
-        let stage_path = workspace.join(&planned.stage);
-        let target_exists = path_exists(&target)?;
-        let stage_identity = if state.prepared && target_exists && !path_exists(&stage_path)? {
+        let target_name = planned
+            .target
+            .file_name()
+            .ok_or_else(|| TransactionError::InvalidTarget(planned.target.clone()))?;
+        let target_exists = stable_child_exists(parent, target_name)?;
+        let stage_exists =
+            stable_child_exists(workspace_directory, std::ffi::OsStr::new(&planned.stage))?;
+        let stage_identity = if state.prepared && target_exists && !stage_exists {
             planned
                 .stage_identity
                 .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?
         } else {
-            verify_stage(workspace, planned)?
+            let stage = verify_stage_handle(workspace_directory, planned)?;
+            file_identity(&stage, &workspace.join(&planned.stage))?
         };
 
-        let target_identity = match fs::symlink_metadata(&target) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => stage_identity,
-            Err(source) => return Err(io_error(&target, source)),
-            Ok(_) => {
-                ensure_real_file(&target)?;
-                identity_for_path(&target)?
-            }
+        let target_identity = if target_exists {
+            let target_file = verify_target_handle(parent, target_name, planned)?;
+            file_identity(&target_file, &target)?
+        } else {
+            stage_identity
         };
         if target_identity != stage_identity {
             return Err(TransactionError::RecoveryConflict(target));
@@ -1030,8 +1065,8 @@ where
                 },
             )?;
         }
-        if path_exists(&target)? {
-            verify_target(&target, planned)?;
+        if target_exists {
+            let _ = verify_target_handle(parent, target_name, planned)?;
         }
         if !planned.verified && !state.prepared {
             append_event(
@@ -1057,24 +1092,31 @@ where
     // able to substitute a target, digest or recorded identity.
     for planned in sealed_state.files.values() {
         let target = checked_target(root, &planned.target)?;
-        let parent = target
-            .parent()
-            .ok_or_else(|| TransactionError::InvalidTarget(planned.target.clone()))?;
-        if identity_for_path(parent)? != planned.parent_identity {
-            return Err(TransactionError::RecoveryConflict(parent.to_path_buf()));
+        let relative_parent = planned.target.parent().unwrap_or_else(|| Path::new(""));
+        let target_chain = open_directory_chain(root, relative_parent)?;
+        let parent = target_chain.last().expect("root directory is retained");
+        if parent.identity != planned.parent_identity {
+            return Err(TransactionError::RecoveryConflict(parent.path.clone()));
         }
+        let target_name = planned
+            .target
+            .file_name()
+            .ok_or_else(|| TransactionError::InvalidTarget(planned.target.clone()))?;
         let recorded = planned
             .target_identity
             .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?;
-        if path_exists(&target)? {
-            verify_target(&target, planned)?;
-            if identity_for_path(&target)? != recorded {
+        if stable_child_exists(parent, target_name)? {
+            let target_file = verify_target_handle(parent, target_name, planned)?;
+            if file_identity(&target_file, &target)? != recorded {
                 return Err(TransactionError::RecoveryConflict(target));
             }
-        } else if verify_stage(workspace, planned)? != recorded {
-            return Err(TransactionError::RecoveryConflict(
-                workspace.join(&planned.stage),
-            ));
+        } else {
+            let stage = verify_stage_handle(workspace_directory, planned)?;
+            if file_identity(&stage, &workspace.join(&planned.stage))? != recorded {
+                return Err(TransactionError::RecoveryConflict(
+                    workspace.join(&planned.stage),
+                ));
+            }
         }
     }
 
@@ -1084,29 +1126,59 @@ where
     // publication as well so observed concurrent mutation preserves evidence.
     for (index, planned) in &sealed_state.files {
         let target = checked_target(root, &planned.target)?;
-        let parent = target
-            .parent()
+        let relative_parent = planned.target.parent().unwrap_or_else(|| Path::new(""));
+        let target_chain = open_directory_chain(root, relative_parent)?;
+        let parent = target_chain.last().expect("root directory is retained");
+        if parent.identity != planned.parent_identity {
+            return Err(TransactionError::RecoveryConflict(parent.path.clone()));
+        }
+        let target_name = planned
+            .target
+            .file_name()
             .ok_or_else(|| TransactionError::InvalidTarget(planned.target.clone()))?;
-        if !path_exists(&target)? {
+        if !stable_child_exists(parent, target_name)? {
+            let stage = verify_stage_handle(workspace_directory, planned)?;
             before_publish(&journal_path)?;
             validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
             after_snapshot_before_publish(&journal_path)?;
+            for directory in &recovery_chain {
+                directory.validate_path()?;
+            }
+            for directory in &target_chain {
+                directory.validate_path()?;
+            }
             let recorded = planned
                 .target_identity
                 .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?;
-            if verify_stage(workspace, planned)? != recorded {
+            if file_identity(&stage, &workspace.join(&planned.stage))? != recorded
+                || digest_file(&stage, &workspace.join(&planned.stage))?.as_str()
+                    != planned.digest.as_str()
+            {
                 return Err(TransactionError::RecoveryConflict(
                     workspace.join(&planned.stage),
                 ));
             }
-            fs::hard_link(workspace.join(&planned.stage), &target)
-                .map_err(|source| io_error(&target, source))?;
-            sync_directory(parent).map_err(|source| io_error(parent, source))?;
+            publish_stage_handle_relative(
+                workspace_directory,
+                parent,
+                &planned.stage,
+                target_name,
+            )?;
+            parent
+                .file
+                .sync_all()
+                .map_err(|source| io_error(&parent.path, source))?;
             if fault == FaultPoint::AfterPublishBeforeVerification(*index) {
                 return Err(TransactionError::InjectedCrash);
             }
         }
-        verify_target(&target, planned)?;
+        let target_file = verify_target_handle(parent, target_name, planned)?;
+        let recorded = planned
+            .target_identity
+            .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?;
+        if file_identity(&target_file, &target)? != recorded {
+            return Err(TransactionError::RecoveryConflict(target));
+        }
         if fault == FaultPoint::AfterPublished(*index) {
             return Err(TransactionError::InjectedCrash);
         }
@@ -1116,11 +1188,10 @@ where
         }
     }
     validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
-    // Windows intentionally denies write/delete sharing during publication.
-    // Release that handle only after the final snapshot check; cleanup remains
-    // a separately documented path-based gate.
-    drop(journal);
-    cleanup_workspace(workspace, &sealed_state)?;
+    // Cleanup consumes the held journal and directory handles so it deletes
+    // the exact verified objects rather than resolving attacker-swappable
+    // absolute paths again.
+    cleanup_workspace(workspace, &recovery_chain, &sealed_state, journal)?;
     Ok(true)
 }
 
@@ -1176,45 +1247,49 @@ fn validate_recovery_journal_capacity(
 fn cleanup_pre_begin_workspace(
     workspace: &Path,
     journal_path: &Path,
+    recovery_chain: &[StableDirectory],
 ) -> Result<bool, TransactionError> {
-    ensure_real_file(journal_path)?;
-    let metadata =
-        fs::symlink_metadata(journal_path).map_err(|source| io_error(journal_path, source))?;
+    let workspace_directory = recovery_chain
+        .last()
+        .ok_or_else(|| TransactionError::RecoveryConflict(workspace.to_path_buf()))?;
+    let (journal, _) = open_recovery_journal(journal_path, workspace_directory)?;
+    validate_private_journal(journal_path, &journal)?;
+    let metadata = journal
+        .metadata()
+        .map_err(|source| io_error(journal_path, source))?;
     if metadata.len() != 0 {
         return Ok(false);
     }
 
-    let mut saw_journal = false;
-    for entry in fs::read_dir(workspace).map_err(|source| io_error(workspace, source))? {
-        let entry = entry.map_err(|source| io_error(workspace, source))?;
-        if saw_journal || entry.file_name().to_str() != Some(JOURNAL_FILE) {
-            return Err(TransactionError::CorruptJournal(workspace.to_path_buf()));
-        }
-        saw_journal = true;
-    }
-    if !saw_journal {
+    let names = stable_directory_names(workspace_directory)?;
+    if names.len() != 1 || names[0] != std::ffi::OsStr::new(JOURNAL_FILE) {
         return Err(TransactionError::CorruptJournal(workspace.to_path_buf()));
     }
 
-    fs::remove_file(journal_path).map_err(|source| io_error(journal_path, source))?;
-    sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
-    fs::remove_dir(workspace).map_err(|source| io_error(workspace, source))?;
-    if let Some(parent) = workspace.parent() {
-        sync_directory(parent).map_err(|source| io_error(parent, source))?;
-    }
+    cleanup_workspace(workspace, recovery_chain, &JournalState::default(), journal)?;
     Ok(true)
 }
 
-fn cleanup_workspace(workspace: &Path, state: &JournalState) -> Result<(), TransactionError> {
+fn cleanup_workspace(
+    workspace: &Path,
+    recovery_chain: &[StableDirectory],
+    state: &JournalState,
+    journal: File,
+) -> Result<(), TransactionError> {
+    let workspace_directory = recovery_chain
+        .last()
+        .ok_or_else(|| TransactionError::RecoveryConflict(workspace.to_path_buf()))?;
+    let transaction_directory = recovery_chain
+        .get(recovery_chain.len().saturating_sub(2))
+        .ok_or_else(|| TransactionError::RecoveryConflict(workspace.to_path_buf()))?;
+    workspace_directory.validate_path()?;
     let expected: HashSet<&str> = state
         .files
         .values()
         .map(|planned| planned.stage.as_str())
         .chain(std::iter::once(JOURNAL_FILE))
         .collect();
-    for entry in fs::read_dir(workspace).map_err(|source| io_error(workspace, source))? {
-        let entry = entry.map_err(|source| io_error(workspace, source))?;
-        let name = entry.file_name();
+    for name in stable_directory_names(workspace_directory)? {
         let name = name
             .to_str()
             .ok_or_else(|| TransactionError::CorruptJournal(workspace.to_path_buf()))?;
@@ -1223,62 +1298,373 @@ fn cleanup_workspace(workspace: &Path, state: &JournalState) -> Result<(), Trans
         }
     }
     for planned in state.files.values() {
-        let stage = workspace.join(&planned.stage);
-        if path_exists(&stage)? {
-            ensure_real_file(&stage)?;
+        let name = std::ffi::OsStr::new(&planned.stage);
+        if stable_child_exists(workspace_directory, name)? {
+            let stage = open_stable_child_file(workspace_directory, name)?;
+            let stage_path = workspace.join(&planned.stage);
             if let Some(expected) = planned.stage_identity {
-                if identity_for_path(&stage)? != expected {
-                    return Err(TransactionError::RecoveryConflict(stage));
+                if file_identity(&stage, &stage_path)? != expected {
+                    return Err(TransactionError::RecoveryConflict(stage_path));
                 }
             }
-            fs::remove_file(&stage).map_err(|source| io_error(&stage, source))?;
+            delete_held_child(workspace_directory, name, &stage)?;
         }
     }
-    sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
-    let journal = workspace.join(JOURNAL_FILE);
-    if path_exists(&journal)? {
-        ensure_real_file(&journal)?;
-        fs::remove_file(&journal).map_err(|source| io_error(&journal, source))?;
-        sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
-    }
-    fs::remove_dir(workspace).map_err(|source| io_error(workspace, source))?;
-    if let Some(parent) = workspace.parent() {
-        sync_directory(parent).map_err(|source| io_error(parent, source))?;
-    }
+    delete_held_child(
+        workspace_directory,
+        std::ffi::OsStr::new(JOURNAL_FILE),
+        &journal,
+    )?;
+    drop(journal);
+    workspace_directory
+        .file
+        .sync_all()
+        .map_err(|source| io_error(workspace, source))?;
+    delete_held_directory(transaction_directory, workspace_directory)?;
+    transaction_directory
+        .file
+        .sync_all()
+        .map_err(|source| io_error(&transaction_directory.path, source))?;
     Ok(())
 }
 
-fn verify_target(target: &Path, planned: &PlannedFile) -> Result<(), TransactionError> {
-    ensure_real_file(target)?;
-    let file = File::open(target).map_err(|source| io_error(target, source))?;
-    let stage_identity = planned
-        .stage_identity
-        .ok_or_else(|| TransactionError::CorruptJournal(target.to_path_buf()))?;
-    if file_identity(&file, target)? != stage_identity
-        || digest_path(target)?.as_str() != planned.digest.as_str()
+#[cfg(unix)]
+fn stable_directory_names(
+    directory: &StableDirectory,
+) -> Result<Vec<std::ffi::OsString>, TransactionError> {
+    use std::ffi::CStr;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStringExt;
+
+    let duplicate = unsafe { libc::fcntl(directory.file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(io_error(&directory.path, io::Error::last_os_error()));
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        let source = io::Error::last_os_error();
+        unsafe { libc::close(duplicate) };
+        return Err(io_error(&directory.path, source));
+    }
+
+    let mut names = Vec::new();
+    loop {
+        set_errno_zero();
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let source = io::Error::last_os_error();
+            unsafe { libc::closedir(stream) };
+            return if source.raw_os_error() == Some(0) {
+                Ok(names)
+            } else {
+                Err(io_error(&directory.path, source))
+            };
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(std::ffi::OsString::from_vec(name.to_vec()));
+        }
+    }
+}
+
+#[cfg(all(unix, target_os = "macos"))]
+fn set_errno_zero() {
+    unsafe { *libc::__error() = 0 };
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn set_errno_zero() {
+    unsafe { *libc::__errno_location() = 0 };
+}
+
+#[cfg(windows)]
+fn stable_directory_names(
+    directory: &StableDirectory,
+) -> Result<Vec<std::ffi::OsString>, TransactionError> {
+    directory.validate_path()?;
+    fs::read_dir(&directory.path)
+        .map_err(|source| io_error(&directory.path, source))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name())
+                .map_err(|source| io_error(&directory.path, source))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn delete_held_child(
+    directory: &StableDirectory,
+    name: &std::ffi::OsStr,
+    held: &File,
+) -> Result<(), TransactionError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = directory.path.join(name);
+    let identity = file_identity(held, &path)?;
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| TransactionError::RecoveryConflict(path.clone()))?;
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::fstatat(
+            directory.file.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
     {
-        return Err(TransactionError::RecoveryConflict(target.to_path_buf()));
+        return Err(io_error(&path, io::Error::last_os_error()));
+    }
+    if stat.st_dev as u64 != identity.volume || stat.st_ino as u64 != identity.file {
+        return Err(TransactionError::RecoveryConflict(path));
+    }
+    if unsafe { libc::unlinkat(directory.file.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(io_error(&path, io::Error::last_os_error()));
     }
     Ok(())
 }
 
-fn verify_stage(workspace: &Path, planned: &PlannedFile) -> Result<FileIdentity, TransactionError> {
-    let path = workspace.join(&planned.stage);
-    ensure_real_file(&path)?;
+#[cfg(windows)]
+fn delete_held_child(
+    _directory: &StableDirectory,
+    name: &std::ffi::OsStr,
+    held: &File,
+) -> Result<(), TransactionError> {
+    mark_windows_handle_for_deletion(held, Path::new(name))
+}
+
+#[cfg(unix)]
+fn delete_held_directory(
+    parent: &StableDirectory,
+    directory: &StableDirectory,
+) -> Result<(), TransactionError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    directory.validate_path()?;
+    let name = directory
+        .path
+        .file_name()
+        .ok_or_else(|| TransactionError::RecoveryConflict(directory.path.clone()))?;
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| TransactionError::RecoveryConflict(directory.path.clone()))?;
+    if unsafe { libc::unlinkat(parent.file.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+        return Err(io_error(&directory.path, io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn delete_held_directory(
+    _parent: &StableDirectory,
+    directory: &StableDirectory,
+) -> Result<(), TransactionError> {
+    mark_windows_handle_for_deletion(&directory.file, &directory.path)
+}
+
+#[cfg(windows)]
+fn mark_windows_handle_for_deletion(file: &File, path: &Path) -> Result<(), TransactionError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+    };
+
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let result = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&disposition as *const FILE_DISPOSITION_INFO).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if result == 0 {
+        Err(io_error(path, io::Error::last_os_error()))
+    } else {
+        Ok(())
+    }
+}
+
+fn open_stable_child_file(
+    directory: &StableDirectory,
+    name: &std::ffi::OsStr,
+) -> Result<File, TransactionError> {
+    let path = directory.path.join(name);
+    #[cfg(unix)]
+    let file = {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| TransactionError::RecoveryConflict(path.clone()))?;
+        let fd = unsafe {
+            libc::openat(
+                directory.file.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io_error(&path, io::Error::last_os_error()));
+        }
+        unsafe { File::from_raw_fd(fd) }
+    };
+    #[cfg(windows)]
+    let file = {
+        use windows_sys::Win32::Foundation::GENERIC_READ;
+        use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_SHARE_READ};
+        directory.validate_path()?;
+        open_windows_path_shared(&path, GENERIC_READ | DELETE, FILE_SHARE_READ)?
+    };
+    let metadata = file.metadata().map_err(|source| io_error(&path, source))?;
+    ensure_not_link(&path, &metadata)?;
+    if !metadata.is_file() {
+        return Err(TransactionError::RecoveryConflict(path));
+    }
+    Ok(file)
+}
+
+fn digest_file(file: &File, path: &Path) -> Result<String, TransactionError> {
+    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+    if metadata.len() > MAX_FILE_BYTES as u64 {
+        return Err(TransactionError::TooLarge(path.to_path_buf()));
+    }
+    let mut reader = file.try_clone().map_err(|source| io_error(path, source))?;
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|source| io_error(path, source))?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    reader
+        .take(MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| io_error(path, source))?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(TransactionError::TooLarge(path.to_path_buf()));
+    }
+    Ok(digest(Some(&bytes)).expect("bytes have a digest"))
+}
+
+fn verify_stage_handle(
+    workspace: &StableDirectory,
+    planned: &PlannedFile,
+) -> Result<File, TransactionError> {
+    let path = workspace.path.join(&planned.stage);
+    let file = open_stable_child_file(workspace, std::ffi::OsStr::new(&planned.stage))?;
     let expected = planned
         .stage_identity
         .ok_or_else(|| TransactionError::CorruptJournal(path.clone()))?;
-    if identity_for_path(&path)? != expected
-        || digest_path(&path)?.as_str() != planned.digest.as_str()
+    if file_identity(&file, &path)? != expected
+        || digest_file(&file, &path)?.as_str() != planned.digest.as_str()
     {
         return Err(TransactionError::RecoveryConflict(path));
     }
-    Ok(expected)
+    Ok(file)
 }
 
-fn digest_path(path: &Path) -> Result<String, TransactionError> {
-    let bytes = Zeroizing::new(read_bounded(path)?);
-    Ok(digest(Some(&bytes)).expect("bytes have a digest"))
+fn verify_target_handle(
+    parent: &StableDirectory,
+    target_name: &std::ffi::OsStr,
+    planned: &PlannedFile,
+) -> Result<File, TransactionError> {
+    let path = parent.path.join(target_name);
+    let file = open_stable_child_file(parent, target_name)?;
+    let expected = planned
+        .stage_identity
+        .ok_or_else(|| TransactionError::CorruptJournal(path.clone()))?;
+    if file_identity(&file, &path)? != expected
+        || digest_file(&file, &path)?.as_str() != planned.digest.as_str()
+    {
+        return Err(TransactionError::RecoveryConflict(path));
+    }
+    Ok(file)
+}
+
+fn stable_child_exists(
+    directory: &StableDirectory,
+    name: &std::ffi::OsStr,
+) -> Result<bool, TransactionError> {
+    let path = directory.path.join(name);
+    #[cfg(unix)]
+    {
+        use std::mem::zeroed;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| TransactionError::RecoveryConflict(path.clone()))?;
+        let mut stat: libc::stat = unsafe { zeroed() };
+        let result = unsafe {
+            libc::fstatat(
+                directory.file.as_raw_fd(),
+                name.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result == 0 {
+            return Ok(true);
+        }
+        let source = io::Error::last_os_error();
+        if source.kind() == io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(io_error(&path, source))
+        }
+    }
+    #[cfg(windows)]
+    {
+        directory.validate_path()?;
+        path_exists(&path)
+    }
+}
+
+fn publish_stage_handle_relative(
+    workspace: &StableDirectory,
+    parent: &StableDirectory,
+    stage_name: &str,
+    target_name: &std::ffi::OsStr,
+) -> Result<(), TransactionError> {
+    let stage_path = workspace.path.join(stage_name);
+    let target_path = parent.path.join(target_name);
+    if workspace.identity.volume != parent.identity.volume {
+        return Err(TransactionError::RecoveryConflict(parent.path.clone()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let stage = std::ffi::CString::new(stage_name.as_bytes())
+            .map_err(|_| TransactionError::RecoveryConflict(stage_path))?;
+        let target = std::ffi::CString::new(target_name.as_bytes())
+            .map_err(|_| TransactionError::RecoveryConflict(target_path.clone()))?;
+        let result = unsafe {
+            libc::linkat(
+                workspace.file.as_raw_fd(),
+                stage.as_ptr(),
+                parent.file.as_raw_fd(),
+                target.as_ptr(),
+                0,
+            )
+        };
+        if result != 0 {
+            return Err(io_error(&target_path, io::Error::last_os_error()));
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Every directory in both chains is held without delete sharing, so
+        // these paths cannot be redirected through a rename or reparse swap.
+        workspace.validate_path()?;
+        parent.validate_path()?;
+        fs::hard_link(&stage_path, &target_path)
+            .map_err(|source| io_error(&target_path, source))?;
+        workspace.validate_path()?;
+        parent.validate_path()?;
+    }
+    Ok(())
 }
 
 fn path_exists(path: &Path) -> Result<bool, TransactionError> {
@@ -1287,14 +1673,6 @@ fn path_exists(path: &Path) -> Result<bool, TransactionError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(source) => Err(io_error(path, source)),
     }
-}
-
-fn read_bounded(path: &Path) -> Result<Vec<u8>, TransactionError> {
-    let metadata = fs::metadata(path).map_err(|source| io_error(path, source))?;
-    if metadata.len() > MAX_FILE_BYTES as u64 {
-        return Err(TransactionError::TooLarge(path.to_path_buf()));
-    }
-    fs::read(path).map_err(|source| io_error(path, source))
 }
 
 fn ensure_no_links(path: &Path) -> Result<(), TransactionError> {
@@ -1331,6 +1709,109 @@ fn ensure_real_file(path: &Path) -> Result<(), TransactionError> {
         return Err(TransactionError::RecoveryConflict(path.to_path_buf()));
     }
     Ok(())
+}
+
+impl StableDirectory {
+    fn open(path: &Path) -> Result<Self, TransactionError> {
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)
+                .map_err(|source| io_error(path, source))?
+        };
+        #[cfg(windows)]
+        let file = open_windows_path_shared(
+            path,
+            windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
+                | windows_sys::Win32::Storage::FileSystem::DELETE
+                | windows_sys::Win32::Foundation::GENERIC_WRITE,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+        )?;
+        let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+        ensure_not_link(path, &metadata)?;
+        if !metadata.is_dir() {
+            return Err(TransactionError::InvalidRoot(path.to_path_buf()));
+        }
+        let identity = file_identity(&file, path)?;
+        let stable = Self {
+            path: path.to_path_buf(),
+            file,
+            identity,
+        };
+        stable.validate_path()?;
+        Ok(stable)
+    }
+
+    #[cfg(unix)]
+    fn open_child(&self, name: &std::ffi::OsStr) -> Result<Self, TransactionError> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = self.path.join(name);
+        let name = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| TransactionError::InvalidRoot(path.clone()))?;
+        let fd = unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io_error(&path, io::Error::last_os_error()));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let identity = file_identity(&file, &path)?;
+        Ok(Self {
+            path,
+            file,
+            identity,
+        })
+    }
+
+    #[cfg(windows)]
+    fn open_child(&self, name: &std::ffi::OsStr) -> Result<Self, TransactionError> {
+        self.validate_path()?;
+        Self::open(&self.path.join(name))
+    }
+
+    fn validate_path(&self) -> Result<(), TransactionError> {
+        if file_identity(&self.file, &self.path)? != self.identity
+            || identity_for_path(&self.path)? != self.identity
+        {
+            return Err(TransactionError::RecoveryConflict(self.path.clone()));
+        }
+        Ok(())
+    }
+}
+
+fn open_directory_chain(
+    root: &Path,
+    relative: &Path,
+) -> Result<Vec<StableDirectory>, TransactionError> {
+    if !relative.as_os_str().is_empty() {
+        validate_relative(relative)?;
+    }
+    let mut chain = vec![StableDirectory::open(root)?];
+    let root_volume = chain[0].identity.volume;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(TransactionError::InvalidTarget(relative.to_path_buf()));
+        };
+        let next = chain
+            .last()
+            .expect("root directory is present")
+            .open_child(name)?;
+        if next.identity.volume != root_volume {
+            return Err(TransactionError::RecoveryConflict(next.path));
+        }
+        chain.push(next);
+    }
+    Ok(chain)
 }
 
 fn validate_workspace_path(path: &Path) -> Result<(), TransactionError> {
@@ -1806,13 +2287,28 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn open_windows_path(path: &Path, access: u32) -> Result<File, TransactionError> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    open_windows_path_shared(
+        path,
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    )
+}
+
+#[cfg(windows)]
+fn open_windows_path_shared(
+    path: &Path,
+    access: u32,
+    share_mode: u32,
+) -> Result<File, TransactionError> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use std::ptr::null;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
     };
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -1820,7 +2316,7 @@ fn open_windows_path(path: &Path, access: u32) -> Result<File, TransactionError>
         CreateFileW(
             wide.as_ptr(),
             access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            share_mode,
             null(),
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -2104,6 +2600,108 @@ mod tests {
             fs::read_to_string(root.path().join("tool/config.json")).unwrap(),
             "synthetic-key"
         );
+    }
+
+    #[test]
+    fn target_parent_rename_in_snapshot_to_publish_window_is_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("tool");
+        let moved = root.path().join("tool-moved");
+        fs::create_dir(&parent).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterPlanning,
+        )
+        .expect_err("fault is injected");
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let checked = checked_root(root.path()).unwrap();
+
+        let error = recover_workspace_inner(
+            &checked,
+            &workspace,
+            FaultPoint::Never,
+            |_| Ok(()),
+            |_| {
+                fs::rename(&parent, &moved).map_err(|source| io_error(&parent, source))?;
+                fs::create_dir(&parent).map_err(|source| io_error(&parent, source))?;
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .expect_err("a renamed target chain must block publication");
+
+        assert!(
+            matches!(
+                error,
+                TransactionError::RecoveryConflict(_) | TransactionError::Io { .. }
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert!(!parent.join("config.json").exists());
+        assert!(!moved.join("config.json").exists());
+        assert!(workspace.join(JOURNAL_FILE).exists());
+    }
+
+    #[test]
+    fn workspace_rename_before_cleanup_preserves_both_objects() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterBegin,
+        )
+        .expect_err("fault is injected");
+        let transaction_root = root.path().join(TRANSACTION_DIRECTORY);
+        let workspace = fs::read_dir(&transaction_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let moved = transaction_root.join("moved-evidence");
+        let checked = checked_root(root.path()).unwrap();
+
+        let error = recover_workspace_inner(
+            &checked,
+            &workspace,
+            FaultPoint::Never,
+            |_| Ok(()),
+            |_| Ok(()),
+            |_| {
+                fs::rename(&workspace, &moved).map_err(|source| io_error(&workspace, source))?;
+                fs::create_dir(&workspace).map_err(|source| io_error(&workspace, source))?;
+                fs::write(workspace.join(JOURNAL_FILE), b"foreign")
+                    .map_err(|source| io_error(&workspace, source))?;
+                Ok(())
+            },
+        )
+        .expect_err("a renamed workspace must block cleanup");
+
+        assert!(
+            matches!(
+                error,
+                TransactionError::CorruptJournal(_)
+                    | TransactionError::RecoveryConflict(_)
+                    | TransactionError::Io { .. }
+            ),
+            "unexpected error: {error:?}"
+        );
+        if moved.exists() {
+            assert!(moved.join(JOURNAL_FILE).exists());
+        } else {
+            assert!(workspace.join(JOURNAL_FILE).exists());
+        }
+        if workspace.exists() && moved.exists() {
+            assert_eq!(fs::read(workspace.join(JOURNAL_FILE)).unwrap(), b"foreign");
+        }
+        assert!(!root.path().join("tool/config.json").exists());
     }
 
     #[test]
