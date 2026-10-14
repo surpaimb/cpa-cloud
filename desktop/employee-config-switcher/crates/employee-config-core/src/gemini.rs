@@ -38,8 +38,7 @@ impl GeminiProfile {
             .find(|item| item.protocol == "gemini-generate-content")
         else {
             return Err(AppError::Config(
-                "当前员工 Key 没有 Gemini GenerateContent 协议模型，不能配置 Gemini CLI"
-                    .into(),
+                "当前员工 Key 没有 Gemini GenerateContent 协议模型，不能配置 Gemini CLI".into(),
             ));
         };
         if protocol.candidates.is_empty()
@@ -148,11 +147,7 @@ pub fn apply_new_gemini(
     validate_transaction_relative(settings_relative, "Gemini CLI")?;
     validate_transaction_relative(environment_relative, "Gemini CLI")?;
     validate_transaction_relative(ownership_relative, "Gemini CLI")?;
-    validate_gemini_paths(
-        settings_relative,
-        environment_relative,
-        ownership_relative,
-    )?;
+    validate_gemini_paths(settings_relative, environment_relative, ownership_relative)?;
     let plan = plan_new_gemini(
         &root.join(settings_relative),
         &root.join(environment_relative),
@@ -178,7 +173,9 @@ fn validate_gemini_paths(
     environment_relative: &Path,
     ownership_relative: &Path,
 ) -> Result<(), AppError> {
-    let settings_name = settings_relative.file_name().and_then(|value| value.to_str());
+    let settings_name = settings_relative
+        .file_name()
+        .and_then(|value| value.to_str());
     let environment_name = environment_relative
         .file_name()
         .and_then(|value| value.to_str());
@@ -286,9 +283,7 @@ mod tests {
         let environment = String::from_utf8(plan.environment.desired_bytes.to_vec()).unwrap();
         assert!(environment.contains("GEMINI_API_KEY=\"employee-secret\""));
         assert!(environment.contains("GEMINI_MODEL=\"gemini-beta\""));
-        assert!(environment.contains(
-            "GOOGLE_GEMINI_BASE_URL=\"https://cpa.example.test/company\""
-        ));
+        assert!(environment.contains("GOOGLE_GEMINI_BASE_URL=\"https://cpa.example.test/company\""));
         assert!(environment.contains("GOOGLE_GENAI_API_VERSION=\"v1beta\""));
 
         let ownership = String::from_utf8(plan.ownership.desired_bytes.to_vec()).unwrap();
