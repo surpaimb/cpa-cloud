@@ -126,3 +126,18 @@ with dedicated settings-, `.env`-, and ownership-only collision coverage. No
 native Gemini CLI binary is available in the local test environment, so fixed
 native parsing/transport evidence and the replacement transaction contract
 remain blockers for real writes.
+
+Grok Build now has a separate synthetic-root create-only projection based on a
+fixed official source commit and its public custom-model contract. It creates
+only canonical same-parent `config.toml` and `cpa-cloud.ownership.json` files
+when both are absent, registers every employee-visible Responses model with
+`api_backend = "responses"`, restricts the picker through `allowed_models`, and
+selects the server-declared default. Each model uses the CPA `/v1` base URL and
+the employee Key through Grok's documented bearer `api_key` field, with
+`reasoning_summary = "none"` for gateway compatibility; telemetry and feedback
+are disabled. The separate Grok-owned `auth.json` remains byte-for-byte
+untouched, including identity and modification time in tests. Any existing
+config or ownership file is a hard conflict. No native Grok Build binary is
+available locally, and the service discovery contract does not yet provide
+per-model context-window metadata, so fixed native evidence and the replacement
+transaction contract remain blockers for real writes.
