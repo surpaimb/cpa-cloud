@@ -1,0 +1,24 @@
+[package]
+name = "cpa-cloud-employee-config"
+version = "0.1.0"
+description = "Native employee configuration client for CPA Cloud"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "cpa_cloud_employee_config"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+dirs.workspace = true
+employee-config-core = { path = "../crates/employee-config-core" }
+serde.workspace = true
+tauri.workspace = true
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
