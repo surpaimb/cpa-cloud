@@ -108,3 +108,16 @@ project-state file remains byte-for-byte untouched, including file identity and
 modification time in tests. Any existing `settings.json` remains a hard
 conflict, and cross-version native fixtures plus the replacement transaction
 contract remain blockers for real writes.
+
+Gemini CLI now has a separate synthetic-root create-only projection based on
+the fixed official `v0.62.0` configuration, authentication, and content-generator
+sources. It creates only canonical same-parent `settings.json`, `.env`, and
+`cpa-cloud.ownership.json` files when all three are absent, selects gateway auth,
+stores the employee Key in the new private `.env`, selects the server-declared
+Gemini default model, and disables telemetry and prompt logging. The ownership
+record, journal, and debug output contain no employee Key, while unrelated
+Gemini state such as `trustedFolders.json` remains byte-for-byte untouched,
+including file identity and modification time in tests. Any existing managed
+file is a hard conflict. No native Gemini CLI binary is available in the local
+test environment, so fixed native parsing/transport evidence and the replacement
+transaction contract remain blockers for real writes.
