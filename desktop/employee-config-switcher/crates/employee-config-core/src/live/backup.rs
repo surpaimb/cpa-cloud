@@ -115,6 +115,7 @@ pub fn prepare_encrypted_backup(
     target: &Path,
     key: &BackupKey,
 ) -> Result<BackupReceipt, BackupError> {
+    validate_target(target)?;
     platform::prepare(root, target, key)
 }
 
@@ -126,6 +127,7 @@ pub fn load_encrypted_backup(
     workspace: &str,
     key: &BackupKey,
 ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+    validate_workspace(workspace)?;
     platform::load(root, workspace, key)
 }
 
