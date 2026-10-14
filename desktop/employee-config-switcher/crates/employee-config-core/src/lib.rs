@@ -16,6 +16,7 @@ pub mod grok_build;
 pub mod hermes;
 pub mod jsonc_document;
 pub mod live;
+pub mod minimax_code;
 pub mod openclaw;
 pub mod opencode;
 pub mod pi;
@@ -32,6 +33,9 @@ pub use error::AppError;
 pub use gemini::{apply_new_gemini, plan_new_gemini, GeminiPlan, GeminiProfile};
 pub use grok_build::{apply_new_grok_build, plan_new_grok_build, GrokBuildPlan, GrokBuildProfile};
 pub use hermes::{apply_new_hermes, plan_new_hermes, HermesPlan, HermesProfile};
+pub use minimax_code::{
+    apply_new_minimax_code, plan_new_minimax_code, MiniMaxCodePlan, MiniMaxCodeProfile,
+};
 pub use openclaw::{apply_new_openclaw, plan_new_openclaw, OpenClawPlan, OpenClawProfile};
 pub use opencode::{apply_new_opencode, plan_opencode, ConfigurationProfile, OpenCodePlan};
 pub use pi::{apply_new_pi, plan_new_pi, PiPlan, PiProfile};

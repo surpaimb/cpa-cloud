@@ -1,0 +1,13 @@
+{
+  "release": "v0.5.6",
+  "source_commit": "836580efb27632e288b5e0ae26ec120a61e907f5",
+  "config_path": "<data-dir>/config.yaml",
+  "data_dir_precedence": ["MINIMAX_DATA_DIR", "MAVIS_DATA_DIR", "~/.minimax"],
+  "provider_tree": "custom_provider.<name>",
+  "provider_reference": "custom_provider:<name>/<model-id>",
+  "provider_fields": ["name", "kind", "enabled", "api", "options", "models"],
+  "options_fields": ["apiKey", "baseURL", "authMode"],
+  "api_format": "openai-responses",
+  "credential_header": "Authorization: Bearer",
+  "native_lock": "config.yaml.lock"
+}

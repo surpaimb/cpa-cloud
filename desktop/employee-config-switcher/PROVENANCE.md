@@ -49,6 +49,7 @@ provider or model.
 - `grok_build.rs`: independently authored Grok Build Responses-model mapping, strict create-only path boundary, non-secret ownership record, and synthetic transaction integration.
 - `hermes.rs`: independently authored Hermes Agent named custom-provider mapping, strict create-only path boundary, non-secret ownership record, and synthetic transaction integration.
 - `live/engine.rs`: CPA-authored create-only staging, journal, locking and recovery experiment.
+- `minimax_code.rs`: independently authored MiniMax Code BYOK provider mapping, strict create-only path boundary, native-lock refusal, non-secret ownership record, and synthetic transaction integration.
 - `opencode.rs`: CPA profile projection, JSONC planning, fail-closed ownership proof, and synthetic-root create-only integration.
 - `plan.rs`: shared redacted file-plan and create-only transaction helpers.
 - `pi.rs`: CPA profile mapping and ownership/transaction integration around the narrowly adapted Pi provider schema.
@@ -86,6 +87,9 @@ the CPA write-safety contract.
 - Hermes model configuration contract at that commit: <https://github.com/NousResearch/hermes-agent/blob/0e427d788d253630d38a3a51cd76849e73cd6925/website/docs/user-guide/configuring-models.md> (accessed 2026-10-14). It defines `~/.hermes/config.yaml`, the `model` mapping, named `providers`, model candidates, `discover_models`, and inline `api_key` support.
 - Hermes provider contract at that commit: <https://github.com/NousResearch/hermes-agent/blob/0e427d788d253630d38a3a51cd76849e73cd6925/website/docs/integrations/providers.md> (accessed 2026-10-14). It documents `custom:<name>` selection, OpenAI-compatible `/v1/chat/completions`, `api`, `transport = chat_completions`, `default_model`, and the current provider-map field names. The independently authored fixed-source fixture is `crates/employee-config-core/tests/fixtures/hermes-agent-0e427d7/config-contract.json`.
 - Hermes configuration directory contract at that commit: <https://github.com/NousResearch/hermes-agent/blob/0e427d788d253630d38a3a51cd76849e73cd6925/website/docs/user-guide/configuration.md> (accessed 2026-10-14). It records the separate `.env`, `auth.json`, and other Hermes-owned state beneath `~/.hermes`. No local `hermes` binary was available, so fixed native parsing/transport evidence remains a blocker for real writes and no cross-version compatibility is claimed.
+- MiniMax Code signed release `v0.5.6` resolves to official commit `836580efb27632e288b5e0ae26ec120a61e907f5`: <https://github.com/MiniMax-AI/minimax-code/releases/tag/v0.5.6> (verified 2026-10-14). First-party code is MIT licensed; no MiniMax Code implementation code is copied into this workspace.
+- MiniMax Code BYOK contract at that commit: <https://github.com/MiniMax-AI/minimax-code/blob/836580efb27632e288b5e0ae26ec120a61e907f5/README.md> and <https://github.com/MiniMax-AI/minimax-code/blob/836580efb27632e288b5e0ae26ec120a61e907f5/docs/examples.md> (accessed 2026-10-14). They document the active data-directory `config.yaml`, `MINIMAX_DATA_DIR`/`MAVIS_DATA_DIR` precedence, `custom_provider`, `openai-responses`, plaintext `options.apiKey`, `options.baseURL`, Bearer authentication, model registration, and default-model selection after a successful `--use` test.
+- MiniMax Code fixed-source provider construction at that commit: <https://github.com/MiniMax-AI/minimax-code/blob/836580efb27632e288b5e0ae26ec120a61e907f5/packages/local-runtime-v2/src/service/model-system/management/service-context.ts> and <https://github.com/MiniMax-AI/minimax-code/blob/836580efb27632e288b5e0ae26ec120a61e907f5/packages/local-runtime-v2/src/service/model-system/resolution/model-key.ts> (accessed 2026-10-14). They define `kind = custom`, `enabled`, `authMode = api-key`, `custom_provider:<name>/<model-id>` references, and the current model/provider validation boundary. The independently authored fixture is `crates/employee-config-core/tests/fixtures/minimax-code-0.5.6/provider-contract.json`. No local `mcode` binary was available, so fixed native parsing/transport and native-lock acceptance remain blockers for real writes and no cross-version compatibility is claimed.
 - OpenCode provider configuration: <https://opencode.ai/docs/providers/> (accessed 2026-10-14). It specifies `@ai-sdk/openai-compatible` for an OpenAI-compatible custom provider.
 - Vercel AI SDK OpenAI-compatible provider: <https://ai-sdk.dev/providers/openai-compatible-providers> (accessed 2026-10-14). Its default/chat model uses `/v1/chat/completions`; the distinct completion model is opt-in.
 - Pi release `v1.0.4` resolves to official commit `7c10bd4337495ee613f2224843ecdf349b80d1df`: <https://github.com/earendil-works/pi/releases/tag/v1.0.4> (verified 2026-10-14).
@@ -105,9 +109,9 @@ the CPA write-safety contract.
 
 These sources support the current OpenCode and Hermes `openai-chat`, Claude
 Code `anthropic-messages`, Gemini CLI `gemini-generate-content`, and Codex,
-Grok Build, Pi and OpenClaw `openai-responses` projections. Claude Code, Gemini
-CLI, Codex, Grok Build, Hermes, Pi and OpenClaw remain synthetic create-only
-planners rather than live-write support; all client adapters remain blocked from real
+Grok Build, MiniMax Code, Pi and OpenClaw `openai-responses` projections. Claude
+Code, Gemini CLI, Codex, Grok Build, Hermes, MiniMax Code, Pi and OpenClaw
+remain synthetic create-only planners rather than live-write support; all client adapters remain blocked from real
 configuration writes until fixed native fixtures and the replacement transaction
 contract are recorded and tested.
 

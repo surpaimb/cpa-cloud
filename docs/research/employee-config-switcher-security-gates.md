@@ -167,3 +167,25 @@ parsing/transport evidence and the replacement transaction contract remain
 blockers for real writes. A future live caller must derive the configuration
 parent through Hermes' existing `HERMES_HOME`-aware detection rather than
 accepting an arbitrary directory.
+
+MiniMax Code now has a separate synthetic-root create-only projection based on
+the official signed `v0.5.6` release and its public BYOK contract. It creates
+only canonical same-parent `config.yaml` and `cpa-cloud.ownership.json` files
+when both are absent, registers every employee-visible Responses model under
+`custom_provider.cpa-cloud`, fixes the provider API to `openai-responses`, and
+selects the server-declared default through the documented
+`custom_provider:cpa-cloud/<model-id>` reference. The employee Key is confined
+to the private new config target through `options.apiKey` and remains absent
+from ownership, journal, and debug output. Existing login, MCP, prompt, plugin,
+cache, and session state remain byte-for-byte untouched in synthetic tests.
+The planner refuses an already-present native `config.yaml.lock`, but that
+preflight is not a race-free acquisition of MiniMax Code's directory-lock
+protocol. Fixed native parser/transport evidence, a compatible atomic native
+lock implementation, and the replacement transaction contract therefore
+remain blockers for real writes. A future live caller must derive the data
+directory through the existing `MINIMAX_DATA_DIR`/`MAVIS_DATA_DIR`-aware
+detection and must not accept an arbitrary parent from its caller.
+
+Claude Desktop remains detection-only. Its CPA `/v1/messages` fidelity and
+32 MiB request-size/HTTP 413 contract are not yet resolved, so this preview
+does not generate a third-party profile or claim ten-tool writable delivery.
