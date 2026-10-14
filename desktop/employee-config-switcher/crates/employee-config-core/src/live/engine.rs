@@ -1027,7 +1027,7 @@ fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
             path,
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "protected owner-only DACL read-back did not match",
+                format!("protected owner-only DACL read-back did not match: {actual}"),
             ),
         ));
     }
