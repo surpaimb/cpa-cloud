@@ -94,7 +94,7 @@ pub fn plan_new_gemini(
         "$schema": "https://raw.githubusercontent.com/google-gemini/gemini-cli/v0.62.0/schemas/settings.schema.json",
         "security": {
             "auth": {
-                "selectedType": "gateway"
+                "selectedType": "gemini-api-key"
             },
             "environmentVariableRedaction": {
                 "enabled": true,
@@ -265,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_selects_gateway_auth_and_server_default() {
+    fn plan_selects_api_key_auth_and_custom_gateway_base() {
         let temp = tempfile::tempdir().unwrap();
         let plan = plan_new_gemini(
             &temp.path().join("settings.json"),
@@ -277,7 +277,10 @@ mod tests {
         assert_eq!(plan.selected_model, "gemini-beta");
         let settings: serde_json::Value =
             serde_json::from_slice(&plan.settings.desired_bytes).unwrap();
-        assert_eq!(settings["security"]["auth"]["selectedType"], "gateway");
+        assert_eq!(
+            settings["security"]["auth"]["selectedType"],
+            "gemini-api-key"
+        );
         assert_eq!(settings["telemetry"]["enabled"], false);
         assert_eq!(settings["telemetry"]["logPrompts"], false);
         let environment = String::from_utf8(plan.environment.desired_bytes.to_vec()).unwrap();
@@ -370,6 +373,57 @@ mod tests {
         assert_eq!(std::fs::read(ownership).unwrap(), original);
         assert!(!gemini.join("settings.json").exists());
         assert!(!gemini.join(".env").exists());
+    }
+
+    #[test]
+    fn create_only_transaction_refuses_an_environment_only_collision() {
+        let temp = tempfile::tempdir().unwrap();
+        let gemini = temp.path().join(".gemini");
+        std::fs::create_dir(&gemini).unwrap();
+        let environment = gemini.join(".env");
+        let original = b"GEMINI_API_KEY=someone-else\n";
+        std::fs::write(&environment, original).unwrap();
+
+        let error = apply_new_gemini(
+            temp.path(),
+            Path::new(".gemini/settings.json"),
+            Path::new(".gemini/.env"),
+            Path::new(".gemini/cpa-cloud.ownership.json"),
+            &profile(),
+        )
+        .expect_err("environment-only collision must remain blocked");
+
+        assert!(matches!(error, AppError::Conflict(_)));
+        assert_eq!(std::fs::read(environment).unwrap(), original);
+        assert!(!gemini.join("settings.json").exists());
+        assert!(!gemini.join("cpa-cloud.ownership.json").exists());
+    }
+
+    #[test]
+    fn fixed_client_auth_fixture_rejects_gateway_as_a_persisted_selection() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/gemini-cli-0.62.0/auth-validation.json"
+        ))
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let plan = plan_new_gemini(
+            &temp.path().join("settings.json"),
+            &temp.path().join(".env"),
+            &temp.path().join("cpa-cloud.ownership.json"),
+            &profile(),
+        )
+        .unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_slice(&plan.settings.desired_bytes).unwrap();
+        let selected = settings["security"]["auth"]["selectedType"]
+            .as_str()
+            .unwrap();
+        let accepted = fixture["accepted_startup_auth_types"].as_array().unwrap();
+        let rejected = fixture["rejected_startup_auth_types"].as_array().unwrap();
+
+        assert!(accepted.iter().any(|value| value == selected));
+        assert!(rejected.iter().any(|value| value == "gateway"));
+        assert_ne!(selected, "gateway");
     }
 
     #[test]

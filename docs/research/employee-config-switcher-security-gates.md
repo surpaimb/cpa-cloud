@@ -112,12 +112,17 @@ contract remain blockers for real writes.
 Gemini CLI now has a separate synthetic-root create-only projection based on
 the fixed official `v0.62.0` configuration, authentication, and content-generator
 sources. It creates only canonical same-parent `settings.json`, `.env`, and
-`cpa-cloud.ownership.json` files when all three are absent, selects gateway auth,
-stores the employee Key in the new private `.env`, selects the server-declared
-Gemini default model, and disables telemetry and prompt logging. The ownership
-record, journal, and debug output contain no employee Key, while unrelated
-Gemini state such as `trustedFolders.json` remains byte-for-byte untouched,
-including file identity and modification time in tests. Any existing managed
-file is a hard conflict. No native Gemini CLI binary is available in the local
-test environment, so fixed native parsing/transport evidence and the replacement
-transaction contract remain blockers for real writes.
+`cpa-cloud.ownership.json` files when all three are absent, persists the accepted
+`gemini-api-key` authentication selection, supplies the custom gateway through
+`GOOGLE_GEMINI_BASE_URL`, stores the employee Key in the new private `.env`,
+selects the server-declared Gemini default model, and disables telemetry and
+prompt logging. The fixed `v0.62.0` CLI startup validator rejects `gateway` as a
+persisted auth selection even though the core transport defines it internally;
+a regression fixture locks this boundary. The ownership record, journal, and
+debug output contain no employee Key, while unrelated Gemini state such as
+`trustedFolders.json` remains byte-for-byte untouched, including file identity
+and modification time in tests. Any existing managed file is a hard conflict,
+with dedicated settings-, `.env`-, and ownership-only collision coverage. No
+native Gemini CLI binary is available in the local test environment, so fixed
+native parsing/transport evidence and the replacement transaction contract
+remain blockers for real writes.
