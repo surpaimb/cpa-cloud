@@ -51,20 +51,8 @@ jobs:
         run: |
           rustup toolchain install 1.90.0 --profile minimal --component rustfmt
           rustup default 1.90.0
-      - run: cargo generate-lockfile
       - run: cargo fmt --all -- --check
-      - run: cargo test -p employee-config-core
-      - name: Capture dependency metadata
-        run: cargo metadata --format-version 1 --locked > cargo-metadata.json
-      - name: Upload first-pass Cargo lockfile
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: employee-config-cargo-lock
-          path: |
-            desktop/employee-config-switcher/Cargo.lock
-            desktop/employee-config-switcher/cargo-metadata.json
-          if-no-files-found: error
-          retention-days: 1
+      - run: cargo test --locked -p employee-config-core
 
   native-check:
     name: Tauri check (${{ matrix.os }})
@@ -98,5 +86,4 @@ jobs:
           corepack prepare pnpm@11.25.0 --activate
           pnpm install --frozen-lockfile
           pnpm build
-      - run: cargo generate-lockfile
-      - run: cargo check -p cpa-cloud-employee-config
+      - run: cargo check --locked -p cpa-cloud-employee-config
