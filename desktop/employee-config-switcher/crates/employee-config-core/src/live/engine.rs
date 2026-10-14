@@ -1065,7 +1065,9 @@ fn replace_prepared_with_complete(
     let prepared = encode_journal_event(path, &JournalEvent::Prepared)?;
     let complete = encode_journal_event(path, &JournalEvent::Complete)?;
     if prepared.len() != complete.len()
-        || !snapshot.bytes.ends_with(&[prepared.as_slice(), b"\n"].concat())
+        || !snapshot
+            .bytes
+            .ends_with(&[prepared.as_slice(), b"\n"].concat())
     {
         return Err(TransactionError::CorruptJournal(path.to_path_buf()));
     }
@@ -2029,7 +2031,9 @@ mod tests {
         .expect_err("restart is injected after preparation");
         assert!(matches!(error, TransactionError::InjectedCrash));
         assert!(!root.path().join("tool/config.json").exists());
-        assert!(fs::read_to_string(&journal).unwrap().contains("\"prepared\""));
+        assert!(fs::read_to_string(&journal)
+            .unwrap()
+            .contains("\"prepared\""));
 
         recover_create_only(root.path()).expect("prepared recovery must roll forward");
         assert_eq!(
