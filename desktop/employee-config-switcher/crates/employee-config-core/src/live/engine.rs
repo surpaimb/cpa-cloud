@@ -1014,7 +1014,9 @@ fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
     if converted == 0 {
         return Err(io_error(path, io::Error::last_os_error()));
     }
-    let actual = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(rendered, rendered_len as usize)) };
+    let actual = unsafe {
+        String::from_utf16_lossy(std::slice::from_raw_parts(rendered, rendered_len as usize))
+    };
     unsafe { LocalFree(rendered.cast()) };
     if actual != "D:P(A;;FA;;;OW)" {
         return Err(io_error(
@@ -1063,8 +1065,7 @@ fn file_identity(file: &File, path: &Path) -> Result<FileIdentity, TransactionEr
     if ok == 0 {
         return Err(io_error(path, io::Error::last_os_error()));
     }
-    if info.dwFileAttributes
-        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+    if info.dwFileAttributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
         != 0
     {
         return Err(TransactionError::LinkedPath(path.to_path_buf()));
@@ -1299,10 +1300,12 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
-            let second = OpenOptions::new().read(true).write(true).open(path).unwrap();
-            let result = unsafe {
-                libc::flock(second.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
-            };
+            let second = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            let result = unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             assert_ne!(result, 0);
         }
         #[cfg(windows)]

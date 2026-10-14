@@ -47,11 +47,7 @@ where
         ("grok-build", "Grok Build", vec![home.join(".grok")]),
         ("opencode", "OpenCode", vec![config.join("opencode")]),
         ("openclaw", "OpenClaw", vec![home.join(".openclaw")]),
-        (
-            "hermes",
-            "Hermes",
-            vec![hermes_home(home, platform, &env)],
-        ),
+        ("hermes", "Hermes", vec![hermes_home(home, platform, &env)]),
         (
             "pi",
             "Pi",
@@ -118,12 +114,9 @@ where
             vec![local.join("Claude"), local.join("Claude-3p")]
         }
         Platform::Macos => vec![home.join("Library/Application Support/Claude")],
-        Platform::Linux => vec![env_path(
-            env,
-            "XDG_CONFIG_HOME",
-            home.join(".config"),
-        )
-        .join("Claude")],
+        Platform::Linux => {
+            vec![env_path(env, "XDG_CONFIG_HOME", home.join(".config")).join("Claude")]
+        }
     }
 }
 
@@ -135,8 +128,7 @@ where
         return PathBuf::from(path);
     }
     if platform == Platform::Windows {
-        return env_path(env, "LOCALAPPDATA", home.join("AppData").join("Local"))
-            .join("hermes");
+        return env_path(env, "LOCALAPPDATA", home.join("AppData").join("Local")).join("hermes");
     }
     home.join(".hermes")
 }
