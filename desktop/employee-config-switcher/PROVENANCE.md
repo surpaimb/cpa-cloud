@@ -41,6 +41,7 @@ provider or model.
 
 ## Newly authored CPA code
 
+- `codex.rs`: independently authored Codex profile mapping, strict create-only path boundary, ownership record, and synthetic transaction integration.
 - `discovery.rs`: HTTPS/loopback validation and authenticated discovery client.
 - `detection.rs`: read-only client location detection with documented home-directory overrides.
 - `live/engine.rs`: CPA-authored create-only staging, journal, locking and recovery experiment.
@@ -79,13 +80,16 @@ the CPA write-safety contract.
 - OpenClaw Zod model/provider schema at that commit: <https://github.com/openclaw/openclaw/blob/fc23bc864e4553c2d215e479eeec47b67a0bf943/src/config/zod-schema.core.ts> (accessed 2026-10-14). `ModelApiSchema` is derived from that fixed API vocabulary and is used for both provider-level and model-level `api`; the same strict provider schema accepts `baseUrl`, `apiKey`, and `models`.
 - OpenClaw custom-endpoint onboarding contract at that commit: <https://github.com/openclaw/openclaw/blob/fc23bc864e4553c2d215e479eeec47b67a0bf943/docs/cli/onboard.md> (accessed 2026-10-14). It requires `openai-responses` for compatible endpoints that expose `/v1/responses` rather than `/v1/chat/completions`.
 - OpenClaw fixed-version custom-provider E2E fixture: <https://github.com/openclaw/openclaw/blob/fc23bc864e4553c2d215e479eeec47b67a0bf943/src/commands/onboard-guided.custom-provider.e2e.test.ts> (accessed 2026-10-14). It maps the `openai-responses` compatibility mode to `/v1/responses` and exercises a custom base URL ending in `/v1`.
+- OpenAI Codex configuration reference: <https://developers.openai.com/codex/config-reference> (accessed 2026-10-14). It defines the user-level `config.toml`, `model_provider`, custom `model_providers`, `base_url`, bearer credential, `wire_api = "responses"`, retry, WebSocket, and `requires_openai_auth` fields used by the synthetic Codex projection.
+- OpenAI Codex configuration schema: <https://developers.openai.com/codex/config-schema.json> (accessed 2026-10-14), UTF-8 size 236751 bytes and SHA-256 `7933a70506e753a6e98c16800d2a76770b2af2b7295491f8f0b8e713e952027e`. Its `ModelProviderInfo` schema marks direct `experimental_bearer_token` use as discouraged in favor of `env_key`, while documenting that it may be necessary for programmatic use.
+- OpenAI Codex app-server Responses provider example: <https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server> (accessed 2026-10-14). It demonstrates `model_provider`, `base_url`, bearer-token environment input, `wire_api = "responses"`, `requires_openai_auth = false`, `supports_websockets = false`, and requests to `/v1/responses`.
+- Fixed local Codex parser fixture: `codex-cli 0.162.0-alpha.17.2` for `windows-x86_64`, executable SHA-256 `d13914ced6c7af174d8d638db938284231227312104b06a25e9608c632a7daec`, validated 2026-10-14 with an isolated temporary `CODEX_HOME` and a loopback-only synthetic provider. `codex doctor --strict-config` reported the config loaded, OpenAI auth not required, and Responses WebSocket disabled; the expected closed-loopback reachability check failed without contacting a production model endpoint. This local fixture is evidence for the exact tested binary only and is not a redistributable artifact or cross-version compatibility claim.
 
-These sources support the current OpenCode `openai-chat`, Pi
-`openai-responses`, and OpenClaw `openai-responses` projections. Pi and
-OpenClaw remain synthetic create-only planners rather than live-write support;
-all client adapters remain blocked from real configuration writes until fixed
-native fixtures and the replacement transaction contract are recorded and
-tested.
+These sources support the current OpenCode `openai-chat` plus Codex, Pi and
+OpenClaw `openai-responses` projections. Codex, Pi and OpenClaw remain
+synthetic create-only planners rather than live-write support; all client
+adapters remain blocked from real configuration writes until fixed native
+fixtures and the replacement transaction contract are recorded and tested.
 
 ## Rust dependency resolution
 

@@ -84,3 +84,15 @@ existing OpenClaw config remains a hard conflict until the replacement contract
 above is implemented and validated against a fixed native client fixture. The
 entry point accepts only canonical `openclaw.json` and
 `cpa-cloud.ownership.json` names in the same parent directory.
+
+Codex now has a separate synthetic-root create-only projection based on the
+public OpenAI Codex configuration contract and a fixed local binary fixture. It
+creates only canonical same-parent `config.toml` and
+`cpa-cloud.ownership.json` files when both are absent, selects the
+server-declared Responses default, disables client retries and WebSocket
+transport, skips OpenAI login, and leaves Codex-owned `auth.json` unchanged.
+The employee Key is written only into the private new config target through the
+documented programmatic bearer-token field; it is absent from ownership,
+journal and debug output. Any existing `config.toml` remains a hard conflict,
+and the discouraged direct-token field plus missing cross-version native
+fixtures remain explicit blockers for real writes.
