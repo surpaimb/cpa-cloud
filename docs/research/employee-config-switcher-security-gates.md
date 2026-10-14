@@ -63,6 +63,32 @@ still replace the current path re-checks to close adversarial rename races, and
 replacement of existing files still needs encrypted or non-persistent rollback
 material. Consequently `apply_configuration` remains fail-closed.
 
+## Encrypted rollback-material foundation
+
+The next bounded synthetic-root slice prepares, but does not yet consume, a
+durable encrypted pre-image for one existing leaf file on Unix. The caller
+supplies a 256-bit recovery key that remains in zeroizing memory; the slice uses
+AES-256-GCM with a fresh random nonce and binds the ciphertext to the root and
+target identities, target name, original digest, and length. The ciphertext is
+flushed before a non-secret manifest is published last. Tests reload the
+pre-image using only durable state and the supplied key, scan the transaction
+workspace for the old employee-key sentinel and recovery key, reject the wrong
+key and ciphertext tampering, and refuse a replaced target identity without
+overwriting the external edit.
+
+On Unix, the root, target, transaction directory, workspace, ciphertext, and
+manifest are all opened relative to already-held directory descriptors with
+no-follow semantics. This first slice deliberately accepts only one UTF-8 leaf
+name owned by the current user, with one hard link and at most 4 MiB. Windows
+returns an explicit unsupported-platform error until equivalent native
+handle-relative traversal and protected-key integration exist.
+
+This remains a foundation, not a replacement transaction: no target is
+modified, no rollback is attempted, orphan cleanup before the manifest, a
+durable publish/verify/rollback state machine, permission/ACL preservation,
+platform key storage, and Windows support remain open. The Tauri command and
+all real client writes therefore remain fail-closed.
+
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret
 ownership record together only when both are absent. It deliberately leaves

@@ -13,6 +13,7 @@ json-five = "=0.3.1"
 json5 = "=0.4.1"
 libc = "=0.2.190"
 reqwest = { version = "=0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+ring = "=0.17.14"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.145", features = ["preserve_order"] }
 sha2 = "=0.10.9"
