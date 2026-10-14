@@ -86,6 +86,7 @@ pub enum TransactionError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileIdentity {
     volume: u64,
     file: u64,
@@ -132,6 +133,7 @@ struct JournalState {
     begun: bool,
     files: BTreeMap<usize, PlannedFile>,
     complete: bool,
+    events: usize,
 }
 
 struct TransactionGuard {
@@ -455,6 +457,52 @@ fn validate_plans(root: &Path, files: &[CreateFilePlan]) -> Result<(), Transacti
         }
         ensure_absent(&checked_target(root, &plan.relative_path)?)?;
     }
+    validate_generated_journal_bounds(root, files)
+}
+
+fn validate_generated_journal_bounds(
+    path: &Path,
+    files: &[CreateFilePlan],
+) -> Result<(), TransactionError> {
+    let maximum_identity = FileIdentity {
+        volume: u64::MAX,
+        file: u64::MAX,
+    };
+    let mut total = journal_event_len(path, &JournalEvent::Begin)?;
+    for (index, plan) in files.iter().enumerate() {
+        total = total.saturating_add(journal_event_len(
+            path,
+            &JournalEvent::Planned {
+                index,
+                target: plan.relative_path.clone(),
+                stage: format!("stage-{index:04}.bin"),
+                digest: digest(Some(&plan.contents)).expect("bytes have a digest"),
+                parent_identity: maximum_identity,
+            },
+        )?);
+        total = total.saturating_add(journal_event_len(
+            path,
+            &JournalEvent::Staged {
+                index,
+                stage_identity: maximum_identity,
+            },
+        )?);
+        total = total.saturating_add(journal_event_len(
+            path,
+            &JournalEvent::Published {
+                index,
+                target_identity: maximum_identity,
+            },
+        )?);
+        total = total.saturating_add(journal_event_len(
+            path,
+            &JournalEvent::Verified { index },
+        )?);
+    }
+    total = total.saturating_add(journal_event_len(path, &JournalEvent::Complete)?);
+    if total > MAX_JOURNAL_BYTES {
+        return Err(TransactionError::TooLarge(path.to_path_buf()));
+    }
     Ok(())
 }
 
@@ -563,11 +611,7 @@ fn append_event(
     path: &Path,
     event: &JournalEvent,
 ) -> Result<(), TransactionError> {
-    let encoded =
-        serde_json::to_vec(event).map_err(|source| io_error(path, io::Error::other(source)))?;
-    if encoded.len() + 1 > MAX_JOURNAL_LINE_BYTES {
-        return Err(TransactionError::TooLarge(path.to_path_buf()));
-    }
+    let encoded = encode_journal_event(path, event)?;
     let current_len = journal
         .metadata()
         .map_err(|source| io_error(path, source))?
@@ -582,6 +626,22 @@ fn append_event(
         .write_all(b"\n")
         .map_err(|source| io_error(path, source))?;
     journal.sync_all().map_err(|source| io_error(path, source))
+}
+
+fn encode_journal_event(
+    path: &Path,
+    event: &JournalEvent,
+) -> Result<Vec<u8>, TransactionError> {
+    let encoded =
+        serde_json::to_vec(event).map_err(|source| io_error(path, io::Error::other(source)))?;
+    if encoded.len() + 1 > MAX_JOURNAL_LINE_BYTES {
+        return Err(TransactionError::TooLarge(path.to_path_buf()));
+    }
+    Ok(encoded)
+}
+
+fn journal_event_len(path: &Path, event: &JournalEvent) -> Result<usize, TransactionError> {
+    Ok(encode_journal_event(path, event)?.len() + 1)
 }
 
 fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
@@ -616,7 +676,11 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
         lines.push(line);
     }
 
-    let mut state = JournalState::default();
+    let event_count = lines.len();
+    let mut state = JournalState {
+        events: event_count,
+        ..JournalState::default()
+    };
     for line in lines {
         let event: JournalEvent = serde_json::from_slice(&line)
             .map_err(|_| TransactionError::CorruptJournal(path.to_path_buf()))?;
@@ -790,6 +854,7 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
         .open(&journal_path)
         .map_err(|source| io_error(&journal_path, source))?;
     enforce_private_permissions(&journal_path, &journal)?;
+    validate_recovery_journal_capacity(&journal_path, &journal, &state)?;
     for (index, planned) in &state.files {
         let target = checked_target(root, &planned.target)?;
         let parent = target
@@ -843,6 +908,50 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
     sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
     cleanup_workspace(workspace, &state)?;
     Ok(true)
+}
+
+fn validate_recovery_journal_capacity(
+    path: &Path,
+    journal: &File,
+    state: &JournalState,
+) -> Result<(), TransactionError> {
+    let maximum_identity = FileIdentity {
+        volume: u64::MAX,
+        file: u64::MAX,
+    };
+    let mut additional_bytes = 0usize;
+    let mut additional_events = 1usize;
+    for (index, planned) in &state.files {
+        if planned.target_identity.is_none() {
+            additional_bytes = additional_bytes.saturating_add(journal_event_len(
+                path,
+                &JournalEvent::Published {
+                    index: *index,
+                    target_identity: maximum_identity,
+                },
+            )?);
+            additional_events = additional_events.saturating_add(1);
+        }
+        if !planned.verified {
+            additional_bytes = additional_bytes.saturating_add(journal_event_len(
+                path,
+                &JournalEvent::Verified { index: *index },
+            )?);
+            additional_events = additional_events.saturating_add(1);
+        }
+    }
+    additional_bytes = additional_bytes
+        .saturating_add(journal_event_len(path, &JournalEvent::Complete)?);
+    let current_bytes = journal
+        .metadata()
+        .map_err(|source| io_error(path, source))?
+        .len();
+    if current_bytes.saturating_add(additional_bytes as u64) > MAX_JOURNAL_BYTES as u64
+        || state.events.saturating_add(additional_events) > MAX_JOURNAL_EVENTS
+    {
+        return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+    }
+    Ok(())
 }
 
 /// A workspace cannot contain secret staging or a published target before its
@@ -1630,12 +1739,76 @@ mod tests {
                 "digest": "0".repeat(SHA256_HEX_BYTES),
                 "parent_identity": { "volume": 0, "file": 0 }
             }),
+            serde_json::json!({
+                "state": "planned",
+                "index": 0,
+                "target": "tool/config.json",
+                "stage": "stage-0000.bin",
+                "digest": "0".repeat(SHA256_HEX_BYTES),
+                "parent_identity": { "volume": 0, "file": 0, "unexpected": 0 }
+            }),
         ];
 
         for event in cases {
             let contents = format!("{{\"state\":\"begin\"}}\n{event}\n");
             assert_corrupt_journal_is_preserved(contents.as_bytes());
         }
+    }
+
+    #[test]
+    fn padded_valid_journal_cannot_exhaust_append_budget_after_publication() {
+        let mut events = Vec::new();
+        events.push(JournalEvent::Begin);
+        for index in 0..MAX_TRANSACTION_FILES {
+            events.push(JournalEvent::Planned {
+                index,
+                target: PathBuf::from(format!("tool/config-{index}.json")),
+                stage: format!("stage-{index:04}.bin"),
+                digest: "0".repeat(SHA256_HEX_BYTES),
+                parent_identity: FileIdentity { volume: 0, file: 0 },
+            });
+        }
+        for index in 0..MAX_TRANSACTION_FILES {
+            events.push(JournalEvent::Staged {
+                index,
+                stage_identity: FileIdentity {
+                    volume: 0,
+                    file: index as u64,
+                },
+            });
+        }
+
+        let encoded = events
+            .iter()
+            .map(|event| serde_json::to_vec(event).unwrap())
+            .collect::<Vec<_>>();
+        let base_bytes = encoded.iter().map(|line| line.len() + 1).sum::<usize>();
+        let mut remaining_padding = MAX_JOURNAL_BYTES - 1 - base_bytes;
+        let mut contents = Vec::with_capacity(MAX_JOURNAL_BYTES - 1);
+        for line in encoded {
+            let padding = remaining_padding.min(MAX_JOURNAL_LINE_BYTES - line.len() - 1);
+            contents.extend_from_slice(&line);
+            contents.extend(std::iter::repeat_n(b' ', padding));
+            contents.push(b'\n');
+            remaining_padding -= padding;
+        }
+        assert_eq!(remaining_padding, 0);
+        assert_eq!(contents.len(), MAX_JOURNAL_BYTES - 1);
+
+        assert_corrupt_journal_is_preserved(&contents);
+    }
+
+    #[test]
+    fn generated_journal_budget_accounts_for_json_escaping() {
+        let files = vec![CreateFilePlan::new(
+            "\"".repeat(MAX_JOURNAL_TARGET_BYTES),
+            b"value".to_vec(),
+        )];
+
+        let error = validate_generated_journal_bounds(Path::new("journal"), &files)
+            .expect_err("escaped event must exceed the line budget");
+
+        assert!(matches!(error, TransactionError::TooLarge(_)));
     }
 
     #[test]

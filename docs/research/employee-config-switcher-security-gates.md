@@ -64,10 +64,15 @@ may describe at most 64 files, the journal is limited to 512 KiB, each newline-
 terminated event is limited to 8 KiB, and at most 258 events are accepted. A
 target field is limited to 4096 UTF-8 bytes, stage names must exactly match the
 engine-generated index, and SHA-256 digests must be exactly 64 hexadecimal
-characters. Oversized, unterminated, excessive, sparse or malformed metadata
-blocks recovery before any target publication and remains untouched for operator
+characters. Unknown fields are rejected at both the event and nested identity
+levels. Before creating a workspace, the writer budgets the entire worst-case
+journal; before recovery publishes any target, it reserves space and event slots
+for every missing `Published` and `Verified` event plus `Complete`. Oversized,
+unterminated, excessive, sparse, padded or malformed metadata therefore blocks
+recovery before any target publication and remains untouched for operator
 inspection. Native-independent negative tests cover the file-count, total-size,
-line-size, event-count and field-size boundaries.
+line-size, event-count, field-size, JSON-escaping and post-publication append-
+budget boundaries.
 
 Before scanning recovery state, the engine now requires the transaction root
 and each workspace to retain their stable file identity and private directory
