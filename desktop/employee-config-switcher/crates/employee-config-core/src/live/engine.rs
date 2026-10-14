@@ -563,8 +563,8 @@ fn append_event(
     path: &Path,
     event: &JournalEvent,
 ) -> Result<(), TransactionError> {
-    let encoded = serde_json::to_vec(event)
-        .map_err(|source| io_error(path, io::Error::other(source)))?;
+    let encoded =
+        serde_json::to_vec(event).map_err(|source| io_error(path, io::Error::other(source)))?;
     if encoded.len() + 1 > MAX_JOURNAL_LINE_BYTES {
         return Err(TransactionError::TooLarge(path.to_path_buf()));
     }
