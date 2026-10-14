@@ -84,8 +84,7 @@ pub fn plan_new_hermes(
     validate_profile(profile)?;
     if read_optional(config_path)?.is_some() || read_optional(ownership_path)?.is_some() {
         return Err(AppError::Conflict(
-            "Hermes 已存在 config.yaml 或 CPA 所有权文件；create-only 安全阶段不会替换它们"
-                .into(),
+            "Hermes 已存在 config.yaml 或 CPA 所有权文件；create-only 安全阶段不会替换它们".into(),
         ));
     }
 
@@ -148,8 +147,7 @@ fn validate_hermes_paths(
         || config_relative == ownership_relative
     {
         return Err(AppError::Config(
-            "Hermes 安全写入只接受同一配置目录内的 config.yaml 和 cpa-cloud.ownership.json"
-                .into(),
+            "Hermes 安全写入只接受同一配置目录内的 config.yaml 和 cpa-cloud.ownership.json".into(),
         ));
     }
     Ok(())
@@ -163,10 +161,7 @@ fn render_config(profile: &HermesProfile, base_url: &str) -> Result<String, AppE
     let mut source = String::new();
     source.push_str("model:\n");
     source.push_str(&format!("  provider: {}\n", quote("custom:cpa-cloud")?));
-    source.push_str(&format!(
-        "  default: {}\n",
-        quote(&profile.default_model)?
-    ));
+    source.push_str(&format!("  default: {}\n", quote(&profile.default_model)?));
     source.push_str("  base_url: \"\"\n");
     source.push_str("  api_mode: \"chat_completions\"\n");
     source.push_str("providers:\n");
@@ -345,7 +340,10 @@ mod tests {
                 crate::live::engine::test_file_identity(&path).unwrap(),
                 identity
             );
-            assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), modified);
+            assert_eq!(
+                std::fs::metadata(path).unwrap().modified().unwrap(),
+                modified
+            );
         }
     }
 
