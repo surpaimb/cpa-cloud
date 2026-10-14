@@ -195,7 +195,9 @@ fn validate_profile(profile: &ConfigurationProfile) -> Result<(), AppError> {
         return Err(AppError::Config("员工 Key 不能为空".into()));
     }
     if profile.models.is_empty() {
-        return Err(AppError::Config("当前 Key 没有可用于 OpenCode 的模型".into()));
+        return Err(AppError::Config(
+            "当前 Key 没有可用于 OpenCode 的模型".into(),
+        ));
     }
     if profile.models.iter().any(|model| {
         model.is_empty() || model.len() > 200 || model.chars().any(|ch| ch.is_control())

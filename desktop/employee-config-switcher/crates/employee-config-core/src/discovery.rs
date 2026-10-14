@@ -51,7 +51,10 @@ pub async fn discover_configuration(
         .await?
         .error_for_status()?;
 
-    if response.content_length().is_some_and(|size| size > MAX_RESPONSE_BYTES) {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_RESPONSE_BYTES)
+    {
         return Err(AppError::Config("服务端配置响应过大".into()));
     }
     let mut body = Vec::new();
@@ -113,9 +116,7 @@ fn validate_configuration(configuration: &ClientConfiguration) -> Result<(), App
             return Err(AppError::Config("服务端协议列表无效".into()));
         }
         if item.candidates.iter().any(|model| {
-            model.is_empty()
-                || model.len() > 200
-                || model.chars().any(|ch| ch.is_control())
+            model.is_empty() || model.len() > 200 || model.chars().any(|ch| ch.is_control())
         }) {
             return Err(AppError::Config("服务端模型标识无效".into()));
         }
@@ -172,7 +173,9 @@ mod tests {
         let serve_once = |listener: TcpListener, expected_request_target: &'static str| {
             std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
                 let mut request = Vec::new();
                 loop {
                     let mut chunk = [0_u8; 1024];
@@ -186,11 +189,9 @@ mod tests {
                 }
                 let request = String::from_utf8_lossy(&request);
                 assert!(request.starts_with(expected_request_target));
-                assert!(
-                    request
-                        .to_ascii_lowercase()
-                        .contains("authorization: bearer synthetic-employee-key")
-                );
+                assert!(request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer synthetic-employee-key"));
                 let body = r#"{"schema_version":1,"protocols":[]}"#;
                 write!(
                     stream,

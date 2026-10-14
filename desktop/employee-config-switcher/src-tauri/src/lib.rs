@@ -7,9 +7,7 @@ fn detect_clients() -> Result<Vec<ClientDetection>, String> {
 }
 
 #[tauri::command]
-async fn discover_configuration(
-    request: DiscoveryRequest,
-) -> Result<ClientConfiguration, String> {
+async fn discover_configuration(request: DiscoveryRequest) -> Result<ClientConfiguration, String> {
     employee_config_core::discover_configuration(&request)
         .await
         .map_err(|error| error.to_string())
