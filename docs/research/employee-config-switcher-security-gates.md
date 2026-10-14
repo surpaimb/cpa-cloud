@@ -81,4 +81,6 @@ CC Switch MIT provider shape. When both files are absent, it creates
 transaction, registers the CPA provider as `openai-responses`, and selects the
 server-declared default model through `agents.defaults.model.primary`. Any
 existing OpenClaw config remains a hard conflict until the replacement contract
-above is implemented and validated against a fixed native client fixture.
+above is implemented and validated against a fixed native client fixture. The
+entry point accepts only canonical `openclaw.json` and
+`cpa-cloud.ownership.json` names in the same parent directory.

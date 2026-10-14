@@ -143,6 +143,7 @@ pub fn apply_new_openclaw(
 ) -> Result<CreateOnlyReceipt, AppError> {
     validate_transaction_relative(config_relative, "OpenClaw")?;
     validate_transaction_relative(ownership_relative, "OpenClaw")?;
+    validate_openclaw_paths(config_relative, ownership_relative)?;
     let plan = plan_new_openclaw(
         &root.join(config_relative),
         &root.join(ownership_relative),
@@ -156,6 +157,27 @@ pub fn apply_new_openclaw(
         ],
     )
     .map_err(|error| transaction_error("OpenClaw", error))
+}
+
+fn validate_openclaw_paths(
+    config_relative: &Path,
+    ownership_relative: &Path,
+) -> Result<(), AppError> {
+    let config_name = config_relative.file_name().and_then(|value| value.to_str());
+    let ownership_name = ownership_relative
+        .file_name()
+        .and_then(|value| value.to_str());
+    if config_name != Some("openclaw.json")
+        || ownership_name != Some("cpa-cloud.ownership.json")
+        || config_relative.parent() != ownership_relative.parent()
+        || config_relative == ownership_relative
+    {
+        return Err(AppError::Config(
+            "OpenClaw 安全写入只接受同一配置目录内的 openclaw.json 和 cpa-cloud.ownership.json"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn provider_value(profile: &OpenClawProfile) -> Result<Value, AppError> {
@@ -329,5 +351,31 @@ mod tests {
         )
         .expect_err("parent traversal must fail before planning");
         assert!(matches!(error, AppError::Config(_)));
+    }
+
+    #[test]
+    fn create_only_transaction_rejects_noncanonical_openclaw_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        for (config, ownership) in [
+            (
+                ".openclaw/custom.json",
+                ".openclaw/cpa-cloud.ownership.json",
+            ),
+            (
+                ".openclaw/openclaw.json",
+                "other/cpa-cloud.ownership.json",
+            ),
+            (".openclaw/openclaw.json", ".openclaw/ownership.json"),
+            (".openclaw/openclaw.json", ".openclaw/openclaw.json"),
+        ] {
+            let error = apply_new_openclaw(
+                temp.path(),
+                Path::new(config),
+                Path::new(ownership),
+                &profile(),
+            )
+            .expect_err("noncanonical OpenClaw paths must fail before planning");
+            assert!(matches!(error, AppError::Config(_)));
+        }
     }
 }
