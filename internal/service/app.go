@@ -511,6 +511,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("DELETE /admin/api/v1/models/{id}", a.requireAdmin(a.archiveModel, true))
 	mux.HandleFunc("GET /admin/api/v1/system/status", a.requireAdmin(a.systemStatus, false))
 	mux.HandleFunc("GET /v1/models", a.listModels)
+	mux.HandleFunc("GET /v1/client-configuration", a.clientConfiguration)
 	mux.HandleFunc("POST /v1/chat/completions", a.chatCompletions)
 	mux.HandleFunc("POST /v1/embeddings", a.embeddings)
 	mux.HandleFunc("POST /v1/responses", a.responsesAPI)
