@@ -439,9 +439,10 @@ mod platform {
         if path.as_os_str().is_empty() {
             return Err(BackupError::InvalidRoot(path.to_path_buf()));
         }
-        if path.components().any(|component| {
-            matches!(component, Component::ParentDir | Component::Prefix(_))
-        }) {
+        if path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        {
             return Err(BackupError::InvalidRoot(path.to_path_buf()));
         }
 
