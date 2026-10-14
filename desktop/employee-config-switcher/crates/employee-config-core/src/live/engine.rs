@@ -1331,16 +1331,17 @@ mod tests {
         #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
             let error = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .share_mode(0)
                 .open(path)
                 .expect_err("exclusive lock handle must deny a second open");
-            assert!(matches!(
-                error.kind(),
-                io::ErrorKind::PermissionDenied | io::ErrorKind::Other
-            ));
+            assert_eq!(
+                error.raw_os_error(),
+                Some(ERROR_SHARING_VIOLATION as i32)
+            );
         }
     }
 

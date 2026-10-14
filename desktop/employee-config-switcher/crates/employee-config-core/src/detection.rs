@@ -219,7 +219,9 @@ mod tests {
         let mac_root = tempfile::tempdir().unwrap();
         let mac_three_party = mac_root
             .path()
-            .join("Library/Application Support/Claude-3p");
+            .join("Library")
+            .join("Application Support")
+            .join("Claude-3p");
         fs::create_dir_all(&mac_three_party).unwrap();
         let mac_items = detect_clients_with_env(mac_root.path(), Platform::Macos, |_| None);
         let mac_desktop = by_id(&mac_items, "claude-desktop");
