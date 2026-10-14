@@ -13,8 +13,11 @@ use ring::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -184,7 +187,7 @@ fn encrypt(
         .seal_in_place_append_tag(
             Nonce::assume_unique_for_key(nonce_bytes),
             Aad::from(associated_data(manifest)),
-            &mut ciphertext,
+            &mut *ciphertext,
         )
         .map_err(|_| BackupError::Cryptography)?;
     Ok(ciphertext)
@@ -257,8 +260,8 @@ mod platform {
         {
             return Err(BackupError::RecoveryConflict(root.join(target)));
         }
-        let target_identity = identity(&target_file)
-            .map_err(|source| io_error(root.join(target), source))?;
+        let target_identity =
+            identity(&target_file).map_err(|source| io_error(root.join(target), source))?;
         let plaintext = read_bounded(&mut target_file, MAX_TARGET_BYTES, root.join(target))?;
         if identity(&target_file).map_err(|source| io_error(root.join(target), source))?
             != target_identity
@@ -296,7 +299,9 @@ mod platform {
         let mut backup_file = create_private_file_at(
             workspace_dir.as_raw_fd(),
             OsStr::new(BACKUP_FILE),
-            root.join(TRANSACTION_DIRECTORY).join(&workspace).join(BACKUP_FILE),
+            root.join(TRANSACTION_DIRECTORY)
+                .join(&workspace)
+                .join(BACKUP_FILE),
         )?;
         backup_file
             .write_all(&ciphertext)
@@ -313,7 +318,9 @@ mod platform {
         let mut manifest_file = create_private_file_at(
             workspace_dir.as_raw_fd(),
             OsStr::new(MANIFEST_FILE),
-            root.join(TRANSACTION_DIRECTORY).join(&workspace).join(MANIFEST_FILE),
+            root.join(TRANSACTION_DIRECTORY)
+                .join(&workspace)
+                .join(MANIFEST_FILE),
         )?;
         manifest_file
             .write_all(&manifest_bytes)
@@ -452,7 +459,9 @@ mod platform {
             }
         }
         let dir = open_private_dir_at(parent, name, display.clone())?;
-        let metadata = dir.metadata().map_err(|source| io_error(&display, source))?;
+        let metadata = dir
+            .metadata()
+            .map_err(|source| io_error(&display, source))?;
         if metadata.uid() != unsafe { libc::geteuid() }
             || metadata.permissions().mode() & 0o077 != 0
         {
@@ -473,7 +482,9 @@ mod platform {
             0,
         )
         .map_err(|source| io_error(&display, source))?;
-        let metadata = dir.metadata().map_err(|source| io_error(&display, source))?;
+        let metadata = dir
+            .metadata()
+            .map_err(|source| io_error(&display, source))?;
         if !metadata.is_dir() {
             return Err(BackupError::RecoveryConflict(display));
         }
@@ -512,11 +523,7 @@ mod platform {
         open_file_at(
             parent,
             name,
-            libc::O_WRONLY
-                | libc::O_CREAT
-                | libc::O_EXCL
-                | libc::O_CLOEXEC
-                | libc::O_NOFOLLOW,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0o600,
         )
         .map_err(|source| io_error(display, source))
@@ -529,7 +536,7 @@ mod platform {
         mode: libc::mode_t,
     ) -> io::Result<File> {
         let c_name = os_c_string(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-        let fd = unsafe { libc::openat(parent, c_name.as_ptr(), flags, mode) };
+        let fd = unsafe { libc::openat(parent, c_name.as_ptr(), flags, mode as libc::c_uint) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -606,12 +613,9 @@ mod tests {
     #[test]
     fn rejects_non_leaf_targets() {
         let root = tempfile::tempdir().unwrap();
-        let error = prepare_encrypted_backup(
-            root.path(),
-            Path::new("nested/config.json"),
-            &fixed_key(1),
-        )
-        .expect_err("nested paths remain outside this bounded slice");
+        let error =
+            prepare_encrypted_backup(root.path(), Path::new("nested/config.json"), &fixed_key(1))
+                .expect_err("nested paths remain outside this bounded slice");
         assert!(matches!(error, BackupError::InvalidTarget(_)));
     }
 
@@ -634,9 +638,15 @@ mod tests {
         let backup = fs::read(workspace.join(BACKUP_FILE)).unwrap();
         let manifest = fs::read(workspace.join(MANIFEST_FILE)).unwrap();
         assert!(!backup.windows(secret.len()).any(|window| window == secret));
-        assert!(!manifest.windows(secret.len()).any(|window| window == secret));
-        assert!(!backup.windows(KEY_BYTES).any(|window| window == [0x5a; KEY_BYTES]));
-        assert!(!manifest.windows(KEY_BYTES).any(|window| window == [0x5a; KEY_BYTES]));
+        assert!(!manifest
+            .windows(secret.len())
+            .any(|window| window == secret));
+        assert!(!backup
+            .windows(KEY_BYTES)
+            .any(|window| window == [0x5a; KEY_BYTES]));
+        assert!(!manifest
+            .windows(KEY_BYTES)
+            .any(|window| window == [0x5a; KEY_BYTES]));
         assert_eq!(
             fs::metadata(&workspace).unwrap().permissions().mode() & 0o777,
             0o700
