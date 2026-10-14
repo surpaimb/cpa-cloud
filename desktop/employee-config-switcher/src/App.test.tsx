@@ -28,3 +28,14 @@ test("discards an in-flight discovery result after either input changes", async 
   expect(screen.queryByText(/连接成功/)).not.toBeInTheDocument();
   expect(screen.getByText("开发预览")).toBeInTheDocument();
 });
+
+test("does not claim detected tools are configurable after discovery", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  await user.type(screen.getByLabelText("员工 Key"), "demo-key");
+  await user.click(screen.getByRole("button", { name: "检测连接" }));
+
+  expect(await screen.findByText(/连接成功/)).toBeInTheDocument();
+  expect(screen.getAllByText("已检测，适配未就绪")).not.toHaveLength(0);
+  expect(screen.queryByText("可配置")).not.toBeInTheDocument();
+});

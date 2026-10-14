@@ -232,6 +232,9 @@ fn apply_create_only_inner(
             stage_file
                 .sync_all()
                 .map_err(|source| io_error(&stage_path, source))?;
+            // Persist the private stage directory entry before the journal can
+            // claim that the stage is available for roll-forward recovery.
+            sync_directory(&workspace).map_err(|source| io_error(&workspace, source))?;
             if fault == FaultPoint::AfterStageBeforeJournal(index) {
                 return Err(TransactionError::InjectedCrash);
             }
@@ -1022,6 +1025,7 @@ fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
         String::from_utf16_lossy(std::slice::from_raw_parts(rendered, rendered_len as usize))
     };
     unsafe { LocalFree(rendered.cast()) };
+    let actual = actual.trim_end_matches('\0');
     if actual != "D:P(A;;FA;;;OW)" {
         return Err(io_error(
             path,
@@ -1231,6 +1235,18 @@ mod tests {
             FaultPoint::AfterStageBeforeJournal(0),
         )
         .expect_err("fault is injected");
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            fs::read(workspace.join("stage-0000.bin")).unwrap(),
+            b"synthetic-key"
+        );
+        let journal = fs::read_to_string(workspace.join(JOURNAL_FILE)).unwrap();
+        assert!(!journal.contains("\"state\":\"staged\""));
         recover_create_only(root.path()).unwrap();
         assert!(!root.path().join("tool/config.json").exists());
         assert_eq!(

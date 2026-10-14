@@ -113,9 +113,16 @@ where
             let local = env_path(env, "LOCALAPPDATA", home.join("AppData").join("Local"));
             vec![local.join("Claude"), local.join("Claude-3p")]
         }
-        Platform::Macos => vec![home.join("Library/Application Support/Claude")],
+        Platform::Macos => {
+            let application_support = home.join("Library/Application Support");
+            vec![
+                application_support.join("Claude"),
+                application_support.join("Claude-3p"),
+            ]
+        }
         Platform::Linux => {
-            vec![env_path(env, "XDG_CONFIG_HOME", home.join(".config")).join("Claude")]
+            let config = env_path(env, "XDG_CONFIG_HOME", home.join(".config"));
+            vec![config.join("Claude"), config.join("Claude-3p")]
         }
     }
 }
@@ -205,6 +212,35 @@ mod tests {
         let desktop = by_id(&items, "claude-desktop");
         assert!(desktop.detected);
         assert_eq!(desktop.detail, three_party.display().to_string());
+    }
+
+    #[test]
+    fn macos_and_linux_desktop_find_three_party_layout() {
+        let mac_root = tempfile::tempdir().unwrap();
+        let mac_three_party = mac_root
+            .path()
+            .join("Library/Application Support/Claude-3p");
+        fs::create_dir_all(&mac_three_party).unwrap();
+        let mac_items = detect_clients_with_env(mac_root.path(), Platform::Macos, |_| None);
+        let mac_desktop = by_id(&mac_items, "claude-desktop");
+        assert!(mac_desktop.detected);
+        assert_eq!(mac_desktop.detail, mac_three_party.display().to_string());
+
+        let linux_root = tempfile::tempdir().unwrap();
+        let xdg = linux_root.path().join("xdg");
+        let linux_three_party = xdg.join("Claude-3p");
+        fs::create_dir_all(&linux_three_party).unwrap();
+        let linux_items = detect_clients_with_env(
+            linux_root.path(),
+            Platform::Linux,
+            fake_env(HashMap::from([("XDG_CONFIG_HOME", xdg)])),
+        );
+        let linux_desktop = by_id(&linux_items, "claude-desktop");
+        assert!(linux_desktop.detected);
+        assert_eq!(
+            linux_desktop.detail,
+            linux_three_party.display().to_string()
+        );
     }
 
     #[test]

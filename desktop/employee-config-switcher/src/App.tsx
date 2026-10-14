@@ -14,7 +14,7 @@ function EyeIcon({ open }: { open: boolean }) {
 function statusText(client: ClientDetection, phase: AppPhase) {
   if (!client.detected) return { tone: "warning", label: "未检测到", detail: client.detail };
   if (phase === "blocked") return { tone: "neutral", label: "已检测", detail: "安全写入尚未开放" };
-  if (phase === "ready") return { tone: "ready", label: "可配置", detail: "已确认服务端权限" };
+  if (phase === "ready") return { tone: "neutral", label: "已检测，适配未就绪", detail: "已确认服务端权限，安全写入尚未开放" };
   return { tone: "neutral", label: "已检测", detail: client.detail };
 }
 
