@@ -61,8 +61,9 @@ false success receipt.
 
 Before scanning recovery state, the engine now requires the transaction root
 and each workspace to retain their stable file identity and private directory
-boundary: exact `0700` ownership by the effective user on Unix, or the verified
-protected owner-only DACL on Windows. Workspace names must exactly match the
+boundary: exact `0700` ownership by the effective user on Unix, with no extended
+ACL entries on macOS, or both current-user ownership and the verified protected
+owner-only DACL on Windows. Workspace names must exactly match the
 engine-generated `tx-<pid>-<nonce>-<counter>` form. Unknown names or weakened
 permissions block recovery and preserve the workspace. These checks remain
 path-based and do not replace the still-required handle-relative traversal.
@@ -71,7 +72,9 @@ A persistent owner-private lock file combines an in-process mutex with an OS
 lock (`flock` on POSIX; an exclusive-sharing file handle on Windows), so a
 second client process cannot recover an active transaction. Windows directories
 are opened with backup semantics and write access before `FlushFileBuffers`;
-the protected owner-only DACL is read back after assignment. These behaviors
+the protected owner-only DACL and owner SID are read back after assignment.
+macOS rejects inherited or manually added extended ACL entries instead of
+treating BSD mode bits alone as proof of privacy. These behaviors
 must pass native runtime tests, not only cross-platform compilation.
 
 This is not clearance for live writes. Native handle-relative traversal must

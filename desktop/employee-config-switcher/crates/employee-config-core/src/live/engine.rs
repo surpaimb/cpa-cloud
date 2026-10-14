@@ -972,6 +972,9 @@ fn validate_private_recovery_directory(path: &Path) -> Result<(), TransactionErr
         }
     }
 
+    #[cfg(target_os = "macos")]
+    verify_no_macos_extended_acl(path)?;
+
     #[cfg(windows)]
     verify_private_windows_dacl(path)?;
 
@@ -1045,7 +1048,56 @@ fn enforce_private_permissions(path: &Path) -> Result<(), TransactionError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
     let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .map_err(|source| io_error(path, source))
+        .map_err(|source| io_error(path, source))?;
+    #[cfg(target_os = "macos")]
+    verify_no_macos_extended_acl(path)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_no_macos_extended_acl(path: &Path) -> Result<(), TransactionError> {
+    use std::ffi::{c_char, c_int, c_void, CString};
+    use std::os::unix::ffi::OsStrExt;
+    use std::ptr::null_mut;
+
+    type Acl = *mut c_void;
+    const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
+    const ACL_FIRST_ENTRY: c_int = 0;
+
+    unsafe extern "C" {
+        fn acl_get_file(path: *const c_char, acl_type: c_int) -> Acl;
+        fn acl_get_entry(acl: Acl, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_free(object: *mut c_void) -> c_int;
+    }
+
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|source| {
+        io_error(path, io::Error::new(io::ErrorKind::InvalidInput, source))
+    })?;
+    let acl = unsafe { acl_get_file(c_path.as_ptr(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+
+    let mut entry = null_mut();
+    unsafe { *libc::__error() = 0 };
+    let result = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
+    let errno = unsafe { *libc::__error() };
+    unsafe { acl_free(acl) };
+
+    if result == 0 {
+        return Err(TransactionError::RecoveryConflict(path.to_path_buf()));
+    }
+    if result == -1 && errno == libc::EINVAL {
+        return Ok(());
+    }
+    Err(io_error(
+        path,
+        if errno == 0 {
+            io::Error::other("unexpected macOS ACL enumeration result")
+        } else {
+            io::Error::from_raw_os_error(errno)
+        },
+    ))
 }
 
 #[cfg(windows)]
@@ -1093,22 +1145,31 @@ fn enforce_private_permissions(path: &Path) -> Result<(), TransactionError> {
 fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::{GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, HANDLE,
+    };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
     };
-    use windows_sys::Win32::Security::{GetFileSecurityW, DACL_SECURITY_INFORMATION};
+    use windows_sys::Win32::Security::{
+        EqualSid, GetFileSecurityW, GetSecurityDescriptorOwner, GetTokenInformation, TokenUser,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    struct TokenHandle(HANDLE);
+
+    impl Drop for TokenHandle {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let requested = DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION;
     let mut needed = 0u32;
     unsafe {
-        GetFileSecurityW(
-            wide.as_ptr(),
-            DACL_SECURITY_INFORMATION,
-            null_mut(),
-            0,
-            &mut needed,
-        )
+        GetFileSecurityW(wide.as_ptr(), requested, null_mut(), 0, &mut needed)
     };
     if needed == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
         return Err(io_error(path, io::Error::last_os_error()));
@@ -1117,7 +1178,7 @@ fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
     let read = unsafe {
         GetFileSecurityW(
             wide.as_ptr(),
-            DACL_SECURITY_INFORMATION,
+            requested,
             descriptor.as_mut_ptr().cast(),
             needed,
             &mut needed,
@@ -1126,6 +1187,54 @@ fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
     if read == 0 {
         return Err(io_error(path, io::Error::last_os_error()));
     }
+
+    let mut owner = null_mut();
+    let mut owner_defaulted = 0;
+    let owner_read = unsafe {
+        GetSecurityDescriptorOwner(
+            descriptor.as_mut_ptr().cast(),
+            &mut owner,
+            &mut owner_defaulted,
+        )
+    };
+    if owner_read == 0 || owner.is_null() {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+
+    let mut token = null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    let token = TokenHandle(token);
+    let mut token_needed = 0u32;
+    unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut token_needed) };
+    if token_needed == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    let mut token_info = vec![0u8; token_needed as usize];
+    let token_read = unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            token_info.as_mut_ptr().cast(),
+            token_needed,
+            &mut token_needed,
+        )
+    };
+    if token_read == 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    let token_user = unsafe { std::ptr::read_unaligned(token_info.as_ptr().cast::<TOKEN_USER>()) };
+    if token_user.User.Sid.is_null() || unsafe { EqualSid(owner, token_user.User.Sid) } == 0 {
+        return Err(io_error(
+            path,
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "security descriptor owner is not the current process user",
+            ),
+        ));
+    }
+
     let mut rendered = null_mut();
     let mut rendered_len = 0u32;
     let converted = unsafe {
@@ -1662,11 +1771,47 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_target_dacl_is_read_back_as_owner_only() {
+    fn windows_target_owner_and_dacl_are_read_back_as_private() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("tool")).unwrap();
         apply_create_only(root.path(), vec![plan("tool/config.json", "secret")]).unwrap();
         verify_private_windows_dacl(&root.path().join("tool/config.json")).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recovery_refuses_a_workspace_with_an_extended_acl() {
+        use std::process::Command;
+
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterJournalCreated,
+        )
+        .expect_err("fault is injected");
+
+        let transaction_root = root.path().join(TRANSACTION_DIRECTORY);
+        let workspace = fs::read_dir(&transaction_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let status = Command::new("chmod")
+            .arg("+a")
+            .arg("everyone allow read")
+            .arg(&workspace)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let error = recover_create_only(root.path())
+            .expect_err("extended ACL must block private-workspace recovery");
+        assert!(matches!(error, TransactionError::RecoveryConflict(_)));
+        assert!(workspace.join(JOURNAL_FILE).exists());
+        assert!(!root.path().join("tool/config.json").exists());
     }
 
     #[cfg(unix)]
