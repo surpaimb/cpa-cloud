@@ -494,10 +494,7 @@ fn validate_generated_journal_bounds(
                 target_identity: maximum_identity,
             },
         )?);
-        total = total.saturating_add(journal_event_len(
-            path,
-            &JournalEvent::Verified { index },
-        )?);
+        total = total.saturating_add(journal_event_len(path, &JournalEvent::Verified { index })?);
     }
     total = total.saturating_add(journal_event_len(path, &JournalEvent::Complete)?);
     if total > MAX_JOURNAL_BYTES {
@@ -628,10 +625,7 @@ fn append_event(
     journal.sync_all().map_err(|source| io_error(path, source))
 }
 
-fn encode_journal_event(
-    path: &Path,
-    event: &JournalEvent,
-) -> Result<Vec<u8>, TransactionError> {
+fn encode_journal_event(path: &Path, event: &JournalEvent) -> Result<Vec<u8>, TransactionError> {
     let encoded =
         serde_json::to_vec(event).map_err(|source| io_error(path, io::Error::other(source)))?;
     if encoded.len() + 1 > MAX_JOURNAL_LINE_BYTES {
@@ -940,8 +934,8 @@ fn validate_recovery_journal_capacity(
             additional_events = additional_events.saturating_add(1);
         }
     }
-    additional_bytes = additional_bytes
-        .saturating_add(journal_event_len(path, &JournalEvent::Complete)?);
+    additional_bytes =
+        additional_bytes.saturating_add(journal_event_len(path, &JournalEvent::Complete)?);
     let current_bytes = journal
         .metadata()
         .map_err(|source| io_error(path, source))?
