@@ -160,6 +160,26 @@ func TestClientConfigurationRequiresOneDispatchableRouteWitness(t *testing.T) {
 			}
 		}
 	}
+
+	if _, err := fixture.app.store.db.Exec(`UPDATE upstreams SET provider_kind='anthropic-api-key' WHERE id IN (SELECT upstream_id FROM model_account_pool_routes WHERE model_id='wire-model')`); err != nil {
+		t.Fatal(err)
+	}
+	fixture.app.notifyAccountPoolChanged()
+	for _, item := range fetch().Protocols {
+		if item.Protocol == string(keypolicy.ProtocolOpenAIResponses) && len(item.Candidates) != 0 {
+			t.Fatalf("responses candidates=%v; uniform pool has an unsupported provider-wire pairing", item.Candidates)
+		}
+	}
+
+	if _, err := fixture.app.store.db.Exec(`UPDATE upstreams SET provider_kind='openai-compatible' WHERE id=?`, chatUpstream); err != nil {
+		t.Fatal(err)
+	}
+	fixture.app.notifyAccountPoolChanged()
+	for _, item := range fetch().Protocols {
+		if item.Protocol == string(keypolicy.ProtocolOpenAIResponses) && len(item.Candidates) != 0 {
+			t.Fatalf("responses candidates=%v; runtime rejects the whole mixed-provider pool", item.Candidates)
+		}
+	}
 }
 
 func TestClientConfigurationRejectsUnsupportedLegacyProviderWireAndSchemaDisallowsOrphanRoute(t *testing.T) {
