@@ -114,7 +114,7 @@ where
             vec![local.join("Claude"), local.join("Claude-3p")]
         }
         Platform::Macos => {
-            let application_support = home.join("Library/Application Support");
+            let application_support = home.join("Library").join("Application Support");
             vec![
                 application_support.join("Claude"),
                 application_support.join("Claude-3p"),

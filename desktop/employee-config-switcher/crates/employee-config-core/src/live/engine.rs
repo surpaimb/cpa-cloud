@@ -1338,10 +1338,7 @@ mod tests {
                 .share_mode(0)
                 .open(path)
                 .expect_err("exclusive lock handle must deny a second open");
-            assert_eq!(
-                error.raw_os_error(),
-                Some(ERROR_SHARING_VIOLATION as i32)
-            );
+            assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION as i32));
         }
     }
 
