@@ -1,11 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::jsonc_document::JsoncDocument;
-use crate::live::engine::digest;
+use crate::live::engine::{
+    apply_create_only, digest, CreateFilePlan, CreateOnlyReceipt, TransactionError,
+};
 use crate::{AppError, ClientConfiguration, SecretString};
 
 const PROVIDER_ID: &str = "cpa-cloud";
@@ -48,7 +51,7 @@ pub struct FilePlan {
     pub expected_pre_digest: Option<String>,
     pub desired_digest: String,
     #[serde(skip)]
-    pub desired_bytes: Vec<u8>,
+    pub desired_bytes: Zeroizing<Vec<u8>>,
 }
 
 impl std::fmt::Debug for FilePlan {
@@ -149,6 +152,70 @@ pub fn plan_opencode(
     })
 }
 
+/// Apply an OpenCode plan only when neither managed file exists.
+///
+/// This is the first transaction integration slice. It intentionally refuses
+/// the common update case; live replacement remains blocked until encrypted
+/// rollback and native handle-relative path validation are complete.
+pub fn apply_new_opencode(
+    root: &Path,
+    config_relative: &Path,
+    ownership_relative: &Path,
+    profile: &ConfigurationProfile,
+) -> Result<CreateOnlyReceipt, AppError> {
+    validate_transaction_relative(config_relative)?;
+    validate_transaction_relative(ownership_relative)?;
+    let plan = plan_opencode(
+        &root.join(config_relative),
+        &root.join(ownership_relative),
+        profile,
+    )?;
+    if plan.config.expected_pre_digest.is_some() || plan.ownership.expected_pre_digest.is_some() {
+        return Err(AppError::Conflict(
+            "OpenCode 已存在配置或所有权文件；create-only 安全阶段不会替换它们".into(),
+        ));
+    }
+    apply_create_only(
+        root,
+        vec![
+            CreateFilePlan::new(config_relative, plan.config.desired_bytes.to_vec()),
+            CreateFilePlan::new(ownership_relative, plan.ownership.desired_bytes.to_vec()),
+        ],
+    )
+    .map_err(transaction_error)
+}
+
+fn validate_transaction_relative(path: &Path) -> Result<(), AppError> {
+    if path.as_os_str().is_empty()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                Component::Prefix(_)
+                    | Component::RootDir
+                    | Component::ParentDir
+                    | Component::CurDir
+            )
+        })
+    {
+        return Err(AppError::Config(
+            "OpenCode 安全写入只接受配置根目录内的相对路径".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn transaction_error(error: TransactionError) -> AppError {
+    match error {
+        TransactionError::Collision(path)
+        | TransactionError::LinkedPath(path)
+        | TransactionError::RecoveryConflict(path) => AppError::Conflict(format!(
+            "OpenCode 安全写入检测到文件冲突：{}；未覆盖任何已有配置",
+            path.display()
+        )),
+        other => AppError::Config(format!("OpenCode 安全写入失败：{other}")),
+    }
+}
+
 fn provider_value(profile: &ConfigurationProfile) -> Result<Value, AppError> {
     let base_url = normalize_openai_base_url(&profile.base_url)?;
     let mut models = serde_json::Map::new();
@@ -230,7 +297,7 @@ fn file_plan(path: &Path, previous: Option<&[u8]>, desired_bytes: Vec<u8>) -> Fi
         path: path.to_path_buf(),
         expected_pre_digest: digest(previous),
         desired_digest: digest(Some(&desired_bytes)).expect("bytes always have a digest"),
-        desired_bytes,
+        desired_bytes: Zeroizing::new(desired_bytes),
     }
 }
 
@@ -264,12 +331,12 @@ mod tests {
         .unwrap();
 
         let plan = plan_opencode(&config, &ownership, &profile()).unwrap();
-        let text = String::from_utf8(plan.config.desired_bytes).unwrap();
+        let text = String::from_utf8(plan.config.desired_bytes.to_vec()).unwrap();
         assert!(text.contains("// keep this comment"));
         assert!(text.contains("\"theme\": \"system\""));
         assert!(text.contains("\"ANTHROPIC_API_KEY\"") == false);
         assert!(text.contains("employee-secret"));
-        assert!(!String::from_utf8(plan.ownership.desired_bytes)
+        assert!(!String::from_utf8(plan.ownership.desired_bytes.to_vec())
             .unwrap()
             .contains("employee-secret"));
     }
@@ -353,5 +420,59 @@ mod tests {
         let rendered = format!("{plan:?}");
         assert!(!rendered.contains("employee-secret"));
         assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn create_only_transaction_publishes_config_and_ownership_together() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("opencode")).unwrap();
+        let receipt = apply_new_opencode(
+            temp.path(),
+            Path::new("opencode/opencode.jsonc"),
+            Path::new("opencode/cpa-cloud.ownership.json"),
+            &profile(),
+        )
+        .unwrap();
+        assert_eq!(receipt.created.len(), 2);
+        let config = std::fs::read_to_string(temp.path().join("opencode/opencode.jsonc")).unwrap();
+        assert!(config.contains("employee-secret"));
+        let ownership =
+            std::fs::read_to_string(temp.path().join("opencode/cpa-cloud.ownership.json")).unwrap();
+        assert!(!ownership.contains("employee-secret"));
+    }
+
+    #[test]
+    fn create_only_transaction_refuses_existing_user_config() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("opencode")).unwrap();
+        let config_path = temp.path().join("opencode/opencode.jsonc");
+        let original = "{\n  // user-owned\n  \"theme\": \"dark\"\n}\n";
+        std::fs::write(&config_path, original).unwrap();
+        let error = apply_new_opencode(
+            temp.path(),
+            Path::new("opencode/opencode.jsonc"),
+            Path::new("opencode/cpa-cloud.ownership.json"),
+            &profile(),
+        )
+        .expect_err("existing config must remain blocked");
+        assert!(matches!(error, AppError::Conflict(_)));
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), original);
+        assert!(!temp
+            .path()
+            .join("opencode/cpa-cloud.ownership.json")
+            .exists());
+    }
+
+    #[test]
+    fn create_only_transaction_rejects_parent_traversal_before_planning() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = apply_new_opencode(
+            temp.path(),
+            Path::new("../outside.json"),
+            Path::new("ownership.json"),
+            &profile(),
+        )
+        .expect_err("parent traversal must fail before any read or write");
+        assert!(matches!(error, AppError::Config(_)));
     }
 }

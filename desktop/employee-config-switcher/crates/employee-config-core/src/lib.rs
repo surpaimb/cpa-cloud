@@ -17,5 +17,7 @@ pub mod secret;
 pub use detection::{detect_clients, ClientDetection};
 pub use discovery::{discover_configuration, ClientConfiguration, DiscoveryRequest};
 pub use error::AppError;
-pub use opencode::{plan_opencode, ConfigurationProfile, FilePlan, OpenCodePlan};
+pub use opencode::{
+    apply_new_opencode, plan_opencode, ConfigurationProfile, FilePlan, OpenCodePlan,
+};
 pub use secret::SecretString;
