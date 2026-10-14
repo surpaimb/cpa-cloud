@@ -74,8 +74,11 @@ second client process cannot recover an active transaction. Windows directories
 are opened with backup semantics and write access before `FlushFileBuffers`;
 the owner is first set to the process user SID, then that SID and the protected
 owner-only DACL are read back after assignment.
-macOS rejects inherited or manually added extended ACL entries instead of
-treating BSD mode bits alone as proof of privacy. These behaviors
+macOS checks the already-open object with `acl_get_fd_np`, rejects inherited or
+manually added extended ACL entries instead of treating BSD mode bits alone as
+proof of privacy, and requires the lock path still to name the locked inode.
+Native negative tests reject a foreign Windows owner SID, a world-accessible
+workspace DACL, a macOS workspace ACL, and a removed macOS lock path. These behaviors
 must pass native runtime tests, not only cross-platform compilation.
 
 This is not clearance for live writes. Native handle-relative traversal must

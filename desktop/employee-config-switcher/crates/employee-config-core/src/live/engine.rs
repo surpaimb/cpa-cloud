@@ -406,13 +406,22 @@ fn acquire_transaction_lock(root: &Path) -> Result<TransactionGuard, Transaction
             .map_err(|source| io_error(&path, source))?
     };
 
-    enforce_private_permissions(&path)?;
-    let metadata = file.metadata().map_err(|source| io_error(&path, source))?;
-    ensure_not_link(&path, &metadata)?;
+    validate_transaction_lock_path(&path, &file)?;
     Ok(TransactionGuard {
         _process: process,
         _file: file,
     })
+}
+
+fn validate_transaction_lock_path(path: &Path, file: &File) -> Result<(), TransactionError> {
+    enforce_private_permissions(path, file)?;
+    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+    ensure_not_link(path, &metadata)?;
+    #[cfg(unix)]
+    if identity_for_path(path)? != file_identity(file, path)? {
+        return Err(TransactionError::RecoveryConflict(path.to_path_buf()));
+    }
+    Ok(())
 }
 
 fn validate_plans(root: &Path, files: &[CreateFilePlan]) -> Result<(), TransactionError> {
@@ -497,7 +506,14 @@ fn ensure_transaction_root(root: &Path) -> Result<PathBuf, TransactionError> {
         }
         Err(source) => return Err(io_error(&path, source)),
     }
-    enforce_private_permissions(&path)?;
+    #[cfg(unix)]
+    let directory = File::open(&path).map_err(|source| io_error(&path, source))?;
+    #[cfg(windows)]
+    let directory = open_windows_path(
+        &path,
+        windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
+    )?;
+    enforce_private_permissions(&path, &directory)?;
     Ok(path)
 }
 
@@ -709,7 +725,7 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
         .append(true)
         .open(&journal_path)
         .map_err(|source| io_error(&journal_path, source))?;
-    enforce_private_permissions(&journal_path)?;
+    enforce_private_permissions(&journal_path, &journal)?;
     for (index, planned) in &state.files {
         let target = checked_target(root, &planned.target)?;
         let parent = target
@@ -973,7 +989,10 @@ fn validate_private_recovery_directory(path: &Path) -> Result<(), TransactionErr
     }
 
     #[cfg(target_os = "macos")]
-    verify_no_macos_extended_acl(path)?;
+    {
+        let file = File::open(path).map_err(|source| io_error(path, source))?;
+        verify_no_macos_extended_acl(&file, path)?;
+    }
 
     #[cfg(windows)]
     verify_private_windows_dacl(path)?;
@@ -1016,7 +1035,14 @@ fn create_private_directory(path: &Path) -> Result<(), TransactionError> {
     }
     #[cfg(windows)]
     fs::create_dir(path).map_err(|source| io_error(path, source))?;
-    enforce_private_permissions(path)
+    #[cfg(unix)]
+    let directory = File::open(path).map_err(|source| io_error(path, source))?;
+    #[cfg(windows)]
+    let directory = open_windows_path(
+        path,
+        windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
+    )?;
+    enforce_private_permissions(path, &directory)
 }
 
 fn create_private_file(path: &Path) -> Result<File, TransactionError> {
@@ -1038,26 +1064,27 @@ fn create_private_file(path: &Path) -> Result<File, TransactionError> {
         .write(true)
         .open(path)
         .map_err(|source| io_error(path, source))?;
-    enforce_private_permissions(path)?;
+    enforce_private_permissions(path, &file)?;
     Ok(file)
 }
 
 #[cfg(unix)]
-fn enforce_private_permissions(path: &Path) -> Result<(), TransactionError> {
-    use std::os::unix::fs::PermissionsExt;
-    let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+fn enforce_private_permissions(path: &Path, file: &File) -> Result<(), TransactionError> {
+    use std::os::fd::AsRawFd;
+    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
     let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .map_err(|source| io_error(path, source))?;
+    if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
     #[cfg(target_os = "macos")]
-    verify_no_macos_extended_acl(path)?;
+    verify_no_macos_extended_acl(file, path)?;
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn verify_no_macos_extended_acl(path: &Path) -> Result<(), TransactionError> {
-    use std::ffi::{c_char, c_int, c_void, CString};
-    use std::os::unix::ffi::OsStrExt;
+fn verify_no_macos_extended_acl(file: &File, path: &Path) -> Result<(), TransactionError> {
+    use std::ffi::{c_int, c_void};
+    use std::os::fd::AsRawFd;
     use std::ptr::null_mut;
 
     type Acl = *mut c_void;
@@ -1065,17 +1092,16 @@ fn verify_no_macos_extended_acl(path: &Path) -> Result<(), TransactionError> {
     const ACL_FIRST_ENTRY: c_int = 0;
 
     unsafe extern "C" {
-        fn acl_get_file(path: *const c_char, acl_type: c_int) -> Acl;
+        fn acl_get_fd_np(fd: c_int, acl_type: c_int) -> Acl;
         fn acl_get_entry(acl: Acl, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
         fn acl_free(object: *mut c_void) -> c_int;
     }
 
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|source| io_error(path, io::Error::new(io::ErrorKind::InvalidInput, source)))?;
-    let acl = unsafe { acl_get_file(c_path.as_ptr(), ACL_TYPE_EXTENDED) };
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
     if acl.is_null() {
         let source = io::Error::last_os_error();
-        // Darwin reports ENOENT when the path exists but has no extended ACL.
+        // With a live descriptor, Darwin's ENOENT unambiguously means that the
+        // object has no extended ACL; it cannot mean that a path disappeared.
         return if source.raw_os_error() == Some(libc::ENOENT) {
             Ok(())
         } else {
@@ -1149,7 +1175,7 @@ fn windows_current_user_token_info(path: &Path) -> Result<Vec<u8>, TransactionEr
 }
 
 #[cfg(windows)]
-fn enforce_private_permissions(path: &Path) -> Result<(), TransactionError> {
+fn enforce_private_permissions(path: &Path, _file: &File) -> Result<(), TransactionError> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
@@ -1229,8 +1255,8 @@ fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
         ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::{
-        EqualSid, GetFileSecurityW, GetSecurityDescriptorOwner, DACL_SECURITY_INFORMATION,
-        OWNER_SECURITY_INFORMATION, TOKEN_USER,
+        GetFileSecurityW, GetSecurityDescriptorOwner, DACL_SECURITY_INFORMATION,
+        OWNER_SECURITY_INFORMATION,
     };
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -1268,8 +1294,7 @@ fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
     }
 
     let token_info = windows_current_user_token_info(path)?;
-    let token_user = unsafe { std::ptr::read_unaligned(token_info.as_ptr().cast::<TOKEN_USER>()) };
-    if token_user.User.Sid.is_null() || unsafe { EqualSid(owner, token_user.User.Sid) } == 0 {
+    if !windows_owner_matches_current_user(owner, &token_info) {
         return Err(io_error(
             path,
             io::Error::new(
@@ -1308,6 +1333,20 @@ fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn windows_owner_matches_current_user(
+    owner: windows_sys::Win32::Security::PSID,
+    token_info: &[u8],
+) -> bool {
+    use windows_sys::Win32::Security::{EqualSid, TOKEN_USER};
+
+    if owner.is_null() || token_info.len() < std::mem::size_of::<TOKEN_USER>() {
+        return false;
+    }
+    let token_user = unsafe { std::ptr::read_unaligned(token_info.as_ptr().cast::<TOKEN_USER>()) };
+    !token_user.User.Sid.is_null() && unsafe { EqualSid(owner, token_user.User.Sid) } != 0
 }
 
 #[cfg(unix)]
@@ -1822,6 +1861,89 @@ mod tests {
         verify_private_windows_dacl(&root.path().join("tool/config.json")).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_owner_comparison_rejects_a_foreign_sid() {
+        use std::ptr::null_mut;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+
+        let root = tempfile::tempdir().unwrap();
+        let token_info = windows_current_user_token_info(root.path()).unwrap();
+        let local_system: Vec<u16> = "S-1-5-18\0".encode_utf16().collect();
+        let mut foreign = null_mut();
+        assert_ne!(
+            unsafe { ConvertStringSidToSidW(local_system.as_ptr(), &mut foreign) },
+            0
+        );
+        assert!(!windows_owner_matches_current_user(foreign, &token_info));
+        unsafe { LocalFree(foreign) };
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_recovery_refuses_a_weakened_workspace_dacl() {
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr::null_mut;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::{
+            SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterJournalCreated,
+        )
+        .expect_err("fault is injected");
+
+        let transaction_root = root.path().join(TRANSACTION_DIRECTORY);
+        let workspace = fs::read_dir(&transaction_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut descriptor = null_mut();
+        let sddl: Vec<u16> = "D:P(A;;FA;;;WD)\0".encode_utf16().collect();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    null_mut(),
+                )
+            },
+            0
+        );
+        let wide: Vec<u16> = workspace
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let applied = unsafe {
+            SetFileSecurityW(
+                wide.as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+        };
+        unsafe { LocalFree(descriptor) };
+        assert_ne!(applied, 0);
+
+        let error = recover_create_only(root.path())
+            .expect_err("a world-accessible workspace DACL must block recovery");
+        assert!(matches!(error, TransactionError::Io { .. }));
+        assert!(workspace.join(JOURNAL_FILE).exists());
+        assert!(!root.path().join("tool/config.json").exists());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn recovery_refuses_a_workspace_with_an_extended_acl() {
@@ -1856,6 +1978,27 @@ mod tests {
         assert!(matches!(error, TransactionError::RecoveryConflict(_)));
         assert!(workspace.join(JOURNAL_FILE).exists());
         assert!(!root.path().join("tool/config.json").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_removed_lock_path_cannot_be_validated_through_its_held_inode() {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(TRANSACTION_LOCK);
+        let file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let error = validate_transaction_lock_path(&path, &file)
+            .expect_err("the lock path must still name the held inode");
+        assert!(matches!(error, TransactionError::Io { .. }));
     }
 
     #[cfg(unix)]
