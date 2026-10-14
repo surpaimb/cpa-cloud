@@ -121,6 +121,7 @@ pub fn apply_new_pi(
 ) -> Result<CreateOnlyReceipt, AppError> {
     validate_transaction_relative(models_relative, "Pi")?;
     validate_transaction_relative(ownership_relative, "Pi")?;
+    validate_pi_paths(models_relative, ownership_relative)?;
     let plan = plan_new_pi(
         &root.join(models_relative),
         &root.join(ownership_relative),
@@ -134,6 +135,24 @@ pub fn apply_new_pi(
         ],
     )
     .map_err(|error| transaction_error("Pi", error))
+}
+
+fn validate_pi_paths(models_relative: &Path, ownership_relative: &Path) -> Result<(), AppError> {
+    let models_name = models_relative.file_name().and_then(|value| value.to_str());
+    let ownership_name = ownership_relative
+        .file_name()
+        .and_then(|value| value.to_str());
+    if models_name != Some("models.json")
+        || ownership_name != Some("cpa-cloud.ownership.json")
+        || models_relative.parent() != ownership_relative.parent()
+        || models_relative == ownership_relative
+    {
+        return Err(AppError::Config(
+            "Pi 安全写入只接受同一配置目录内的 models.json 和 cpa-cloud.ownership.json"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn provider_value(profile: &PiProfile) -> Result<Value, AppError> {
@@ -239,7 +258,16 @@ mod tests {
     #[test]
     fn create_only_transaction_publishes_pi_models_and_ownership_together() {
         let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(temp.path().join("agent")).unwrap();
+        let agent = temp.path().join("agent");
+        std::fs::create_dir(&agent).unwrap();
+        let auth = agent.join("auth.json");
+        let settings = agent.join("settings.json");
+        std::fs::write(&auth, b"auth-sentinel").unwrap();
+        std::fs::write(&settings, b"settings-sentinel").unwrap();
+        let auth_identity = crate::live::engine::test_file_identity(&auth).unwrap();
+        let settings_identity = crate::live::engine::test_file_identity(&settings).unwrap();
+        let auth_modified = std::fs::metadata(&auth).unwrap().modified().unwrap();
+        let settings_modified = std::fs::metadata(&settings).unwrap().modified().unwrap();
         let receipt = apply_new_pi(
             temp.path(),
             Path::new("agent/models.json"),
@@ -250,8 +278,24 @@ mod tests {
         assert_eq!(receipt.created.len(), 2);
         assert!(temp.path().join("agent/models.json").exists());
         assert!(temp.path().join("agent/cpa-cloud.ownership.json").exists());
-        assert!(!temp.path().join("agent/settings.json").exists());
-        assert!(!temp.path().join("agent/auth.json").exists());
+        assert_eq!(std::fs::read(&auth).unwrap(), b"auth-sentinel");
+        assert_eq!(std::fs::read(&settings).unwrap(), b"settings-sentinel");
+        assert_eq!(
+            crate::live::engine::test_file_identity(&auth).unwrap(),
+            auth_identity
+        );
+        assert_eq!(
+            crate::live::engine::test_file_identity(&settings).unwrap(),
+            settings_identity
+        );
+        assert_eq!(
+            std::fs::metadata(&auth).unwrap().modified().unwrap(),
+            auth_modified
+        );
+        assert_eq!(
+            std::fs::metadata(&settings).unwrap().modified().unwrap(),
+            settings_modified
+        );
     }
 
     #[test]
@@ -284,5 +328,24 @@ mod tests {
         )
         .expect_err("parent traversal must fail before planning");
         assert!(matches!(error, AppError::Config(_)));
+    }
+
+    #[test]
+    fn create_only_transaction_rejects_noncanonical_pi_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        for (models, ownership) in [
+            ("agent/custom-models.json", "agent/cpa-cloud.ownership.json"),
+            ("agent/models.json", "other/cpa-cloud.ownership.json"),
+            ("agent/models.json", "agent/ownership.json"),
+        ] {
+            let error = apply_new_pi(
+                temp.path(),
+                Path::new(models),
+                Path::new(ownership),
+                &profile(),
+            )
+            .expect_err("noncanonical Pi paths must fail before planning");
+            assert!(matches!(error, AppError::Config(_)));
+        }
     }
 }

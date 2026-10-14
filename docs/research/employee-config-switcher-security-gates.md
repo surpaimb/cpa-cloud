@@ -69,7 +69,10 @@ ownership record together only when both are absent. It deliberately leaves
 Pi-owned `auth.json` and `settings.json` untouched, so it registers a provider
 without claiming to select or activate a default model. Existing Pi
 `models.json` files remain blocked until the replacement transaction contract
-above is implemented.
+above is implemented. The create-only entry point accepts only canonical
+`models.json` and `cpa-cloud.ownership.json` names in the same parent directory;
+tests preserve sentinel bytes, file identity, and modification time for Pi-owned
+`auth.json` and `settings.json`.
 
 OpenClaw now has the same synthetic-root boundary. Its planner follows the
 fixed signed `v2026.9.8` public custom-provider schema and a narrowly adapted

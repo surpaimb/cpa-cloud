@@ -1051,6 +1051,12 @@ fn identity_for_path(path: &Path) -> Result<FileIdentity, TransactionError> {
     file_identity(&file, path)
 }
 
+#[cfg(test)]
+pub(crate) fn test_file_identity(path: &Path) -> Result<(u64, u64), TransactionError> {
+    let identity = identity_for_path(path)?;
+    Ok((identity.volume, identity.file))
+}
+
 #[cfg(unix)]
 fn file_identity(file: &File, path: &Path) -> Result<FileIdentity, TransactionError> {
     use std::os::unix::fs::MetadataExt;

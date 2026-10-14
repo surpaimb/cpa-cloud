@@ -69,12 +69,18 @@ the CPA write-safety contract.
 
 - OpenCode provider configuration: <https://opencode.ai/docs/providers/> (accessed 2026-10-14). It specifies `@ai-sdk/openai-compatible` for an OpenAI-compatible custom provider.
 - Vercel AI SDK OpenAI-compatible provider: <https://ai-sdk.dev/providers/openai-compatible-providers> (accessed 2026-10-14). Its default/chat model uses `/v1/chat/completions`; the distinct completion model is opt-in.
+- Pi release `v1.0.4` resolves to official commit `7c10bd4337495ee613f2224843ecdf349b80d1df`: <https://github.com/earendil-works/pi/releases/tag/v1.0.4> (verified 2026-10-14).
+- Pi `models.json` compatible-endpoint contract at that commit: <https://github.com/earendil-works/pi/blob/7c10bd4337495ee613f2224843ecdf349b80d1df/packages/coding-agent/docs/models.md> (accessed 2026-10-14). It documents provider `baseUrl`, `api`, `apiKey`, and `models` entries, including `openai-responses` support.
+- Pi configuration ownership at that commit: <https://github.com/earendil-works/pi/blob/7c10bd4337495ee613f2224843ecdf349b80d1df/packages/coding-agent/docs/configuration.md> (accessed 2026-10-14). It assigns compatible endpoints to `models.json`, credentials to `auth.json`, and user defaults to `settings.json` under the agent directory.
+- Pi Responses transport at that commit: <https://github.com/earendil-works/pi/blob/7c10bd4337495ee613f2224843ecdf349b80d1df/packages/ai/src/api/openai-responses.ts> (accessed 2026-10-14). It constructs the OpenAI client from the model `baseUrl` and sends streaming Responses requests with the resolved API key.
 - OpenClaw signed tag `v2026.9.8` resolves to commit `fc23bc864e4553c2d215e479eeec47b67a0bf943`: <https://github.com/openclaw/openclaw/releases/tag/v2026.9.8> (verified 2026-10-14).
 - OpenClaw custom-provider configuration at that commit: <https://github.com/openclaw/openclaw/blob/fc23bc864e4553c2d215e479eeec47b67a0bf943/docs/concepts/model-providers/custom-providers.md> (accessed 2026-10-14). It defines `models.providers`, `baseUrl`, `apiKey`, `api`, model entries, and `provider/model` selection.
 
-These sources support the current OpenCode `openai-chat` and OpenClaw
-`openai-responses` projections. Other client adapters remain blocked until
-their own public protocol contracts and native fixtures are recorded and
+These sources support the current OpenCode `openai-chat`, Pi
+`openai-responses`, and OpenClaw `openai-responses` projections. Pi and
+OpenClaw remain synthetic create-only planners rather than live-write support;
+all client adapters remain blocked from real configuration writes until fixed
+native fixtures and the replacement transaction contract are recorded and
 tested.
 
 ## Rust dependency resolution
