@@ -93,8 +93,9 @@ pub fn plan_new_claude_code(
             "ANTHROPIC_AUTH_TOKEN": profile.employee_key.expose_secret().trim()
         }
     });
-    let mut settings_bytes = serde_json::to_vec_pretty(&document)
-        .map_err(|error| AppError::Config(format!("无法生成 Claude Code settings.json：{error}")))?;
+    let mut settings_bytes = serde_json::to_vec_pretty(&document).map_err(|error| {
+        AppError::Config(format!("无法生成 Claude Code settings.json：{error}"))
+    })?;
     settings_bytes.push(b'\n');
     let ownership = OwnershipRecord {
         schema_version: 1,
@@ -142,7 +143,9 @@ fn validate_claude_code_paths(
     settings_relative: &Path,
     ownership_relative: &Path,
 ) -> Result<(), AppError> {
-    let settings_name = settings_relative.file_name().and_then(|value| value.to_str());
+    let settings_name = settings_relative
+        .file_name()
+        .and_then(|value| value.to_str());
     let ownership_name = ownership_relative
         .file_name()
         .and_then(|value| value.to_str());
@@ -222,10 +225,7 @@ mod tests {
             document["env"]["ANTHROPIC_BASE_URL"],
             "https://cpa.example.test/company"
         );
-        assert_eq!(
-            document["env"]["ANTHROPIC_AUTH_TOKEN"],
-            "employee-secret"
-        );
+        assert_eq!(document["env"]["ANTHROPIC_AUTH_TOKEN"], "employee-secret");
 
         let ownership = String::from_utf8(plan.ownership.desired_bytes.to_vec()).unwrap();
         assert!(!ownership.contains("employee-secret"));
