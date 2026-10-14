@@ -18,6 +18,7 @@ import (
 
 const (
 	anthropicAPIKeyProvider = "anthropic-api-key"
+	anthropicMaxRequest     = 32 << 20
 	anthropicMaxResponse    = 16 << 20
 	anthropicMaxSSELine     = 1 << 20
 	anthropicMaxSSEEvent    = 2 << 20
@@ -32,10 +33,8 @@ func (a *App) countMessageTokens(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, countTokens bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, modelMaxBody)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request.", requestID(r.Context()))
+	body, ok := readAnthropicRequestBody(w, r, anthropicMaxRequest)
+	if !ok {
 		return
 	}
 	var payload map[string]json.RawMessage
@@ -243,6 +242,21 @@ func (a *App) handleAnthropicRequest(w http.ResponseWriter, r *http.Request, cou
 		return
 	}
 	a.forwardAnthropicJSON(w, r, response, modelRequestID, !countTokens)
+}
+
+func readAnthropicRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	body, err := io.ReadAll(r.Body)
+	if err == nil {
+		return body, true
+	}
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeAnthropicError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request exceeds the maximum allowed size.", requestID(r.Context()))
+		return nil, false
+	}
+	writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request.", requestID(r.Context()))
+	return nil, false
 }
 
 func (a *App) authenticateAnthropicEmployee(w http.ResponseWriter, r *http.Request) (employeeAuth, bool) {

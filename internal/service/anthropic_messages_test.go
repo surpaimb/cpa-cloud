@@ -133,6 +133,51 @@ func anthropicEmployeeRequest(t *testing.T, ctx context.Context, method, target,
 	return response
 }
 
+func TestAnthropicMessagesRequestSizeContract(t *testing.T) {
+	if anthropicMaxRequest != 32<<20 {
+		t.Fatalf("anthropicMaxRequest=%d, want 32 MiB", anthropicMaxRequest)
+	}
+	for _, test := range []struct {
+		name       string
+		size       int
+		wantOK     bool
+		wantStatus int
+	}{
+		{name: "exact limit remains readable", size: 32, wantOK: true},
+		{name: "one byte over returns Anthropic 413", size: 33, wantStatus: http.StatusRequestEntityTooLarge},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(strings.Repeat("x", test.size)))
+			recorder := httptest.NewRecorder()
+			body, ok := readAnthropicRequestBody(recorder, request, 32)
+			if ok != test.wantOK {
+				t.Fatalf("ok=%v, want %v", ok, test.wantOK)
+			}
+			if test.wantOK {
+				if len(body) != test.size {
+					t.Fatalf("body length=%d, want %d", len(body), test.size)
+				}
+				return
+			}
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var response struct {
+				Type  string `json:"type"`
+				Error struct {
+					Type string `json:"type"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Type != "error" || response.Error.Type != "request_too_large" {
+				t.Fatalf("unexpected Anthropic error: %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestAnthropicMessagesPreservesNativePayloadAndCountsTokens(t *testing.T) {
 	var mu sync.Mutex
 	paths := make([]string, 0, 2)

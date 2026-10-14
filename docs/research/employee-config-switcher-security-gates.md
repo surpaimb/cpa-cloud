@@ -198,6 +198,10 @@ plain `~/.minimax` default. The fixed client can also select `--data-dir`,
 active directory or explicitly reject unsupported overrides; it must never
 accept an arbitrary parent from its caller.
 
-Claude Desktop remains detection-only. Its CPA `/v1/messages` fidelity and
-32 MiB request-size/HTTP 413 contract are not yet resolved, so this preview
-does not generate a third-party profile or claim ten-tool writable delivery.
+Claude Desktop remains detection-only. CPA now applies the official 32 MiB
+request limit to both `/v1/messages` and `/v1/messages/count_tokens`, returns
+Anthropic-shaped 413 `request_too_large` above that boundary, and keeps the
+other model routes at their existing lower limit. Complete fixed-client
+request/stream/tool/cancellation acceptance and the Claude Desktop
+configuration transaction are still unresolved, so this preview does not
+generate a third-party profile or claim ten-tool writable delivery.
