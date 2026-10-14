@@ -59,6 +59,14 @@ untouched for operator inspection. A separate ordinary I/O fault after `Begin`
 proves the same-process recovery path returns the original error rather than a
 false success receipt.
 
+Before scanning recovery state, the engine now requires the transaction root
+and each workspace to retain their stable file identity and private directory
+boundary: exact `0700` ownership by the effective user on Unix, or the verified
+protected owner-only DACL on Windows. Workspace names must exactly match the
+engine-generated `tx-<pid>-<nonce>-<counter>` form. Unknown names or weakened
+permissions block recovery and preserve the workspace. These checks remain
+path-based and do not replace the still-required handle-relative traversal.
+
 A persistent owner-private lock file combines an in-process mutex with an OS
 lock (`flock` on POSIX; an exclusive-sharing file handle on Windows), so a
 second client process cannot recover an active transaction. Windows directories

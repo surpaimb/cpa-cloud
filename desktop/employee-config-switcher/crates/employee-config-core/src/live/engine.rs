@@ -161,7 +161,7 @@ pub fn recover_create_only(root: &Path) -> Result<(), TransactionError> {
 fn recover_create_only_locked(root: &Path) -> Result<(), TransactionError> {
     let transaction_root = root.join(TRANSACTION_DIRECTORY);
     match fs::symlink_metadata(&transaction_root) {
-        Ok(_) => ensure_real_directory(&transaction_root)?,
+        Ok(_) => validate_private_recovery_directory(&transaction_root)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(source) => return Err(io_error(&transaction_root, source)),
     }
@@ -171,7 +171,8 @@ fn recover_create_only_locked(root: &Path) -> Result<(), TransactionError> {
         let path = entry
             .map_err(|source| io_error(&transaction_root, source))?
             .path();
-        ensure_real_directory(&path)?;
+        validate_workspace_path(&path)?;
+        validate_private_recovery_directory(&path)?;
         let _ = recover_workspace(root, &path)?;
     }
     sync_directory(&transaction_root).map_err(|source| io_error(&transaction_root, source))
@@ -656,7 +657,7 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
 /// Returns `true` when the transaction is or becomes committed, `false` when
 /// no target had been published and incomplete staging was safely abandoned.
 fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionError> {
-    ensure_real_directory(workspace)?;
+    validate_private_recovery_directory(workspace)?;
     let journal_path = workspace.join(JOURNAL_FILE);
     if !path_exists(&journal_path)? {
         if fs::read_dir(workspace)
@@ -924,6 +925,55 @@ fn ensure_real_file(path: &Path) -> Result<(), TransactionError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
     ensure_not_link(path, &metadata)?;
     if !metadata.is_file() {
+        return Err(TransactionError::RecoveryConflict(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn validate_workspace_path(path: &Path) -> Result<(), TransactionError> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+    };
+    let mut parts = name.split('-');
+    let (Some(prefix), Some(pid), Some(nonce), Some(count), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+    };
+    let valid = prefix == "tx"
+        && pid.parse::<u32>().is_ok_and(|value| value.to_string() == pid)
+        && u128::from_str_radix(nonce, 16).is_ok_and(|value| format!("{value:x}") == nonce)
+        && u64::from_str_radix(count, 16).is_ok_and(|value| format!("{value:x}") == count);
+    if valid {
+        Ok(())
+    } else {
+        Err(TransactionError::CorruptJournal(path.to_path_buf()))
+    }
+}
+
+fn validate_private_recovery_directory(path: &Path) -> Result<(), TransactionError> {
+    ensure_real_directory(path)?;
+    let before = identity_for_path(path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o777 != 0o700
+        {
+            return Err(TransactionError::RecoveryConflict(path.to_path_buf()));
+        }
+    }
+
+    #[cfg(windows)]
+    verify_private_windows_dacl(path)?;
+
+    if identity_for_path(path)? != before {
         return Err(TransactionError::RecoveryConflict(path.to_path_buf()));
     }
     Ok(())
@@ -1471,6 +1521,70 @@ mod tests {
         );
         assert!(workspace.join(JOURNAL_FILE).exists());
         assert!(!root.path().join("tool/config.json").exists());
+    }
+
+    #[test]
+    fn recovery_refuses_an_unrecognized_workspace_name() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterJournalCreated,
+        )
+        .expect_err("fault is injected");
+
+        let transaction_root = root.path().join(TRANSACTION_DIRECTORY);
+        let workspace = fs::read_dir(&transaction_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let foreign = transaction_root.join("foreign-workspace");
+        fs::rename(&workspace, &foreign).unwrap();
+
+        let error = recover_create_only(root.path()).expect_err("unknown workspace must block");
+        assert!(matches!(error, TransactionError::CorruptJournal(_)));
+        assert!(foreign.join(JOURNAL_FILE).exists());
+        assert!(!root.path().join("tool/config.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_refuses_non_private_transaction_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for weaken_workspace in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            fs::create_dir(root.path().join("tool")).unwrap();
+            apply_create_only_inner(
+                root.path(),
+                vec![plan("tool/config.json", "synthetic-key")],
+                FaultPoint::AfterJournalCreated,
+            )
+            .expect_err("fault is injected");
+
+            let transaction_root = root.path().join(TRANSACTION_DIRECTORY);
+            let workspace = fs::read_dir(&transaction_root)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let weakened = if weaken_workspace {
+                &workspace
+            } else {
+                &transaction_root
+            };
+            fs::set_permissions(weakened, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let error = recover_create_only(root.path())
+                .expect_err("non-private recovery directory must block");
+            assert!(matches!(error, TransactionError::RecoveryConflict(_)));
+            assert!(workspace.join(JOURNAL_FILE).exists());
+            assert!(!root.path().join("tool/config.json").exists());
+        }
     }
 
     #[test]
