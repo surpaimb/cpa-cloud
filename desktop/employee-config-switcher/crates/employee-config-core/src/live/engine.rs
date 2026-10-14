@@ -945,6 +945,18 @@ where
     A: FnMut(&Path) -> Result<(), TransactionError>,
     C: FnMut(&Path) -> Result<(), TransactionError>,
 {
+    validate_workspace_path(workspace)?;
+    let workspace_name = workspace
+        .file_name()
+        .ok_or_else(|| TransactionError::RecoveryConflict(workspace.to_path_buf()))?;
+    let anchored_workspace = root.join(TRANSACTION_DIRECTORY).join(workspace_name);
+    if identity_for_path(workspace)? != identity_for_path(&anchored_workspace)? {
+        return Err(TransactionError::RecoveryConflict(workspace.to_path_buf()));
+    }
+    // macOS commonly exposes the same temporary directory through `/var` and
+    // `/private/var`. Re-anchor the verified workspace identity below the
+    // canonical root instead of treating that harmless alias as traversal.
+    let workspace = anchored_workspace.as_path();
     let workspace_relative = workspace
         .strip_prefix(root)
         .map_err(|_| TransactionError::RecoveryConflict(workspace.to_path_buf()))?;
