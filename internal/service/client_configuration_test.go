@@ -161,3 +161,41 @@ func TestClientConfigurationRequiresOneDispatchableRouteWitness(t *testing.T) {
 		}
 	}
 }
+
+func TestClientConfigurationRejectsUnsupportedLegacyProviderWireAndSchemaDisallowsOrphanRoute(t *testing.T) {
+	fixture := newExplicitWireFixture(t, string(wireProtocolOpenAIChat), http.NotFoundHandler())
+	var primaryUpstream string
+	if err := fixture.app.store.db.QueryRow(`SELECT upstream_id FROM models WHERE id='wire-model'`).Scan(&primaryUpstream); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.app.store.db.Exec(`UPDATE upstreams SET provider_kind='anthropic-api-key' WHERE id=?`, primaryUpstream); err != nil {
+		t.Fatal(err)
+	}
+	installAccountGroup(t, fixture.app, "grp-orphan", "channel-orphan")
+	if _, err := fixture.app.store.db.Exec(`INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at) VALUES('ups-orphan-chat','orphan chat','openai-compatible','https://example.invalid/v1',1,X'01',1,1,?)`, utcNow()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.app.store.db.Exec(`INSERT INTO model_account_pool_routes(model_id,upstream_id,upstream_model,wire_protocol,priority,weight,max_concurrency,channel_id,position) VALUES('wire-model','ups-orphan-chat','orphan-chat','openai-chat',0,1,4,'channel-orphan',0)`); err == nil {
+		t.Fatal("route without an explicit pool configuration unexpectedly passed the schema constraint")
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, fixture.server.URL+"/v1/client-configuration", nil)
+	req.Header.Set("Authorization", "Bearer "+fixture.key.Key)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var got clientConfigurationResponse
+	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d response=%+v", res.StatusCode, got)
+	}
+	for _, item := range got.Protocols {
+		if item.Protocol == string(keypolicy.ProtocolOpenAIChat) && len(item.Candidates) != 0 {
+			t.Fatalf("chat candidates=%v; legacy provider cannot serve chat", item.Candidates)
+		}
+	}
+}

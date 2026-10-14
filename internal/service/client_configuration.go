@@ -108,11 +108,25 @@ func (a *App) clientConfigurationModels(r *http.Request, auth employeeAuth, prot
 // rejects a whole pool before group filtering when either value is mixed, so a
 // merely eligible row is not enough to advertise a dispatchable model.
 func (a *App) clientConfigurationRouteWitnessSQL(modelAlias, upstreamAlias, wire string, geminiOnly, selectedGroup bool, keyID string) (string, []any) {
+	providerWireSQL := func(alias string) string {
+		switch wire {
+		case string(keypolicy.ProtocolOpenAIChat):
+			return alias + ".provider_kind='openai-compatible'"
+		case string(keypolicy.ProtocolOpenAIResponses):
+			return alias + ".provider_kind IN ('openai-compatible','codex-membership')"
+		case string(keypolicy.ProtocolAnthropicMessages):
+			return alias + ".provider_kind='anthropic-api-key'"
+		case string(keypolicy.ProtocolGeminiGenerate):
+			return alias + ".provider_kind='gemini-api-key'"
+		default:
+			return "0"
+		}
+	}
 	if a.accountPool == nil {
 		if selectedGroup {
 			return "0", nil
 		}
-		return "(" + modelAlias + ".wire_protocol=? AND " + a.eligibleUpstreamSQL(upstreamAlias, geminiOnly) + ")", []any{wire}
+		return "(" + modelAlias + ".wire_protocol=? AND " + providerWireSQL(upstreamAlias) + " AND " + a.eligibleUpstreamSQL(upstreamAlias, geminiOnly) + ")", []any{wire}
 	}
 	if selectedGroup {
 		return `EXISTS(
@@ -125,6 +139,7 @@ func (a *App) clientConfigurationRouteWitnessSQL(modelAlias, upstreamAlias, wire
 			WHERE discovery_route.model_id=` + modelAlias + `.id
 			  AND discovery_route.wire_protocol=?
 			  AND discovery_group.key_id=?
+			  AND ` + providerWireSQL("discovery_upstream") + `
 			  AND ` + a.eligibleUpstreamSQL("discovery_upstream", geminiOnly) + `
 			  AND NOT EXISTS(SELECT 1 FROM account_recovery_states discovery_recovery WHERE discovery_recovery.account_id=discovery_upstream.id)
 			  AND NOT EXISTS(
@@ -140,6 +155,7 @@ func (a *App) clientConfigurationRouteWitnessSQL(modelAlias, upstreamAlias, wire
 	return `(
 		(NOT EXISTS(SELECT 1 FROM model_account_pool_configs discovery_pool WHERE discovery_pool.model_id=` + modelAlias + `.id)
 		 AND ` + modelAlias + `.wire_protocol=?
+		 AND ` + providerWireSQL(upstreamAlias) + `
 		 AND ` + a.eligibleUpstreamSQL(upstreamAlias, geminiOnly) + `)
 		OR EXISTS(
 			SELECT 1
@@ -147,6 +163,7 @@ func (a *App) clientConfigurationRouteWitnessSQL(modelAlias, upstreamAlias, wire
 			JOIN upstreams discovery_upstream ON discovery_upstream.id=discovery_route.upstream_id
 			WHERE discovery_route.model_id=` + modelAlias + `.id
 			  AND discovery_route.wire_protocol=?
+			  AND ` + providerWireSQL("discovery_upstream") + `
 			  AND ` + a.eligibleUpstreamSQL("discovery_upstream", geminiOnly) + `
 			  AND NOT EXISTS(SELECT 1 FROM account_recovery_states discovery_recovery WHERE discovery_recovery.account_id=discovery_upstream.id)
 			  AND NOT EXISTS(
