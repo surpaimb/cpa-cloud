@@ -209,8 +209,11 @@ fn validate_profile(profile: &ConfigurationProfile) -> Result<(), AppError> {
 
 fn normalize_openai_base_url(input: &str) -> Result<String, AppError> {
     let mut url = crate::discovery::discovery_endpoint(input)?;
-    let path = url.path().trim_end_matches("/client-configuration");
-    url.set_path(path);
+    let path = url
+        .path()
+        .trim_end_matches("/client-configuration")
+        .to_owned();
+    url.set_path(&path);
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
