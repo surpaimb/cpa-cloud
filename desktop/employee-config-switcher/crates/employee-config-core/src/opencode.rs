@@ -5,9 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::jsonc_document::JsoncDocument;
-use crate::live::engine::{
-    apply_create_only, CreateFilePlan, CreateOnlyReceipt,
-};
+use crate::live::engine::{apply_create_only, CreateFilePlan, CreateOnlyReceipt};
 use crate::plan::{
     file_plan, normalize_cpa_base_url, read_optional, transaction_error,
     validate_transaction_relative, FilePlan,

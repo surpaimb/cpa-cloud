@@ -82,8 +82,7 @@ pub fn plan_new_pi(
     let previous_ownership = read_optional(ownership_path)?;
     if previous_models.is_some() || previous_ownership.is_some() {
         return Err(AppError::Conflict(
-            "Pi 已存在 models.json 或 CPA 所有权文件；create-only 安全阶段不会替换它们"
-                .into(),
+            "Pi 已存在 models.json 或 CPA 所有权文件；create-only 安全阶段不会替换它们".into(),
         ));
     }
 
@@ -131,10 +130,7 @@ pub fn apply_new_pi(
         root,
         vec![
             CreateFilePlan::new(models_relative, plan.models.desired_bytes.to_vec()),
-            CreateFilePlan::new(
-                ownership_relative,
-                plan.ownership.desired_bytes.to_vec(),
-            ),
+            CreateFilePlan::new(ownership_relative, plan.ownership.desired_bytes.to_vec()),
         ],
     )
     .map_err(|error| transaction_error("Pi", error))

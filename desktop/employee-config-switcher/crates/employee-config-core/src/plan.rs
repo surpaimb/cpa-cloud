@@ -27,11 +27,7 @@ impl std::fmt::Debug for FilePlan {
     }
 }
 
-pub(crate) fn file_plan(
-    path: &Path,
-    previous: Option<&[u8]>,
-    desired_bytes: Vec<u8>,
-) -> FilePlan {
+pub(crate) fn file_plan(path: &Path, previous: Option<&[u8]>, desired_bytes: Vec<u8>) -> FilePlan {
     FilePlan {
         path: path.to_path_buf(),
         expected_pre_digest: digest(previous),
