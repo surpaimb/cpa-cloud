@@ -6,6 +6,7 @@
 //! for isolated synthetic roots; the Tauri apply command and real client-file
 //! replacement remain fail-closed.
 
+pub mod claude_code;
 pub mod codex;
 pub mod detection;
 pub mod discovery;
@@ -18,6 +19,9 @@ pub mod pi;
 pub mod plan;
 pub mod secret;
 
+pub use claude_code::{
+    apply_new_claude_code, plan_new_claude_code, ClaudeCodePlan, ClaudeCodeProfile,
+};
 pub use codex::{apply_new_codex, plan_new_codex, CodexPlan, CodexProfile};
 pub use detection::{detect_clients, ClientDetection};
 pub use discovery::{discover_configuration, ClientConfiguration, DiscoveryRequest};

@@ -41,6 +41,7 @@ provider or model.
 
 ## Newly authored CPA code
 
+- `claude_code.rs`: independently authored Claude Code gateway mapping, strict create-only path boundary, ownership record, and synthetic transaction integration.
 - `codex.rs`: independently authored Codex profile mapping, strict create-only path boundary, ownership record, and synthetic transaction integration.
 - `discovery.rs`: HTTPS/loopback validation and authenticated discovery client.
 - `detection.rs`: read-only client location detection with documented home-directory overrides.
@@ -68,6 +69,9 @@ the CPA write-safety contract.
 
 ## Public protocol sources
 
+- Claude Code settings files and precedence: <https://code.claude.com/docs/en/settings> (accessed 2026-10-14). It defines the user-level `~/.claude/settings.json` file, strict JSON syntax, the `env` block, the `model` setting, and the separate Claude-owned `~/.claude.json` login/project-state file.
+- Claude Code LLM gateway connection contract: <https://code.claude.com/docs/en/llm-gateway-connect> (accessed 2026-10-14). It documents `ANTHROPIC_BASE_URL`, bearer-token `ANTHROPIC_AUTH_TOKEN`, persistence in the user settings `env` block, precedence over a saved Claude login, and Anthropic Messages requests at `/v1/messages`.
+- Fixed local Claude Code parser fixture: native Claude Code `2.1.266` (`eb01d6090964`) for `win32-x64`, executable SHA-256 `d2c5f7b3b6a12819097ceb6efbce2a390157166003fcaee32dbde0e6d7b45ef7`, validated 2026-10-14 with an isolated `CLAUDE_CONFIG_DIR`, a closed numeric-loopback synthetic gateway, and nonessential traffic disabled. `claude doctor` loaded the custom base URL without contacting Anthropic managed settings or organization policy; the reported warnings concerned only the local installation method and an unrelated missing launcher. The committed synthetic fixture is `crates/employee-config-core/tests/fixtures/claude-code-2.1.266/settings.json`. This evidence applies only to that exact binary and does not authorize real writes or claim cross-version compatibility.
 - OpenCode provider configuration: <https://opencode.ai/docs/providers/> (accessed 2026-10-14). It specifies `@ai-sdk/openai-compatible` for an OpenAI-compatible custom provider.
 - Vercel AI SDK OpenAI-compatible provider: <https://ai-sdk.dev/providers/openai-compatible-providers> (accessed 2026-10-14). Its default/chat model uses `/v1/chat/completions`; the distinct completion model is opt-in.
 - Pi release `v1.0.4` resolves to official commit `7c10bd4337495ee613f2224843ecdf349b80d1df`: <https://github.com/earendil-works/pi/releases/tag/v1.0.4> (verified 2026-10-14).
@@ -85,11 +89,12 @@ the CPA write-safety contract.
 - OpenAI Codex app-server Responses provider example: <https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server> (accessed 2026-10-14). It demonstrates `model_provider`, `base_url`, bearer-token environment input, `wire_api = "responses"`, `requires_openai_auth = false`, `supports_websockets = false`, and requests to `/v1/responses`.
 - Fixed local Codex parser fixture: `codex-cli 0.162.0-alpha.17.2` for `windows-x86_64`, executable SHA-256 `d13914ced6c7af174d8d638db938284231227312104b06a25e9608c632a7daec`, validated 2026-10-14 with an isolated temporary `CODEX_HOME` and a loopback-only synthetic provider. `codex doctor --strict-config` reported the config loaded, OpenAI auth not required, and Responses WebSocket disabled; the expected closed-loopback reachability check failed without contacting a production model endpoint. This local fixture is evidence for the exact tested binary only and is not a redistributable artifact or cross-version compatibility claim.
 
-These sources support the current OpenCode `openai-chat` plus Codex, Pi and
-OpenClaw `openai-responses` projections. Codex, Pi and OpenClaw remain
-synthetic create-only planners rather than live-write support; all client
-adapters remain blocked from real configuration writes until fixed native
-fixtures and the replacement transaction contract are recorded and tested.
+These sources support the current OpenCode `openai-chat`, Claude Code
+`anthropic-messages`, and Codex, Pi and OpenClaw `openai-responses`
+projections. Claude Code, Codex, Pi and OpenClaw remain synthetic create-only
+planners rather than live-write support; all client adapters remain blocked
+from real configuration writes until fixed native fixtures and the replacement
+transaction contract are recorded and tested.
 
 ## Rust dependency resolution
 

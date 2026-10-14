@@ -96,3 +96,15 @@ documented programmatic bearer-token field; it is absent from ownership,
 journal and debug output. Any existing `config.toml` remains a hard conflict,
 and the discouraged direct-token field plus missing cross-version native
 fixtures remain explicit blockers for real writes.
+
+Claude Code now has a separate synthetic-root create-only projection based on
+the official Claude Code settings and LLM gateway contracts plus a fixed native
+`2.1.266` parser fixture. It creates only canonical same-parent
+`settings.json` and `cpa-cloud.ownership.json` files when both are absent,
+places the CPA gateway URL and bearer employee Key in the documented `env`
+block, and selects the server-declared Anthropic Messages default through the
+top-level `model` setting. The separate Claude-owned `~/.claude.json` login and
+project-state file remains byte-for-byte untouched, including file identity and
+modification time in tests. Any existing `settings.json` remains a hard
+conflict, and cross-version native fixtures plus the replacement transaction
+contract remain blockers for real writes.
