@@ -1070,9 +1070,8 @@ fn verify_no_macos_extended_acl(path: &Path) -> Result<(), TransactionError> {
         fn acl_free(object: *mut c_void) -> c_int;
     }
 
-    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|source| {
-        io_error(path, io::Error::new(io::ErrorKind::InvalidInput, source))
-    })?;
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|source| io_error(path, io::Error::new(io::ErrorKind::InvalidInput, source)))?;
     let acl = unsafe { acl_get_file(c_path.as_ptr(), ACL_TYPE_EXTENDED) };
     if acl.is_null() {
         return Err(io_error(path, io::Error::last_os_error()));
@@ -1168,9 +1167,7 @@ fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let requested = DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION;
     let mut needed = 0u32;
-    unsafe {
-        GetFileSecurityW(wide.as_ptr(), requested, null_mut(), 0, &mut needed)
-    };
+    unsafe { GetFileSecurityW(wide.as_ptr(), requested, null_mut(), 0, &mut needed) };
     if needed == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
         return Err(io_error(path, io::Error::last_os_error()));
     }
