@@ -59,6 +59,16 @@ untouched for operator inspection. A separate ordinary I/O fault after `Begin`
 proves the same-process recovery path returns the original error rather than a
 false success receipt.
 
+Recovery now bounds the untrusted journal before deserialization: one transaction
+may describe at most 64 files, the journal is limited to 512 KiB, each newline-
+terminated event is limited to 8 KiB, and at most 258 events are accepted. A
+target field is limited to 4096 UTF-8 bytes, stage names must exactly match the
+engine-generated index, and SHA-256 digests must be exactly 64 hexadecimal
+characters. Oversized, unterminated, excessive, sparse or malformed metadata
+blocks recovery before any target publication and remains untouched for operator
+inspection. Native-independent negative tests cover the file-count, total-size,
+line-size, event-count and field-size boundaries.
+
 Before scanning recovery state, the engine now requires the transaction root
 and each workspace to retain their stable file identity and private directory
 boundary: exact `0700` ownership by the effective user on Unix, with no extended
@@ -77,9 +87,12 @@ owner-only DACL are read back after assignment.
 macOS checks the already-open object with `acl_get_fd_np`, rejects inherited or
 manually added extended ACL entries instead of treating BSD mode bits alone as
 proof of privacy, and requires the lock path still to name the locked inode.
-Native negative tests reject a foreign Windows owner SID, a world-accessible
-workspace DACL, a macOS workspace ACL, and a removed macOS lock path. These behaviors
-must pass native runtime tests, not only cross-platform compilation.
+A Windows-native production-predicate test rejects a foreign owner SID, while a
+separate end-to-end recovery test rejects a world-accessible workspace DACL and
+preserves the journal. An end-to-end owner-mismatch recovery test remains open.
+Native negative recovery tests also reject a macOS workspace ACL and a removed
+macOS lock path. These behaviors must pass native runtime tests, not only
+cross-platform compilation.
 
 This is not clearance for live writes. Native handle-relative traversal must
 still replace the current path re-checks to close adversarial rename races, and

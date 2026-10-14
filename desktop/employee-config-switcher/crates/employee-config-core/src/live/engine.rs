@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -21,6 +21,13 @@ const TRANSACTION_DIRECTORY: &str = ".cpa-cloud-employee-config-transactions";
 const TRANSACTION_LOCK: &str = ".cpa-cloud-employee-config.lock";
 const JOURNAL_FILE: &str = "journal.jsonl";
 const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TRANSACTION_FILES: usize = 64;
+const MAX_JOURNAL_BYTES: usize = 512 * 1024;
+const MAX_JOURNAL_LINE_BYTES: usize = 8 * 1024;
+const MAX_JOURNAL_EVENTS: usize = 4 * MAX_TRANSACTION_FILES + 2;
+const MAX_JOURNAL_TARGET_BYTES: usize = 4 * 1024;
+const MAX_JOURNAL_STAGE_BYTES: usize = 32;
+const SHA256_HEX_BYTES: usize = 64;
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 static PROCESS_TRANSACTION_LOCK: Mutex<()> = Mutex::new(());
 
@@ -85,7 +92,7 @@ struct FileIdentity {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 enum JournalEvent {
     Begin,
     Planned {
@@ -428,9 +435,18 @@ fn validate_plans(root: &Path, files: &[CreateFilePlan]) -> Result<(), Transacti
     if files.is_empty() {
         return Err(TransactionError::InvalidTarget(PathBuf::new()));
     }
+    if files.len() > MAX_TRANSACTION_FILES {
+        return Err(TransactionError::TooLarge(root.to_path_buf()));
+    }
     let mut unique = HashSet::new();
     for plan in files {
         if plan.contents.len() > MAX_FILE_BYTES {
+            return Err(TransactionError::TooLarge(plan.relative_path.clone()));
+        }
+        let Some(target) = plan.relative_path.to_str() else {
+            return Err(TransactionError::InvalidTarget(plan.relative_path.clone()));
+        };
+        if target.len() > MAX_JOURNAL_TARGET_BYTES {
             return Err(TransactionError::TooLarge(plan.relative_path.clone()));
         }
         validate_relative(&plan.relative_path)?;
@@ -547,8 +563,21 @@ fn append_event(
     path: &Path,
     event: &JournalEvent,
 ) -> Result<(), TransactionError> {
-    serde_json::to_writer(&mut *journal, event)
+    let encoded = serde_json::to_vec(event)
         .map_err(|source| io_error(path, io::Error::other(source)))?;
+    if encoded.len() + 1 > MAX_JOURNAL_LINE_BYTES {
+        return Err(TransactionError::TooLarge(path.to_path_buf()));
+    }
+    let current_len = journal
+        .metadata()
+        .map_err(|source| io_error(path, source))?
+        .len();
+    if current_len.saturating_add(encoded.len() as u64 + 1) > MAX_JOURNAL_BYTES as u64 {
+        return Err(TransactionError::TooLarge(path.to_path_buf()));
+    }
+    journal
+        .write_all(&encoded)
+        .map_err(|source| io_error(path, source))?;
     journal
         .write_all(b"\n")
         .map_err(|source| io_error(path, source))?;
@@ -558,13 +587,38 @@ fn append_event(
 fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
     ensure_real_file(path)?;
     let file = File::open(path).map_err(|source| io_error(path, source))?;
-    let mut state = JournalState::default();
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|source| io_error(path, source))?;
-        if line.is_empty() {
+    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+    if metadata.len() > MAX_JOURNAL_BYTES as u64 {
+        return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+    }
+    let mut reader = BufReader::new(file).take(MAX_JOURNAL_BYTES as u64 + 1);
+    let mut lines = Vec::new();
+    let mut total_bytes = 0usize;
+    loop {
+        let mut line = Vec::new();
+        let bytes_read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|source| io_error(path, source))?;
+        if bytes_read == 0 {
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(bytes_read);
+        if total_bytes > MAX_JOURNAL_BYTES
+            || line.len() > MAX_JOURNAL_LINE_BYTES
+            || line.last() != Some(&b'\n')
+        {
             return Err(TransactionError::CorruptJournal(path.to_path_buf()));
         }
-        let event: JournalEvent = serde_json::from_str(&line)
+        line.pop();
+        if line.is_empty() || lines.len() == MAX_JOURNAL_EVENTS {
+            return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+        }
+        lines.push(line);
+    }
+
+    let mut state = JournalState::default();
+    for line in lines {
+        let event: JournalEvent = serde_json::from_slice(&line)
             .map_err(|_| TransactionError::CorruptJournal(path.to_path_buf()))?;
         match event {
             JournalEvent::Begin => {
@@ -580,12 +634,22 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
                 digest,
                 parent_identity,
             } => {
+                let Some(target_text) = target.to_str() else {
+                    return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+                };
+                let expected_stage = format!("stage-{index:04}.bin");
                 validate_relative(&target)?;
                 if !state.begun
                     || state.complete
-                    || !stage.starts_with("stage-")
-                    || stage.contains('/')
-                    || stage.contains('\\')
+                    || index >= MAX_TRANSACTION_FILES
+                    || index != state.files.len()
+                    || target_text.len() > MAX_JOURNAL_TARGET_BYTES
+                    || stage.len() > MAX_JOURNAL_STAGE_BYTES
+                    || stage != expected_stage
+                    || digest.len() != SHA256_HEX_BYTES
+                    || !digest
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
                     || state
                         .files
                         .insert(
@@ -1459,6 +1523,169 @@ mod tests {
 
     fn plan(path: &str, contents: &str) -> CreateFilePlan {
         CreateFilePlan::new(path, contents.as_bytes().to_vec())
+    }
+
+    fn assert_corrupt_journal_is_preserved(contents: &[u8]) {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterBegin,
+        )
+        .expect_err("fault is injected");
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let journal = workspace.join(JOURNAL_FILE);
+        fs::write(&journal, contents).unwrap();
+
+        let error = recover_create_only(root.path()).expect_err("malicious journal must block");
+        assert!(matches!(error, TransactionError::CorruptJournal(_)));
+        assert_eq!(fs::read(&journal).unwrap(), contents);
+        assert!(!root.path().join("tool/config.json").exists());
+    }
+
+    #[test]
+    fn rejects_too_many_files_before_creating_a_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        let files = (0..=MAX_TRANSACTION_FILES)
+            .map(|index| plan(&format!("tool/config-{index}.json"), "value"))
+            .collect();
+
+        let error = apply_create_only(root.path(), files).expect_err("file count must be bounded");
+
+        assert!(matches!(error, TransactionError::TooLarge(_)));
+        assert!(!root.path().join(TRANSACTION_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn oversized_journal_is_rejected_and_preserved() {
+        assert_corrupt_journal_is_preserved(&vec![b'x'; MAX_JOURNAL_BYTES + 1]);
+    }
+
+    #[test]
+    fn oversized_journal_line_is_rejected_and_preserved() {
+        let mut contents = vec![b'x'; MAX_JOURNAL_LINE_BYTES];
+        contents.push(b'\n');
+        assert_corrupt_journal_is_preserved(&contents);
+    }
+
+    #[test]
+    fn unterminated_journal_event_is_rejected_and_preserved() {
+        assert_corrupt_journal_is_preserved(b"{\"state\":\"begin\"}");
+    }
+
+    #[test]
+    fn excessive_journal_event_count_is_rejected_and_preserved() {
+        let contents = "{}\n".repeat(MAX_JOURNAL_EVENTS + 1);
+        assert_corrupt_journal_is_preserved(contents.as_bytes());
+    }
+
+    #[test]
+    fn oversized_journal_fields_are_rejected_and_preserved() {
+        let digest = "0".repeat(SHA256_HEX_BYTES);
+        let cases = [
+            serde_json::json!({
+                "state": "planned",
+                "index": 0,
+                "target": "x".repeat(MAX_JOURNAL_TARGET_BYTES + 1),
+                "stage": "stage-0000.bin",
+                "digest": digest,
+                "parent_identity": { "volume": 0, "file": 0 }
+            }),
+            serde_json::json!({
+                "state": "planned",
+                "index": 0,
+                "target": "tool/config.json",
+                "stage": "s".repeat(MAX_JOURNAL_STAGE_BYTES + 1),
+                "digest": "0".repeat(SHA256_HEX_BYTES),
+                "parent_identity": { "volume": 0, "file": 0 }
+            }),
+            serde_json::json!({
+                "state": "planned",
+                "index": 0,
+                "target": "tool/config.json",
+                "stage": "stage-0000.bin",
+                "digest": "0".repeat(SHA256_HEX_BYTES + 1),
+                "parent_identity": { "volume": 0, "file": 0 }
+            }),
+            serde_json::json!({
+                "state": "planned",
+                "index": 0,
+                "target": "tool/config.json",
+                "stage": "stage-0000.bin",
+                "digest": "G".repeat(SHA256_HEX_BYTES),
+                "parent_identity": { "volume": 0, "file": 0 }
+            }),
+            serde_json::json!({
+                "state": "planned",
+                "index": 1,
+                "target": "tool/config.json",
+                "stage": "stage-0001.bin",
+                "digest": "0".repeat(SHA256_HEX_BYTES),
+                "parent_identity": { "volume": 0, "file": 0 }
+            }),
+        ];
+
+        for event in cases {
+            let contents = format!("{{\"state\":\"begin\"}}\n{event}\n");
+            assert_corrupt_journal_is_preserved(contents.as_bytes());
+        }
+    }
+
+    #[test]
+    fn maximum_well_formed_journal_event_count_is_accepted() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(JOURNAL_FILE);
+        let mut contents = String::new();
+        let mut push = |event: JournalEvent| {
+            contents.push_str(&serde_json::to_string(&event).unwrap());
+            contents.push('\n');
+        };
+        push(JournalEvent::Begin);
+        for index in 0..MAX_TRANSACTION_FILES {
+            push(JournalEvent::Planned {
+                index,
+                target: PathBuf::from(format!("tool/config-{index}.json")),
+                stage: format!("stage-{index:04}.bin"),
+                digest: "0".repeat(SHA256_HEX_BYTES),
+                parent_identity: FileIdentity { volume: 0, file: 0 },
+            });
+        }
+        for index in 0..MAX_TRANSACTION_FILES {
+            push(JournalEvent::Staged {
+                index,
+                stage_identity: FileIdentity {
+                    volume: 0,
+                    file: index as u64,
+                },
+            });
+        }
+        for index in 0..MAX_TRANSACTION_FILES {
+            push(JournalEvent::Published {
+                index,
+                target_identity: FileIdentity {
+                    volume: 0,
+                    file: index as u64,
+                },
+            });
+        }
+        for index in 0..MAX_TRANSACTION_FILES {
+            push(JournalEvent::Verified { index });
+        }
+        push(JournalEvent::Complete);
+        drop(push);
+        fs::write(&path, contents).unwrap();
+
+        let state = read_journal(&path).expect("exact event limit must remain valid");
+
+        assert!(state.complete);
+        assert_eq!(state.files.len(), MAX_TRANSACTION_FILES);
     }
 
     #[test]

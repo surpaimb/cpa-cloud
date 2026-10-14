@@ -48,7 +48,7 @@ provider or model.
 - `gemini.rs`: independently authored Gemini CLI gateway mapping, strict three-file create-only path boundary, non-secret ownership record, and synthetic transaction integration.
 - `grok_build.rs`: independently authored Grok Build Responses-model mapping, strict create-only path boundary, non-secret ownership record, and synthetic transaction integration.
 - `hermes.rs`: independently authored Hermes Agent named custom-provider mapping, strict create-only path boundary, non-secret ownership record, and synthetic transaction integration.
-- `live/engine.rs`: CPA-authored create-only staging, journal, locking, private recovery-directory validation, pre-begin orphan cleanup, and recovery experiment.
+- `live/engine.rs`: CPA-authored create-only staging, bounded journal parsing, locking, private recovery-directory validation, pre-begin orphan cleanup, and recovery experiment.
 - `live/backup.rs`: CPA-authored Unix synthetic-root encrypted rollback-material foundation using the [`ring` 0.17.14 AEAD API](https://docs.rs/ring/0.17.14/ring/aead/index.html); it does not publish or replace client files.
 - `minimax_code.rs`: independently authored MiniMax Code BYOK provider mapping, strict create-only path boundary, native-lock refusal, non-secret ownership record, and synthetic transaction integration.
 - `opencode.rs`: CPA profile projection, JSONC planning, fail-closed ownership proof, and synthetic-root create-only integration.
