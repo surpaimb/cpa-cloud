@@ -135,6 +135,8 @@ struct TransactionGuard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FaultPoint {
     Never,
+    AfterWorkspace,
+    AfterJournalCreated,
     AfterManifest,
     AfterPlanning,
     AfterStageBeforeJournal(usize),
@@ -193,8 +195,14 @@ fn apply_create_only_inner(
 
     let transaction_root = ensure_transaction_root(&root)?;
     let workspace = create_workspace(&transaction_root)?;
+    if fault == FaultPoint::AfterWorkspace {
+        return Err(TransactionError::InjectedCrash);
+    }
     let journal_path = workspace.join(JOURNAL_FILE);
     let mut journal = create_private_file(&journal_path)?;
+    if fault == FaultPoint::AfterJournalCreated {
+        return Err(TransactionError::InjectedCrash);
+    }
     let mut created = Vec::with_capacity(files.len());
 
     let result = (|| {
@@ -650,6 +658,9 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
         }
         return Err(TransactionError::CorruptJournal(journal_path));
     }
+    if cleanup_pre_begin_workspace(workspace, &journal_path)? {
+        return Ok(false);
+    }
 
     let state = read_journal(&journal_path)?;
     if state.complete {
@@ -731,6 +742,43 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
     append_event(&mut journal, &journal_path, &JournalEvent::Complete)?;
     sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
     cleanup_workspace(workspace, &state)?;
+    Ok(true)
+}
+
+/// A workspace cannot contain secret staging or a published target before its
+/// journal has a durable `Begin` event. Recovery may therefore remove exactly
+/// two pre-begin shapes: an empty workspace (handled above), or a workspace
+/// whose only entry is an empty, real journal file. Any additional entry is
+/// ambiguous and must remain in place for operator inspection.
+fn cleanup_pre_begin_workspace(
+    workspace: &Path,
+    journal_path: &Path,
+) -> Result<bool, TransactionError> {
+    ensure_real_file(journal_path)?;
+    let metadata = fs::symlink_metadata(journal_path)
+        .map_err(|source| io_error(journal_path, source))?;
+    if metadata.len() != 0 {
+        return Ok(false);
+    }
+
+    let mut saw_journal = false;
+    for entry in fs::read_dir(workspace).map_err(|source| io_error(workspace, source))? {
+        let entry = entry.map_err(|source| io_error(workspace, source))?;
+        if saw_journal || entry.file_name().to_str() != Some(JOURNAL_FILE) {
+            return Err(TransactionError::CorruptJournal(workspace.to_path_buf()));
+        }
+        saw_journal = true;
+    }
+    if !saw_journal {
+        return Err(TransactionError::CorruptJournal(workspace.to_path_buf()));
+    }
+
+    fs::remove_file(journal_path).map_err(|source| io_error(journal_path, source))?;
+    sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
+    fs::remove_dir(workspace).map_err(|source| io_error(workspace, source))?;
+    if let Some(parent) = workspace.parent() {
+        sync_directory(parent).map_err(|source| io_error(parent, source))?;
+    }
     Ok(true)
 }
 
@@ -1274,6 +1322,85 @@ mod tests {
         )
         .expect_err("fault is injected");
         recover_create_only(root.path()).unwrap();
+        assert!(!root.path().join("tool/config.json").exists());
+    }
+
+    #[test]
+    fn crash_after_workspace_before_journal_is_cleaned() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterWorkspace,
+        )
+        .expect_err("fault is injected");
+
+        let transaction_root = root.path().join(TRANSACTION_DIRECTORY);
+        let workspace = fs::read_dir(&transaction_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(fs::read_dir(&workspace).unwrap().count(), 0);
+
+        recover_create_only(root.path()).unwrap();
+        assert_eq!(fs::read_dir(transaction_root).unwrap().count(), 0);
+        assert!(!root.path().join("tool/config.json").exists());
+    }
+
+    #[test]
+    fn crash_after_empty_journal_before_begin_is_cleaned() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterJournalCreated,
+        )
+        .expect_err("fault is injected");
+
+        let transaction_root = root.path().join(TRANSACTION_DIRECTORY);
+        let workspace = fs::read_dir(&transaction_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(fs::metadata(workspace.join(JOURNAL_FILE)).unwrap().len(), 0);
+
+        recover_create_only(root.path()).unwrap();
+        assert_eq!(fs::read_dir(transaction_root).unwrap().count(), 0);
+        assert!(!root.path().join("tool/config.json").exists());
+    }
+
+    #[test]
+    fn empty_journal_with_an_unexpected_entry_blocks_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterJournalCreated,
+        )
+        .expect_err("fault is injected");
+
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::write(workspace.join("unexpected.bin"), b"operator-evidence").unwrap();
+
+        let error = recover_create_only(root.path()).expect_err("ambiguous orphan must block");
+        assert!(matches!(error, TransactionError::CorruptJournal(_)));
+        assert_eq!(
+            fs::read(workspace.join("unexpected.bin")).unwrap(),
+            b"operator-evidence"
+        );
+        assert!(workspace.join(JOURNAL_FILE).exists());
         assert!(!root.path().join("tool/config.json").exists());
     }
 

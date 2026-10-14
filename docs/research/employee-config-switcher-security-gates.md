@@ -49,7 +49,11 @@ stage and target identities plus digests, then rolls the create-only operation
 forward. Missing stages before publication are cleaned manifest-last; a target
 replacement or modification becomes a blocking recovery conflict. Tests inject
 crashes around manifest, staging, publication and verification and confirm that
-the journal itself contains no Key bytes.
+the journal itself contains no Key bytes. Separate pre-begin fault injection
+covers crashes after workspace creation and after creation of the empty journal:
+recovery removes only an empty workspace or a workspace whose sole entry is the
+zero-length real journal. Any additional entry makes the orphan ambiguous,
+blocks recovery, and remains untouched for operator inspection.
 
 A persistent owner-private lock file combines an in-process mutex with an OS
 lock (`flock` on POSIX; an exclusive-sharing file handle on Windows), so a
