@@ -1074,7 +1074,13 @@ fn verify_no_macos_extended_acl(path: &Path) -> Result<(), TransactionError> {
         .map_err(|source| io_error(path, io::Error::new(io::ErrorKind::InvalidInput, source)))?;
     let acl = unsafe { acl_get_file(c_path.as_ptr(), ACL_TYPE_EXTENDED) };
     if acl.is_null() {
-        return Err(io_error(path, io::Error::last_os_error()));
+        let source = io::Error::last_os_error();
+        // Darwin reports ENOENT when the path exists but has no extended ACL.
+        return if source.raw_os_error() == Some(libc::ENOENT) {
+            Ok(())
+        } else {
+            Err(io_error(path, source))
+        };
     }
 
     let mut entry = null_mut();
@@ -1100,16 +1106,88 @@ fn verify_no_macos_extended_acl(path: &Path) -> Result<(), TransactionError> {
 }
 
 #[cfg(windows)]
+struct WindowsTokenHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for WindowsTokenHandle {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+fn windows_current_user_token_info(path: &Path) -> Result<Vec<u8>, TransactionError> {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    let token = WindowsTokenHandle(token);
+    let mut needed = 0u32;
+    unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut needed) };
+    if needed == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    let mut info = vec![0u8; needed as usize];
+    let read = unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            info.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    };
+    if read == 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    Ok(info)
+}
+
+#[cfg(windows)]
 fn enforce_private_permissions(path: &Path) -> Result<(), TransactionError> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
+        SDDL_REVISION_1, SE_FILE_OBJECT,
     };
     use windows_sys::Win32::Security::{
-        SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        SetFileSecurityW, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_USER,
     };
+
+    let token_info = windows_current_user_token_info(path)?;
+    let token_user = unsafe { std::ptr::read_unaligned(token_info.as_ptr().cast::<TOKEN_USER>()) };
+    if token_user.User.Sid.is_null() {
+        return Err(io_error(
+            path,
+            io::Error::new(io::ErrorKind::PermissionDenied, "process user SID is missing"),
+        ));
+    }
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let owner_status = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_mut_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            token_user.User.Sid,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+        )
+    };
+    if owner_status != ERROR_SUCCESS {
+        return Err(io_error(
+            path,
+            io::Error::from_raw_os_error(owner_status as i32),
+        ));
+    }
 
     let mut descriptor = null_mut();
     let sddl: Vec<u16> = "D:P(A;;FA;;;OW)\0".encode_utf16().collect();
@@ -1124,7 +1202,6 @@ fn enforce_private_permissions(path: &Path) -> Result<(), TransactionError> {
     if converted == 0 {
         return Err(io_error(path, io::Error::last_os_error()));
     }
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let applied = unsafe {
         SetFileSecurityW(
             wide.as_ptr(),
@@ -1144,25 +1221,14 @@ fn enforce_private_permissions(path: &Path) -> Result<(), TransactionError> {
 fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, HANDLE,
-    };
+    use windows_sys::Win32::Foundation::{GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER};
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::{
-        EqualSid, GetFileSecurityW, GetSecurityDescriptorOwner, GetTokenInformation, TokenUser,
-        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
+        EqualSid, GetFileSecurityW, GetSecurityDescriptorOwner, DACL_SECURITY_INFORMATION,
+        OWNER_SECURITY_INFORMATION, TOKEN_USER,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-    struct TokenHandle(HANDLE);
-
-    impl Drop for TokenHandle {
-        fn drop(&mut self) {
-            unsafe { CloseHandle(self.0) };
-        }
-    }
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let requested = DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION;
@@ -1198,29 +1264,7 @@ fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
         return Err(io_error(path, io::Error::last_os_error()));
     }
 
-    let mut token = null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return Err(io_error(path, io::Error::last_os_error()));
-    }
-    let token = TokenHandle(token);
-    let mut token_needed = 0u32;
-    unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut token_needed) };
-    if token_needed == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
-        return Err(io_error(path, io::Error::last_os_error()));
-    }
-    let mut token_info = vec![0u8; token_needed as usize];
-    let token_read = unsafe {
-        GetTokenInformation(
-            token.0,
-            TokenUser,
-            token_info.as_mut_ptr().cast(),
-            token_needed,
-            &mut token_needed,
-        )
-    };
-    if token_read == 0 {
-        return Err(io_error(path, io::Error::last_os_error()));
-    }
+    let token_info = windows_current_user_token_info(path)?;
     let token_user = unsafe { std::ptr::read_unaligned(token_info.as_ptr().cast::<TOKEN_USER>()) };
     if token_user.User.Sid.is_null() || unsafe { EqualSid(owner, token_user.User.Sid) } == 0 {
         return Err(io_error(
