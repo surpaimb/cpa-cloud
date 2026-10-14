@@ -43,13 +43,22 @@ collision, so this slice never persists a plaintext backup of a previous Key.
 The primitive writes secret-bearing bytes to a private `0600` staging file
 inside a `0700` transaction directory (or a protected owner DACL on Windows),
 flushes an append-only digest/identity journal, and publishes with an atomic
-hard link. Recovery removes a published file only if both stable file identity
-and digest still match; replacement or modification becomes a blocking recovery
-conflict. Tests inject crashes before and after publication and verify that the
-journal itself contains no Key bytes.
+hard link. Because no previous file exists, recovery never performs a path-based
+delete or replacement: once all private stages are durable it verifies parent,
+stage and target identities plus digests, then rolls the create-only operation
+forward. Missing stages before publication are cleaned manifest-last; a target
+replacement or modification becomes a blocking recovery conflict. Tests inject
+crashes around manifest, staging, publication and verification and confirm that
+the journal itself contains no Key bytes.
+
+A persistent owner-private lock file combines an in-process mutex with an OS
+lock (`flock` on POSIX; an exclusive-sharing file handle on Windows), so a
+second client process cannot recover an active transaction. Windows directories
+are opened with backup semantics and write access before `FlushFileBuffers`;
+the protected owner-only DACL is read back after assignment. These behaviors
+must pass native runtime tests, not only cross-platform compilation.
 
 This is not clearance for live writes. Native handle-relative traversal must
-still replace the current path re-checks to close adversarial rename races;
-Windows directory durability and the exact owner-only DACL must pass on-target
-review; replacement of existing files still needs encrypted or non-persistent
-rollback material. Consequently `apply_configuration` remains fail-closed.
+still replace the current path re-checks to close adversarial rename races, and
+replacement of existing files still needs encrypted or non-persistent rollback
+material. Consequently `apply_configuration` remains fail-closed.

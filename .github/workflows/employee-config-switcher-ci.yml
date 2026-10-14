@@ -86,4 +86,6 @@ jobs:
           corepack prepare pnpm@11.25.0 --activate
           pnpm install --frozen-lockfile
           pnpm build
+      - name: Run platform core tests
+        run: cargo test --locked -p employee-config-core
       - run: cargo check --locked -p cpa-cloud-employee-config

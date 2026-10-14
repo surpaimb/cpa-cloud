@@ -13,13 +13,16 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 const TRANSACTION_DIRECTORY: &str = ".cpa-cloud-employee-config-transactions";
+const TRANSACTION_LOCK: &str = ".cpa-cloud-employee-config.lock";
 const JOURNAL_FILE: &str = "journal.jsonl";
 const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static PROCESS_TRANSACTION_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn digest(contents: Option<&[u8]>) -> Option<String> {
     contents.map(|bytes| hex::encode(Sha256::digest(bytes)))
@@ -90,8 +93,11 @@ enum JournalEvent {
         target: PathBuf,
         stage: String,
         digest: String,
-        stage_identity: FileIdentity,
         parent_identity: FileIdentity,
+    },
+    Staged {
+        index: usize,
+        stage_identity: FileIdentity,
     },
     Published {
         index: usize,
@@ -108,7 +114,7 @@ struct PlannedFile {
     target: PathBuf,
     stage: String,
     digest: String,
-    stage_identity: FileIdentity,
+    stage_identity: Option<FileIdentity>,
     parent_identity: FileIdentity,
     target_identity: Option<FileIdentity>,
     verified: bool,
@@ -121,10 +127,17 @@ struct JournalState {
     complete: bool,
 }
 
+struct TransactionGuard {
+    _process: MutexGuard<'static, ()>,
+    _file: File,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FaultPoint {
     Never,
+    AfterManifest,
     AfterPlanning,
+    AfterStageBeforeJournal(usize),
     AfterPublishBeforeJournal(usize),
     AfterPublished(usize),
     AfterVerified(usize),
@@ -132,11 +145,16 @@ enum FaultPoint {
 
 /// Recover incomplete create-only transactions below `root`.
 ///
-/// A published target is removed only when its stable identity and SHA-256
-/// digest still match the transaction. An external edit blocks recovery and
-/// therefore blocks later writes.
+/// Recovery never deletes or replaces a published target. If every private
+/// stage is durable it verifies identities and digests, then safely rolls the
+/// create-only operation forward. An external edit blocks later writes.
 pub fn recover_create_only(root: &Path) -> Result<(), TransactionError> {
     let root = checked_root(root)?;
+    let _guard = acquire_transaction_lock(&root)?;
+    recover_create_only_locked(&root)
+}
+
+fn recover_create_only_locked(root: &Path) -> Result<(), TransactionError> {
     let transaction_root = root.join(TRANSACTION_DIRECTORY);
     match fs::symlink_metadata(&transaction_root) {
         Ok(_) => ensure_real_directory(&transaction_root)?,
@@ -150,7 +168,7 @@ pub fn recover_create_only(root: &Path) -> Result<(), TransactionError> {
             .map_err(|source| io_error(&transaction_root, source))?
             .path();
         ensure_real_directory(&path)?;
-        recover_workspace(&root, &path)?;
+        let _ = recover_workspace(root, &path)?;
     }
     sync_directory(&transaction_root).map_err(|source| io_error(&transaction_root, source))
 }
@@ -169,7 +187,8 @@ fn apply_create_only_inner(
     fault: FaultPoint,
 ) -> Result<CreateOnlyReceipt, TransactionError> {
     let root = checked_root(root)?;
-    recover_create_only(&root)?;
+    let _guard = acquire_transaction_lock(&root)?;
+    recover_create_only_locked(&root)?;
     validate_plans(&root, &files)?;
 
     let transaction_root = ensure_transaction_root(&root)?;
@@ -186,14 +205,6 @@ fn apply_create_only_inner(
                 .parent()
                 .ok_or_else(|| TransactionError::InvalidTarget(plan.relative_path.clone()))?;
             let stage = format!("stage-{index:04}.bin");
-            let stage_path = workspace.join(&stage);
-            let mut stage_file = create_private_file(&stage_path)?;
-            stage_file
-                .write_all(&plan.contents)
-                .map_err(|source| io_error(&stage_path, source))?;
-            stage_file
-                .sync_all()
-                .map_err(|source| io_error(&stage_path, source))?;
             append_event(
                 &mut journal,
                 &journal_path,
@@ -202,8 +213,31 @@ fn apply_create_only_inner(
                     target: plan.relative_path.clone(),
                     stage,
                     digest: digest(Some(&plan.contents)).expect("bytes have a digest"),
-                    stage_identity: file_identity(&stage_file, &stage_path)?,
                     parent_identity: identity_for_path(parent)?,
+                },
+            )?;
+        }
+        if fault == FaultPoint::AfterManifest {
+            return Err(TransactionError::InjectedCrash);
+        }
+        for (index, plan) in files.iter().enumerate() {
+            let stage_path = workspace.join(format!("stage-{index:04}.bin"));
+            let mut stage_file = create_private_file(&stage_path)?;
+            stage_file
+                .write_all(&plan.contents)
+                .map_err(|source| io_error(&stage_path, source))?;
+            stage_file
+                .sync_all()
+                .map_err(|source| io_error(&stage_path, source))?;
+            if fault == FaultPoint::AfterStageBeforeJournal(index) {
+                return Err(TransactionError::InjectedCrash);
+            }
+            append_event(
+                &mut journal,
+                &journal_path,
+                &JournalEvent::Staged {
+                    index,
+                    stage_identity: file_identity(&stage_file, &stage_path)?,
                 },
             )?;
         }
@@ -225,12 +259,15 @@ fn apply_create_only_inner(
             if identity_for_path(parent)? != planned.parent_identity {
                 return Err(TransactionError::RecoveryConflict(parent.to_path_buf()));
             }
+            let stage_identity = planned
+                .stage_identity
+                .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?;
             ensure_absent(&target)?;
 
             let stage_path = workspace.join(&planned.stage);
             let stage_file =
                 File::open(&stage_path).map_err(|source| io_error(&stage_path, source))?;
-            if file_identity(&stage_file, &stage_path)? != planned.stage_identity {
+            if file_identity(&stage_file, &stage_path)? != stage_identity {
                 return Err(TransactionError::RecoveryConflict(stage_path));
             }
             fs::hard_link(&stage_path, &target).map_err(|source| {
@@ -247,7 +284,7 @@ fn apply_create_only_inner(
 
             let target_file = File::open(&target).map_err(|source| io_error(&target, source))?;
             let target_identity = file_identity(&target_file, &target)?;
-            if target_identity != planned.stage_identity {
+            if target_identity != stage_identity {
                 return Err(TransactionError::RecoveryConflict(target));
             }
             append_event(
@@ -285,8 +322,71 @@ fn apply_create_only_inner(
             Ok(receipt)
         }
         Err(TransactionError::InjectedCrash) => Err(TransactionError::InjectedCrash),
-        Err(error) => recover_workspace(&root, &workspace).and(Err(error)),
+        Err(error) => match recover_workspace(&root, &workspace) {
+            Ok(true) => Ok(CreateOnlyReceipt {
+                created: files
+                    .iter()
+                    .map(|plan| plan.relative_path.clone())
+                    .collect(),
+            }),
+            Ok(false) => Err(error),
+            Err(recovery_error) => Err(recovery_error),
+        },
     }
+}
+
+fn acquire_transaction_lock(root: &Path) -> Result<TransactionGuard, TransactionError> {
+    let process = PROCESS_TRANSACTION_LOCK
+        .lock()
+        .map_err(|_| io_error(root, io::Error::other("transaction mutex poisoned")))?;
+    let path = root.join(TRANSACTION_LOCK);
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        ensure_not_link(&path, &metadata)?;
+        if !metadata.is_file() {
+            return Err(TransactionError::RecoveryConflict(path));
+        }
+    }
+
+    #[cfg(unix)]
+    let file = {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|source| io_error(&path, source))?;
+        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if locked != 0 {
+            return Err(io_error(&path, io::Error::last_os_error()));
+        }
+        file
+    };
+
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)
+            .map_err(|source| io_error(&path, source))?
+    };
+
+    enforce_private_permissions(&path)?;
+    let metadata = file.metadata().map_err(|source| io_error(&path, source))?;
+    ensure_not_link(&path, &metadata)?;
+    Ok(TransactionGuard {
+        _process: process,
+        _file: file,
+    })
 }
 
 fn validate_plans(root: &Path, files: &[CreateFilePlan]) -> Result<(), TransactionError> {
@@ -413,6 +513,7 @@ fn append_event(
 }
 
 fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
+    ensure_real_file(path)?;
     let file = File::open(path).map_err(|source| io_error(path, source))?;
     let mut state = JournalState::default();
     for line in BufReader::new(file).lines() {
@@ -434,7 +535,6 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
                 target,
                 stage,
                 digest,
-                stage_identity,
                 parent_identity,
             } => {
                 validate_relative(&target)?;
@@ -451,13 +551,30 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
                                 target,
                                 stage,
                                 digest,
-                                stage_identity,
+                                stage_identity: None,
                                 parent_identity,
                                 target_identity: None,
                                 verified: false,
                             },
                         )
                         .is_some()
+                {
+                    return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+                }
+            }
+            JournalEvent::Staged {
+                index,
+                stage_identity,
+            } => {
+                if !state.begun || state.complete {
+                    return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+                }
+                let planned = state
+                    .files
+                    .get_mut(&index)
+                    .ok_or_else(|| TransactionError::CorruptJournal(path.to_path_buf()))?;
+                if planned.stage_identity.replace(stage_identity).is_some()
+                    || planned.target_identity.is_some()
                 {
                     return Err(TransactionError::CorruptJournal(path.to_path_buf()));
                 }
@@ -473,7 +590,9 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
                     .files
                     .get_mut(&index)
                     .ok_or_else(|| TransactionError::CorruptJournal(path.to_path_buf()))?;
-                if planned.target_identity.replace(target_identity).is_some() {
+                if planned.stage_identity.is_none()
+                    || planned.target_identity.replace(target_identity).is_some()
+                {
                     return Err(TransactionError::CorruptJournal(path.to_path_buf()));
                 }
             }
@@ -508,56 +627,142 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
     Ok(state)
 }
 
-fn recover_workspace(root: &Path, workspace: &Path) -> Result<(), TransactionError> {
+/// Returns `true` when the transaction is or becomes committed, `false` when
+/// no target had been published and incomplete staging was safely abandoned.
+fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionError> {
     ensure_real_directory(workspace)?;
     let journal_path = workspace.join(JOURNAL_FILE);
+    if !path_exists(&journal_path)? {
+        if fs::read_dir(workspace)
+            .map_err(|source| io_error(workspace, source))?
+            .next()
+            .is_none()
+        {
+            fs::remove_dir(workspace).map_err(|source| io_error(workspace, source))?;
+            return Ok(false);
+        }
+        return Err(TransactionError::CorruptJournal(journal_path));
+    }
+
     let state = read_journal(&journal_path)?;
-    if !state.complete {
-        for planned in state.files.values().rev() {
-            let target = checked_target(root, &planned.target)?;
-            let stage_path = workspace.join(&planned.stage);
-            let stage = File::open(&stage_path).map_err(|source| io_error(&stage_path, source))?;
-            if file_identity(&stage, &stage_path)? != planned.stage_identity {
-                return Err(TransactionError::RecoveryConflict(stage_path));
+    if state.complete {
+        cleanup_workspace(workspace, &state)?;
+        return Ok(true);
+    }
+
+    let all_staged = state
+        .files
+        .values()
+        .all(|planned| planned.stage_identity.is_some());
+    let any_published_path = state.files.values().try_fold(false, |found, planned| {
+        let target = checked_target(root, &planned.target)?;
+        Ok::<_, TransactionError>(found || path_exists(&target)?)
+    })?;
+    if !all_staged {
+        if any_published_path {
+            return Err(TransactionError::RecoveryConflict(workspace.to_path_buf()));
+        }
+        cleanup_workspace(workspace, &state)?;
+        return Ok(false);
+    }
+
+    let mut journal = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(&journal_path)
+        .map_err(|source| io_error(&journal_path, source))?;
+    enforce_private_permissions(&journal_path)?;
+    for (index, planned) in &state.files {
+        let target = checked_target(root, &planned.target)?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| TransactionError::InvalidTarget(planned.target.clone()))?;
+        if identity_for_path(parent)? != planned.parent_identity {
+            return Err(TransactionError::RecoveryConflict(parent.to_path_buf()));
+        }
+        let stage_identity = verify_stage(workspace, planned)?;
+
+        let target_identity = match fs::symlink_metadata(&target) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::hard_link(workspace.join(&planned.stage), &target)
+                    .map_err(|source| io_error(&target, source))?;
+                sync_directory(parent).map_err(|source| io_error(parent, source))?;
+                identity_for_path(&target)?
             }
-            match fs::symlink_metadata(&target) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => return Err(io_error(&target, source)),
-                Ok(_) => {
-                    ensure_real_file(&target)?;
-                    let target_file =
-                        File::open(&target).map_err(|source| io_error(&target, source))?;
-                    let target_identity = file_identity(&target_file, &target)?;
-                    let expected = planned.target_identity.unwrap_or(planned.stage_identity);
-                    if target_identity != expected
-                        || target_identity != planned.stage_identity
-                        || digest(Some(&read_bounded(&target)?)).as_deref()
-                            != Some(planned.digest.as_str())
-                    {
-                        return Err(TransactionError::RecoveryConflict(target));
-                    }
-                    fs::remove_file(&target).map_err(|source| io_error(&target, source))?;
-                    if let Some(parent) = target.parent() {
-                        sync_directory(parent).map_err(|source| io_error(parent, source))?;
-                    }
-                }
+            Err(source) => return Err(io_error(&target, source)),
+            Ok(_) => {
+                ensure_real_file(&target)?;
+                identity_for_path(&target)?
             }
+        };
+        if target_identity != stage_identity {
+            return Err(TransactionError::RecoveryConflict(target));
+        }
+        if let Some(recorded) = planned.target_identity {
+            if recorded != target_identity {
+                return Err(TransactionError::RecoveryConflict(target));
+            }
+        } else {
+            append_event(
+                &mut journal,
+                &journal_path,
+                &JournalEvent::Published {
+                    index: *index,
+                    target_identity,
+                },
+            )?;
+        }
+        verify_target(&target, planned)?;
+        if !planned.verified {
+            append_event(
+                &mut journal,
+                &journal_path,
+                &JournalEvent::Verified { index: *index },
+            )?;
         }
     }
-    cleanup_workspace(workspace, &state)
+    append_event(&mut journal, &journal_path, &JournalEvent::Complete)?;
+    sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
+    cleanup_workspace(workspace, &state)?;
+    Ok(true)
 }
 
 fn cleanup_workspace(workspace: &Path, state: &JournalState) -> Result<(), TransactionError> {
-    for planned in state.files.values() {
-        let stage = workspace.join(&planned.stage);
-        match fs::remove_file(&stage) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => return Err(io_error(&stage, source)),
+    let expected: HashSet<&str> = state
+        .files
+        .values()
+        .map(|planned| planned.stage.as_str())
+        .chain(std::iter::once(JOURNAL_FILE))
+        .collect();
+    for entry in fs::read_dir(workspace).map_err(|source| io_error(workspace, source))? {
+        let entry = entry.map_err(|source| io_error(workspace, source))?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| TransactionError::CorruptJournal(workspace.to_path_buf()))?;
+        if !expected.contains(name) {
+            return Err(TransactionError::CorruptJournal(workspace.to_path_buf()));
         }
     }
+    for planned in state.files.values() {
+        let stage = workspace.join(&planned.stage);
+        if path_exists(&stage)? {
+            ensure_real_file(&stage)?;
+            if let Some(expected) = planned.stage_identity {
+                if identity_for_path(&stage)? != expected {
+                    return Err(TransactionError::RecoveryConflict(stage));
+                }
+            }
+            fs::remove_file(&stage).map_err(|source| io_error(&stage, source))?;
+        }
+    }
+    sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
     let journal = workspace.join(JOURNAL_FILE);
-    fs::remove_file(&journal).map_err(|source| io_error(&journal, source))?;
+    if path_exists(&journal)? {
+        ensure_real_file(&journal)?;
+        fs::remove_file(&journal).map_err(|source| io_error(&journal, source))?;
+        sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
+    }
     fs::remove_dir(workspace).map_err(|source| io_error(workspace, source))?;
     if let Some(parent) = workspace.parent() {
         sync_directory(parent).map_err(|source| io_error(parent, source))?;
@@ -568,12 +773,42 @@ fn cleanup_workspace(workspace: &Path, state: &JournalState) -> Result<(), Trans
 fn verify_target(target: &Path, planned: &PlannedFile) -> Result<(), TransactionError> {
     ensure_real_file(target)?;
     let file = File::open(target).map_err(|source| io_error(target, source))?;
-    if file_identity(&file, target)? != planned.stage_identity
-        || digest(Some(&read_bounded(target)?)).as_deref() != Some(planned.digest.as_str())
+    let stage_identity = planned
+        .stage_identity
+        .ok_or_else(|| TransactionError::CorruptJournal(target.to_path_buf()))?;
+    if file_identity(&file, target)? != stage_identity
+        || digest_path(target)?.as_str() != planned.digest.as_str()
     {
         return Err(TransactionError::RecoveryConflict(target.to_path_buf()));
     }
     Ok(())
+}
+
+fn verify_stage(workspace: &Path, planned: &PlannedFile) -> Result<FileIdentity, TransactionError> {
+    let path = workspace.join(&planned.stage);
+    ensure_real_file(&path)?;
+    let expected = planned
+        .stage_identity
+        .ok_or_else(|| TransactionError::CorruptJournal(path.clone()))?;
+    if identity_for_path(&path)? != expected
+        || digest_path(&path)?.as_str() != planned.digest.as_str()
+    {
+        return Err(TransactionError::RecoveryConflict(path));
+    }
+    Ok(expected)
+}
+
+fn digest_path(path: &Path) -> Result<String, TransactionError> {
+    let bytes = Zeroizing::new(read_bounded(path)?);
+    Ok(digest(Some(&bytes)).expect("bytes have a digest"))
+}
+
+fn path_exists(path: &Path) -> Result<bool, TransactionError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error(path, source)),
+    }
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, TransactionError> {
@@ -724,12 +959,85 @@ fn enforce_private_permissions(path: &Path) -> Result<(), TransactionError> {
     if applied == 0 {
         Err(io_error(path, io::Error::last_os_error()))
     } else {
-        Ok(())
+        verify_private_windows_dacl(path)
     }
 }
 
+#[cfg(windows)]
+fn verify_private_windows_dacl(path: &Path) -> Result<(), TransactionError> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{GetFileSecurityW, DACL_SECURITY_INFORMATION};
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut needed = 0u32;
+    unsafe {
+        GetFileSecurityW(
+            wide.as_ptr(),
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if needed == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    let mut descriptor = vec![0u8; needed as usize];
+    let read = unsafe {
+        GetFileSecurityW(
+            wide.as_ptr(),
+            DACL_SECURITY_INFORMATION,
+            descriptor.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    };
+    if read == 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    let mut rendered = null_mut();
+    let mut rendered_len = 0u32;
+    let converted = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor.as_mut_ptr().cast(),
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut rendered,
+            &mut rendered_len,
+        )
+    };
+    if converted == 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    let actual = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(rendered, rendered_len as usize)) };
+    unsafe { LocalFree(rendered.cast()) };
+    if actual != "D:P(A;;FA;;;OW)" {
+        return Err(io_error(
+            path,
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "protected owner-only DACL read-back did not match",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn identity_for_path(path: &Path) -> Result<FileIdentity, TransactionError> {
     let file = File::open(path).map_err(|source| io_error(path, source))?;
+    file_identity(&file, path)
+}
+
+#[cfg(windows)]
+fn identity_for_path(path: &Path) -> Result<FileIdentity, TransactionError> {
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+    let file = open_windows_path(path, FILE_READ_ATTRIBUTES)?;
     file_identity(&file, path)
 }
 
@@ -755,6 +1063,12 @@ fn file_identity(file: &File, path: &Path) -> Result<FileIdentity, TransactionEr
     if ok == 0 {
         return Err(io_error(path, io::Error::last_os_error()));
     }
+    if info.dwFileAttributes
+        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+        != 0
+    {
+        return Err(TransactionError::LinkedPath(path.to_path_buf()));
+    }
     Ok(FileIdentity {
         volume: info.dwVolumeSerialNumber as u64,
         file: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
@@ -768,13 +1082,42 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn sync_directory(path: &Path) -> io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?
+    use windows_sys::Win32::Foundation::GENERIC_WRITE;
+    open_windows_path(path, GENERIC_WRITE)
+        .map_err(|error| match error {
+            TransactionError::Io { source, .. } => source,
+            other => io::Error::other(other),
+        })?
         .sync_all()
+}
+
+#[cfg(windows)]
+fn open_windows_path(path: &Path, access: u32) -> Result<File, TransactionError> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use std::ptr::null;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    Ok(unsafe { File::from_raw_handle(handle) })
 }
 
 fn io_error(path: &Path, source: io::Error) -> TransactionError {
@@ -832,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn crash_after_unjournaled_publish_is_recovered_by_identity() {
+    fn crash_after_unjournaled_publish_is_safely_rolled_forward() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("tool")).unwrap();
         let error = apply_create_only_inner(
@@ -843,11 +1186,14 @@ mod tests {
         .expect_err("fault is injected");
         assert!(matches!(error, TransactionError::InjectedCrash));
         recover_create_only(root.path()).unwrap();
-        assert!(!root.path().join("tool/config.json").exists());
+        assert_eq!(
+            fs::read_to_string(root.path().join("tool/config.json")).unwrap(),
+            "synthetic-key"
+        );
     }
 
     #[test]
-    fn crash_after_verified_publish_rolls_back_all_files() {
+    fn crash_after_verified_publish_rolls_forward_all_files() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("tool")).unwrap();
         apply_create_only_inner(
@@ -860,8 +1206,48 @@ mod tests {
         )
         .expect_err("fault is injected");
         recover_create_only(root.path()).unwrap();
-        assert!(!root.path().join("tool/a.json").exists());
-        assert!(!root.path().join("tool/b.json").exists());
+        assert_eq!(
+            fs::read_to_string(root.path().join("tool/a.json")).unwrap(),
+            "a-secret"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("tool/b.json")).unwrap(),
+            "b-secret"
+        );
+    }
+
+    #[test]
+    fn crash_after_stage_write_before_stage_event_leaves_no_plaintext_residue() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterStageBeforeJournal(0),
+        )
+        .expect_err("fault is injected");
+        recover_create_only(root.path()).unwrap();
+        assert!(!root.path().join("tool/config.json").exists());
+        assert_eq!(
+            fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn crash_after_manifest_before_staging_is_cleaned() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterManifest,
+        )
+        .expect_err("fault is injected");
+        recover_create_only(root.path()).unwrap();
+        assert!(!root.path().join("tool/config.json").exists());
     }
 
     #[test]
@@ -901,6 +1287,47 @@ mod tests {
             .path();
         let journal = fs::read_to_string(workspace.join(JOURNAL_FILE)).unwrap();
         assert!(!journal.contains(secret));
+    }
+
+    #[test]
+    fn operating_system_lock_refuses_a_second_holder() {
+        let root = tempfile::tempdir().unwrap();
+        let checked = checked_root(root.path()).unwrap();
+        let _guard = acquire_transaction_lock(&checked).unwrap();
+        let path = checked.join(TRANSACTION_LOCK);
+
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let second = OpenOptions::new().read(true).write(true).open(path).unwrap();
+            let result = unsafe {
+                libc::flock(second.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
+            };
+            assert_ne!(result, 0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let error = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(path)
+                .expect_err("exclusive lock handle must deny a second open");
+            assert!(matches!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::Other
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_target_dacl_is_read_back_as_owner_only() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only(root.path(), vec![plan("tool/config.json", "secret")]).unwrap();
+        verify_private_windows_dacl(&root.path().join("tool/config.json")).unwrap();
     }
 
     #[cfg(unix)]

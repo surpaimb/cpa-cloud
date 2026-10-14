@@ -767,6 +767,7 @@ dependencies = [
  "hex",
  "json-five",
  "json5",
+ "libc",
  "reqwest 0.12.24",
  "serde",
  "serde_json",
