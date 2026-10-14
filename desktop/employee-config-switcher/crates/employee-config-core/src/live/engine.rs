@@ -945,7 +945,9 @@ fn validate_workspace_path(path: &Path) -> Result<(), TransactionError> {
         return Err(TransactionError::CorruptJournal(path.to_path_buf()));
     };
     let valid = prefix == "tx"
-        && pid.parse::<u32>().is_ok_and(|value| value.to_string() == pid)
+        && pid
+            .parse::<u32>()
+            .is_ok_and(|value| value.to_string() == pid)
         && u128::from_str_radix(nonce, 16).is_ok_and(|value| format!("{value:x}") == nonce)
         && u64::from_str_radix(count, 16).is_ok_and(|value| format!("{value:x}") == count);
     if valid {
