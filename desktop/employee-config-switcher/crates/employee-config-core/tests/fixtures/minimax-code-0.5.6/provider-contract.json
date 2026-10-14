@@ -3,11 +3,25 @@
   "source_commit": "836580efb27632e288b5e0ae26ec120a61e907f5",
   "config_path": "<data-dir>/config.yaml",
   "data_dir_precedence": ["MINIMAX_DATA_DIR", "MAVIS_DATA_DIR", "~/.minimax"],
+  "data_dir_resolution": {
+    "cli_overrides": ["--data-dir", "--profile"],
+    "public_environment_precedence": ["MINIMAX_DATA_DIR", "MAVIS_DATA_DIR"],
+    "primary_default": "~/.minimax",
+    "primary_profile": "~/.minimax-<profile>",
+    "legacy_default": "~/.mavis",
+    "legacy_profile": "~/.mavis-<profile>",
+    "migration_aware": true
+  },
   "provider_tree": "custom_provider.<name>",
   "provider_reference": "custom_provider:<name>/<model-id>",
   "provider_fields": ["name", "kind", "enabled", "api", "options", "models"],
   "options_fields": ["apiKey", "baseURL", "authMode"],
   "api_format": "openai-responses",
   "credential_header": "Authorization: Bearer",
-  "native_lock": "config.yaml.lock"
+  "native_lock": {
+    "path": "config.yaml.lock",
+    "implementation": "proper-lockfile",
+    "stale_ms": 10000,
+    "must_be_held_through_publication": true
+  }
 }

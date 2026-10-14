@@ -89,10 +89,18 @@ pub fn plan_new_minimax_code(
         ));
     }
     let native_lock = native_lock_path(config_path)?;
-    if native_lock.exists() {
-        return Err(AppError::Conflict(
-            "MiniMax Code config.yaml.lock 已存在；不会绕过客户端原生配置锁".into(),
-        ));
+    match std::fs::symlink_metadata(&native_lock) {
+        Ok(_) => {
+            return Err(AppError::Conflict(
+                "MiniMax Code config.yaml.lock 已存在；不会绕过客户端原生配置锁".into(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(AppError::Conflict(
+                "无法安全检查 MiniMax Code config.yaml.lock；本次不会写入".into(),
+            ));
+        }
     }
 
     let base_url = normalize_cpa_base_url(&profile.base_url)?;
@@ -300,6 +308,20 @@ mod tests {
         assert_eq!(fixture["provider_tree"], "custom_provider.<name>");
         assert_eq!(fixture["api_format"], "openai-responses");
         assert_eq!(fixture["credential_header"], "Authorization: Bearer");
+        assert_eq!(
+            fixture["data_dir_resolution"]["primary_profile"],
+            "~/.minimax-<profile>"
+        );
+        assert_eq!(
+            fixture["data_dir_resolution"]["legacy_profile"],
+            "~/.mavis-<profile>"
+        );
+        assert_eq!(fixture["native_lock"]["path"], "config.yaml.lock");
+        assert_eq!(fixture["native_lock"]["stale_ms"], 10_000);
+        assert_eq!(
+            fixture["native_lock"]["must_be_held_through_publication"],
+            true
+        );
     }
 
     #[test]
@@ -372,19 +394,26 @@ mod tests {
 
     #[test]
     fn create_only_transaction_refuses_native_config_lock() {
-        let temp = tempfile::tempdir().unwrap();
-        let minimax = temp.path().join(".minimax");
-        std::fs::create_dir(&minimax).unwrap();
-        std::fs::create_dir(minimax.join("config.yaml.lock")).unwrap();
-        let error = apply_new_minimax_code(
-            temp.path(),
-            Path::new(".minimax/config.yaml"),
-            Path::new(".minimax/cpa-cloud.ownership.json"),
-            &profile(),
-        )
-        .expect_err("native MiniMax Code lock must remain authoritative");
-        assert!(matches!(error, AppError::Conflict(_)));
-        assert!(!minimax.join("config.yaml").exists());
+        for entry_kind in ["file", "directory"] {
+            let temp = tempfile::tempdir().unwrap();
+            let minimax = temp.path().join(".minimax");
+            std::fs::create_dir(&minimax).unwrap();
+            let native_lock = minimax.join("config.yaml.lock");
+            if entry_kind == "file" {
+                std::fs::write(&native_lock, b"unexpected-lock-entry").unwrap();
+            } else {
+                std::fs::create_dir(&native_lock).unwrap();
+            }
+            let error = apply_new_minimax_code(
+                temp.path(),
+                Path::new(".minimax/config.yaml"),
+                Path::new(".minimax/cpa-cloud.ownership.json"),
+                &profile(),
+            )
+            .expect_err("every native MiniMax Code lock entry must remain authoritative");
+            assert!(matches!(error, AppError::Conflict(_)));
+            assert!(!minimax.join("config.yaml").exists());
+        }
     }
 
     #[test]

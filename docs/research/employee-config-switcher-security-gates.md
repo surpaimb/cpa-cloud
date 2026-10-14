@@ -184,13 +184,19 @@ selects the server-declared default through the documented
 to the private new config target through `options.apiKey` and remains absent
 from ownership, journal, and debug output. Existing login, MCP, prompt, plugin,
 cache, and session state remain byte-for-byte untouched in synthetic tests.
-The planner refuses an already-present native `config.yaml.lock`, but that
-preflight is not a race-free acquisition of MiniMax Code's directory-lock
-protocol. Fixed native parser/transport evidence, a compatible atomic native
-lock implementation, and the replacement transaction contract therefore
-remain blockers for real writes. A future live caller must derive the data
-directory through the existing `MINIMAX_DATA_DIR`/`MAVIS_DATA_DIR`-aware
-detection and must not accept an arbitrary parent from its caller.
+The planner treats every visible `config.yaml.lock` entry, including an
+unexpected file type, as a hard conflict and treats lock inspection errors as
+conflicts. That preflight is still not a race-free acquisition of MiniMax
+Code's `proper-lockfile` protocol. A future live writer must atomically acquire
+a compatible native lock, coordinate it with the CPA transaction lock, and
+hold both through publication. Fixed native parser/transport evidence and the
+replacement transaction contract therefore remain blockers for real writes.
+The current detector covers only `MINIMAX_DATA_DIR`, `MAVIS_DATA_DIR`, and the
+plain `~/.minimax` default. The fixed client can also select `--data-dir`,
+`--profile`, profile-scoped `~/.minimax-<profile>` roots, and migration-aware
+`~/.mavis[-profile]` fallbacks. A future live caller must derive the exact
+active directory or explicitly reject unsupported overrides; it must never
+accept an arbitrary parent from its caller.
 
 Claude Desktop remains detection-only. Its CPA `/v1/messages` fidelity and
 32 MiB request-size/HTTP 413 contract are not yet resolved, so this preview
