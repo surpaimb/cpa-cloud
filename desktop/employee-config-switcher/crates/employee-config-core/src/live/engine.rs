@@ -755,8 +755,8 @@ fn cleanup_pre_begin_workspace(
     journal_path: &Path,
 ) -> Result<bool, TransactionError> {
     ensure_real_file(journal_path)?;
-    let metadata = fs::symlink_metadata(journal_path)
-        .map_err(|source| io_error(journal_path, source))?;
+    let metadata =
+        fs::symlink_metadata(journal_path).map_err(|source| io_error(journal_path, source))?;
     if metadata.len() != 0 {
         return Ok(false);
     }
