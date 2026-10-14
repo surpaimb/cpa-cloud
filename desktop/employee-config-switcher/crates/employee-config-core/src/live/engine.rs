@@ -2781,7 +2781,7 @@ mod tests {
             .unwrap()
             .path();
         let journal = workspace.join(JOURNAL_FILE);
-        let moved = workspace.join("journal-evidence.jsonl");
+        let moved = root.path().join("journal-evidence.jsonl");
         let checked = checked_root(root.path()).unwrap();
 
         let error = recover_workspace_inner(
