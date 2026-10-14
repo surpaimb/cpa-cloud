@@ -47,6 +47,7 @@ provider or model.
 - `detection.rs`: read-only client location detection with documented home-directory overrides.
 - `gemini.rs`: independently authored Gemini CLI gateway mapping, strict three-file create-only path boundary, non-secret ownership record, and synthetic transaction integration.
 - `grok_build.rs`: independently authored Grok Build Responses-model mapping, strict create-only path boundary, non-secret ownership record, and synthetic transaction integration.
+- `hermes.rs`: independently authored Hermes Agent named custom-provider mapping, strict create-only path boundary, non-secret ownership record, and synthetic transaction integration.
 - `live/engine.rs`: CPA-authored create-only staging, journal, locking and recovery experiment.
 - `opencode.rs`: CPA profile projection, JSONC planning, fail-closed ownership proof, and synthetic-root create-only integration.
 - `plan.rs`: shared redacted file-plan and create-only transaction helpers.
@@ -81,6 +82,10 @@ the CPA write-safety contract.
 - Grok Build official source snapshot `xai-org/grok-build@2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8` (verified 2026-10-14): <https://github.com/xai-org/grok-build/tree/2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8>. The repository is Apache-2.0 licensed; no Grok source code is copied into this workspace.
 - Grok Build custom-model contract at that commit: <https://github.com/xai-org/grok-build/blob/2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md> (accessed 2026-10-14). It defines `~/.grok/config.toml`, `[models].default`, `allowed_models`, `[model.<name>]`, the `responses` backend, `base_url`, inline `api_key`, bearer authentication, and the `reasoning_summary = "none"` compatibility setting used by the synthetic projection. The independently authored fixed-source fixture is `crates/employee-config-core/tests/fixtures/grok-build-2bdd1d6/custom-models-contract.json`.
 - Grok Build shell guide at that commit: <https://github.com/xai-org/grok-build/blob/2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8/crates/codegen/xai-grok-shell/README.md> (accessed 2026-10-14). It records the separate Grok-owned `~/.grok/auth.json` browser-login state. No local `grok` binary was available, so fixed native parsing/transport evidence remains a blocker for real writes and no cross-version compatibility is claimed.
+- Hermes Agent official source snapshot `NousResearch/hermes-agent@0e427d788d253630d38a3a51cd76849e73cd6925` (verified 2026-10-14): <https://github.com/NousResearch/hermes-agent/tree/0e427d788d253630d38a3a51cd76849e73cd6925>. The repository is MIT licensed; no Hermes implementation code is copied into this workspace.
+- Hermes model configuration contract at that commit: <https://github.com/NousResearch/hermes-agent/blob/0e427d788d253630d38a3a51cd76849e73cd6925/website/docs/user-guide/configuring-models.md> (accessed 2026-10-14). It defines `~/.hermes/config.yaml`, the `model` mapping, named `providers`, model candidates, `discover_models`, and inline `api_key` support.
+- Hermes provider contract at that commit: <https://github.com/NousResearch/hermes-agent/blob/0e427d788d253630d38a3a51cd76849e73cd6925/website/docs/integrations/providers.md> (accessed 2026-10-14). It documents `custom:<name>` selection, OpenAI-compatible `/v1/chat/completions`, `api`, `transport = chat_completions`, `default_model`, and the current provider-map field names. The independently authored fixed-source fixture is `crates/employee-config-core/tests/fixtures/hermes-agent-0e427d7/config-contract.json`.
+- Hermes configuration directory contract at that commit: <https://github.com/NousResearch/hermes-agent/blob/0e427d788d253630d38a3a51cd76849e73cd6925/website/docs/user-guide/configuration.md> (accessed 2026-10-14). It records the separate `.env`, `auth.json`, and other Hermes-owned state beneath `~/.hermes`. No local `hermes` binary was available, so fixed native parsing/transport evidence remains a blocker for real writes and no cross-version compatibility is claimed.
 - OpenCode provider configuration: <https://opencode.ai/docs/providers/> (accessed 2026-10-14). It specifies `@ai-sdk/openai-compatible` for an OpenAI-compatible custom provider.
 - Vercel AI SDK OpenAI-compatible provider: <https://ai-sdk.dev/providers/openai-compatible-providers> (accessed 2026-10-14). Its default/chat model uses `/v1/chat/completions`; the distinct completion model is opt-in.
 - Pi release `v1.0.4` resolves to official commit `7c10bd4337495ee613f2224843ecdf349b80d1df`: <https://github.com/earendil-works/pi/releases/tag/v1.0.4> (verified 2026-10-14).
@@ -98,11 +103,11 @@ the CPA write-safety contract.
 - OpenAI Codex app-server Responses provider example: <https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server> (accessed 2026-10-14). It demonstrates `model_provider`, `base_url`, bearer-token environment input, `wire_api = "responses"`, `requires_openai_auth = false`, `supports_websockets = false`, and requests to `/v1/responses`.
 - Fixed local Codex parser fixture: `codex-cli 0.162.0-alpha.17.2` for `windows-x86_64`, executable SHA-256 `d13914ced6c7af174d8d638db938284231227312104b06a25e9608c632a7daec`, validated 2026-10-14 with an isolated temporary `CODEX_HOME` and a loopback-only synthetic provider. `codex doctor --strict-config` reported the config loaded, OpenAI auth not required, and Responses WebSocket disabled; the expected closed-loopback reachability check failed without contacting a production model endpoint. This local fixture is evidence for the exact tested binary only and is not a redistributable artifact or cross-version compatibility claim.
 
-These sources support the current OpenCode `openai-chat`, Claude Code
-`anthropic-messages`, Gemini CLI `gemini-generate-content`, and Codex, Grok
-Build, Pi and OpenClaw `openai-responses` projections. Claude Code, Gemini CLI,
-Codex, Grok Build, Pi and OpenClaw remain synthetic create-only planners rather
-than live-write support; all client adapters remain blocked from real
+These sources support the current OpenCode and Hermes `openai-chat`, Claude
+Code `anthropic-messages`, Gemini CLI `gemini-generate-content`, and Codex,
+Grok Build, Pi and OpenClaw `openai-responses` projections. Claude Code, Gemini
+CLI, Codex, Grok Build, Hermes, Pi and OpenClaw remain synthetic create-only
+planners rather than live-write support; all client adapters remain blocked from real
 configuration writes until fixed native fixtures and the replacement transaction
 contract are recorded and tested.
 

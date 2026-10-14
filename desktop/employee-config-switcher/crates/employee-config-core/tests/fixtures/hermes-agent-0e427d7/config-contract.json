@@ -1,0 +1,18 @@
+{
+  "source_commit": "0e427d788d253630d38a3a51cd76849e73cd6925",
+  "config_path": "~/.hermes/config.yaml",
+  "model_section": ["provider", "default", "base_url", "api_mode"],
+  "provider_map": "providers.<name>",
+  "provider_selector": "custom:<name>",
+  "provider_fields": [
+    "api",
+    "api_key",
+    "transport",
+    "default_model",
+    "models",
+    "discover_models"
+  ],
+  "transport": "chat_completions",
+  "inline_credential_field": "api_key",
+  "separate_state_files": [".env", "auth.json"]
+}

@@ -149,3 +149,21 @@ model IDs to CPA's `validIdentifier` contract or safely escaping Grok glob
 semantics, and proving the result with a fixed native-client fixture. A future
 live caller must derive the canonical Grok parent itself rather than accepting
 an arbitrary parent from its caller.
+
+Hermes Agent now has a separate synthetic-root create-only projection based on
+the fixed official `0e427d788d253630d38a3a51cd76849e73cd6925`
+configuration and provider contracts. It creates only canonical same-parent
+`config.yaml` and `cpa-cloud.ownership.json` files when both are absent,
+registers every employee-visible Chat Completions model under the named
+`cpa-cloud` provider, explicitly selects `custom:cpa-cloud`, disables runtime
+`/models` discovery, and selects the server-declared default. The employee Key
+is confined to the private new config target through the documented inline
+`api_key` field and remains absent from the ownership record, journal, and
+debug output. Existing `.env`, `auth.json`, `SOUL.md`, and all other Hermes
+state remain byte-for-byte untouched, including identity and modification time
+for the tested sentinels. Any existing config or ownership file is a hard
+conflict. No native Hermes binary is available locally, so fixed native
+parsing/transport evidence and the replacement transaction contract remain
+blockers for real writes. A future live caller must derive the configuration
+parent through Hermes' existing `HERMES_HOME`-aware detection rather than
+accepting an arbitrary directory.
