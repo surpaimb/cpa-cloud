@@ -283,10 +283,8 @@ mod platform {
         root_dir
             .sync_all()
             .map_err(|source| io_error(root, source))?;
-        let (workspace, workspace_dir) = create_workspace(
-            transaction_dir.as_raw_fd(),
-            root.join(BACKUP_DIRECTORY),
-        )?;
+        let (workspace, workspace_dir) =
+            create_workspace(transaction_dir.as_raw_fd(), root.join(BACKUP_DIRECTORY))?;
 
         let mut nonce_bytes = [0_u8; NONCE_BYTES];
         SystemRandom::new()
@@ -641,10 +639,7 @@ mod tests {
 
         let receipt =
             prepare_encrypted_backup(root.path(), Path::new("config.json"), &key).unwrap();
-        let workspace = root
-            .path()
-            .join(BACKUP_DIRECTORY)
-            .join(&receipt.workspace);
+        let workspace = root.path().join(BACKUP_DIRECTORY).join(&receipt.workspace);
         let backup = fs::read(workspace.join(BACKUP_FILE)).unwrap();
         let manifest = fs::read(workspace.join(MANIFEST_FILE)).unwrap();
         assert!(!backup
@@ -684,12 +679,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let original = b"old-employee-key-sentinel\n";
         fs::write(root.path().join("config.json"), original).unwrap();
-        let receipt = prepare_encrypted_backup(
-            root.path(),
-            Path::new("config.json"),
-            &fixed_key(0x33),
-        )
-        .unwrap();
+        let receipt =
+            prepare_encrypted_backup(root.path(), Path::new("config.json"), &fixed_key(0x33))
+                .unwrap();
         let workspace = receipt.workspace.clone();
         drop(receipt);
 
@@ -703,7 +695,10 @@ mod tests {
 
         let reloaded = load_encrypted_backup(root.path(), &workspace, &fixed_key(0x33)).unwrap();
         assert_eq!(&*reloaded, original);
-        assert_eq!(fs::read(root.path().join("created.json")).unwrap(), b"new-file");
+        assert_eq!(
+            fs::read(root.path().join("created.json")).unwrap(),
+            b"new-file"
+        );
     }
 
     #[cfg(unix)]
