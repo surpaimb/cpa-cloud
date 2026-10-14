@@ -1827,7 +1827,10 @@ mod tests {
         fs::write(&journal, contents).unwrap();
 
         let error = recover_create_only(root.path()).expect_err("malicious journal must block");
-        assert!(matches!(error, TransactionError::CorruptJournal(_)));
+        assert!(
+            matches!(error, TransactionError::CorruptJournal(_)),
+            "unexpected error: {error:?}"
+        );
         assert_eq!(fs::read(&journal).unwrap(), contents);
         assert!(!root.path().join("tool/config.json").exists());
     }
@@ -2029,7 +2032,10 @@ mod tests {
             Err(TransactionError::InjectedCrash)
         })
         .expect_err("restart is injected after preparation");
-        assert!(matches!(error, TransactionError::InjectedCrash));
+        assert!(
+            matches!(error, TransactionError::InjectedCrash),
+            "unexpected error: {error:?}"
+        );
         assert!(!root.path().join("tool/config.json").exists());
         assert!(fs::read_to_string(&journal)
             .unwrap()
