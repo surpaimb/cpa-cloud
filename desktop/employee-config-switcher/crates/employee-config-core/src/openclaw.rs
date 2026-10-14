@@ -361,10 +361,7 @@ mod tests {
                 ".openclaw/custom.json",
                 ".openclaw/cpa-cloud.ownership.json",
             ),
-            (
-                ".openclaw/openclaw.json",
-                "other/cpa-cloud.ownership.json",
-            ),
+            (".openclaw/openclaw.json", "other/cpa-cloud.ownership.json"),
             (".openclaw/openclaw.json", ".openclaw/ownership.json"),
             (".openclaw/openclaw.json", ".openclaw/openclaw.json"),
         ] {
