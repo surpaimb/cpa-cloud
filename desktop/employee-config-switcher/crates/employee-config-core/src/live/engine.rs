@@ -217,6 +217,9 @@ fn apply_create_only_inner(
                 },
             )?;
         }
+        // Make the journal directory entry and the complete non-secret stage
+        // manifest durable before any secret-bearing stage file is created.
+        sync_directory(&workspace).map_err(|source| io_error(&workspace, source))?;
         if fault == FaultPoint::AfterManifest {
             return Err(TransactionError::InjectedCrash);
         }
@@ -415,9 +418,10 @@ fn checked_root(root: &Path) -> Result<PathBuf, TransactionError> {
             .map_err(|source| io_error(root, source))?
             .join(root)
     };
-    ensure_no_links(&absolute)?;
     ensure_real_directory(&absolute)?;
-    fs::canonicalize(&absolute).map_err(|source| io_error(&absolute, source))
+    let canonical = fs::canonicalize(&absolute).map_err(|source| io_error(&absolute, source))?;
+    ensure_no_links(&canonical)?;
+    Ok(canonical)
 }
 
 fn validate_relative(relative: &Path) -> Result<(), TransactionError> {
