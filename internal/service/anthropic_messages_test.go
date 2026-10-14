@@ -178,6 +178,89 @@ func TestAnthropicMessagesRequestSizeContract(t *testing.T) {
 	}
 }
 
+type repeatedByteReader struct {
+	remaining int64
+	value     byte
+}
+
+func (r *repeatedByteReader) Read(buffer []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	count := len(buffer)
+	if int64(count) > r.remaining {
+		count = int(r.remaining)
+	}
+	for index := 0; index < count; index++ {
+		buffer[index] = r.value
+	}
+	r.remaining -= int64(count)
+	return count, nil
+}
+
+func TestAnthropicMessageEndpointsEnforceRequestSizeBeforeUpstream(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	fixture := newAnthropicFixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		upstreamCalls.Add(1)
+	}))
+
+	for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens"} {
+		for _, test := range []struct {
+			name       string
+			size       int64
+			wantStatus int
+			wantType   string
+		}{
+			{name: "exact 32 MiB passes size gate", size: anthropicMaxRequest, wantStatus: http.StatusBadRequest, wantType: "invalid_request_error"},
+			{name: "one byte over fails with 413", size: anthropicMaxRequest + 1, wantStatus: http.StatusRequestEntityTooLarge, wantType: "request_too_large"},
+		} {
+			t.Run(path+"/"+test.name, func(t *testing.T) {
+				request, err := http.NewRequest(http.MethodPost, fixture.server.URL+path, io.NopCloser(&repeatedByteReader{remaining: test.size, value: 'x'}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.ContentLength = test.size
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Anthropic-Version", "2023-06-01")
+				response, err := http.DefaultClient.Do(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				payload := readBody(response)
+				if response.StatusCode != test.wantStatus {
+					t.Fatalf("status=%d body=%s", response.StatusCode, payload)
+				}
+				var envelope struct {
+					Type  string `json:"type"`
+					Error struct {
+						Type string `json:"type"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal([]byte(payload), &envelope); err != nil {
+					t.Fatal(err)
+				}
+				if envelope.Type != "error" || envelope.Error.Type != test.wantType {
+					t.Fatalf("unexpected Anthropic error: %s", payload)
+				}
+			})
+		}
+	}
+
+	if calls := upstreamCalls.Load(); calls != 0 {
+		t.Fatalf("upstream calls=%d, want 0", calls)
+	}
+	var modelRequests, accountingAttempts int
+	if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM model_requests`).Scan(&modelRequests); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM accounting_attempts`).Scan(&accountingAttempts); err != nil {
+		t.Fatal(err)
+	}
+	if modelRequests != 0 || accountingAttempts != 0 {
+		t.Fatalf("model_requests=%d accounting_attempts=%d, want 0/0", modelRequests, accountingAttempts)
+	}
+}
+
 func TestAnthropicMessagesPreservesNativePayloadAndCountsTokens(t *testing.T) {
 	var mu sync.Mutex
 	paths := make([]string, 0, 2)

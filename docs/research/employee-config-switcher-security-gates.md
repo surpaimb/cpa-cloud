@@ -205,3 +205,11 @@ other model routes at their existing lower limit. Complete fixed-client
 request/stream/tool/cancellation acceptance and the Claude Desktop
 configuration transaction are still unresolved, so this preview does not
 generate a third-party profile or claim ten-tool writable delivery.
+The endpoint-level regression exercises the exact 32 MiB boundary and one
+byte above it on both routes, and requires zero upstream calls, model-request
+rows, and accounting-attempt rows for those malformed synthetic bodies. This
+is size/error-shape evidence only: governance proof still uses the existing
+smaller bounded request copy, so no general acceptance guarantee is inferred
+for every otherwise-valid request below 32 MiB. Because body parsing currently
+precedes authentication, production readiness also requires an explicit
+concurrency/memory admission bound for unauthenticated large requests.
