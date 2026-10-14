@@ -70,3 +70,12 @@ Pi-owned `auth.json` and `settings.json` untouched, so it registers a provider
 without claiming to select or activate a default model. Existing Pi
 `models.json` files remain blocked until the replacement transaction contract
 above is implemented.
+
+OpenClaw now has the same synthetic-root boundary. Its planner follows the
+fixed signed `v2026.9.8` public custom-provider schema and a narrowly adapted
+CC Switch MIT provider shape. When both files are absent, it creates
+`openclaw.json` and a non-secret ownership record in one create-only
+transaction, registers the CPA provider as `openai-responses`, and selects the
+server-declared default model through `agents.defaults.model.primary`. Any
+existing OpenClaw config remains a hard conflict until the replacement contract
+above is implemented and validated against a fixed native client fixture.

@@ -31,6 +31,7 @@ no upstream transaction or recovery implementation was copied or translated.
 | Destination | Upstream path | Git blob OID | Upstream SHA-256 | Retained boundary |
 | --- | --- | --- | --- | --- |
 | `crates/employee-config-core/src/pi.rs` | `src-tauri/src/pi_config/mod.rs` | `947e1b1d43eb18ddc4d4b31d72a6c2fa161a32bc` | `f660fa5678d990dd3d14e0fcca546ec3302f029daa9b8f1fac33717aabe0e25d` | Pi `models.json.providers.<id>` node shape and the rule that `auth.json`/`settings.json` remain Pi-owned |
+| `crates/employee-config-core/src/openclaw.rs` | `src-tauri/src/openclaw_config.rs` | `976fcd1e5214f0c7b2b69f9ab3c2a155ce8c60e8` | `a02b5bf9536ac1fc28e58634989180924dcf945c0f709fe824738ec45874d6d3` | OpenClaw `models.providers.<id>` node shape and `agents.defaults.model.primary` selection path |
 
 The Pi file does not adopt CC Switch's writer, lock, revision, backup, settings,
 or authentication code. CPA protocol selection, URL normalization, ownership
@@ -46,6 +47,7 @@ provider or model.
 - `opencode.rs`: CPA profile projection, JSONC planning, fail-closed ownership proof, and synthetic-root create-only integration.
 - `plan.rs`: shared redacted file-plan and create-only transaction helpers.
 - `pi.rs`: CPA profile mapping and ownership/transaction integration around the narrowly adapted Pi provider schema.
+- `openclaw.rs`: CPA profile mapping, validation, ownership, and transaction integration around the narrowly adapted OpenClaw provider schema.
 - Tauri command shell and the React interface.
 
 The app icon is a newly generated CPA brand asset created for this client with
@@ -67,10 +69,13 @@ the CPA write-safety contract.
 
 - OpenCode provider configuration: <https://opencode.ai/docs/providers/> (accessed 2026-10-14). It specifies `@ai-sdk/openai-compatible` for an OpenAI-compatible custom provider.
 - Vercel AI SDK OpenAI-compatible provider: <https://ai-sdk.dev/providers/openai-compatible-providers> (accessed 2026-10-14). Its default/chat model uses `/v1/chat/completions`; the distinct completion model is opt-in.
+- OpenClaw signed tag `v2026.9.8` resolves to commit `fc23bc864e4553c2d215e479eeec47b67a0bf943`: <https://github.com/openclaw/openclaw/releases/tag/v2026.9.8> (verified 2026-10-14).
+- OpenClaw custom-provider configuration at that commit: <https://github.com/openclaw/openclaw/blob/fc23bc864e4553c2d215e479eeec47b67a0bf943/docs/concepts/model-providers/custom-providers.md> (accessed 2026-10-14). It defines `models.providers`, `baseUrl`, `apiKey`, `api`, model entries, and `provider/model` selection.
 
-These sources support the current OpenCode `openai-chat` projection. Other
-client adapters remain blocked until their own public protocol contracts and
-native fixtures are recorded and tested.
+These sources support the current OpenCode `openai-chat` and OpenClaw
+`openai-responses` projections. Other client adapters remain blocked until
+their own public protocol contracts and native fixtures are recorded and
+tested.
 
 ## Rust dependency resolution
 
