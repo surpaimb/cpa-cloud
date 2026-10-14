@@ -55,7 +55,7 @@ Atomicity is per tool. A failed tool must not leave a half-configured file set. 
 - Grok Build uses `[models] default` plus `[model.<id>]` and the required `model`, `name`, `api_backend`, and `context_window` fields.
 - Hermes uses the singular selected `model` and its native map-shaped `models` declaration.
 - Codex custom-provider authentication must be proven end to end. Merely declaring `env_key = "OPENAI_API_KEY"` while writing only `auth.json` is insufficient.
-- Protocols are fixed by client contract, never inferred from model names: Claude clients use `anthropic-messages`; Codex, Grok Build, OpenCode, OpenClaw, Pi, and MiniMax Code use `openai-responses`; Gemini CLI uses `gemini-generate-content`; Hermes uses `openai-chat`.
+- Protocols are fixed by client contract, never inferred from model names: Claude clients use `anthropic-messages`; Codex, Grok Build, OpenClaw, Pi, and MiniMax Code use `openai-responses`; OpenCode's `@ai-sdk/openai-compatible` provider uses `openai-chat`; Gemini CLI uses `gemini-generate-content`; Hermes uses `openai-chat`.
 
 ## Dependency and build plan
 

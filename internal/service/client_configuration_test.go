@@ -112,29 +112,51 @@ func TestClientConfigurationRequiresOneDispatchableRouteWitness(t *testing.T) {
 	}
 	fixture.app.notifyAccountPoolChanged()
 
-	req, _ := http.NewRequest(http.MethodGet, fixture.server.URL+"/v1/client-configuration", nil)
-	req.Header.Set("Authorization", "Bearer "+fixture.key.Key)
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	fetch := func() clientConfigurationResponse {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, fixture.server.URL+"/v1/client-configuration", nil)
+		req.Header.Set("Authorization", "Bearer "+fixture.key.Key)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var got clientConfigurationResponse
+		if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d response=%+v", res.StatusCode, got)
+		}
+		return got
 	}
-	defer res.Body.Close()
-	var got clientConfigurationResponse
-	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
-		t.Fatal(err)
-	}
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d response=%+v", res.StatusCode, got)
-	}
-	for _, item := range got.Protocols {
+
+	for _, item := range fetch().Protocols {
 		switch item.Protocol {
 		case string(keypolicy.ProtocolOpenAIChat):
 			if len(item.Candidates) != 0 {
-				t.Fatalf("chat candidates=%v; exact wire and selected group came from different rows", item.Candidates)
+				t.Fatalf("chat candidates=%v; mixed-wire pool is not dispatchable", item.Candidates)
+			}
+		case string(keypolicy.ProtocolOpenAIResponses):
+			if len(item.Candidates) != 0 {
+				t.Fatalf("responses candidates=%v; runtime rejects the whole mixed-wire pool", item.Candidates)
+			}
+		}
+	}
+
+	if _, err := fixture.app.store.db.Exec(`UPDATE model_account_pool_routes SET wire_protocol=?,channel_id=? WHERE model_id='wire-model'`, string(wireProtocolResponses), "channel-selected"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.app.notifyAccountPoolChanged()
+	for _, item := range fetch().Protocols {
+		switch item.Protocol {
+		case string(keypolicy.ProtocolOpenAIChat):
+			if len(item.Candidates) != 0 {
+				t.Fatalf("chat candidates=%v after uniform responses update", item.Candidates)
 			}
 		case string(keypolicy.ProtocolOpenAIResponses):
 			if len(item.Candidates) != 1 || item.Candidates[0] != "wire-model" {
-				t.Fatalf("responses candidates=%v", item.Candidates)
+				t.Fatalf("responses candidates=%v for dispatchable uniform pool", item.Candidates)
 			}
 		}
 	}

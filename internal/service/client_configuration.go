@@ -103,10 +103,10 @@ func (a *App) clientConfigurationModels(r *http.Request, auth employeeAuth, prot
 }
 
 // clientConfigurationRouteWitnessSQL requires one route row to satisfy every
-// route-local condition for the requested client protocol. Keeping wire,
-// provider eligibility, recovery state and selected account group in the same
-// EXISTS prevents different pool members from jointly exposing a model that no
-// real dispatch can select.
+// route-local condition for the requested client protocol and requires all
+// active rows in the pool to agree with its wire and provider. The runtime
+// rejects a whole pool before group filtering when either value is mixed, so a
+// merely eligible row is not enough to advertise a dispatchable model.
 func (a *App) clientConfigurationRouteWitnessSQL(modelAlias, upstreamAlias, wire string, geminiOnly, selectedGroup bool, keyID string) (string, []any) {
 	if a.accountPool == nil {
 		if selectedGroup {
@@ -127,7 +127,15 @@ func (a *App) clientConfigurationRouteWitnessSQL(modelAlias, upstreamAlias, wire
 			  AND discovery_group.key_id=?
 			  AND ` + a.eligibleUpstreamSQL("discovery_upstream", geminiOnly) + `
 			  AND NOT EXISTS(SELECT 1 FROM account_recovery_states discovery_recovery WHERE discovery_recovery.account_id=discovery_upstream.id)
-		)`, []any{wire, keyID}
+			  AND NOT EXISTS(
+				SELECT 1
+				FROM model_account_pool_routes inconsistent_route
+				JOIN upstreams inconsistent_upstream ON inconsistent_upstream.id=inconsistent_route.upstream_id
+				WHERE inconsistent_route.model_id=` + modelAlias + `.id
+				  AND inconsistent_upstream.archived=0
+				  AND (inconsistent_route.wire_protocol<>? OR inconsistent_upstream.provider_kind<>discovery_upstream.provider_kind)
+			  )
+		)`, []any{wire, keyID, wire}
 	}
 	return `(
 		(NOT EXISTS(SELECT 1 FROM model_account_pool_configs discovery_pool WHERE discovery_pool.model_id=` + modelAlias + `.id)
@@ -141,6 +149,14 @@ func (a *App) clientConfigurationRouteWitnessSQL(modelAlias, upstreamAlias, wire
 			  AND discovery_route.wire_protocol=?
 			  AND ` + a.eligibleUpstreamSQL("discovery_upstream", geminiOnly) + `
 			  AND NOT EXISTS(SELECT 1 FROM account_recovery_states discovery_recovery WHERE discovery_recovery.account_id=discovery_upstream.id)
+			  AND NOT EXISTS(
+				SELECT 1
+				FROM model_account_pool_routes inconsistent_route
+				JOIN upstreams inconsistent_upstream ON inconsistent_upstream.id=inconsistent_route.upstream_id
+				WHERE inconsistent_route.model_id=` + modelAlias + `.id
+				  AND inconsistent_upstream.archived=0
+				  AND (inconsistent_route.wire_protocol<>? OR inconsistent_upstream.provider_kind<>discovery_upstream.provider_kind)
+			  )
 		)
-	)`, []any{wire, wire}
+	)`, []any{wire, wire, wire}
 }
