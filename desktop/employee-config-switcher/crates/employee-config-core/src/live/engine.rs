@@ -1033,7 +1033,7 @@ where
     for (index, planned) in &state.files {
         let target = checked_target(root, &planned.target)?;
         let relative_parent = planned.target.parent().unwrap_or_else(|| Path::new(""));
-        let target_chain = open_directory_chain(root, relative_parent)?;
+        let target_chain = open_directory_chain_from(&recovery_chain[0], relative_parent)?;
         let parent = target_chain.last().expect("root directory is retained");
         if parent.identity != planned.parent_identity {
             return Err(TransactionError::RecoveryConflict(parent.path.clone()));
@@ -1105,7 +1105,7 @@ where
     for planned in sealed_state.files.values() {
         let target = checked_target(root, &planned.target)?;
         let relative_parent = planned.target.parent().unwrap_or_else(|| Path::new(""));
-        let target_chain = open_directory_chain(root, relative_parent)?;
+        let target_chain = open_directory_chain_from(&recovery_chain[0], relative_parent)?;
         let parent = target_chain.last().expect("root directory is retained");
         if parent.identity != planned.parent_identity {
             return Err(TransactionError::RecoveryConflict(parent.path.clone()));
@@ -1139,7 +1139,7 @@ where
     for (index, planned) in &sealed_state.files {
         let target = checked_target(root, &planned.target)?;
         let relative_parent = planned.target.parent().unwrap_or_else(|| Path::new(""));
-        let target_chain = open_directory_chain(root, relative_parent)?;
+        let target_chain = open_directory_chain_from(&recovery_chain[0], relative_parent)?;
         let parent = target_chain.last().expect("root directory is retained");
         if parent.identity != planned.parent_identity {
             return Err(TransactionError::RecoveryConflict(parent.path.clone()));
@@ -1799,16 +1799,35 @@ impl StableDirectory {
         }
         Ok(())
     }
+
+    fn try_clone(&self) -> Result<Self, TransactionError> {
+        Ok(Self {
+            path: self.path.clone(),
+            file: self
+                .file
+                .try_clone()
+                .map_err(|source| io_error(&self.path, source))?,
+            identity: self.identity,
+        })
+    }
 }
 
 fn open_directory_chain(
     root: &Path,
     relative: &Path,
 ) -> Result<Vec<StableDirectory>, TransactionError> {
+    let root = StableDirectory::open(root)?;
+    open_directory_chain_from(&root, relative)
+}
+
+fn open_directory_chain_from(
+    root: &StableDirectory,
+    relative: &Path,
+) -> Result<Vec<StableDirectory>, TransactionError> {
     if !relative.as_os_str().is_empty() {
         validate_relative(relative)?;
     }
-    let mut chain = vec![StableDirectory::open(root)?];
+    let mut chain = vec![root.try_clone()?];
     let root_volume = chain[0].identity.volume;
     for component in relative.components() {
         let Component::Normal(name) = component else {
