@@ -1922,11 +1922,7 @@ mod tests {
             },
             0
         );
-        let wide: Vec<u16> = workspace
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
+        let wide: Vec<u16> = workspace.as_os_str().encode_wide().chain(Some(0)).collect();
         let applied = unsafe {
             SetFileSecurityW(
                 wide.as_ptr(),
