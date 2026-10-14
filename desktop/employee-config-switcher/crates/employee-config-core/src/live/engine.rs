@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -114,6 +114,7 @@ enum JournalEvent {
     Verified {
         index: usize,
     },
+    Prepared,
     Complete,
 }
 
@@ -133,7 +134,14 @@ struct JournalState {
     begun: bool,
     files: BTreeMap<usize, PlannedFile>,
     complete: bool,
+    prepared: bool,
     events: usize,
+}
+
+#[derive(Debug)]
+struct JournalSnapshot {
+    identity: FileIdentity,
+    bytes: Vec<u8>,
 }
 
 struct TransactionGuard {
@@ -617,6 +625,9 @@ fn append_event(
         return Err(TransactionError::TooLarge(path.to_path_buf()));
     }
     journal
+        .seek(SeekFrom::End(0))
+        .map_err(|source| io_error(path, source))?;
+    journal
         .write_all(&encoded)
         .map_err(|source| io_error(path, source))?;
     journal
@@ -641,33 +652,73 @@ fn journal_event_len(path: &Path, event: &JournalEvent) -> Result<usize, Transac
 fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
     ensure_real_file(path)?;
     let file = File::open(path).map_err(|source| io_error(path, source))?;
-    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
-    if metadata.len() > MAX_JOURNAL_BYTES as u64 {
+    let (state, _) = read_journal_from_file(path, &file)?;
+    Ok(state)
+}
+
+fn read_journal_from_file(
+    path: &Path,
+    file: &File,
+) -> Result<(JournalState, JournalSnapshot), TransactionError> {
+    let identity = file_identity(file, path)?;
+    if identity_for_path(path)? != identity {
         return Err(TransactionError::CorruptJournal(path.to_path_buf()));
     }
-    let mut reader = BufReader::new(file).take(MAX_JOURNAL_BYTES as u64 + 1);
+    let bytes = read_stable_journal_bytes(path, file)?;
+    let state = parse_journal(path, &bytes)?;
+    Ok((state, JournalSnapshot { identity, bytes }))
+}
+
+fn read_stable_journal_bytes(path: &Path, file: &File) -> Result<Vec<u8>, TransactionError> {
+    let first = read_journal_bytes(path, file)?;
+    let second = read_journal_bytes(path, file)?;
+    if first != second {
+        return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+    }
+    Ok(second)
+}
+
+fn read_journal_bytes(path: &Path, file: &File) -> Result<Vec<u8>, TransactionError> {
+    let before = file.metadata().map_err(|source| io_error(path, source))?;
+    if before.len() > MAX_JOURNAL_BYTES as u64 {
+        return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+    }
+    let mut reader = file.try_clone().map_err(|source| io_error(path, source))?;
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|source| io_error(path, source))?;
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    reader
+        .take(MAX_JOURNAL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| io_error(path, source))?;
+    let after = file.metadata().map_err(|source| io_error(path, source))?;
+    if bytes.len() > MAX_JOURNAL_BYTES
+        || before.len() != after.len()
+        || after.len() != bytes.len() as u64
+    {
+        return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+    }
+    Ok(bytes)
+}
+
+fn parse_journal(path: &Path, bytes: &[u8]) -> Result<JournalState, TransactionError> {
     let mut lines = Vec::new();
-    let mut total_bytes = 0usize;
-    loop {
-        let mut line = Vec::new();
-        let bytes_read = reader
-            .read_until(b'\n', &mut line)
-            .map_err(|source| io_error(path, source))?;
-        if bytes_read == 0 {
-            break;
-        }
-        total_bytes = total_bytes.saturating_add(bytes_read);
-        if total_bytes > MAX_JOURNAL_BYTES
-            || line.len() > MAX_JOURNAL_LINE_BYTES
-            || line.last() != Some(&b'\n')
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let Some(relative_end) = bytes[offset..].iter().position(|byte| *byte == b'\n') else {
+            return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+        };
+        let end = offset + relative_end;
+        let line = &bytes[offset..end];
+        if line.is_empty()
+            || line.len() + 1 > MAX_JOURNAL_LINE_BYTES
+            || lines.len() == MAX_JOURNAL_EVENTS
         {
             return Err(TransactionError::CorruptJournal(path.to_path_buf()));
         }
-        line.pop();
-        if line.is_empty() || lines.len() == MAX_JOURNAL_EVENTS {
-            return Err(TransactionError::CorruptJournal(path.to_path_buf()));
-        }
         lines.push(line);
+        offset = end + 1;
     }
 
     let event_count = lines.len();
@@ -680,7 +731,7 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
             .map_err(|_| TransactionError::CorruptJournal(path.to_path_buf()))?;
         match event {
             JournalEvent::Begin => {
-                if state.begun || state.complete || !state.files.is_empty() {
+                if state.begun || state.prepared || state.complete || !state.files.is_empty() {
                     return Err(TransactionError::CorruptJournal(path.to_path_buf()));
                 }
                 state.begun = true;
@@ -698,6 +749,7 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
                 let expected_stage = format!("stage-{index:04}.bin");
                 validate_relative(&target)?;
                 if !state.begun
+                    || state.prepared
                     || state.complete
                     || index >= MAX_TRANSACTION_FILES
                     || index != state.files.len()
@@ -731,7 +783,7 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
                 index,
                 stage_identity,
             } => {
-                if !state.begun || state.complete {
+                if !state.begun || state.prepared || state.complete {
                     return Err(TransactionError::CorruptJournal(path.to_path_buf()));
                 }
                 let planned = state
@@ -748,7 +800,7 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
                 index,
                 target_identity,
             } => {
-                if !state.begun || state.complete {
+                if !state.begun || state.prepared || state.complete {
                     return Err(TransactionError::CorruptJournal(path.to_path_buf()));
                 }
                 let planned = state
@@ -762,7 +814,7 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
                 }
             }
             JournalEvent::Verified { index } => {
-                if !state.begun || state.complete {
+                if !state.begun || state.prepared || state.complete {
                     return Err(TransactionError::CorruptJournal(path.to_path_buf()));
                 }
                 let planned = state
@@ -774,15 +826,20 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
                 }
                 planned.verified = true;
             }
-            JournalEvent::Complete => {
+            terminal @ (JournalEvent::Prepared | JournalEvent::Complete) => {
                 if !state.begun
+                    || state.prepared
                     || state.complete
                     || state.files.is_empty()
                     || state.files.values().any(|planned| !planned.verified)
                 {
                     return Err(TransactionError::CorruptJournal(path.to_path_buf()));
                 }
-                state.complete = true;
+                match terminal {
+                    JournalEvent::Prepared => state.prepared = true,
+                    JournalEvent::Complete => state.complete = true,
+                    _ => unreachable!(),
+                }
             }
         }
     }
@@ -792,9 +849,34 @@ fn read_journal(path: &Path) -> Result<JournalState, TransactionError> {
     Ok(state)
 }
 
+fn validate_journal_snapshot(
+    path: &Path,
+    journal: &File,
+    snapshot: &JournalSnapshot,
+) -> Result<(), TransactionError> {
+    if file_identity(journal, path)? != snapshot.identity
+        || identity_for_path(path)? != snapshot.identity
+        || read_stable_journal_bytes(path, journal)? != snapshot.bytes
+    {
+        return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+    }
+    Ok(())
+}
+
 /// Returns `true` when the transaction is or becomes committed, `false` when
 /// no target had been published and incomplete staging was safely abandoned.
 fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionError> {
+    recover_workspace_inner(root, workspace, |_| Ok(()))
+}
+
+fn recover_workspace_inner<F>(
+    root: &Path,
+    workspace: &Path,
+    mut before_publish: F,
+) -> Result<bool, TransactionError>
+where
+    F: FnMut(&Path) -> Result<(), TransactionError>,
+{
     validate_private_recovery_directory(workspace)?;
     let journal_path = workspace.join(JOURNAL_FILE);
     if !path_exists(&journal_path)? {
@@ -812,7 +894,13 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
         return Ok(false);
     }
 
-    let state = read_journal(&journal_path)?;
+    let mut journal = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&journal_path)
+        .map_err(|source| io_error(&journal_path, source))?;
+    enforce_private_permissions(&journal_path, &journal)?;
+    let (state, _) = read_journal_from_file(&journal_path, &journal)?;
     if state.complete {
         cleanup_workspace(workspace, &state)?;
         return Ok(true);
@@ -842,13 +930,13 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
         return Ok(false);
     }
 
-    let mut journal = OpenOptions::new()
-        .read(true)
-        .append(true)
-        .open(&journal_path)
-        .map_err(|source| io_error(&journal_path, source))?;
-    enforce_private_permissions(&journal_path, &journal)?;
-    validate_recovery_journal_capacity(&journal_path, &journal, &state)?;
+    if !state.prepared {
+        validate_recovery_journal_capacity(&journal_path, &journal, &state)?;
+    }
+
+    // Verify every stage, parent and already-published target before making
+    // the recovery decision durable. The hard link preserves the stage file's
+    // identity, so the terminal identities can be journaled before publication.
     for (index, planned) in &state.files {
         let target = checked_target(root, &planned.target)?;
         let parent = target
@@ -860,12 +948,7 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
         let stage_identity = verify_stage(workspace, planned)?;
 
         let target_identity = match fs::symlink_metadata(&target) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::hard_link(workspace.join(&planned.stage), &target)
-                    .map_err(|source| io_error(&target, source))?;
-                sync_directory(parent).map_err(|source| io_error(parent, source))?;
-                identity_for_path(&target)?
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => stage_identity,
             Err(source) => return Err(io_error(&target, source)),
             Ok(_) => {
                 ensure_real_file(&target)?;
@@ -879,7 +962,7 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
             if recorded != target_identity {
                 return Err(TransactionError::RecoveryConflict(target));
             }
-        } else {
+        } else if !state.prepared {
             append_event(
                 &mut journal,
                 &journal_path,
@@ -889,8 +972,10 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
                 },
             )?;
         }
-        verify_target(&target, planned)?;
-        if !planned.verified {
+        if path_exists(&target)? {
+            verify_target(&target, planned)?;
+        }
+        if !planned.verified && !state.prepared {
             append_event(
                 &mut journal,
                 &journal_path,
@@ -898,10 +983,103 @@ fn recover_workspace(root: &Path, workspace: &Path) -> Result<bool, TransactionE
             )?;
         }
     }
-    append_event(&mut journal, &journal_path, &JournalEvent::Complete)?;
+
+    if !state.prepared {
+        append_event(&mut journal, &journal_path, &JournalEvent::Prepared)?;
+    }
     sync_directory(workspace).map_err(|source| io_error(workspace, source))?;
-    cleanup_workspace(workspace, &state)?;
+    let (sealed_state, sealed_snapshot) = read_journal_from_file(&journal_path, &journal)?;
+    if !sealed_state.prepared || sealed_state.complete {
+        return Err(TransactionError::CorruptJournal(journal_path));
+    }
+
+    // Revalidate the state parsed after sealing rather than trusting the
+    // earlier parse. A same-length mutation between the two reads must not be
+    // able to substitute a target, digest or recorded identity.
+    for planned in sealed_state.files.values() {
+        let target = checked_target(root, &planned.target)?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| TransactionError::InvalidTarget(planned.target.clone()))?;
+        if identity_for_path(parent)? != planned.parent_identity {
+            return Err(TransactionError::RecoveryConflict(parent.to_path_buf()));
+        }
+        let recorded = planned
+            .target_identity
+            .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?;
+        if path_exists(&target)? {
+            verify_target(&target, planned)?;
+            if identity_for_path(&target)? != recorded {
+                return Err(TransactionError::RecoveryConflict(target));
+            }
+        } else if verify_stage(workspace, planned)? != recorded {
+            return Err(TransactionError::RecoveryConflict(
+                workspace.join(&planned.stage),
+            ));
+        }
+    }
+
+    // No journal append is allowed after the first target publication. Before
+    // every missing target is linked, prove that the held journal and its path
+    // still identify the same, byte-for-byte sealed record. Re-check after
+    // publication as well so observed concurrent mutation preserves evidence.
+    for planned in sealed_state.files.values() {
+        let target = checked_target(root, &planned.target)?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| TransactionError::InvalidTarget(planned.target.clone()))?;
+        if !path_exists(&target)? {
+            before_publish(&journal_path)?;
+            validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
+            let recorded = planned
+                .target_identity
+                .ok_or_else(|| TransactionError::CorruptJournal(journal_path.clone()))?;
+            if verify_stage(workspace, planned)? != recorded {
+                return Err(TransactionError::RecoveryConflict(
+                    workspace.join(&planned.stage),
+                ));
+            }
+            fs::hard_link(workspace.join(&planned.stage), &target)
+                .map_err(|source| io_error(&target, source))?;
+            sync_directory(parent).map_err(|source| io_error(parent, source))?;
+        }
+        verify_target(&target, planned)?;
+        validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
+    }
+    validate_journal_snapshot(&journal_path, &journal, &sealed_snapshot)?;
+    replace_prepared_with_complete(&journal_path, &mut journal, &sealed_snapshot)?;
+    let (complete_state, _) = read_journal_from_file(&journal_path, &journal)?;
+    if !complete_state.complete || complete_state.prepared {
+        return Err(TransactionError::CorruptJournal(journal_path));
+    }
+    cleanup_workspace(workspace, &complete_state)?;
     Ok(true)
+}
+
+fn replace_prepared_with_complete(
+    path: &Path,
+    journal: &mut File,
+    snapshot: &JournalSnapshot,
+) -> Result<(), TransactionError> {
+    validate_journal_snapshot(path, journal, snapshot)?;
+    let prepared = encode_journal_event(path, &JournalEvent::Prepared)?;
+    let complete = encode_journal_event(path, &JournalEvent::Complete)?;
+    if prepared.len() != complete.len()
+        || !snapshot.bytes.ends_with(&[prepared.as_slice(), b"\n"].concat())
+    {
+        return Err(TransactionError::CorruptJournal(path.to_path_buf()));
+    }
+    let offset = snapshot.bytes.len() - prepared.len() - 1;
+    journal
+        .seek(SeekFrom::Start(offset as u64))
+        .map_err(|source| io_error(path, source))?;
+    journal
+        .write_all(&complete)
+        .map_err(|source| io_error(path, source))?;
+    journal
+        .write_all(b"\n")
+        .map_err(|source| io_error(path, source))?;
+    journal.sync_all().map_err(|source| io_error(path, source))
 }
 
 fn validate_recovery_journal_capacity(
@@ -935,7 +1113,7 @@ fn validate_recovery_journal_capacity(
         }
     }
     additional_bytes =
-        additional_bytes.saturating_add(journal_event_len(path, &JournalEvent::Complete)?);
+        additional_bytes.saturating_add(journal_event_len(path, &JournalEvent::Prepared)?);
     let current_bytes = journal
         .metadata()
         .map_err(|source| io_error(path, source))?
@@ -1790,6 +1968,80 @@ mod tests {
         assert_eq!(contents.len(), MAX_JOURNAL_BYTES - 1);
 
         assert_corrupt_journal_is_preserved(&contents);
+    }
+
+    #[test]
+    fn concurrent_journal_growth_after_sealing_blocks_first_publication() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterPlanning,
+        )
+        .expect_err("fault is injected");
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let journal = workspace.join(JOURNAL_FILE);
+
+        let error = recover_workspace_inner(root.path(), &workspace, |path| {
+            let mut external = OpenOptions::new()
+                .append(true)
+                .open(path)
+                .map_err(|source| io_error(path, source))?;
+            external
+                .write_all(b" ")
+                .map_err(|source| io_error(path, source))?;
+            external.sync_all().map_err(|source| io_error(path, source))
+        })
+        .expect_err("concurrent journal growth must block publication");
+
+        assert!(matches!(error, TransactionError::CorruptJournal(_)));
+        assert!(!root.path().join("tool/config.json").exists());
+        assert_eq!(fs::read(&journal).unwrap().last(), Some(&b' '));
+    }
+
+    #[test]
+    fn prepared_recovery_decision_rolls_forward_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterPlanning,
+        )
+        .expect_err("fault is injected");
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let journal = workspace.join(JOURNAL_FILE);
+
+        let error = recover_workspace_inner(root.path(), &workspace, |_| {
+            Err(TransactionError::InjectedCrash)
+        })
+        .expect_err("restart is injected after preparation");
+        assert!(matches!(error, TransactionError::InjectedCrash));
+        assert!(!root.path().join("tool/config.json").exists());
+        assert!(fs::read_to_string(&journal).unwrap().contains("\"prepared\""));
+
+        recover_create_only(root.path()).expect("prepared recovery must roll forward");
+        assert_eq!(
+            fs::read_to_string(root.path().join("tool/config.json")).unwrap(),
+            "synthetic-key"
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[test]

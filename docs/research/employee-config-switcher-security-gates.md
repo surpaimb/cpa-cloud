@@ -67,12 +67,26 @@ engine-generated index, and SHA-256 digests must be exactly 64 hexadecimal
 characters. Unknown fields are rejected at both the event and nested identity
 levels. Before creating a workspace, the writer budgets the entire worst-case
 journal; before recovery publishes any target, it reserves space and event slots
-for every missing `Published` and `Verified` event plus `Complete`. Oversized,
+for every missing `Published` and `Verified` event plus `Prepared`. Oversized,
 unterminated, excessive, sparse, padded or malformed metadata therefore blocks
 recovery before any target publication and remains untouched for operator
 inspection. Native-independent negative tests cover the file-count, total-size,
 line-size, event-count, field-size, JSON-escaping and post-publication append-
 budget boundaries.
+
+Recovery binds parsing and subsequent writes to one open journal handle. It
+verifies every stage, parent and existing target first, then durably appends all
+remaining `Published` and `Verified` records followed by a fixed-size `Prepared`
+roll-forward marker before creating a missing target. The engine reads the
+bounded journal twice to obtain a stable byte snapshot and, immediately before
+each first publication and again afterward, checks the held file identity, the
+path identity, length and exact bytes. Once every target verifies, `Prepared` is
+replaced in place by the same-length `Complete` marker and flushed, retaining
+manifest-last completion without a capacity-dependent append after publication.
+Observed concurrent growth or replacement blocks publication or cleanup and
+preserves the workspace. A negative test injects a non-cooperating append after
+preparation and proves that the first target remains absent. This does not
+replace the handle-relative target and workspace traversal still required below.
 
 Before scanning recovery state, the engine now requires the transaction root
 and each workspace to retain their stable file identity and private directory
