@@ -32,3 +32,24 @@ platform.
 
 The current OpenCode planner implements gate 8 at planning time and preserves
 JSONC source through the fixed CC Switch parser. It does not publish bytes.
+
+## Create-only transaction slice
+
+The native branch now contains a deliberately narrow transaction primitive for
+synthetic-root testing. It can create a file only when the target and every
+target in the same transaction are absent. Existing client files are a hard
+collision, so this slice never persists a plaintext backup of a previous Key.
+
+The primitive writes secret-bearing bytes to a private `0600` staging file
+inside a `0700` transaction directory (or a protected owner DACL on Windows),
+flushes an append-only digest/identity journal, and publishes with an atomic
+hard link. Recovery removes a published file only if both stable file identity
+and digest still match; replacement or modification becomes a blocking recovery
+conflict. Tests inject crashes before and after publication and verify that the
+journal itself contains no Key bytes.
+
+This is not clearance for live writes. Native handle-relative traversal must
+still replace the current path re-checks to close adversarial rename races;
+Windows directory durability and the exact owner-only DACL must pass on-target
+review; replacement of existing files still needs encrypted or non-persistent
+rollback material. Consequently `apply_configuration` remains fail-closed.

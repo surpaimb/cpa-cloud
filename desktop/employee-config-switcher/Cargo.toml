@@ -21,3 +21,4 @@ thiserror = "=2.0.17"
 toml_edit = "=0.22.27"
 url = "=2.5.7"
 zeroize = { version = "=1.8.2", features = ["serde"] }
+windows-sys = "=0.61.2"
