@@ -97,7 +97,9 @@ enum JournalEvent {
         index: usize,
         target_identity: FileIdentity,
     },
-    Verified { index: usize },
+    Verified {
+        index: usize,
+    },
     Complete,
 }
 
@@ -141,8 +143,8 @@ pub fn recover_create_only(root: &Path) -> Result<(), TransactionError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(source) => return Err(io_error(&transaction_root, source)),
     }
-    for entry in fs::read_dir(&transaction_root)
-        .map_err(|source| io_error(&transaction_root, source))?
+    for entry in
+        fs::read_dir(&transaction_root).map_err(|source| io_error(&transaction_root, source))?
     {
         let path = entry
             .map_err(|source| io_error(&transaction_root, source))?
@@ -226,7 +228,8 @@ fn apply_create_only_inner(
             ensure_absent(&target)?;
 
             let stage_path = workspace.join(&planned.stage);
-            let stage_file = File::open(&stage_path).map_err(|source| io_error(&stage_path, source))?;
+            let stage_file =
+                File::open(&stage_path).map_err(|source| io_error(&stage_path, source))?;
             if file_identity(&stage_file, &stage_path)? != planned.stage_identity {
                 return Err(TransactionError::RecoveryConflict(stage_path));
             }
@@ -401,9 +404,8 @@ fn append_event(
     path: &Path,
     event: &JournalEvent,
 ) -> Result<(), TransactionError> {
-    serde_json::to_writer(&mut *journal, event).map_err(|source| {
-        io_error(path, io::Error::other(source))
-    })?;
+    serde_json::to_writer(&mut *journal, event)
+        .map_err(|source| io_error(path, io::Error::other(source)))?;
     journal
         .write_all(b"\n")
         .map_err(|source| io_error(path, source))?;
@@ -644,7 +646,9 @@ fn create_private_directory(path: &Path) -> Result<(), TransactionError> {
         use std::os::unix::fs::DirBuilderExt;
         let mut builder = fs::DirBuilder::new();
         builder.mode(0o700);
-        builder.create(path).map_err(|source| io_error(path, source))?;
+        builder
+            .create(path)
+            .map_err(|source| io_error(path, source))?;
     }
     #[cfg(windows)]
     fs::create_dir(path).map_err(|source| io_error(path, source))?;
@@ -803,7 +807,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(receipt.created.len(), 2);
-        assert_eq!(fs::read_to_string(root.path().join("tool-a/config.json")).unwrap(), secret);
+        assert_eq!(
+            fs::read_to_string(root.path().join("tool-a/config.json")).unwrap(),
+            secret
+        );
         assert_eq!(
             fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
                 .unwrap()
