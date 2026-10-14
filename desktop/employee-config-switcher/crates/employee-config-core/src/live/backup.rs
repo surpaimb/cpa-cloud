@@ -1,11 +1,12 @@
 //! Durable encrypted rollback material for a bounded synthetic-root slice.
 //!
 //! This module deliberately does not publish or replace a configuration file.
-//! On Unix it opens the root, target, transaction directory, workspace,
-//! ciphertext, and manifest through held directory descriptors and `openat`
-//! with no-follow semantics. Windows remains explicitly unsupported until the
-//! equivalent handle-relative implementation exists. The Tauri apply command
-//! remains fail-closed.
+//! On Unix it opens the synthetic root once by path with final-component
+//! no-follow semantics, then opens the target, separate backup directory,
+//! workspace, ciphertext, and manifest relative to held directory descriptors.
+//! Full ancestor pinning remains intentionally unresolved. Windows remains
+//! explicitly unsupported until the equivalent handle-relative implementation
+//! exists. The Tauri apply command remains fail-closed.
 
 use ring::{
     aead::{self, Aad, LessSafeKey, Nonce, UnboundKey},
