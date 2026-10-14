@@ -111,7 +111,10 @@ the hard-link destination across a filesystem boundary. Fault tests rename a
 target parent after the sealed snapshot and rename a workspace immediately
 before cleanup; both paths stop without publishing into or deleting the
 replacement object. Unknown workspace entries are enumerated from the stable
-directory and block deletion before any known entry is removed.
+directory and block deletion before any known entry is removed. Pre-`Begin`
+cleanup keeps the same locked zero-length journal handle from validation through
+deletion; it never closes and reopens the journal name. A replacement-window
+fault test preserves both the verified evidence object and the foreign entry.
 
 The remaining Unix boundary is explicit: an equally privileged process running
 as the same OS user can ignore `flock`, restore owner-write permission, and race

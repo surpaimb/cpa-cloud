@@ -667,6 +667,23 @@ fn seal_journal(path: &Path, file: &File) -> Result<(), TransactionError> {
     file.sync_all().map_err(|source| io_error(path, source))
 }
 
+#[cfg(unix)]
+fn lock_journal_for_cleanup(path: &Path, file: &File) -> Result<(), TransactionError> {
+    use std::os::fd::AsRawFd;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io_error(path, io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn lock_journal_for_cleanup(_path: &Path, _file: &File) -> Result<(), TransactionError> {
+    // `open_stable_child_file` denied write and delete sharing when it opened
+    // this exact handle, so no second Windows lock operation is needed.
+    Ok(())
+}
+
 fn append_event(
     journal: &mut File,
     path: &Path,
@@ -978,7 +995,12 @@ where
         }
         return Err(TransactionError::CorruptJournal(journal_path));
     }
-    if cleanup_pre_begin_workspace(workspace, &journal_path, &recovery_chain)? {
+    if cleanup_pre_begin_workspace(
+        workspace,
+        &journal_path,
+        &recovery_chain,
+        &mut before_cleanup,
+    )? {
         return Ok(false);
     }
 
@@ -1257,31 +1279,34 @@ fn validate_recovery_journal_capacity(
 /// two pre-begin shapes: an empty workspace (handled above), or a workspace
 /// whose only entry is an empty, real journal file. Any additional entry is
 /// ambiguous and must remain in place for operator inspection.
-fn cleanup_pre_begin_workspace(
+fn cleanup_pre_begin_workspace<C>(
     workspace: &Path,
     journal_path: &Path,
     recovery_chain: &[StableDirectory],
-) -> Result<bool, TransactionError> {
+    before_cleanup: &mut C,
+) -> Result<bool, TransactionError>
+where
+    C: FnMut(&Path) -> Result<(), TransactionError>,
+{
     let workspace_directory = recovery_chain
         .last()
         .ok_or_else(|| TransactionError::RecoveryConflict(workspace.to_path_buf()))?;
-    let inspected =
-        open_stable_child_file(workspace_directory, std::ffi::OsStr::new(JOURNAL_FILE))?;
-    validate_private_journal(journal_path, &inspected)?;
-    let metadata = inspected
+    let journal = open_stable_child_file(workspace_directory, std::ffi::OsStr::new(JOURNAL_FILE))?;
+    validate_private_journal(journal_path, &journal)?;
+    let metadata = journal
         .metadata()
         .map_err(|source| io_error(journal_path, source))?;
     if metadata.len() != 0 {
         return Ok(false);
     }
-    drop(inspected);
-    let (journal, _) = open_recovery_journal(journal_path, workspace_directory)?;
+    lock_journal_for_cleanup(journal_path, &journal)?;
 
     let names = stable_directory_names(workspace_directory)?;
     if names.len() != 1 || names[0] != std::ffi::OsStr::new(JOURNAL_FILE) {
         return Err(TransactionError::CorruptJournal(workspace.to_path_buf()));
     }
 
+    before_cleanup(journal_path)?;
     cleanup_workspace(workspace, recovery_chain, &JournalState::default(), journal)?;
     Ok(true)
 }
@@ -2735,6 +2760,58 @@ mod tests {
         }
         if workspace.exists() && moved.exists() {
             assert_eq!(fs::read(workspace.join(JOURNAL_FILE)).unwrap(), b"foreign");
+        }
+        assert!(!root.path().join("tool/config.json").exists());
+    }
+
+    #[test]
+    fn pre_begin_journal_replacement_before_cleanup_is_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("tool")).unwrap();
+        apply_create_only_inner(
+            root.path(),
+            vec![plan("tool/config.json", "synthetic-key")],
+            FaultPoint::AfterJournalCreated,
+        )
+        .expect_err("fault is injected");
+        let workspace = fs::read_dir(root.path().join(TRANSACTION_DIRECTORY))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let journal = workspace.join(JOURNAL_FILE);
+        let moved = workspace.join("journal-evidence.jsonl");
+        let checked = checked_root(root.path()).unwrap();
+
+        let error = recover_workspace_inner(
+            &checked,
+            &workspace,
+            FaultPoint::Never,
+            |_| Ok(()),
+            |_| Ok(()),
+            |path| {
+                fs::rename(path, &moved).map_err(|source| io_error(path, source))?;
+                fs::write(path, b"foreign").map_err(|source| io_error(path, source))?;
+                Ok(())
+            },
+        )
+        .expect_err("replacement after validation must block cleanup");
+
+        assert!(
+            matches!(
+                error,
+                TransactionError::CorruptJournal(_)
+                    | TransactionError::RecoveryConflict(_)
+                    | TransactionError::Io { .. }
+            ),
+            "unexpected error: {error:?}"
+        );
+        if moved.exists() {
+            assert_eq!(fs::read(&moved).unwrap(), b"");
+            assert_eq!(fs::read(&journal).unwrap(), b"foreign");
+        } else {
+            assert_eq!(fs::read(&journal).unwrap(), b"");
         }
         assert!(!root.path().join("tool/config.json").exists());
     }
