@@ -32,6 +32,15 @@ by the vendored `Guarded` patch type. It is not CC Switch's transaction engine.
 - `opencode.rs`: CPA profile projection, JSONC planning, and fail-closed ownership proof.
 - Tauri command shell and the React interface.
 
+The app icon is a newly generated CPA brand asset created for this client with
+the OpenAI image generation tool on 2026-10-14, then resized and encoded with
+ImageMagick. It does not reuse CC Switch artwork or identifiers:
+
+| Asset | SHA-256 |
+| --- | --- |
+| `src-tauri/icons/icon.png` | `c13e944357ed583280bbffc2900e55795f48cf7d4c5759dd51161ace7e3325ce` |
+| `src-tauri/icons/icon.ico` | `ed5a72971c51f09d079010c094f043be9c0c089bc0eef180d3c57c94cd685788` |
+
 The upstream `config.rs`, `live/engine.rs`, `mode/*`, database, provider store,
 proxy, OAuth, usage, session, MCP, skills, cloud sync, updater, deep-link, tray,
 and brand assets are excluded. In particular, the upstream transaction engine

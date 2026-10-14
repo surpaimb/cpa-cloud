@@ -20,4 +20,4 @@ pnpm build
 cargo test -p employee-config-core
 ```
 
-完整 Tauri 构建需要 Rust 1.85+ 和各平台原生依赖。本仓库不复用 CC Switch 的产品标识、更新渠道、数据库、代理或品牌资产。
+完整 Tauri 构建需要 Rust 1.90+ 和各平台原生依赖。本仓库不复用 CC Switch 的产品标识、更新渠道、数据库、代理或品牌资产。
