@@ -187,6 +187,12 @@ mod windows_impl {
     use zeroize::{Zeroize, Zeroizing};
 
     static PROCESS_PROVIDER_LOCK: Mutex<()> = Mutex::new(());
+    #[cfg(test)]
+    thread_local! {
+        static LAST_CREATE_FAILURE_POINT: std::cell::Cell<&'static str> = const {
+            std::cell::Cell::new("none")
+        };
+    }
 
     pub(super) struct StableStore {
         path: PathBuf,
@@ -303,12 +309,12 @@ mod windows_impl {
     ) -> RecoveryKeyCreateOutcome {
         let _guard = match acquire_provider_lock(store) {
             Ok(guard) => guard,
-            Err(error) => return create_outcome_for(error),
+            Err(error) => return create_failure("provider-lock", error),
         };
         match reconcile_create_state(store, transaction_id) {
             Ok(Some(created)) => return RecoveryKeyCreateOutcome::Created(created),
             Ok(None) => {}
-            Err(error) => return create_outcome_for(error),
+            Err(error) => return create_failure("reconcile", error),
         }
 
         let key = match BackupKey::generate() {
@@ -317,7 +323,7 @@ mod windows_impl {
         };
         let protected = match protect(transaction_id, &key) {
             Ok(protected) => protected,
-            Err(error) => return create_outcome_for(error),
+            Err(error) => return create_failure("protect", error),
         };
         if protected.is_empty() || protected.len() > MAX_PROTECTED_BYTES {
             return RecoveryKeyCreateOutcome::Unavailable;
@@ -335,7 +341,7 @@ mod windows_impl {
         let stage_path = stage_path(store, transaction_id);
         let mut file = match create_private_file(&stage_path) {
             Ok(file) => file,
-            Err(error) => return create_outcome_for(error),
+            Err(error) => return create_failure("stage-create", error),
         };
         if interruption == Some(CreateInterruption::AfterStageCreate) {
             return RecoveryKeyCreateOutcome::Unavailable;
@@ -354,16 +360,16 @@ mod windows_impl {
         }
         let staged_identity = match file_identity(&file, &stage_path) {
             Ok(identity) => identity,
-            Err(error) => return create_outcome_for(error),
+            Err(error) => return create_failure("stage-identity", error),
         };
         if let Err(error) = publish_stage_no_replace(store, &file, transaction_id) {
-            return create_outcome_for(error);
+            return create_failure("publish", error);
         }
         if interruption == Some(CreateInterruption::AfterPublish) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
         if let Err(error) = verify_published_stage(store, file, transaction_id, staged_identity) {
-            return create_outcome_for(error);
+            return create_failure("publish-verify", error);
         }
         if sync_store_directory(store).is_err() {
             return RecoveryKeyCreateOutcome::Unavailable;
@@ -1129,6 +1135,18 @@ mod windows_impl {
         }
     }
 
+    fn create_failure(point: &'static str, error: NativeError) -> RecoveryKeyCreateOutcome {
+        #[cfg(test)]
+        LAST_CREATE_FAILURE_POINT.with(|last| last.set(point));
+        let _ = point;
+        create_outcome_for(error)
+    }
+
+    #[cfg(test)]
+    fn last_create_failure_point() -> &'static str {
+        LAST_CREATE_FAILURE_POINT.with(|last| last.get())
+    }
+
     fn open_outcome_for(error: NativeError) -> RecoveryKeyOpenOutcome {
         if is_missing(&error) {
             RecoveryKeyOpenOutcome::Missing
@@ -1168,7 +1186,10 @@ mod windows_impl {
         fn created(outcome: RecoveryKeyCreateOutcome) -> (RecoveryKeyReference, BackupKey) {
             match outcome {
                 RecoveryKeyCreateOutcome::Created(created) => (created.reference, created.key),
-                other => panic!("unexpected create outcome: {other:?}"),
+                other => panic!(
+                    "unexpected create outcome: {other:?} at {}",
+                    last_create_failure_point()
+                ),
             }
         }
 
@@ -1288,7 +1309,10 @@ mod windows_impl {
                     barrier.wait();
                     match provider.create(transaction_id) {
                         RecoveryKeyCreateOutcome::Created(created) => created,
-                        other => panic!("unexpected create outcome: {other:?}"),
+                        other => panic!(
+                            "unexpected create outcome: {other:?} at {}",
+                            last_create_failure_point()
+                        ),
                     }
                 })
             };
