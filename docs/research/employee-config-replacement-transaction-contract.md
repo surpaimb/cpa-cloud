@@ -313,28 +313,38 @@ only for a Linux synthetic root whose approval has no production constructor.
 It accepts exactly one existing UTF-8 leaf, bounded to 4 MiB, owned by the
 effective user, single-linked and private, under an owner-private `0700` root.
 The module creates an owner-private transaction workspace and a bounded,
-append-only, flushed JSON-lines journal containing identities, digests,
+flushed JSON-lines journal containing identities, digests,
 lengths, original UID/GID/mode, the non-secret provider reference and durable
-phase events, but no configuration bytes or DEK. Before `CommitPrepared` it
+phase events, but no configuration bytes or DEK. Each append first publishes a
+complete owner-private pending record; restart may truncate only a tail that is
+an exact prefix of that record, append the complete record, flush it, and remove
+the pending file. A key-create intent is durable before the provider call, and
+recovery requires provider creation to be idempotent for the transaction ID.
+Before `CommitPrepared` it
 requires the version-3 encrypted pre-image, a flushed desired stage, a current
-old-target CAS, enough terminal journal budget, and a successful exact provider
-reopen/decrypt of the pre-image.
+old-target comparison, physically allocated journal capacity and rollback-stage
+inode, and a successful exact provider reopen/decrypt of the
+pre-image.
 
-Publication and restoration use `renameat2` between held workspace/root
-descriptors only after rechecking the expected current inode, digest, length,
-link count and security metadata. The desired and rollback stage identities are
-durable before their respective rename. Restart therefore recognizes only the
-exact narrow crash shape in which the stage name disappeared and its recorded
-inode now names the target; a symlink, added hard link, stale inode, changed
-content/metadata or third-party replacement is preserved as a recovery
-conflict. Synthetic validation rejection authenticates the complete pre-image
-and reserves rollback journal budget before `RollbackPrepared`, then creates
-and flushes the rollback stage before the first restore. Terminal recovery is
-idempotent and revalidates the exact desired or restored inode.
+Publication and restoration hold one synthetic-root target lock and use
+`renameat2(RENAME_EXCHANGE)` between held workspace/root descriptors after
+rechecking the expected current inode, digest, length, link count and security
+metadata. Both post-exchange names are verified; a check-to-syscall mismatch is
+undone only while those names still identify the exchange result. The displaced
+inode remains as durable recovery evidence until `Published` or `Restored` is
+flushed. Restart therefore recognizes only the exact two-object crash shape; a
+symlink, added hard link, stale inode, changed content/metadata or third-party
+replacement is preserved as a recovery conflict. Synthetic validation
+rejection authenticates the complete pre-image and records a rollback-stage
+intent before rewriting the preallocated pending inode, flushing it and
+publishing it no-replace. Terminal recovery is idempotent and revalidates the
+exact desired or restored inode.
 
-Tests interrupt after each begin/backup/stage/decision/publication/verification/
-rollback/restore/terminal boundary, exercise stale targets plus symlink and
-hard-link changes, preserve a post-publication external edit, scan durable
+Tests interrupt after each key-intent/create/backup/stage/decision/publication/
+verification/rollback-stage/restore/terminal boundary, repair torn journal
+tails after mutation, exercise a deterministic check-to-exchange edit and the
+shared target lock, exercise stale targets plus symlink and hard-link changes,
+preserve a post-publication external edit, scan durable
 metadata for the original Key and DEK, and repeat terminal recovery. Before the
 commit decision, restart returns a non-mutating `Uncommitted` blocker and
 retains evidence; this slice does not yet define abandoned-workspace/key

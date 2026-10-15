@@ -256,15 +256,19 @@ extended ACL to a `0600` target and proves this fail-closed boundary.
 `live/backup.rs` itself remains non-publishing, but a separate bounded
 `live/linux_replacement.rs` slice now consumes its version-3 material for one
 existing leaf under a test-only approved Linux synthetic root. That slice uses
-a private bounded append-only journal, records the desired and rollback stage
-identities, makes `CommitPrepared` durable before a descriptor-relative
-`renameat2`, and performs an exact identity/digest/metadata CAS before both
-publication and restore. It recognizes only its recorded stage inode in the
-post-rename/pre-event crash window. Before a synthetic validation rejection is
-made durably rollback-directed, it authenticates the pre-image and reserves
-rollback journal space; every restart after `RollbackPrepared` remains on the
-rollback path. Stale, symlinked, hard-linked or externally replaced targets are
-preserved as conflicts, and terminal recovery is idempotent.
+a private bounded journal whose complete pending record repairs only an exact
+torn tail, and it persists key-create intent before requiring idempotent
+provider creation. It serializes synthetic transactions with one shared target
+lock, allocates journal and rollback-stage space before `CommitPrepared`, and uses
+descriptor-relative `RENAME_EXCHANGE` so the displaced inode remains available
+for post-syscall verification and bounded undo. It recognizes only the exact
+target/stage pair in the post-exchange/pre-event crash window. Before a
+synthetic validation rejection is made durably rollback-directed, it
+authenticates the pre-image; rollback then persists a stage intent, rewrites the
+preallocated inode, flushes it and publishes it no-replace. Every restart after
+`RollbackPrepared` remains on the rollback path. Stale, symlinked, hard-linked
+or externally replaced targets are preserved as conflicts, and terminal
+recovery is idempotent.
 
 The approval has no production constructor. Pre-commit interruption currently
 retains evidence and returns an `Uncommitted` blocker; abandoned-workspace/key
