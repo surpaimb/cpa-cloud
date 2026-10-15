@@ -331,10 +331,7 @@ mod tests {
             fixture["release_asset"]["checksum_asset"]["github_asset_id"],
             594_638_509
         );
-        assert_eq!(
-            fixture["release_asset"]["checksum_asset"]["size_bytes"],
-            92
-        );
+        assert_eq!(fixture["release_asset"]["checksum_asset"]["size_bytes"], 92);
         assert_eq!(fixture["provider_tree"], "custom_provider.<name>");
         assert_eq!(fixture["api_format"], "openai-responses");
         assert_eq!(fixture["credential_header"], "Authorization: Bearer");

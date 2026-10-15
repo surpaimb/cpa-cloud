@@ -331,9 +331,8 @@ mod tests {
             legacy.display().to_string()
         );
 
-        let empty = |name: &str| {
-            matches!(name, "MINIMAX_DATA_DIR" | "MAVIS_DATA_DIR").then(OsString::new)
-        };
+        let empty =
+            |name: &str| matches!(name, "MINIMAX_DATA_DIR" | "MAVIS_DATA_DIR").then(OsString::new);
         let items = detect_clients_with_env(root.path(), Platform::Linux, empty);
         assert_eq!(
             by_id(&items, "minimax-code").detail,
