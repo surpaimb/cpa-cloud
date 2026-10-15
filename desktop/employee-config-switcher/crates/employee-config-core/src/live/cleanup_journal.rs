@@ -361,6 +361,59 @@ mod platform {
         path::Component,
     };
 
+    #[cfg(test)]
+    struct BeforePublishLockBarrier {
+        barrier: std::sync::Arc<std::sync::Barrier>,
+        remaining: usize,
+    }
+
+    #[cfg(test)]
+    static BEFORE_PUBLISH_LOCK_BARRIERS: std::sync::OnceLock<
+        std::sync::Mutex<BTreeMap<PathBuf, BeforePublishLockBarrier>>,
+    > = std::sync::OnceLock::new();
+
+    #[cfg(test)]
+    pub(super) fn install_before_publish_lock_barrier(
+        directory_path: PathBuf,
+        barrier: std::sync::Arc<std::sync::Barrier>,
+    ) {
+        // Hold both callers after opening the stable directory and immediately
+        // before locking it. A pre-lock snapshot implementation therefore lets
+        // both callers validate stale state before this deterministic boundary.
+        let barriers = BEFORE_PUBLISH_LOCK_BARRIERS
+            .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+        let replaced = barriers.lock().unwrap().insert(
+            directory_path,
+            BeforePublishLockBarrier {
+                barrier,
+                remaining: 2,
+            },
+        );
+        assert!(replaced.is_none(), "test publication barrier already installed");
+    }
+
+    #[cfg(test)]
+    fn wait_before_publish_lock(directory_path: &Path) {
+        let barriers = BEFORE_PUBLISH_LOCK_BARRIERS
+            .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+        let barrier = {
+            let mut barriers = barriers.lock().unwrap();
+            let mut remove = false;
+            let barrier = barriers.get_mut(directory_path).map(|entry| {
+                entry.remaining -= 1;
+                remove = entry.remaining == 0;
+                std::sync::Arc::clone(&entry.barrier)
+            });
+            if remove {
+                barriers.remove(directory_path);
+            }
+            barrier
+        };
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+    }
+
     #[derive(Clone, Copy)]
     enum PublishExpectation {
         Initial,
@@ -421,6 +474,8 @@ mod platform {
         };
         let directory_identity =
             identity(&directory).map_err(|source| io_error(&directory_path, source))?;
+        #[cfg(test)]
+        wait_before_publish_lock(&directory_path);
         lock_exclusive(&directory, &directory_path)?;
         if created {
             root_dir
@@ -1192,12 +1247,14 @@ mod tests {
         }
 
         let barrier = Arc::new(Barrier::new(2));
+        platform::install_before_publish_lock_barrier(
+            root_path.join(CLEANUP_DIRECTORY),
+            Arc::clone(&barrier),
+        );
         let mut workers = Vec::new();
         for byte in [0x70, 0x71] {
             let root_path = root_path.clone();
-            let barrier = Arc::clone(&barrier);
             workers.push(thread::spawn(move || {
-                barrier.wait();
                 create_durable_cleanup_journal(
                     &root_path,
                     ReplacementPhase::Complete,
@@ -1222,6 +1279,14 @@ mod tests {
             load_durable_cleanup_journals(&root_path).unwrap().len(),
             MAX_TRANSACTIONS
         );
+        let names = fs::read_dir(root_path.join(CLEANUP_DIRECTORY))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), MAX_TRANSACTIONS);
+        assert!(names
+            .iter()
+            .all(|name| !name.to_string_lossy().ends_with(PENDING_SUFFIX)));
     }
 
     #[cfg(target_os = "linux")]
@@ -1240,11 +1305,13 @@ mod tests {
         let first = load_durable_cleanup_journals(&root_path).unwrap().remove(0);
         let second = load_durable_cleanup_journals(&root_path).unwrap().remove(0);
         let barrier = Arc::new(Barrier::new(2));
+        platform::install_before_publish_lock_barrier(
+            root_path.join(CLEANUP_DIRECTORY),
+            Arc::clone(&barrier),
+        );
         let mut workers = Vec::new();
         for mut journal in [first, second] {
-            let barrier = Arc::clone(&barrier);
             workers.push(thread::spawn(move || {
-                barrier.wait();
                 journal.record_completion_tombstone_durable()
             }));
         }
@@ -1253,6 +1320,13 @@ mod tests {
             .map(|worker| worker.join().unwrap())
             .collect();
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(CleanupJournalError::RecoveryConflict(_))))
+                .count(),
+            1
+        );
 
         let loaded = load_durable_cleanup_journals(&root_path).unwrap();
         assert_eq!(loaded.len(), 1);
