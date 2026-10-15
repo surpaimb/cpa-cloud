@@ -305,6 +305,36 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(fixture["config_path"], "<data-dir>/config.yaml");
+        assert_eq!(fixture["release_asset"]["github_asset_id"], 594_638_510);
+        assert_eq!(
+            fixture["release_asset"]["url"],
+            "https://github.com/MiniMax-AI/minimax-code/releases/download/v0.5.6/minimax-code-0.5.6.tar.gz"
+        );
+        assert_eq!(fixture["release_asset"]["size_bytes"], 12_707_059);
+        assert_eq!(
+            fixture["release_asset"]["sha256"],
+            "2e3df211e0d18379af7b09bec07a3da106bf1095ce84c4850504769512df2abb"
+        );
+        assert_eq!(
+            fixture["release_asset"]["upstream_windows_acceptance"],
+            false
+        );
+        assert_eq!(
+            fixture["release_asset"]["upstream_live_service_acceptance"],
+            false
+        );
+        assert_eq!(
+            fixture["release_asset"]["node_engine"],
+            ">=22.19 <23 || >=24.2 <27"
+        );
+        assert_eq!(
+            fixture["release_asset"]["checksum_asset"]["github_asset_id"],
+            594_638_509
+        );
+        assert_eq!(
+            fixture["release_asset"]["checksum_asset"]["size_bytes"],
+            92
+        );
         assert_eq!(fixture["provider_tree"], "custom_provider.<name>");
         assert_eq!(fixture["api_format"], "openai-responses");
         assert_eq!(fixture["credential_header"], "Authorization: Bearer");
@@ -322,6 +352,19 @@ mod tests {
             fixture["native_lock"]["must_be_held_through_publication"],
             true
         );
+        assert_eq!(
+            fixture["native_evidence_gate"]["requires_verified_asset"],
+            true
+        );
+        assert_eq!(
+            fixture["native_evidence_gate"]["requires_native_writer_read_negative_control"],
+            true
+        );
+        assert_eq!(
+            fixture["native_evidence_gate"]["requires_loopback_responses_observation"],
+            true
+        );
+        assert_eq!(fixture["native_evidence_gate"]["satisfied"], false);
     }
 
     #[test]

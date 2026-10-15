@@ -1,6 +1,20 @@
 {
   "release": "v0.5.6",
   "source_commit": "836580efb27632e288b5e0ae26ec120a61e907f5",
+  "release_asset": {
+    "github_asset_id": 594638510,
+    "url": "https://github.com/MiniMax-AI/minimax-code/releases/download/v0.5.6/minimax-code-0.5.6.tar.gz",
+    "size_bytes": 12707059,
+    "sha256": "2e3df211e0d18379af7b09bec07a3da106bf1095ce84c4850504769512df2abb",
+    "checksum_asset": {
+      "github_asset_id": 594638509,
+      "url": "https://github.com/MiniMax-AI/minimax-code/releases/download/v0.5.6/minimax-code-0.5.6.tar.gz.sha256",
+      "size_bytes": 92
+    },
+    "node_engine": ">=22.19 <23 || >=24.2 <27",
+    "upstream_windows_acceptance": false,
+    "upstream_live_service_acceptance": false
+  },
   "config_path": "<data-dir>/config.yaml",
   "data_dir_precedence": ["MINIMAX_DATA_DIR", "MAVIS_DATA_DIR", "~/.minimax"],
   "data_dir_resolution": {
@@ -23,5 +37,12 @@
     "implementation": "proper-lockfile",
     "stale_ms": 10000,
     "must_be_held_through_publication": true
+  },
+  "native_evidence_gate": {
+    "requires_verified_asset": true,
+    "requires_isolated_data_directory": true,
+    "requires_native_writer_read_negative_control": true,
+    "requires_loopback_responses_observation": true,
+    "satisfied": false
   }
 }

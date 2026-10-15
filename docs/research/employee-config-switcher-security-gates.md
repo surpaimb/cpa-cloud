@@ -476,6 +476,15 @@ plain `~/.minimax` default. The fixed client can also select `--data-dir`,
 active directory or explicitly reject unsupported overrides; it must never
 accept an arbitrary parent from its caller.
 
+The official v0.5.6 release asset is pinned by URL, exact `12707059`-byte size,
+and SHA-256 in the fixed-source fixture. Its release notes explicitly exclude
+upstream Windows and live-service acceptance. A bounded local HTTPS attempt on
+2026-10-15 timed out before producing the asset, so this preview does not claim
+native config parsing, native writer/read behavior, compatible lock acquisition,
+or loopback Responses transport. Those gates remain false until the exact asset
+passes both size and digest checks and runs only with isolated home, application
+data, XDG, npm, PATH, working-directory and MiniMax data-directory state.
+
 Claude Desktop remains detection-only. CPA now applies the official 32 MiB
 request limit to both `/v1/messages` and `/v1/messages/count_tokens`, returns
 Anthropic-shaped 413 `request_too_large` above that boundary, and keeps the

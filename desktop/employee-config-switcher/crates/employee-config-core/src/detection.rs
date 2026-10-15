@@ -56,11 +56,7 @@ where
         (
             "minimax-code",
             "MiniMax Code",
-            vec![env("MINIMAX_DATA_DIR")
-                .filter(|value| !value.is_empty())
-                .or_else(|| env("MAVIS_DATA_DIR").filter(|value| !value.is_empty()))
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".minimax"))],
+            vec![minimax_detection_home(home, &env)],
         ),
     ];
 
@@ -98,6 +94,20 @@ where
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or(fallback)
+}
+
+// Detection intentionally covers only the fixed client's public environment
+// precedence and plain default. CLI --data-dir/--profile and migration-aware
+// legacy fallback remain unsupported for any future live-write caller.
+fn minimax_detection_home<F>(home: &Path, env: &F) -> PathBuf
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    env("MINIMAX_DATA_DIR")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env("MAVIS_DATA_DIR").filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".minimax"))
 }
 
 fn claude_desktop_candidates<F>(home: &Path, platform: Platform, env: &F) -> Vec<PathBuf>
@@ -284,6 +294,50 @@ mod tests {
         assert_eq!(
             by_id(&items, "gemini").detail,
             root.path().join(".gemini").display().to_string()
+        );
+    }
+
+    #[test]
+    fn minimax_detection_uses_the_fixed_public_environment_precedence() {
+        let root = tempfile::tempdir().unwrap();
+        let primary = root.path().join("primary");
+        let legacy = root.path().join("legacy");
+        fs::create_dir_all(&primary).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+        let env = fake_env(HashMap::from([
+            ("MINIMAX_DATA_DIR", primary.clone()),
+            ("MAVIS_DATA_DIR", legacy),
+        ]));
+        let items = detect_clients_with_env(root.path(), Platform::Windows, env);
+        assert_eq!(
+            by_id(&items, "minimax-code").detail,
+            primary.display().to_string()
+        );
+        assert!(by_id(&items, "minimax-code").detected);
+    }
+
+    #[test]
+    fn minimax_detection_ignores_empty_overrides_in_order() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        let env = |name: &str| match name {
+            "MINIMAX_DATA_DIR" => Some(OsString::new()),
+            "MAVIS_DATA_DIR" => Some(legacy.clone().into_os_string()),
+            _ => None,
+        };
+        let items = detect_clients_with_env(root.path(), Platform::Linux, env);
+        assert_eq!(
+            by_id(&items, "minimax-code").detail,
+            legacy.display().to_string()
+        );
+
+        let empty = |name: &str| {
+            matches!(name, "MINIMAX_DATA_DIR" | "MAVIS_DATA_DIR").then(OsString::new)
+        };
+        let items = detect_clients_with_env(root.path(), Platform::Linux, empty);
+        assert_eq!(
+            by_id(&items, "minimax-code").detail,
+            root.path().join(".minimax").display().to_string()
         );
     }
 
