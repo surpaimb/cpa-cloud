@@ -524,8 +524,10 @@ official `%APPDATA%\Claude\claude_desktop_config.json` file; directory-only
 The public file contract configures local MCP `mcpServers`, while Anthropic's
 remote custom connectors are likewise MCP tool/data integrations. Neither is a
 public custom-model endpoint or employee-key routing contract, so Claude Desktop
-is excluded from the first-release configurable set while the other nine tools
-continue through their separate gates. CPA now applies the official 32 MiB
+remains fail-closed and cannot be described as model-routing capable. Whether it
+remains in the first-release configurable target set is a pending user decision,
+not an implementation assumption; the other tools continue through their
+separate gates. CPA now applies the official 32 MiB
 request limit to both `/v1/messages` and `/v1/messages/count_tokens`, returns
 Anthropic-shaped 413 `request_too_large` above that boundary, and keeps the
 other model routes at their existing lower limit. Complete fixed-client

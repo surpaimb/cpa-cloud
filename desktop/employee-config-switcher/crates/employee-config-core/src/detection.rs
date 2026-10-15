@@ -18,6 +18,41 @@ enum Platform {
     Linux,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Candidate {
+    path: PathBuf,
+    kind: CandidateKind,
+}
+
+impl Candidate {
+    fn file(path: PathBuf) -> Self {
+        Self {
+            path,
+            kind: CandidateKind::File,
+        }
+    }
+
+    fn directory(path: PathBuf) -> Self {
+        Self {
+            path,
+            kind: CandidateKind::Directory,
+        }
+    }
+
+    fn matches(&self) -> bool {
+        match self.kind {
+            CandidateKind::File => self.path.is_file(),
+            CandidateKind::Directory => self.path.is_dir(),
+        }
+    }
+}
+
 pub fn detect_clients(home: &Path) -> Vec<ClientDetection> {
     detect_clients_with_env(home, current_platform(), |name| std::env::var_os(name))
 }
@@ -27,36 +62,64 @@ where
     F: Fn(&str) -> Option<OsString>,
 {
     let config = env_path(&env, "XDG_CONFIG_HOME", home.join(".config"));
-    let candidates: [(&str, &str, Vec<PathBuf>); 10] = [
-        ("claude-code", "Claude Code", vec![home.join(".claude")]),
+    let candidates: [(&str, &str, Vec<Candidate>); 10] = [
+        (
+            "claude-code",
+            "Claude Code",
+            vec![Candidate::directory(home.join(".claude"))],
+        ),
         (
             "codex",
             "Codex CLI",
-            vec![env_path(&env, "CODEX_HOME", home.join(".codex"))],
+            vec![Candidate::directory(env_path(
+                &env,
+                "CODEX_HOME",
+                home.join(".codex"),
+            ))],
         ),
-        ("gemini", "Gemini CLI", vec![gemini_home(home, &env)]),
+        (
+            "gemini",
+            "Gemini CLI",
+            vec![Candidate::directory(gemini_home(home, &env))],
+        ),
         (
             "claude-desktop",
             "Claude Desktop",
             claude_desktop_candidates(home, platform, &env),
         ),
-        ("grok-build", "Grok Build", vec![grok_home(home, &env)]),
-        ("opencode", "OpenCode", vec![config.join("opencode")]),
-        ("openclaw", "OpenClaw", vec![home.join(".openclaw")]),
-        ("hermes", "Hermes", vec![hermes_home(home, platform, &env)]),
+        (
+            "grok-build",
+            "Grok Build",
+            vec![Candidate::directory(grok_home(home, &env))],
+        ),
+        (
+            "opencode",
+            "OpenCode",
+            vec![Candidate::directory(config.join("opencode"))],
+        ),
+        (
+            "openclaw",
+            "OpenClaw",
+            vec![Candidate::directory(home.join(".openclaw"))],
+        ),
+        (
+            "hermes",
+            "Hermes",
+            vec![Candidate::directory(hermes_home(home, platform, &env))],
+        ),
         (
             "pi",
             "Pi",
-            vec![env_path(
+            vec![Candidate::directory(env_path(
                 &env,
                 "PI_CODING_AGENT_DIR",
                 home.join(".pi").join("agent"),
-            )],
+            ))],
         ),
         (
             "minimax-code",
             "MiniMax Code",
-            vec![minimax_detection_home(home, &env)],
+            vec![Candidate::directory(minimax_detection_home(home, &env))],
         ),
     ];
 
@@ -66,17 +129,17 @@ where
         .collect()
 }
 
-fn detection(id: &'static str, name: &'static str, paths: Vec<PathBuf>) -> ClientDetection {
-    let existing = paths.iter().find(|path| path.exists());
+fn detection(id: &'static str, name: &'static str, candidates: Vec<Candidate>) -> ClientDetection {
+    let existing = candidates.iter().find(|candidate| candidate.matches());
     let detail = existing.map_or_else(
         || {
-            paths
+            candidates
                 .iter()
-                .map(|path| path.display().to_string())
+                .map(|candidate| candidate.path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(" | ")
         },
-        |path| path.display().to_string(),
+        |candidate| candidate.path.display().to_string(),
     );
     ClientDetection {
         id,
@@ -121,25 +184,30 @@ where
     })
 }
 
-fn claude_desktop_candidates<F>(home: &Path, platform: Platform, env: &F) -> Vec<PathBuf>
+fn claude_desktop_candidates<F>(home: &Path, platform: Platform, env: &F) -> Vec<Candidate>
 where
     F: Fn(&str) -> Option<OsString>,
 {
     match platform {
         Platform::Windows => {
             let roaming = env_path(env, "APPDATA", home.join("AppData").join("Roaming"));
-            vec![roaming.join("Claude").join("claude_desktop_config.json")]
+            vec![Candidate::file(
+                roaming.join("Claude").join("claude_desktop_config.json"),
+            )]
         }
         Platform::Macos => {
             let application_support = home.join("Library").join("Application Support");
             vec![
-                application_support.join("Claude"),
-                application_support.join("Claude-3p"),
+                Candidate::directory(application_support.join("Claude")),
+                Candidate::directory(application_support.join("Claude-3p")),
             ]
         }
         Platform::Linux => {
             let config = env_path(env, "XDG_CONFIG_HOME", home.join(".config"));
-            vec![config.join("Claude"), config.join("Claude-3p")]
+            vec![
+                Candidate::directory(config.join("Claude")),
+                Candidate::directory(config.join("Claude-3p")),
+            ]
         }
     }
 }
@@ -257,7 +325,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let roaming = root.path().join("RoamingAppData");
         let local = root.path().join("LocalAppData");
-        fs::create_dir_all(roaming.join("Claude")).unwrap();
+        fs::create_dir_all(
+            roaming
+                .join("Claude")
+                .join("claude_desktop_config.json"),
+        )
+        .unwrap();
         fs::create_dir_all(local.join("Claude")).unwrap();
         fs::create_dir_all(local.join("Claude-3p")).unwrap();
         let env = fake_env(HashMap::from([
@@ -359,6 +432,18 @@ mod tests {
         let grok = by_id(&items, "grok-build");
         assert!(grok.detected);
         assert_eq!(grok.detail, default.display().to_string());
+    }
+
+    #[test]
+    fn grok_build_rejects_a_regular_file_as_its_home() {
+        let root = tempfile::tempdir().unwrap();
+        let regular_file = root.path().join("not-a-directory");
+        fs::write(&regular_file, b"not a Grok home").unwrap();
+        let env = fake_env(HashMap::from([("GROK_HOME", regular_file.clone())]));
+        let items = detect_clients_with_env(root.path(), Platform::Linux, env);
+        let grok = by_id(&items, "grok-build");
+        assert!(!grok.detected);
+        assert_eq!(grok.detail, regular_file.display().to_string());
     }
 
     #[test]
