@@ -1383,9 +1383,6 @@ mod platform {
             .write_all(&pending)
             .map_err(|source| io_error(workspace_path.join(JOURNAL_FILE), source))?;
         journal
-            .set_len(candidate.len() as u64)
-            .map_err(|source| io_error(workspace_path.join(JOURNAL_FILE), source))?;
-        journal
             .sync_all()
             .map_err(|source| io_error(workspace_path.join(JOURNAL_FILE), source))?;
         Ok(())
