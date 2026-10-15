@@ -253,13 +253,25 @@ creation until equivalent native handle-relative, ACL/security-descriptor and
 protected-key integration exists. A macOS-native negative test attaches an
 extended ACL to a `0600` target and proves this fail-closed boundary.
 
-This remains a foundation, not a replacement transaction: no target is
-modified and the pre-image identity check cannot restore a target after future
-publication. No rollback is attempted. Orphan discovery/cleanup before the
-manifest, a durable decision and publish/verify/rollback journal, production
-Linux recovery-key custody, full ACL preservation, and Windows/macOS backup
-support remain open. The
-Tauri command and all real client writes therefore remain fail-closed.
+`live/backup.rs` itself remains non-publishing, but a separate bounded
+`live/linux_replacement.rs` slice now consumes its version-3 material for one
+existing leaf under a test-only approved Linux synthetic root. That slice uses
+a private bounded append-only journal, records the desired and rollback stage
+identities, makes `CommitPrepared` durable before a descriptor-relative
+`renameat2`, and performs an exact identity/digest/metadata CAS before both
+publication and restore. It recognizes only its recorded stage inode in the
+post-rename/pre-event crash window. Before a synthetic validation rejection is
+made durably rollback-directed, it authenticates the pre-image and reserves
+rollback journal space; every restart after `RollbackPrepared` remains on the
+rollback path. Stale, symlinked, hard-linked or externally replaced targets are
+preserved as conflicts, and terminal recovery is idempotent.
+
+The approval has no production constructor. Pre-commit interruption currently
+retains evidence and returns an `Uncommitted` blocker; abandoned-workspace/key
+cleanup, multi-target atomic policy, fixed native tool validation and locking,
+production Linux recovery-key custody, full ACL support, Windows/macOS
+primitives, startup orchestration and transaction retirement remain open. The
+Tauri command, UI and all real client writes therefore remain fail-closed.
 
 A separate pure in-memory replacement sequence gate now exercises the reviewed
 ordering without defining a journal encoding or touching the filesystem. It

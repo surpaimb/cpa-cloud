@@ -71,6 +71,21 @@ pub struct BackupReceipt {
     pub target: PathBuf,
 }
 
+/// Exact current target state accepted while reopening rollback material after
+/// this transaction has published its desired inode.
+///
+/// This is crate-private because production replacement remains disabled. The
+/// encrypted manifest continues to supply and authenticate the original
+/// security metadata; callers may only nominate the expected published inode,
+/// length and content digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReplacementTargetExpectation {
+    pub volume: u64,
+    pub file: u64,
+    pub digest: String,
+    pub len: usize,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
     #[error("encrypted rollback material is not supported on this platform")]
@@ -173,6 +188,35 @@ pub fn load_encrypted_backup_with_provider<P: RecoveryKeyProvider + ?Sized>(
         workspace,
         transaction_id,
         recovery_key_reference,
+        provider,
+    )
+}
+
+/// Reopens rollback material after a synthetic replacement has published its
+/// exact recorded inode. The provider boundary and namespace revalidation are
+/// identical to the ordinary loader, but the live target must match the
+/// caller's durable published identity and digest rather than the obsolete
+/// pre-publication inode.
+pub(crate) fn load_encrypted_backup_for_replacement_with_provider<
+    P: RecoveryKeyProvider + ?Sized,
+>(
+    root: &Path,
+    workspace: &str,
+    transaction_id: ReplacementTransactionId,
+    recovery_key_reference: &RecoveryKeyReference,
+    expected_target: &ReplacementTargetExpectation,
+    provider: &mut P,
+) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+    validate_workspace(workspace)?;
+    if expected_target.len > MAX_TARGET_BYTES || !is_sha256_digest(&expected_target.digest) {
+        return Err(BackupError::CorruptManifest);
+    }
+    platform::load_for_replacement_with_provider(
+        root,
+        workspace,
+        transaction_id,
+        recovery_key_reference,
+        expected_target,
         provider,
     )
 }
@@ -460,7 +504,14 @@ mod platform {
         recovery_key_reference: &RecoveryKeyReference,
         key: &BackupKey,
     ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
-        validate_for_load(root, workspace, transaction_id, recovery_key_reference)?.finish(key)
+        validate_for_load(
+            root,
+            workspace,
+            transaction_id,
+            recovery_key_reference,
+            None,
+        )?
+        .finish(key)
     }
 
     pub(super) fn load_with_provider<P: RecoveryKeyProvider + ?Sized>(
@@ -470,7 +521,32 @@ mod platform {
         recovery_key_reference: &RecoveryKeyReference,
         provider: &mut P,
     ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
-        let validated = validate_for_load(root, workspace, transaction_id, recovery_key_reference)?;
+        let validated = validate_for_load(
+            root,
+            workspace,
+            transaction_id,
+            recovery_key_reference,
+            None,
+        )?;
+        let key = open_existing_recovery_key(provider, transaction_id, recovery_key_reference)?;
+        validated.finish(&key)
+    }
+
+    pub(super) fn load_for_replacement_with_provider<P: RecoveryKeyProvider + ?Sized>(
+        root: &Path,
+        workspace: &str,
+        transaction_id: ReplacementTransactionId,
+        recovery_key_reference: &RecoveryKeyReference,
+        expected_target: &ReplacementTargetExpectation,
+        provider: &mut P,
+    ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+        let validated = validate_for_load(
+            root,
+            workspace,
+            transaction_id,
+            recovery_key_reference,
+            Some(expected_target),
+        )?;
         let key = open_existing_recovery_key(provider, transaction_id, recovery_key_reference)?;
         validated.finish(&key)
     }
@@ -491,6 +567,7 @@ mod platform {
         backup_file: File,
         manifest_bytes: Zeroizing<Vec<u8>>,
         manifest: BackupManifest,
+        replacement_target: Option<ReplacementTargetExpectation>,
     }
 
     impl ValidatedBackup {
@@ -551,7 +628,12 @@ mod platform {
             )
             .map_err(|_| BackupError::RecoveryConflict(self.target_path.clone()))?;
             require_same_identity(&current_target, &self.target_file, &self.target_path)?;
-            validate_target_file(&mut current_target, &self.manifest, &self.target_path)?;
+            validate_target_for_load(
+                &mut current_target,
+                &self.manifest,
+                self.replacement_target.as_ref(),
+                &self.target_path,
+            )?;
 
             let mut current_backup = open_private_file_at(
                 current_workspace.as_raw_fd(),
@@ -573,6 +655,7 @@ mod platform {
         workspace: &str,
         transaction_id: ReplacementTransactionId,
         recovery_key_reference: &RecoveryKeyReference,
+        replacement_target: Option<&ReplacementTargetExpectation>,
     ) -> Result<ValidatedBackup, BackupError> {
         validate_workspace(workspace)?;
         let root_dir = open_root(root)?;
@@ -617,7 +700,12 @@ mod platform {
             0,
         )
         .map_err(|source| io_error(&target_path, source))?;
-        validate_target_file(&mut target_file, &manifest, &target_path)?;
+        validate_target_for_load(
+            &mut target_file,
+            &manifest,
+            replacement_target,
+            &target_path,
+        )?;
 
         let backup_path = workspace_path.join(BACKUP_FILE);
         let mut backup_file = open_private_file_at(
@@ -645,7 +733,55 @@ mod platform {
             backup_file,
             manifest_bytes,
             manifest,
+            replacement_target: replacement_target.cloned(),
         })
+    }
+
+    fn validate_target_for_load(
+        target_file: &mut File,
+        manifest: &BackupManifest,
+        replacement_target: Option<&ReplacementTargetExpectation>,
+        target_path: &Path,
+    ) -> Result<(), BackupError> {
+        let Some(expected) = replacement_target else {
+            return validate_target_file(target_file, manifest, target_path);
+        };
+        let metadata = target_file
+            .metadata()
+            .map_err(|source| io_error(target_path, source))?;
+        let expected_identity = FileIdentity {
+            volume: expected.volume,
+            file: expected.file,
+        };
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o7777 != manifest.original_mode
+            || metadata.uid() != manifest.original_uid
+            || metadata.gid() != manifest.original_gid
+            || identity(target_file).map_err(|source| io_error(target_path, source))?
+                != expected_identity
+        {
+            return Err(BackupError::RecoveryConflict(target_path.to_path_buf()));
+        }
+        target_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|source| io_error(target_path, source))?;
+        let bytes = read_bounded(target_file, MAX_TARGET_BYTES, target_path)?;
+        let final_metadata = target_file
+            .metadata()
+            .map_err(|source| io_error(target_path, source))?;
+        if bytes.len() != expected.len
+            || digest(&bytes) != expected.digest
+            || identity(target_file).map_err(|source| io_error(target_path, source))?
+                != expected_identity
+            || final_metadata.nlink() != 1
+            || final_metadata.mode() & 0o7777 != manifest.original_mode
+            || final_metadata.uid() != manifest.original_uid
+            || final_metadata.gid() != manifest.original_gid
+        {
+            return Err(BackupError::RecoveryConflict(target_path.to_path_buf()));
+        }
+        Ok(())
     }
 
     fn require_same_identity(
@@ -1033,6 +1169,17 @@ mod platform {
         _workspace: &str,
         _transaction_id: ReplacementTransactionId,
         _recovery_key_reference: &RecoveryKeyReference,
+        _provider: &mut P,
+    ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+        Err(BackupError::UnsupportedPlatform)
+    }
+
+    pub(super) fn load_for_replacement_with_provider<P: RecoveryKeyProvider + ?Sized>(
+        _root: &Path,
+        _workspace: &str,
+        _transaction_id: ReplacementTransactionId,
+        _recovery_key_reference: &RecoveryKeyReference,
+        _expected_target: &ReplacementTargetExpectation,
         _provider: &mut P,
     ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
         Err(BackupError::UnsupportedPlatform)

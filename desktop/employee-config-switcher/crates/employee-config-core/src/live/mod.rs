@@ -3,6 +3,7 @@ pub mod cleanup_journal;
 pub mod completion_tombstone;
 pub mod engine;
 pub mod floor;
+pub(crate) mod linux_replacement;
 pub mod macos_keychain;
 pub mod patch;
 pub mod recovery_key;

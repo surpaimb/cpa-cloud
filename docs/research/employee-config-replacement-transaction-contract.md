@@ -6,10 +6,12 @@ remain disabled.
 This contract defines the minimum transaction that may eventually replace one
 or more existing employee-tool configuration files. It does not authorize the
 Tauri command to write a real client directory. The current implementation
-prepares and reloads encrypted rollback material for one existing Linux leaf
-and persists a separate bounded Linux completion tombstone in a synthetic root.
-Publication, rollback, operating-system key custody and integrated
-crash-recoverable tombstone cleanup remain incomplete.
+prepares and reloads encrypted rollback material for one existing Linux leaf,
+exercises single-leaf publication and rollback only behind a test-only
+synthetic-root approval, and persists a separate bounded Linux completion
+tombstone. Multi-target policy, native tool validation/locking, operating-
+system key custody, integrated cleanup and every production write path remain
+incomplete.
 
 ## First-release local threat model
 
@@ -305,6 +307,41 @@ restore, and terminal completion predicates. It is not serializable, carries no
 identities/digests/security metadata, performs no I/O, and does not implement
 the durable journal, recovery-blocked handling, publication, tool-format
 validation, rollback or cleanup.
+
+`live/linux_replacement.rs` now makes one smaller filesystem slice executable
+only for a Linux synthetic root whose approval has no production constructor.
+It accepts exactly one existing UTF-8 leaf, bounded to 4 MiB, owned by the
+effective user, single-linked and private, under an owner-private `0700` root.
+The module creates an owner-private transaction workspace and a bounded,
+append-only, flushed JSON-lines journal containing identities, digests,
+lengths, original UID/GID/mode, the non-secret provider reference and durable
+phase events, but no configuration bytes or DEK. Before `CommitPrepared` it
+requires the version-3 encrypted pre-image, a flushed desired stage, a current
+old-target CAS, enough terminal journal budget, and a successful exact provider
+reopen/decrypt of the pre-image.
+
+Publication and restoration use `renameat2` between held workspace/root
+descriptors only after rechecking the expected current inode, digest, length,
+link count and security metadata. The desired and rollback stage identities are
+durable before their respective rename. Restart therefore recognizes only the
+exact narrow crash shape in which the stage name disappeared and its recorded
+inode now names the target; a symlink, added hard link, stale inode, changed
+content/metadata or third-party replacement is preserved as a recovery
+conflict. Synthetic validation rejection authenticates the complete pre-image
+and reserves rollback journal budget before `RollbackPrepared`, then creates
+and flushes the rollback stage before the first restore. Terminal recovery is
+idempotent and revalidates the exact desired or restored inode.
+
+Tests interrupt after each begin/backup/stage/decision/publication/verification/
+rollback/restore/terminal boundary, exercise stale targets plus symlink and
+hard-link changes, preserve a post-publication external edit, scan durable
+metadata for the original Key and DEK, and repeat terminal recovery. Before the
+commit decision, restart returns a non-mutating `Uncommitted` blocker and
+retains evidence; this slice does not yet define abandoned-workspace/key
+cleanup. It also omits multi-target rollback, native tool-format validation and
+tool lock compatibility, journal/artifact retirement, a production Linux key
+provider, Windows/macOS primitives, automatic startup orchestration and all
+real client paths. `apply_configuration` and the UI remain fail-closed.
 
 `live/recovery_key.rs` fixes the provider-call boundary and redacted outcome
 taxonomy. Recovery opens one exact non-zero transaction ID and
