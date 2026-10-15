@@ -30,6 +30,7 @@ const PENDING_EVENT_CAPACITY: usize = 16 * 1024;
 const PENDING_EVENT_MAGIC: &[u8; 8] = b"CPAPND01";
 const PENDING_EVENT_HEADER: usize = 8 + 4 + 32;
 const PENDING_SLOT_PREFIX: &str = ".journal-pending-";
+const PENDING_SLOTS_READY_FILE: &str = ".journal-pending-ready";
 const DESIRED_STAGE: &str = "desired.stage";
 const ROLLBACK_STAGE: &str = "rollback.stage";
 const ROLLBACK_STAGE_PENDING: &str = "rollback.stage.pending";
@@ -1137,7 +1138,7 @@ mod platform {
             return Err(SyntheticReplacementError::CorruptJournal);
         }
         let envelope = encode_pending_event(&bytes)?;
-        if entry_exists(workspace.as_raw_fd(), OsStr::new(&pending_slot_name(0)))? {
+        if pending_slots_ready(workspace, workspace_path)? {
             let event_count = read_journal_bytes(journal)?
                 .iter()
                 .filter(|byte| **byte == b'\n')
@@ -1200,7 +1201,30 @@ mod platform {
         Ok(())
     }
 
-    fn encode_pending_event(bytes: &[u8]) -> Result<Vec<u8>, SyntheticReplacementError> {
+    fn pending_slots_ready(
+        workspace: &File,
+        workspace_path: &Path,
+    ) -> Result<bool, SyntheticReplacementError> {
+        if !entry_exists(workspace.as_raw_fd(), OsStr::new(PENDING_SLOTS_READY_FILE))? {
+            return Ok(false);
+        }
+        let marker = open_private_file(
+            workspace.as_raw_fd(),
+            OsStr::new(PENDING_SLOTS_READY_FILE),
+            &workspace_path.join(PENDING_SLOTS_READY_FILE),
+        )?;
+        if marker
+            .metadata()
+            .map_err(|source| io_error(workspace_path.join(PENDING_SLOTS_READY_FILE), source))?
+            .len()
+            != 0
+        {
+            return Err(SyntheticReplacementError::RecoveryConflict);
+        }
+        Ok(true)
+    }
+
+    pub(super) fn encode_pending_event(bytes: &[u8]) -> Result<Vec<u8>, SyntheticReplacementError> {
         if bytes.is_empty() || bytes.len() > PENDING_EVENT_CAPACITY - PENDING_EVENT_HEADER {
             return Err(SyntheticReplacementError::CorruptJournal);
         }
@@ -1232,7 +1256,7 @@ mod platform {
         Some(payload.to_vec())
     }
 
-    fn pending_slot_name(index: usize) -> String {
+    pub(super) fn pending_slot_name(index: usize) -> String {
         format!("{PENDING_SLOT_PREFIX}{index:02}")
     }
 
@@ -1263,6 +1287,17 @@ mod platform {
             slot.sync_all()
                 .map_err(|source| io_error(&display, source))?;
         }
+        workspace
+            .sync_all()
+            .map_err(|source| io_error(workspace_path, source))?;
+        let marker = create_private_file(
+            workspace.as_raw_fd(),
+            OsStr::new(PENDING_SLOTS_READY_FILE),
+            workspace_path.join(PENDING_SLOTS_READY_FILE),
+        )?;
+        marker
+            .sync_all()
+            .map_err(|source| io_error(workspace_path.join(PENDING_SLOTS_READY_FILE), source))?;
         workspace
             .sync_all()
             .map_err(|source| io_error(workspace_path, source))?;
@@ -1300,7 +1335,7 @@ mod platform {
         workspace_path: &Path,
         journal: &mut File,
     ) -> Result<(), SyntheticReplacementError> {
-        if !entry_exists(workspace.as_raw_fd(), OsStr::new(&pending_slot_name(0)))? {
+        if !pending_slots_ready(workspace, workspace_path)? {
             return Ok(());
         }
         let bytes = read_journal_bytes(journal)?;
@@ -2776,7 +2811,7 @@ mod tests {
         let journal_path = workspace.join(JOURNAL_FILE);
         let journal_bytes = fs::read(&journal_path).unwrap();
         let event_count = journal_bytes.iter().filter(|byte| **byte == b'\n').count();
-        let pending = workspace.join(pending_slot_name(event_count));
+        let pending = workspace.join(platform::pending_slot_name(event_count));
         let mut pending_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -2784,7 +2819,7 @@ mod tests {
             .unwrap();
         pending_file.seek(SeekFrom::Start(0)).unwrap();
         pending_file
-            .write_all(&encode_pending_event(&bytes).unwrap())
+            .write_all(&platform::encode_pending_event(&bytes).unwrap())
             .unwrap();
         pending_file.sync_all().unwrap();
         let mut journal = OpenOptions::new().append(true).open(journal_path).unwrap();
@@ -3268,6 +3303,11 @@ mod tests {
                 ),
                 Err(SyntheticReplacementError::Uncommitted)
             ));
+            if fault == FaultPoint::PendingSlotReservationFailure {
+                assert!(!workspace(root.path(), tx)
+                    .join(PENDING_SLOTS_READY_FILE)
+                    .exists());
+            }
         }
     }
 
@@ -3287,10 +3327,11 @@ mod tests {
         )
         .is_err());
         let workspace = workspace(root.path(), tx);
+        assert!(workspace.join(PENDING_SLOTS_READY_FILE).is_file());
         let journal = fs::metadata(workspace.join(JOURNAL_FILE)).unwrap();
         assert!(journal.blocks() * 512 >= MAX_JOURNAL_BYTES as u64);
         for index in 0..MAX_EVENTS {
-            let slot = fs::metadata(workspace.join(pending_slot_name(index))).unwrap();
+            let slot = fs::metadata(workspace.join(platform::pending_slot_name(index))).unwrap();
             assert_eq!(slot.len(), PENDING_EVENT_CAPACITY as u64);
             assert!(slot.blocks() * 512 >= PENDING_EVENT_CAPACITY as u64);
         }
