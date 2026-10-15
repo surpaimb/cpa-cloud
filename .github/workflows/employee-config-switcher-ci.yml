@@ -47,6 +47,10 @@ jobs:
         working-directory: desktop/employee-config-switcher
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install Linux D-Bus development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Install fixed Rust toolchain
         run: |
           rustup toolchain install 1.90.0 --profile minimal --component rustfmt

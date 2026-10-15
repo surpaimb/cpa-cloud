@@ -122,9 +122,16 @@ Planned platform providers are gated separately:
   the transaction, current-user UUID commitment, access-group commitment and
   exact persistent reference. A temporary file-based Keychain is not evidence
   for this production contract.
-- Linux desktop: a Secret Service item located by stable lookup attributes.
-  Locked collections and prompt requirements are explicit `locked` states.
-  Headless Linux has no accepted provider yet and therefore remains unsupported.
+- Linux desktop: a Secret Service item located by stable case-sensitive,
+  non-secret lookup attributes rather than a persisted object path. The current
+  Linux-only candidate is synthetic/integration-only: tests alone can approve
+  its owner-private reconciliation-lock directory. It serializes create under
+  a per-user cross-process `flock`, always calls `CreateItem` with
+  `replace=false`, returns the same authenticated key/reference on retry, and
+  refuses duplicate matches. It never invokes Unlock or Prompt; locked items or
+  prompt requirements are explicit `locked` states. A fixed isolated native
+  keyring restart/lock/delete fixture and encrypted transfer session remain
+  unproved, so headless and production Linux remain unsupported.
 
 Before production, each provider needs native restart, locked-store, deleted-
 item, wrong-user, corrupted-reference and cleanup-crash tests. Machine/profile
@@ -399,8 +406,14 @@ Linux and macOS return `UnsupportedPlatform` before namespace creation. This
 provider is not wired to a durable replacement transaction or real client write.
 A separate macOS boundary now keeps production construction unavailable until
 signing/access-group identity can be verified and exercises the intended
-Data-Protection-Keychain request/state contract against an in-memory fake only;
-native Keychain and Secret Service implementations remain unimplemented.
+Data-Protection-Keychain request/state contract against an in-memory fake only.
+The Linux Secret Service candidate similarly requires a test-only synthetic
+approval, uses stable non-secret transaction/UID/item attributes plus a
+checksummed identity-bound envelope/reference, and exercises no-prompt,
+no-replace create/open/delete behavior against a fake service fault matrix.
+Its session-bus transport compiles only on Linux, but no fixed native keyring
+fixture has yet established restart, locked-session or deletion behavior; it is
+not a production provider.
 
 The same module includes a provider-agnostic terminal-cleanup ordering gate. It
 accepts only an already durable `Complete` or `RolledBack` decision, requires
@@ -503,7 +516,14 @@ write gate remain unresolved requirements.
 - [Microsoft `FileRenameInformationEx`](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/4217551b-d2c0-42cb-9dc1-69a716cf6d0c)
 - [Apple: Using the keychain to manage user secrets](https://developer.apple.com/documentation/security/using-the-keychain-to-manage-user-secrets)
 - [freedesktop.org Secret Service: collections and items](https://specifications.freedesktop.org/secret-service/latest/ch03.html)
+- [freedesktop.org Secret Service: lookup attributes](https://specifications.freedesktop.org/secret-service/latest/lookup-attributes.html)
+- [freedesktop.org Secret Service: service methods](https://specifications.freedesktop.org/secret-service/latest/org.freedesktop.Secret.Service.html)
+- [freedesktop.org Secret Service: collection methods](https://specifications.freedesktop.org/secret-service/latest/org.freedesktop.Secret.Collection.html)
+- [freedesktop.org Secret Service: item methods](https://specifications.freedesktop.org/secret-service/latest/org.freedesktop.Secret.Item.html)
+- [freedesktop.org Secret Service: plain session](https://specifications.freedesktop.org/secret-service/latest/ch07s02.html)
 - [freedesktop.org Secret Service: locking and unlocking](https://specifications.freedesktop.org/secret-service/latest/unlocking.html)
+- [freedesktop.org Secret Service: prompts](https://specifications.freedesktop.org/secret-service/latest/prompts.html)
+- [freedesktop.org Secret Service: standard errors](https://specifications.freedesktop.org/secret-service/latest/errors.html)
 - [Linux `unlinkat(2)`](https://man7.org/linux/man-pages/man2/unlinkat.2.html)
 - [Linux `flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html)
 - [Linux `renameat2(2)`](https://man7.org/linux/man-pages/man2/renameat2.2.html)

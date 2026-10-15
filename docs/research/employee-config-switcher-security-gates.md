@@ -320,9 +320,9 @@ fallback; tests distinguish an upper-half ReFS collision and two distinct live
 objects, detect same-path object replacement, and reject the missing-ID form.
 DPAPI plaintext and temporary key arrays are
 zeroized. Linux/macOS construction returns `UnsupportedPlatform` without
-creating a namespace; Keychain, Secret Service and all environment/CLI/database/
-plaintext fallbacks remain absent. The provider is synthetic-only and is not
-wired to the durable transaction or real client writes.
+creating a namespace; this Windows provider has no environment/CLI/database/
+plaintext fallback and is not wired to the durable transaction or real client
+writes.
 
 The macOS Keychain slice now records a pure, fake-`SecItem` contract without
 touching Security.framework. It fixes Data Protection Keychain selection,
@@ -338,6 +338,23 @@ the preview has no fixed signing team/access-group entitlement to verify.
 Temporary file-based Keychains are explicitly not accepted as evidence for
 Data Protection Keychain restart, locked-session, cross-user or durability
 behavior, so native Keychain custody and real writes remain open gates.
+
+The Linux Secret Service candidate is also synthetic-only. Its approval has no
+production constructor and holds an already-open owner-private directory used
+for a descriptor-relative, single-link `0600` reconciliation lock. Stable
+non-secret lookup attributes bind application, purpose, format, transaction,
+effective UID and random item ID; checksummed reference and secret envelopes
+repeat the identity. Create is serialized across processes, uses
+`CreateItem(replace=false)`, reconciles a prior exact item and refuses
+duplicates. Open and delete re-search attributes instead of trusting a stored
+object path. The client never calls Unlock, Prompt or SetSecret and maps prompt
+requirements to `locked`; missing, wrong-identity, corrupt and unavailable are
+kept distinct without create/overwrite fallback. Fake-service tests inject
+search/create/get/delete faults and unknown post-create completion. No test
+touches a real user keyring. The current D-Bus adapter uses the specification's
+plain session within the accepted same-login-user threat boundary; encrypted
+session negotiation plus a fixed isolated native keyring restart/lock/delete
+fixture remain required before production Linux custody or real writes.
 
 A provider-agnostic cleanup sequence gate now also refuses provider deletion
 until a terminal decision, completion tombstone, and workspace removal have

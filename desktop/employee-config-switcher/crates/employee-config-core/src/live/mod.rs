@@ -4,6 +4,8 @@ pub mod completion_tombstone;
 pub mod engine;
 pub mod floor;
 pub(crate) mod linux_replacement;
+#[cfg(target_os = "linux")]
+pub(crate) mod linux_secret_service;
 pub mod macos_keychain;
 pub mod patch;
 pub mod recovery_key;
