@@ -175,9 +175,9 @@ mod windows_impl {
         PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FileRenameInfoEx, SetFileInformationByHandle, DELETE, FILE_RENAME_INFO,
+        CreateFileW, FileRenameInfoEx, SetFileInformationByHandle, DELETE,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use zeroize::{Zeroize, Zeroizing};
