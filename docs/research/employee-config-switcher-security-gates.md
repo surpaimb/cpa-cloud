@@ -351,6 +351,9 @@ fixed native `@google/gemini-cli@0.62.0` package accepted the exact planner byte
 in an isolated Windows home and completed a synthetic loopback streaming request
 using the expected v1beta route and `x-goog-api-key`, while the unrelated
 `trustedFolders.json` sentinel remained byte-, digest-, and mtime-identical.
+System settings/defaults, the working directory, ancestor `.env` search, and
+credential variables were isolated; a rejected-auth negative control exited
+before any request, independently proving that the user settings file was read.
 `GEMINI_CLI_HOME` is treated as a home root and `.gemini` is appended, matching
 that fixed CLI contract. Cross-version acceptance and the replacement
 transaction contract remain blockers for real writes.

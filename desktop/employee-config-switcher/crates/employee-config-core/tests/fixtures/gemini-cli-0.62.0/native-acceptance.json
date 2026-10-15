@@ -30,6 +30,11 @@
     "temporary_npm_cache": true,
     "temporary_npm_prefix": true,
     "path_contains_only_node_and_system32": true,
+    "system_settings_path_redirected_to_isolated_empty_file": true,
+    "system_defaults_path_redirected_to_isolated_empty_file": true,
+    "isolated_system_file_sha256": "fcd393d2c13bad308661b62b34d9c3234a3ce840e22909b0a180e85f76b5d24d",
+    "working_directory_isolated": true,
+    "working_directory_ancestor_env_file_count": 0,
     "production_provider_contacted": false
   },
   "invocation": {
@@ -41,7 +46,21 @@
     "model_argument_present": false,
     "api_key_process_environment_present": false,
     "base_url_process_environment_present": false,
-    "model_process_environment_present": false
+    "model_process_environment_present": false,
+    "api_version_process_environment_present": false,
+    "credential_process_environment_variables_absent": [
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "GOOGLE_CLOUD_PROJECT",
+      "GOOGLE_CLOUD_PROJECT_ID",
+      "GOOGLE_GENAI_USE_VERTEXAI",
+      "GOOGLE_GENAI_USE_GCA"
+    ]
+  },
+  "planner_fixtures": {
+    "settings_sha256": "aee5c986d940620c90c5f5cd803ac5f2d92d6a5018700acf94d11ea001ed8cbc",
+    "environment_sha256": "c6d48d40c2a0bcc2ee81ca672229c1f3fbe454d17a5d057ab8f5e67290b531c8"
   },
   "loopback_observation": {
     "listen_address": "127.0.0.1:43127",
@@ -54,6 +73,16 @@
     "response_body_recorded": false,
     "exit_code": 0,
     "stdout_was_valid_json": true
+  },
+  "settings_read_negative_control": {
+    "only_selected_type_changed_to": "gateway",
+    "exit_code": 41,
+    "request_count_before": 1,
+    "request_count_after": 1,
+    "rejected_before_request": true,
+    "system_settings_path_redirected": true,
+    "system_defaults_path_redirected": true,
+    "working_directory_ancestor_env_file_count": 0
   },
   "trusted_folders_sentinel": {
     "fixture_sha256": "cf140ed718953ef4bd7ef0316e8e2ebb0426b0c95da4ceefe1452653517a0966",

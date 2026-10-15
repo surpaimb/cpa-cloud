@@ -457,9 +457,27 @@ mod tests {
             "../tests/fixtures/gemini-cli-0.62.0/native-acceptance.json"
         ))
         .unwrap();
+        let settings_hash = hex::encode(Sha256::digest(include_bytes!(
+            "../tests/fixtures/gemini-cli-0.62.0/native-settings.json"
+        )));
+        let environment_hash = hex::encode(Sha256::digest(include_bytes!(
+            "../tests/fixtures/gemini-cli-0.62.0/native.env"
+        )));
         assert_eq!(acceptance["package"]["version"], "0.62.0");
         assert_eq!(acceptance["package"]["bin_entry"], "bundle/gemini.js");
         assert_eq!(acceptance["runtime"]["node_version"], "v22.22.0");
+        assert_eq!(
+            acceptance["planner_fixtures"]["settings_sha256"]
+                .as_str()
+                .unwrap(),
+            settings_hash
+        );
+        assert_eq!(
+            acceptance["planner_fixtures"]["environment_sha256"]
+                .as_str()
+                .unwrap(),
+            environment_hash
+        );
         assert_eq!(acceptance["loopback_observation"]["request_method"], "POST");
         assert_eq!(
             acceptance["loopback_observation"]["request_path"],
@@ -474,6 +492,18 @@ mod tests {
             false
         );
         assert_eq!(acceptance["loopback_observation"]["exit_code"], 0);
+        assert_eq!(
+            acceptance["settings_read_negative_control"]["rejected_before_request"],
+            true
+        );
+        assert_eq!(
+            acceptance["settings_read_negative_control"]["request_count_before"],
+            acceptance["settings_read_negative_control"]["request_count_after"]
+        );
+        assert_eq!(
+            acceptance["isolation"]["working_directory_ancestor_env_file_count"],
+            0
+        );
         assert_eq!(
             acceptance["trusted_folders_sentinel"]["bytes_unchanged"],
             true
