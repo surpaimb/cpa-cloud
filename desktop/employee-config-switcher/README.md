@@ -13,6 +13,8 @@
 
 首版本地威胁模型信任同一登录系统账号下的进程；恶意同账号进程读取工具配置中的员工 Key、绕过 advisory lock 或主动竞态替换目录项明确不在首版范围。跨账号访问、意外并发修改、崩溃恢复与对象身份变化仍在范围内，必须保留 CAS/稳定路径与权限、兼容锁、原子替换、加密备份/回滚、OS Key provider 与 Key 生命周期，以及逐工具原生验收。这一范围选择不启用 `apply_configuration`，也不代表十个工具已可真实写入。
 
+Linux 合成根目录的 completion tombstone 现在用同一稳定目录句柄和兼容 advisory lock 覆盖枚举、容量/重复校验、发布、逻辑删除与 inactive-proof 验证，并用确定性并发测试覆盖第 64 条边界及发布/删除竞态。这只是后续 artifact retirement 的并发安全前置条件；跨命名空间退休、OS Key provider 与真实配置替换仍未实现。
+
 Grok Build 的真实检测或写入还必须先支持或明确拒绝 `GROK_HOME` 覆盖，证明模型 ID 满足 CPA `validIdentifier` 约束或能安全处理 Grok glob 语义，并增加固定原生客户端夹具；在这些门槛完成前，不声称覆盖 Grok 的内部模型选择路径。
 
 ## 本地验证

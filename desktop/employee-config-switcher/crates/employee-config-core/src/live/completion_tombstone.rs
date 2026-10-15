@@ -1,9 +1,10 @@
 //! Durable completion tombstones for a bounded synthetic-root experiment.
 //!
 //! Linux uses held directory descriptors, no-follow opens, owner-private modes
-//! and directory flushes. Windows and macOS remain unsupported. This module
-//! does not delete recovery keys, remove transaction workspaces or touch real
-//! client directories.
+//! and directory flushes. A compatible directory lock spans enumeration and
+//! every capacity/duplicate decision through publication or logical removal.
+//! Windows and macOS remain unsupported. This module does not delete recovery
+//! keys, remove transaction workspaces or touch real client directories.
 
 #[cfg(target_os = "linux")]
 use super::recovery_key::RecoveryKeyMetadataError;
@@ -298,9 +299,64 @@ fn io_error(path: impl Into<PathBuf>, source: io::Error) -> CompletionTombstoneE
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
+    #[cfg(test)]
+    use std::collections::BTreeMap;
     use std::os::fd::{AsRawFd, FromRawFd, RawFd};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::MetadataExt;
+
+    #[cfg(test)]
+    struct BeforeMutationLockBarrier {
+        barrier: std::sync::Arc<std::sync::Barrier>,
+        remaining: usize,
+    }
+
+    #[cfg(test)]
+    static BEFORE_MUTATION_LOCK_BARRIERS: std::sync::OnceLock<
+        std::sync::Mutex<BTreeMap<PathBuf, BeforeMutationLockBarrier>>,
+    > = std::sync::OnceLock::new();
+
+    #[cfg(test)]
+    pub(super) fn install_before_mutation_lock_barrier(
+        directory_path: PathBuf,
+        barrier: std::sync::Arc<std::sync::Barrier>,
+    ) {
+        let barriers = BEFORE_MUTATION_LOCK_BARRIERS
+            .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+        let replaced = barriers.lock().unwrap().insert(
+            directory_path,
+            BeforeMutationLockBarrier {
+                barrier,
+                remaining: 2,
+            },
+        );
+        assert!(
+            replaced.is_none(),
+            "test tombstone mutation barrier already installed"
+        );
+    }
+
+    #[cfg(test)]
+    fn wait_before_mutation_lock(directory_path: &Path) {
+        let barriers = BEFORE_MUTATION_LOCK_BARRIERS
+            .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+        let barrier = {
+            let mut barriers = barriers.lock().unwrap();
+            let mut remove = false;
+            let barrier = barriers.get_mut(directory_path).map(|entry| {
+                entry.remaining -= 1;
+                remove = entry.remaining == 0;
+                std::sync::Arc::clone(&entry.barrier)
+            });
+            if remove {
+                barriers.remove(directory_path);
+            }
+            barrier
+        };
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[allow(dead_code)]
@@ -366,21 +422,6 @@ mod platform {
         reference: &RecoveryKeyReference,
         fault: PersistFault,
     ) -> Result<CompletionTombstone, CompletionTombstoneError> {
-        let existing = load_snapshot(root, None)?;
-        if existing
-            .tombstones
-            .iter()
-            .chain(existing.removed.iter())
-            .any(|tombstone| tombstone.transaction_id == transaction_id)
-        {
-            return Err(CompletionTombstoneError::RecoveryConflict(
-                root.join(TOMBSTONE_DIRECTORY)
-                    .join(tombstone_name(transaction_id)),
-            ));
-        }
-        if existing.entry_count >= MAX_TOMBSTONES {
-            return Err(CompletionTombstoneError::TooMany);
-        }
         let root_dir = open_root(root)?;
         let root_identity = identity(&root_dir).map_err(|source| io_error(root, source))?;
         let directory_path = root.join(TOMBSTONE_DIRECTORY);
@@ -395,6 +436,32 @@ mod platform {
             root_dir
                 .sync_all()
                 .map_err(|source| io_error(root, source))?;
+        }
+        #[cfg(test)]
+        wait_before_mutation_lock(&directory_path);
+        lock_exclusive(&directory, &directory_path)?;
+
+        let existing = load_snapshot_locked(
+            root,
+            &root_dir,
+            root_identity,
+            &directory_path,
+            &directory,
+            directory_identity,
+            None,
+        )?;
+        if existing
+            .tombstones
+            .iter()
+            .chain(existing.removed.iter())
+            .any(|tombstone| tombstone.transaction_id == transaction_id)
+        {
+            return Err(CompletionTombstoneError::RecoveryConflict(
+                directory_path.join(tombstone_name(transaction_id)),
+            ));
+        }
+        if existing.entry_count >= MAX_TOMBSTONES {
+            return Err(CompletionTombstoneError::TooMany);
         }
 
         let transaction_text = transaction_hex(transaction_id);
@@ -469,13 +536,10 @@ mod platform {
     pub(super) fn load_all(
         root: &Path,
     ) -> Result<Vec<CompletionTombstone>, CompletionTombstoneError> {
-        Ok(load_snapshot(root, None)?.tombstones)
+        Ok(load_snapshot(root)?.tombstones)
     }
 
-    fn load_snapshot(
-        root: &Path,
-        allowed_deleting: Option<ReplacementTransactionId>,
-    ) -> Result<LoadSnapshot, CompletionTombstoneError> {
+    fn load_snapshot(root: &Path) -> Result<LoadSnapshot, CompletionTombstoneError> {
         let root_dir = open_root(root)?;
         let root_identity = identity(&root_dir).map_err(|source| io_error(root, source))?;
         let directory_path = root.join(TOMBSTONE_DIRECTORY);
@@ -499,8 +563,29 @@ mod platform {
         };
         let directory_identity =
             identity(&directory).map_err(|source| io_error(&directory_path, source))?;
+        lock_shared(&directory, &directory_path)?;
+        load_snapshot_locked(
+            root,
+            &root_dir,
+            root_identity,
+            &directory_path,
+            &directory,
+            directory_identity,
+            None,
+        )
+    }
 
-        let names_before = read_directory_names(&directory, &directory_path)?;
+    #[allow(clippy::too_many_arguments)]
+    fn load_snapshot_locked(
+        root: &Path,
+        root_dir: &File,
+        root_identity: RootIdentity,
+        directory_path: &Path,
+        directory: &File,
+        directory_identity: RootIdentity,
+        allowed_deleting: Option<ReplacementTransactionId>,
+    ) -> Result<LoadSnapshot, CompletionTombstoneError> {
+        let names_before = read_directory_names(directory, directory_path)?;
         let mut tombstones = Vec::with_capacity(names_before.len());
         let mut deleting = None;
         let mut removed = Vec::new();
@@ -578,24 +663,28 @@ mod platform {
 
         directory
             .sync_all()
-            .map_err(|source| io_error(&directory_path, source))?;
+            .map_err(|source| io_error(directory_path, source))?;
         root_dir
             .sync_all()
             .map_err(|source| io_error(root, source))?;
-        let names_after = read_directory_names(&directory, &directory_path)?;
+        let names_after = read_directory_names(directory, directory_path)?;
         if names_before != names_after {
-            return Err(CompletionTombstoneError::RecoveryConflict(directory_path));
+            return Err(CompletionTombstoneError::RecoveryConflict(
+                directory_path.to_path_buf(),
+            ));
         }
-        verify_private_directory(&directory, &directory_path)?;
+        verify_private_directory(directory, directory_path)?;
         let reopened_directory = open_private_directory_at(
             root_dir.as_raw_fd(),
             OsStr::new(TOMBSTONE_DIRECTORY),
-            &directory_path,
+            directory_path,
         )?;
-        if identity(&reopened_directory).map_err(|source| io_error(&directory_path, source))?
+        if identity(&reopened_directory).map_err(|source| io_error(directory_path, source))?
             != directory_identity
         {
-            return Err(CompletionTombstoneError::RecoveryConflict(directory_path));
+            return Err(CompletionTombstoneError::RecoveryConflict(
+                directory_path.to_path_buf(),
+            ));
         }
         Ok(LoadSnapshot {
             tombstones,
@@ -675,7 +764,32 @@ mod platform {
         let deleting_path = root.join(TOMBSTONE_DIRECTORY).join(&deleting_name);
         let removed_name = removed_name(transaction_id);
         let removed_path = root.join(TOMBSTONE_DIRECTORY).join(&removed_name);
-        let loaded = load_snapshot(root, Some(transaction_id))?;
+        let root_dir = open_root(root)?;
+        let root_identity = identity(&root_dir).map_err(|source| io_error(root, source))?;
+        let directory_path = root.join(TOMBSTONE_DIRECTORY);
+        let directory = open_private_directory_at(
+            root_dir.as_raw_fd(),
+            OsStr::new(TOMBSTONE_DIRECTORY),
+            &directory_path,
+        )?;
+        let directory_identity =
+            identity(&directory).map_err(|source| io_error(&directory_path, source))?;
+        if require_removed {
+            lock_shared(&directory, &directory_path)?;
+        } else {
+            #[cfg(test)]
+            wait_before_mutation_lock(&directory_path);
+            lock_exclusive(&directory, &directory_path)?;
+        }
+        let loaded = load_snapshot_locked(
+            root,
+            &root_dir,
+            root_identity,
+            &directory_path,
+            &directory,
+            directory_identity,
+            Some(transaction_id),
+        )?;
         let final_tombstone = loaded
             .tombstones
             .iter()
@@ -712,16 +826,6 @@ mod platform {
             ));
         }
 
-        let root_dir = open_root(root)?;
-        let root_identity = identity(&root_dir).map_err(|source| io_error(root, source))?;
-        let directory_path = root.join(TOMBSTONE_DIRECTORY);
-        let directory = open_private_directory_at(
-            root_dir.as_raw_fd(),
-            OsStr::new(TOMBSTONE_DIRECTORY),
-            &directory_path,
-        )?;
-        let directory_identity =
-            identity(&directory).map_err(|source| io_error(&directory_path, source))?;
         let mut file =
             open_private_file_at(directory.as_raw_fd(), OsStr::new(source_name), source_path)?;
         let file_identity = identity(&file).map_err(|source| io_error(source_path, source))?;
@@ -1021,6 +1125,20 @@ mod platform {
         Ok(())
     }
 
+    fn lock_exclusive(file: &File, display: &Path) -> Result<(), CompletionTombstoneError> {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(io_error(display, io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    fn lock_shared(file: &File, display: &Path) -> Result<(), CompletionTombstoneError> {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } != 0 {
+            return Err(io_error(display, io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
     fn create_private_file_at(
         parent: RawFd,
         name: &OsStr,
@@ -1243,6 +1361,10 @@ mod tests {
     };
     #[cfg(target_os = "linux")]
     use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::sync::{Arc, Barrier};
+    #[cfg(target_os = "linux")]
+    use std::thread;
 
     fn transaction(byte: u8) -> ReplacementTransactionId {
         ReplacementTransactionId::from_bytes([byte; 16]).unwrap()
@@ -1716,6 +1838,105 @@ mod tests {
         let outside = tempfile::NamedTempFile::new().unwrap();
         symlink(outside.path(), &file).unwrap();
         assert!(load_completion_tombstones(&root_path).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_sixty_fourth_persist_cannot_overfill_the_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        for byte in 1..MAX_TOMBSTONES as u8 {
+            persist_completion_tombstone(
+                &root_path,
+                ReplacementPhase::Complete,
+                transaction(byte),
+                &reference(),
+            )
+            .unwrap();
+        }
+
+        let barrier = Arc::new(Barrier::new(2));
+        platform::install_before_mutation_lock_barrier(
+            root_path.join(TOMBSTONE_DIRECTORY),
+            Arc::clone(&barrier),
+        );
+        let workers = [0x70, 0x71].map(|byte| {
+            let root_path = root_path.clone();
+            thread::spawn(move || {
+                persist_completion_tombstone(
+                    &root_path,
+                    ReplacementPhase::Complete,
+                    transaction(byte),
+                    &reference(),
+                )
+            })
+        });
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(CompletionTombstoneError::TooMany)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            fs::read_dir(root_path.join(TOMBSTONE_DIRECTORY))
+                .unwrap()
+                .count(),
+            MAX_TOMBSTONES
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_removal_and_duplicate_persist_serialize_under_one_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(0x72);
+        let reference = reference();
+        persist_completion_tombstone(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            &reference,
+        )
+        .unwrap();
+        let (_cleanup, authorization) = removal_authorization(transaction_id, reference.clone());
+
+        let barrier = Arc::new(Barrier::new(2));
+        platform::install_before_mutation_lock_barrier(
+            root_path.join(TOMBSTONE_DIRECTORY),
+            Arc::clone(&barrier),
+        );
+        let persist_root = root_path.clone();
+        let persist_reference = reference.clone();
+        let persist = thread::spawn(move || {
+            persist_completion_tombstone(
+                &persist_root,
+                ReplacementPhase::Complete,
+                transaction_id,
+                &persist_reference,
+            )
+        });
+        let remove_root = root_path.clone();
+        let remove = thread::spawn(move || {
+            remove_completion_tombstone(&remove_root, &authorization)
+        });
+
+        assert!(matches!(
+            persist.join().unwrap(),
+            Err(CompletionTombstoneError::RecoveryConflict(_))
+        ));
+        assert_eq!(remove.join().unwrap().unwrap().transaction_id(), transaction_id);
+        let directory = root_path.join(TOMBSTONE_DIRECTORY);
+        assert!(!directory.join(tombstone_name(transaction_id)).exists());
+        assert!(!directory.join(deleting_name(transaction_id)).exists());
+        assert!(directory.join(removed_name(transaction_id)).exists());
     }
 
     #[cfg(target_os = "linux")]

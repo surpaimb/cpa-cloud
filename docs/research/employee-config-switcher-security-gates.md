@@ -284,6 +284,11 @@ foundation now persists and reloads versioned completion tombstones with exact
 `0700`/`0600` owner-private modes, no-follow descriptor-relative opens, private
 staging plus no-replace atomic publication, bounded restart enumeration,
 file/directory/root flushes and root/transaction/provider-reference binding.
+One stable directory descriptor and a compatible advisory lock now cover
+restart enumeration, duplicate/capacity validation, publication, logical
+removal and inactive-proof verification. Deterministic concurrent tests prove
+that two contenders for the 64th entry cannot publish a 65th record and that a
+duplicate publisher cannot race an authorized removal into two active states.
 Restart refuses a pre-publication `.pending` artifact and repairs durability of
 a structurally complete final record before returning it. Windows and macOS
 remain unsupported before namespace creation. No operating-system key provider,

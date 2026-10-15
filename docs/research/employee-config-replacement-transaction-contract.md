@@ -318,7 +318,12 @@ partial final tombstone. Restart revalidates and flushes every visible complete
 record plus its directory and root before returning it as durable, binds it to
 the held root identity and exact transaction/provider reference, and
 reconstructs a bounded sorted set. It reopens the named file and directory to
-reject replacement during the operation. After the provider-agnostic cleanup
+reject replacement during the operation. A stable directory descriptor plus a
+shared/exclusive advisory lock now spans enumeration and every duplicate or
+capacity decision through publication, authorized logical removal, or inactive-
+proof verification. Deterministic concurrency tests cover the 63-to-64 boundary
+and a duplicate publisher racing an authorized removal. After the provider-
+agnostic cleanup
 gate reaches `KeyDeletionConfirmed`, it can issue a non-serializable
 authorization for the Linux store to revalidate the exact
 transaction/reference, rename that one final tombstone to a `.deleting` intent,
