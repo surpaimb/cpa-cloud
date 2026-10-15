@@ -266,6 +266,14 @@ concurrent boundary tests cover both phase-zero capacity and duplicate append.
 Its workspace phase now requires and revalidates the exact durable removal
 proof described above; it still does not remove completed journal or proof
 records.
+The first retirement prerequisite is now explicit but non-mutating: only a
+durably `Complete` cleanup sequence may request revalidation of the exact
+inactive completion proof, and only that exact receipt can produce an opaque
+authorization bound to the same transaction/provider and workspace
+leaf/device/inode. No unlink API consumes this authorization. Crash-resumable
+cross-namespace deletion, mutation-boundary revalidation/locking,
+transaction-ID non-reuse and partial-retirement recovery remain required, so
+the 64-entry lifecycle limits are not yet reclaimed.
 The pure cleanup gate can issue a non-serializable removal authorization only
 after provider deletion is confirmed; the Linux store then revalidates the
 exact transaction/reference, renames the final tombstone to a flushed

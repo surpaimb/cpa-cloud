@@ -53,7 +53,13 @@ If a platform or filesystem cannot provide the required primitive, replacement
 returns `unsupported_platform_or_filesystem` before backup or target mutation.
 The unresolved same-user Unix leaf-entry and pre-opened-writer races documented
 in [the write-safety gates](employee-config-switcher-security-gates.md) remain a
-live-write blocker even if this synthetic state machine passes.
+live-write blocker even if this synthetic state machine passes. Linux
+`unlinkat(..., AT_REMOVEDIR)` still resolves a leaf name at its own operation
+boundary, while `flock` is advisory; extra `fstat`/`openat2` checks or a
+quarantine rename only move, rather than close, the final same-UID exchange
+window. A live implementation therefore needs a separate broker/service UID
+that exclusively owns and writes the transaction namespace, or an equivalent
+mandatory kernel-enforced boundary. Ordinary same-UID DAC remains unsupported.
 
 ## Recovery-key custody interface
 
@@ -343,6 +349,15 @@ journals/proofs, authenticate against a hostile same-user process, or
 orchestrate startup automatically. This does not implement a provider deletion
 backend, operating-system key provider, cleanup/proof garbage collection,
 automatic restart orchestration or real client writes.
+As the first bounded prerequisite for later garbage collection, a durably
+`Complete` cleanup sequence can now authorize a non-mutating revalidation of
+the exact inactive completion-tombstone proof. Only the resulting exact receipt
+can produce an opaque artifact-retirement authorization carrying the same
+terminal/transaction/provider and workspace leaf/device/inode binding. No code
+accepts that authorization for unlink yet: a future slice must define a
+crash-resumable cross-namespace deletion order, revalidation/locking at the
+mutation boundary, transaction-ID non-reuse, and recovery from every partial
+retirement state. Therefore all 64-entry journal/proof limits still apply.
 The owner-private filesystem boundary is not authentication against another
 process running as the same user; the documented same-user race remains a
 blocker.
@@ -353,3 +368,7 @@ blocker.
 - [Apple: Using the keychain to manage user secrets](https://developer.apple.com/documentation/security/using-the-keychain-to-manage-user-secrets)
 - [freedesktop.org Secret Service: collections and items](https://specifications.freedesktop.org/secret-service/latest/ch03.html)
 - [freedesktop.org Secret Service: locking and unlocking](https://specifications.freedesktop.org/secret-service/latest/unlocking.html)
+- [Linux `unlinkat(2)`](https://man7.org/linux/man-pages/man2/unlinkat.2.html)
+- [Linux `flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html)
+- [Linux `renameat2(2)`](https://man7.org/linux/man-pages/man2/renameat2.2.html)
+- [Linux `openat2(2)`](https://man7.org/linux/man-pages/man2/openat2.2.html)

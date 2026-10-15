@@ -300,6 +300,52 @@ impl std::fmt::Debug for CompletionTombstoneRemovalAuthorization {
     }
 }
 
+/// Authorization to verify, without mutating, the inactive completion proof
+/// for a cleanup sequence whose `Complete` event is already durable.
+pub(crate) struct CompletionTombstoneProofAuthorization {
+    terminal: ReplacementPhase,
+    transaction_id: ReplacementTransactionId,
+    reference: RecoveryKeyReference,
+}
+
+impl CompletionTombstoneProofAuthorization {
+    pub(crate) fn terminal(&self) -> ReplacementPhase {
+        self.terminal
+    }
+
+    pub(crate) fn transaction_id(&self) -> ReplacementTransactionId {
+        self.transaction_id
+    }
+
+    pub(crate) fn reference(&self) -> &RecoveryKeyReference {
+        &self.reference
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        terminal: ReplacementPhase,
+        transaction_id: ReplacementTransactionId,
+        reference: RecoveryKeyReference,
+    ) -> Self {
+        Self {
+            terminal,
+            transaction_id,
+            reference,
+        }
+    }
+}
+
+impl std::fmt::Debug for CompletionTombstoneProofAuthorization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompletionTombstoneProofAuthorization")
+            .field("terminal", &self.terminal)
+            .field("transaction_id", &self.transaction_id)
+            .field("reference", &self.reference)
+            .finish()
+    }
+}
+
 /// Proof that the completion tombstone is durable and that one exact
 /// transaction workspace may now be removed. It is intentionally not
 /// serializable and carries no key material.
@@ -349,6 +395,57 @@ impl WorkspaceRemovalTarget {
             device,
             inode,
         }
+    }
+}
+
+/// Verified precondition for a future durable artifact-retirement protocol.
+///
+/// The value is issued only after the cleanup journal is durably `Complete`
+/// and the tombstone store has revalidated the exact inactive completion proof.
+/// It authorizes no unlink by itself; the crash-safe cross-namespace retirement
+/// protocol remains a separate implementation slice.
+pub(crate) struct CleanupArtifactRetirementAuthorization {
+    terminal: ReplacementPhase,
+    transaction_id: ReplacementTransactionId,
+    reference: RecoveryKeyReference,
+    target: WorkspaceRemovalTarget,
+}
+
+impl CleanupArtifactRetirementAuthorization {
+    pub(crate) fn terminal(&self) -> ReplacementPhase {
+        self.terminal
+    }
+
+    pub(crate) fn transaction_id(&self) -> ReplacementTransactionId {
+        self.transaction_id
+    }
+
+    pub(crate) fn reference(&self) -> &RecoveryKeyReference {
+        &self.reference
+    }
+
+    pub(crate) fn workspace_name(&self) -> &str {
+        self.target.workspace_name()
+    }
+
+    pub(crate) fn workspace_device(&self) -> u64 {
+        self.target.device()
+    }
+
+    pub(crate) fn workspace_inode(&self) -> u64 {
+        self.target.inode()
+    }
+}
+
+impl std::fmt::Debug for CleanupArtifactRetirementAuthorization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CleanupArtifactRetirementAuthorization")
+            .field("terminal", &self.terminal)
+            .field("transaction_id", &self.transaction_id)
+            .field("reference", &self.reference)
+            .field("target", &self.target)
+            .finish()
     }
 }
 
@@ -574,6 +671,37 @@ impl RecoveryKeyCleanupSequence {
         }
         self.phase = RecoveryKeyCleanupPhase::Complete;
         Ok(())
+    }
+
+    pub(crate) fn authorize_completion_tombstone_proof_verification(
+        &self,
+    ) -> Result<CompletionTombstoneProofAuthorization, RecoveryKeyCleanupError> {
+        self.require_phase(RecoveryKeyCleanupPhase::Complete)?;
+        Ok(CompletionTombstoneProofAuthorization {
+            terminal: self.terminal,
+            transaction_id: self.transaction_id,
+            reference: self.reference.clone(),
+        })
+    }
+
+    pub(crate) fn authorize_artifact_retirement(
+        &self,
+        _evidence: super::cleanup_journal::RetirementEvidence,
+        receipt: &CompletionTombstoneRemovalReceipt,
+    ) -> Result<CleanupArtifactRetirementAuthorization, RecoveryKeyCleanupError> {
+        self.require_phase(RecoveryKeyCleanupPhase::Complete)?;
+        if receipt.terminal() != self.terminal
+            || receipt.transaction_id() != self.transaction_id
+            || receipt.reference() != &self.reference
+        {
+            return Err(RecoveryKeyCleanupError::InvalidTransition(self.phase));
+        }
+        Ok(CleanupArtifactRetirementAuthorization {
+            terminal: self.terminal,
+            transaction_id: self.transaction_id,
+            reference: self.reference.clone(),
+            target: self.workspace_target.clone(),
+        })
     }
 
     fn require_phase(&self, phase: RecoveryKeyCleanupPhase) -> Result<(), RecoveryKeyCleanupError> {
@@ -825,6 +953,12 @@ mod tests {
             cleanup.phase(),
             RecoveryKeyCleanupPhase::KeyDeletionConfirmed
         );
+        assert!(matches!(
+            cleanup.authorize_completion_tombstone_proof_verification(),
+            Err(RecoveryKeyCleanupError::InvalidTransition(
+                RecoveryKeyCleanupPhase::KeyDeletionConfirmed
+            ))
+        ));
         let authorization = cleanup.authorize_completion_tombstone_removal().unwrap();
         assert_eq!(authorization.terminal(), ReplacementPhase::Complete);
         assert_eq!(authorization.transaction_id(), transaction_id());

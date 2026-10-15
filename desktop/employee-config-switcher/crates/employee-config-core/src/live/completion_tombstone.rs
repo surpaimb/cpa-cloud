@@ -9,7 +9,8 @@
 use super::recovery_key::RecoveryKeyMetadataError;
 use super::{
     recovery_key::{
-        CompletionTombstoneRemovalAuthorization, RecoveryKeyReference, ReplacementTransactionId,
+        CompletionTombstoneProofAuthorization, CompletionTombstoneRemovalAuthorization,
+        RecoveryKeyReference, ReplacementTransactionId,
     },
     replacement::ReplacementPhase,
 };
@@ -207,6 +208,16 @@ pub fn remove_completion_tombstone(
     authorization: &CompletionTombstoneRemovalAuthorization,
 ) -> Result<CompletionTombstoneRemovalReceipt, CompletionTombstoneError> {
     platform::remove(root, authorization)
+}
+
+/// Revalidate an already inactive completion proof without renaming or
+/// deleting any artifact. This is the final evidence gate for a future
+/// crash-safe cleanup-artifact retirement protocol.
+pub(crate) fn verify_removed_completion_tombstone(
+    root: &Path,
+    authorization: &CompletionTombstoneProofAuthorization,
+) -> Result<CompletionTombstoneRemovalReceipt, CompletionTombstoneError> {
+    platform::verify_removed(root, authorization)
 }
 
 #[cfg(target_os = "linux")]
@@ -598,7 +609,14 @@ mod platform {
         root: &Path,
         authorization: &CompletionTombstoneRemovalAuthorization,
     ) -> Result<CompletionTombstoneRemovalReceipt, CompletionTombstoneError> {
-        remove_inner(root, authorization, RemovalFault::None)
+        remove_inner(root, authorization, false, RemovalFault::None)
+    }
+
+    pub(super) fn verify_removed(
+        root: &Path,
+        authorization: &CompletionTombstoneProofAuthorization,
+    ) -> Result<CompletionTombstoneRemovalReceipt, CompletionTombstoneError> {
+        remove_inner(root, authorization, true, RemovalFault::None)
     }
 
     #[cfg(test)]
@@ -607,12 +625,47 @@ mod platform {
         authorization: &CompletionTombstoneRemovalAuthorization,
         fault: RemovalFault,
     ) -> Result<CompletionTombstoneRemovalReceipt, CompletionTombstoneError> {
-        remove_inner(root, authorization, fault)
+        remove_inner(root, authorization, false, fault)
     }
 
-    fn remove_inner(
+    trait TombstoneAuthorization {
+        fn terminal(&self) -> ReplacementPhase;
+        fn transaction_id(&self) -> ReplacementTransactionId;
+        fn reference(&self) -> &RecoveryKeyReference;
+    }
+
+    impl TombstoneAuthorization for CompletionTombstoneRemovalAuthorization {
+        fn terminal(&self) -> ReplacementPhase {
+            CompletionTombstoneRemovalAuthorization::terminal(self)
+        }
+
+        fn transaction_id(&self) -> ReplacementTransactionId {
+            CompletionTombstoneRemovalAuthorization::transaction_id(self)
+        }
+
+        fn reference(&self) -> &RecoveryKeyReference {
+            CompletionTombstoneRemovalAuthorization::reference(self)
+        }
+    }
+
+    impl TombstoneAuthorization for CompletionTombstoneProofAuthorization {
+        fn terminal(&self) -> ReplacementPhase {
+            CompletionTombstoneProofAuthorization::terminal(self)
+        }
+
+        fn transaction_id(&self) -> ReplacementTransactionId {
+            CompletionTombstoneProofAuthorization::transaction_id(self)
+        }
+
+        fn reference(&self) -> &RecoveryKeyReference {
+            CompletionTombstoneProofAuthorization::reference(self)
+        }
+    }
+
+    fn remove_inner<A: TombstoneAuthorization>(
         root: &Path,
-        authorization: &CompletionTombstoneRemovalAuthorization,
+        authorization: &A,
+        require_removed: bool,
         fault: RemovalFault,
     ) -> Result<CompletionTombstoneRemovalReceipt, CompletionTombstoneError> {
         let transaction_id = authorization.transaction_id();
@@ -646,6 +699,11 @@ mod platform {
             TombstoneState::Deleting => (&deleting_name, &deleting_path),
             TombstoneState::Removed => (&removed_name, &removed_path),
         };
+        if require_removed && state != TombstoneState::Removed {
+            return Err(CompletionTombstoneError::RecoveryConflict(
+                source_path.to_path_buf(),
+            ));
+        }
         if expected.terminal() != CompletionTerminal::from_phase(authorization.terminal())?
             || expected.reference() != authorization.reference()
         {
@@ -1166,6 +1224,13 @@ mod platform {
     ) -> Result<CompletionTombstoneRemovalReceipt, CompletionTombstoneError> {
         Err(CompletionTombstoneError::UnsupportedPlatform)
     }
+
+    pub(super) fn verify_removed(
+        _root: &Path,
+        _authorization: &CompletionTombstoneProofAuthorization,
+    ) -> Result<CompletionTombstoneRemovalReceipt, CompletionTombstoneError> {
+        Err(CompletionTombstoneError::UnsupportedPlatform)
+    }
 }
 
 #[cfg(test)]
@@ -1373,6 +1438,13 @@ mod tests {
             .join(TOMBSTONE_DIRECTORY)
             .join(removed_name(transaction_id))
             .exists());
+        let proof_authorization = cleanup
+            .authorize_completion_tombstone_proof_verification()
+            .unwrap();
+        let proof_receipt =
+            verify_removed_completion_tombstone(&root_path, &proof_authorization).unwrap();
+        assert_eq!(proof_receipt.transaction_id(), transaction_id);
+        assert_eq!(proof_receipt.reference(), &reference());
         remove_completion_tombstone(&root_path, &authorization)
             .expect("the exact durable proof supports idempotent restart recovery");
         let other_reference =
@@ -1393,6 +1465,46 @@ mod tests {
             ),
             Err(CompletionTombstoneError::RecoveryConflict(_))
         ));
+
+        fs::remove_file(
+            root_path
+                .join(TOMBSTONE_DIRECTORY)
+                .join(removed_name(transaction_id)),
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_removed_completion_tombstone(&root_path, &proof_authorization),
+            Err(CompletionTombstoneError::Missing(_))
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retirement_verification_never_converts_an_active_tombstone() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(0x16);
+        let reference = reference();
+        persist_completion_tombstone(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            &reference,
+        )
+        .unwrap();
+        let authorization = CompletionTombstoneProofAuthorization::for_test(
+            ReplacementPhase::Complete,
+            transaction_id,
+            reference,
+        );
+
+        assert!(matches!(
+            verify_removed_completion_tombstone(&root_path, &authorization),
+            Err(CompletionTombstoneError::RecoveryConflict(_))
+        ));
+        let directory = root_path.join(TOMBSTONE_DIRECTORY);
+        assert!(directory.join(tombstone_name(transaction_id)).exists());
+        assert!(!directory.join(removed_name(transaction_id)).exists());
     }
 
     #[cfg(target_os = "linux")]

@@ -8,11 +8,15 @@
 //! flushed.
 
 use super::{
-    completion_tombstone::CompletionTombstoneRemovalReceipt,
+    completion_tombstone::{
+        verify_removed_completion_tombstone, CompletionTombstoneError,
+        CompletionTombstoneRemovalReceipt,
+    },
     recovery_key::{
-        CompletionTombstoneRemovalAuthorization, RecoveryKeyCleanupError, RecoveryKeyCleanupPhase,
-        RecoveryKeyCleanupSequence, RecoveryKeyProvider, RecoveryKeyReference,
-        ReplacementTransactionId, WorkspaceRemovalTarget,
+        CleanupArtifactRetirementAuthorization, CompletionTombstoneRemovalAuthorization,
+        RecoveryKeyCleanupError, RecoveryKeyCleanupPhase, RecoveryKeyCleanupSequence,
+        RecoveryKeyProvider, RecoveryKeyReference, ReplacementTransactionId,
+        WorkspaceRemovalTarget,
     },
     replacement::ReplacementPhase,
     workspace_removal::{remove_workspace, verify_workspace_removal, WorkspaceRemovalError},
@@ -27,6 +31,7 @@ use std::{
 const CLEANUP_DIRECTORY: &str = ".cpa-cloud-employee-config-cleanup";
 
 pub(crate) struct DurablePhaseEvidence(());
+pub(crate) struct RetirementEvidence(());
 #[cfg(target_os = "linux")]
 const FORMAT_VERSION: u32 = 1;
 #[cfg(target_os = "linux")]
@@ -64,6 +69,8 @@ pub enum CleanupJournalError {
     Cleanup(#[from] RecoveryKeyCleanupError),
     #[error("workspace removal failed: {0}")]
     WorkspaceRemoval(#[from] WorkspaceRemovalError),
+    #[error("completion tombstone verification failed: {0}")]
+    CompletionTombstone(#[from] CompletionTombstoneError),
     #[error("cleanup journal filesystem operation failed for {path}: {source}")]
     Io {
         path: PathBuf,
@@ -142,6 +149,21 @@ impl DurableCleanupJournal {
         self.sequence
             .record_completion_tombstone_removal_durable(receipt)?;
         self.persist_or_restore(previous)
+    }
+
+    /// Verify the inactive completion proof and return an opaque prerequisite
+    /// for a future cross-namespace retirement protocol. This method deletes
+    /// nothing and therefore cannot reclaim bounded journal/proof capacity yet.
+    pub(crate) fn verify_artifact_retirement_preconditions(
+        &self,
+    ) -> Result<CleanupArtifactRetirementAuthorization, CleanupJournalError> {
+        let proof_authorization = self
+            .sequence
+            .authorize_completion_tombstone_proof_verification()?;
+        let receipt = verify_removed_completion_tombstone(&self.root, &proof_authorization)?;
+        Ok(self
+            .sequence
+            .authorize_artifact_retirement(RetirementEvidence(()), &receipt)?)
     }
 
     fn persist_or_restore(
@@ -1218,13 +1240,16 @@ mod tests {
         )
         .unwrap();
         let workspace = empty_workspace(&root_path, 0x61);
+        let workspace_target = workspace_target(&workspace);
+        let workspace_device = workspace_target.device();
+        let workspace_inode = workspace_target.inode();
 
         let mut journal = create_durable_cleanup_journal(
             &root_path,
             ReplacementPhase::Complete,
             transaction_id,
             reference.clone(),
-            workspace_target(&workspace),
+            workspace_target,
         )
         .unwrap();
         assert_eq!(journal.phase(), RecoveryKeyCleanupPhase::TerminalRecorded);
@@ -1277,6 +1302,17 @@ mod tests {
         assert_eq!(loaded[0].phase(), RecoveryKeyCleanupPhase::Complete);
         assert_eq!(loaded[0].transaction_id(), transaction_id);
         assert_eq!(loaded[0].reference(), &reference);
+        let retirement = loaded[0]
+            .verify_artifact_retirement_preconditions()
+            .unwrap();
+        assert_eq!(retirement.terminal(), ReplacementPhase::Complete);
+        assert_eq!(retirement.transaction_id(), transaction_id);
+        assert_eq!(retirement.reference(), &reference);
+        assert_eq!(retirement.workspace_name(), workspace_name(0x61));
+        assert_eq!(retirement.workspace_device(), workspace_device);
+        assert_eq!(retirement.workspace_inode(), workspace_inode);
+        let rendered = format!("{retirement:?}");
+        assert!(!rendered.contains("opaque-cleanup-reference"));
         assert!(!format!("{:?}", loaded[0]).contains("opaque-cleanup-reference"));
     }
 
