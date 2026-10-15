@@ -116,8 +116,14 @@ mod contract_tests {
         WhenUnlockedThisDeviceOnly,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SecItemClass {
+        GenericPassword,
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct SecItemPolicy {
+        item_class: SecItemClass,
         data_protection_keychain: bool,
         synchronizable: bool,
         access_group: String,
@@ -128,6 +134,7 @@ mod contract_tests {
     impl SecItemPolicy {
         fn fixed() -> Self {
             Self {
+                item_class: SecItemClass::GenericPassword,
                 data_protection_keychain: true,
                 synchronizable: false,
                 access_group: ACCESS_GROUP.to_owned(),
@@ -737,7 +744,8 @@ mod contract_tests {
         next_error: Option<SecItemStatus>,
         replacement_after_delete: Option<SecItemRecord>,
         last_add: Option<AddRequest>,
-        last_exact: Option<ExactQuery>,
+        last_exact_read: Option<ExactQuery>,
+        last_exact_delete: Option<ExactQuery>,
         last_primary: Option<PrimaryQuery>,
     }
 
@@ -779,7 +787,7 @@ mod contract_tests {
 
         fn read_exact(&mut self, query: &ExactQuery) -> Result<SecItemRecord, SecItemStatus> {
             self.exact_reads += 1;
-            self.last_exact = Some(query.clone());
+            self.last_exact_read = Some(query.clone());
             self.take_error()?;
             self.records
                 .get(&query.persistent_reference)
@@ -799,7 +807,7 @@ mod contract_tests {
 
         fn delete_exact(&mut self, query: &ExactQuery) -> Result<(), SecItemStatus> {
             self.deletes += 1;
-            self.last_exact = Some(query.clone());
+            self.last_exact_delete = Some(query.clone());
             self.take_error()?;
             if self.records.remove(&query.persistent_reference).is_none() {
                 return Err(SecItemStatus::ItemNotFound);
@@ -854,7 +862,7 @@ mod contract_tests {
     }
 
     #[test]
-    fn every_request_has_the_fixed_data_protection_policy() {
+    fn every_request_has_the_fixed_generic_password_and_data_protection_policy() {
         let tx = transaction(0x11);
         let mut provider =
             ContractProvider::for_verified_test_identity(FakeBackend::default(), user(1));
@@ -863,16 +871,39 @@ mod contract_tests {
             provider.open(tx, &created.reference),
             RecoveryKeyOpenOutcome::Available(_)
         ));
+        assert_eq!(
+            provider.delete(tx, &created.reference),
+            RecoveryKeyDeleteOutcome::Deleted
+        );
 
         let backend = &provider.backend;
         let add = backend.last_add.as_ref().unwrap();
         assert_eq!(add.record.policy, SecItemPolicy::fixed());
+        assert_eq!(
+            add.record.policy.item_class,
+            SecItemClass::GenericPassword
+        );
         assert!(add.return_persistent_reference);
-        let exact = backend.last_exact.as_ref().unwrap();
-        assert_eq!(exact.policy, SecItemPolicy::fixed());
-        assert!(exact.return_attributes && exact.return_data && exact.return_persistent_reference);
+        let exact_read = backend.last_exact_read.as_ref().unwrap();
+        assert_eq!(exact_read.policy, SecItemPolicy::fixed());
+        assert_eq!(
+            exact_read.policy.item_class,
+            SecItemClass::GenericPassword
+        );
+        assert!(
+            exact_read.return_attributes
+                && exact_read.return_data
+                && exact_read.return_persistent_reference
+        );
+        let exact_delete = backend.last_exact_delete.as_ref().unwrap();
+        assert_eq!(exact_delete.policy, SecItemPolicy::fixed());
+        assert_eq!(
+            exact_delete.policy.item_class,
+            SecItemClass::GenericPassword
+        );
         let primary = backend.last_primary.as_ref().unwrap();
         assert_eq!(primary.policy, SecItemPolicy::fixed());
+        assert_eq!(primary.policy.item_class, SecItemClass::GenericPassword);
         assert_eq!(primary.match_limit, MatchLimit::All);
         assert!(
             primary.return_attributes && primary.return_data && primary.return_persistent_reference
@@ -1029,7 +1060,10 @@ mod contract_tests {
         let created = created(provider.create(tx));
         let rendered_reference = format!("{:?}", created.reference);
         let rendered_add = format!("{:?}", provider.backend.last_add.as_ref().unwrap());
-        let rendered_exact = format!("{:?}", provider.backend.last_exact.as_ref().unwrap());
+        let rendered_exact = format!(
+            "{:?}",
+            provider.backend.last_exact_read.as_ref().unwrap()
+        );
         assert!(!rendered_reference.contains("persistent-ref"));
         assert!(!rendered_add.contains("persistent-ref"));
         assert!(!rendered_exact.contains("persistent-ref"));
