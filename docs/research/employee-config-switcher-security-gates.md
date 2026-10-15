@@ -346,10 +346,14 @@ a regression fixture locks this boundary. The ownership record, journal, and
 debug output contain no employee Key, while unrelated Gemini state such as
 `trustedFolders.json` remains byte-for-byte untouched, including file identity
 and modification time in tests. Any existing managed file is a hard conflict,
-with dedicated settings-, `.env`-, and ownership-only collision coverage. No
-native Gemini CLI binary is available in the local test environment, so fixed
-native parsing/transport evidence and the replacement transaction contract
-remain blockers for real writes.
+with dedicated settings-, `.env`-, and ownership-only collision coverage. The
+fixed native `@google/gemini-cli@0.62.0` package accepted the exact planner bytes
+in an isolated Windows home and completed a synthetic loopback streaming request
+using the expected v1beta route and `x-goog-api-key`, while the unrelated
+`trustedFolders.json` sentinel remained byte-, digest-, and mtime-identical.
+`GEMINI_CLI_HOME` is treated as a home root and `.gemini` is appended, matching
+that fixed CLI contract. Cross-version acceptance and the replacement
+transaction contract remain blockers for real writes.
 
 Grok Build now has a separate synthetic-root create-only projection based on a
 fixed official source commit and its public custom-model contract. It creates

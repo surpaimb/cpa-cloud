@@ -37,7 +37,7 @@ where
         (
             "gemini",
             "Gemini CLI",
-            vec![env_path(&env, "GEMINI_CLI_HOME", home.join(".gemini"))],
+            vec![gemini_home(home, &env)],
         ),
         (
             "claude-desktop",
@@ -140,6 +140,17 @@ where
     home.join(".hermes")
 }
 
+fn gemini_home<F>(home: &Path, env: &F) -> PathBuf
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    env("GEMINI_CLI_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.to_path_buf())
+        .join(".gemini")
+}
+
 #[cfg(target_os = "windows")]
 fn current_platform() -> Platform {
     Platform::Windows
@@ -178,7 +189,8 @@ mod tests {
     fn honors_documented_tool_home_overrides_without_mutating_process_env() {
         let root = tempfile::tempdir().unwrap();
         let codex = root.path().join("custom-codex");
-        let gemini = root.path().join("custom-gemini");
+        let gemini_root = root.path().join("custom-gemini-home");
+        let gemini = gemini_root.join(".gemini");
         let hermes = root.path().join("custom-hermes");
         let pi = root.path().join("custom-pi");
         for path in [&codex, &gemini, &hermes, &pi] {
@@ -186,7 +198,7 @@ mod tests {
         }
         let env = fake_env(HashMap::from([
             ("CODEX_HOME", codex.clone()),
-            ("GEMINI_CLI_HOME", gemini.clone()),
+            ("GEMINI_CLI_HOME", gemini_root),
             ("HERMES_HOME", hermes.clone()),
             ("PI_CODING_AGENT_DIR", pi.clone()),
         ]));
@@ -265,6 +277,17 @@ mod tests {
         assert_eq!(
             by_id(&items, "codex").detail,
             root.path().join(".codex").display().to_string()
+        );
+    }
+
+    #[test]
+    fn empty_gemini_home_override_falls_back_to_home_dot_gemini() {
+        let root = tempfile::tempdir().unwrap();
+        let env = |name: &str| (name == "GEMINI_CLI_HOME").then(OsString::new);
+        let items = detect_clients_with_env(root.path(), Platform::Linux, env);
+        assert_eq!(
+            by_id(&items, "gemini").detail,
+            root.path().join(".gemini").display().to_string()
         );
     }
 

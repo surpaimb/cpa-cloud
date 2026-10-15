@@ -427,6 +427,63 @@ mod tests {
     }
 
     #[test]
+    fn fixed_native_fixture_matches_exact_planner_output_and_transport_observation() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = GeminiProfile {
+            base_url: "http://127.0.0.1:43127/v1".into(),
+            employee_key: SecretString::new("synthetic-employee-key"),
+            default_model: "gemini-fixture-model".into(),
+        };
+        let plan = plan_new_gemini(
+            &temp.path().join("settings.json"),
+            &temp.path().join(".env"),
+            &temp.path().join("cpa-cloud.ownership.json"),
+            &profile,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.settings.desired_bytes.as_slice(),
+            include_bytes!(
+                "../tests/fixtures/gemini-cli-0.62.0/native-settings.json"
+            )
+        );
+        assert_eq!(
+            plan.environment.desired_bytes.as_slice(),
+            include_bytes!("../tests/fixtures/gemini-cli-0.62.0/native.env")
+        );
+        assert!(!String::from_utf8_lossy(&plan.ownership.desired_bytes)
+            .contains("synthetic-employee-key"));
+
+        let acceptance: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/gemini-cli-0.62.0/native-acceptance.json"
+        ))
+        .unwrap();
+        assert_eq!(acceptance["package"]["version"], "0.62.0");
+        assert_eq!(acceptance["package"]["bin_entry"], "bundle/gemini.js");
+        assert_eq!(acceptance["runtime"]["node_version"], "v22.22.0");
+        assert_eq!(
+            acceptance["loopback_observation"]["request_method"],
+            "POST"
+        );
+        assert_eq!(
+            acceptance["loopback_observation"]["request_path"],
+            "/v1beta/models/gemini-fixture-model:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            acceptance["loopback_observation"]["x_goog_api_key_matched_synthetic_fixture"],
+            true
+        );
+        assert_eq!(
+            acceptance["loopback_observation"]["authorization_present"],
+            false
+        );
+        assert_eq!(acceptance["loopback_observation"]["exit_code"], 0);
+        assert_eq!(acceptance["trusted_folders_sentinel"]["bytes_unchanged"], true);
+        assert_eq!(acceptance["trusted_folders_sentinel"]["mtime_unchanged"], true);
+    }
+
+    #[test]
     fn profile_rejects_a_default_outside_the_candidate_list() {
         let mut configuration = configuration();
         configuration.protocols[1].default_model = "missing".into();

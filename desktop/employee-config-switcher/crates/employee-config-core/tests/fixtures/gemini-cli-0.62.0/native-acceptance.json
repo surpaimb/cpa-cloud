@@ -1,0 +1,65 @@
+{
+  "observed_at": "2026-10-15",
+  "package": {
+    "name": "@google/gemini-cli",
+    "version": "0.62.0",
+    "license": "Apache-2.0",
+    "repository": "https://github.com/google-gemini/gemini-cli.git",
+    "repository_tag": "v0.62.0",
+    "repository_commit": "b460678f3db508407554afd604cc9d6635becb2a",
+    "tarball_url": "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.62.0.tgz",
+    "npm_integrity": "sha512-A1rw0Tf2sHLpGncfYdaq5WaJIufKAP8il4BmHD5Yw4ewmB/Wo0vRQb2bEvx7OqyaPFPZCh0hVhcMKsICZyIBww==",
+    "tarball_sha256": "2276032b1c33d2b828b1cf197e52f48e74b0a395326763ff01a80d97d0fbc0c3",
+    "bin_name": "gemini",
+    "bin_entry": "bundle/gemini.js",
+    "bin_entry_sha256": "ef1d1bd9ee5aaae37ebcfb601b56659e3b16c5b258b21c138109c541e487ade7"
+  },
+  "runtime": {
+    "node_path": "C:\\Program Files\\nodejs\\node.exe",
+    "node_version": "v22.22.0",
+    "node_sha256": "bae898add4643fcf890a83ad8ae56e20dce7e781cab161a53991ceba70c99ffb"
+  },
+  "isolation": {
+    "temporary_home": true,
+    "temporary_appdata": true,
+    "temporary_localappdata": true,
+    "temporary_xdg_config_home": true,
+    "temporary_xdg_data_home": true,
+    "temporary_xdg_cache_home": true,
+    "temporary_npm_userconfig": true,
+    "temporary_npm_cache": true,
+    "temporary_npm_prefix": true,
+    "path_contains_only_node_and_system32": true,
+    "production_provider_contacted": false
+  },
+  "invocation": {
+    "gemini_cli_home_points_to_isolated_home_root": true,
+    "skip_trust": true,
+    "approval_mode": "plan",
+    "output_format": "json",
+    "prompt_argument_present_but_not_recorded": true,
+    "model_argument_present": false,
+    "api_key_process_environment_present": false,
+    "base_url_process_environment_present": false,
+    "model_process_environment_present": false
+  },
+  "loopback_observation": {
+    "listen_address": "127.0.0.1:43127",
+    "request_method": "POST",
+    "request_path": "/v1beta/models/gemini-fixture-model:streamGenerateContent?alt=sse",
+    "x_goog_api_key_present": true,
+    "x_goog_api_key_matched_synthetic_fixture": true,
+    "authorization_present": false,
+    "request_body_recorded": false,
+    "response_body_recorded": false,
+    "exit_code": 0,
+    "stdout_was_valid_json": true
+  },
+  "trusted_folders_sentinel": {
+    "fixture_sha256": "cf140ed718953ef4bd7ef0316e8e2ebb0426b0c95da4ceefe1452653517a0966",
+    "bytes_unchanged": true,
+    "sha256_unchanged": true,
+    "mtime_unchanged": true
+  },
+  "scope": "Exact Windows x86_64 package/runtime acceptance only; no real user configuration, credential, provider endpoint, live-write, or cross-version claim."
+}
