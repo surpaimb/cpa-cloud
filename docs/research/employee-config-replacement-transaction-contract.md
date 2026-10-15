@@ -300,8 +300,16 @@ provider using current-user DPAPI, `CRYPTPROTECT_UI_FORBIDDEN`, transaction-boun
 optional entropy, a checked plaintext envelope, an exact protected-blob digest
 reference, owner-only protected DACLs, stable directory handles and a compatible
 exclusive lock. Create is no-replace and read-back verified; open after a fresh
-provider instance never creates or replaces a missing value; delete authenticates
-the exact existing value first and flushes its directory. DPAPI plaintext output
+provider instance never creates or replaces a missing value. Creation writes
+and flushes an owner-private `.pending` blob, performs one handle-relative
+same-directory `FileRenameInfoEx` operation with replacement disabled, flushes
+the directory, and authenticates the final value. An exact create retry may
+remove only a bounded private unpublished stage when no final exists, or return
+the authenticated already-published value; simultaneous final/stage state is
+preserved and refused. Tests inject interruption after stage creation, write,
+flush, publication, and directory flush, and prove no-overwrite conflict
+preservation plus restart reopen/delete behavior. Delete authenticates the exact
+existing value first and flushes its directory. DPAPI plaintext output
 and intermediate key arrays are zeroized, and neither key nor DPAPI blob enters
 the journal, receipt, `Debug`, environment, command line, database or network.
 Linux and macOS return `UnsupportedPlatform` before namespace creation. This
@@ -404,6 +412,8 @@ write gate remain unresolved requirements.
 ## Public platform references
 
 - [Microsoft `CryptProtectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
+- [Microsoft `SetFileInformationByHandle`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle)
+- [Microsoft `FileRenameInformationEx`](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/4217551b-d2c0-42cb-9dc1-69a716cf6d0c)
 - [Apple: Using the keychain to manage user secrets](https://developer.apple.com/documentation/security/using-the-keychain-to-manage-user-secrets)
 - [freedesktop.org Secret Service: collections and items](https://specifications.freedesktop.org/secret-service/latest/ch03.html)
 - [freedesktop.org Secret Service: locking and unlocking](https://specifications.freedesktop.org/secret-service/latest/unlocking.html)

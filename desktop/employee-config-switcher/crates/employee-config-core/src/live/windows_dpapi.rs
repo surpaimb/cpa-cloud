@@ -2,8 +2,12 @@
 //!
 //! This module is deliberately not wired to the Tauri apply command. On
 //! Windows it stores only a DPAPI-protected envelope in a private provider
-//! directory under a caller-supplied synthetic root. Linux and macOS return
-//! `UnsupportedPlatform` before touching the filesystem. There is no
+//! directory under a caller-supplied synthetic root. Creation writes and
+//! flushes a private stage before a same-directory, no-replace Windows rename;
+//! an interrupted unpublished stage is removable on an exact create retry,
+//! while an already published value is authenticated and returned
+//! idempotently. Linux and macOS return `UnsupportedPlatform` before touching
+//! the filesystem. There is no
 //! environment-variable, command-line, database, network, or plaintext-file
 //! fallback.
 
@@ -24,6 +28,8 @@ const PROVIDER_VERSION: u32 = 1;
 const STORE_DIRECTORY: &str = ".cpa-cloud-employee-recovery-keys";
 const LOCK_FILE: &str = ".lock";
 const BLOB_SUFFIX: &str = ".dpapi";
+const STAGE_SUFFIX: &str = ".dpapi.pending";
+const BLOB_FILE_NAME_UTF16_UNITS: usize = 32 + BLOB_SUFFIX.len();
 const MAX_PROTECTED_BYTES: usize = 16 * 1024;
 const REFERENCE_BYTES: usize = 32;
 const ENVELOPE_MAGIC: &[u8; 16] = b"CPA-DPAPI-KEY-V1";
@@ -144,16 +150,18 @@ mod windows_impl {
     use ring::constant_time::verify_slices_are_equal;
     use std::fs::{self, File, OpenOptions};
     use std::io::{Read, Write};
+    use std::mem::size_of;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    use std::os::windows::io::FromRawHandle;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::ptr::{null, null_mut};
     use std::sync::{Mutex, MutexGuard};
     use windows_sys::Win32::Foundation::{
         GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
         ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_DATA, ERROR_INVALID_PARAMETER,
         ERROR_LOCK_VIOLATION, ERROR_PASSWORD_RESTRICTION, ERROR_PATH_NOT_FOUND,
-        ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+        ERROR_SHARING_VIOLATION, ERROR_SUCCESS, DELETE, GENERIC_READ, GENERIC_WRITE,
+        INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW,
@@ -169,9 +177,9 @@ mod windows_impl {
         PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        CreateFileW, SetFileInformationByHandle, FileRenameInfoEx,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use zeroize::{Zeroize, Zeroizing};
@@ -187,6 +195,15 @@ mod windows_impl {
     struct ProviderGuard {
         _process: MutexGuard<'static, ()>,
         _file: File,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CreateInterruption {
+        AfterStageCreate,
+        AfterStageWrite,
+        AfterStageFlush,
+        AfterPublish,
+        AfterDirectoryFlush,
     }
 
     struct TokenHandle(windows_sys::Win32::Foundation::HANDLE);
@@ -274,13 +291,22 @@ mod windows_impl {
         store: &StableStore,
         transaction_id: ReplacementTransactionId,
     ) -> RecoveryKeyCreateOutcome {
+        create_with_interruption(store, transaction_id, None)
+    }
+
+    fn create_with_interruption(
+        store: &StableStore,
+        transaction_id: ReplacementTransactionId,
+        interruption: Option<CreateInterruption>,
+    ) -> RecoveryKeyCreateOutcome {
         let _guard = match acquire_provider_lock(store) {
             Ok(guard) => guard,
             Err(error) => return create_outcome_for(error),
         };
-        let path = blob_path(store, transaction_id);
-        if path.exists() {
-            return RecoveryKeyCreateOutcome::Unavailable;
+        match reconcile_create_state(store, transaction_id) {
+            Ok(Some(created)) => return RecoveryKeyCreateOutcome::Created(created),
+            Ok(None) => {}
+            Err(error) => return create_outcome_for(error),
         }
 
         let key = match BackupKey::generate() {
@@ -304,14 +330,36 @@ mod windows_impl {
             Err(_) => return RecoveryKeyCreateOutcome::Unavailable,
         };
 
-        let mut file = match create_private_file(&path) {
+        let stage_path = stage_path(store, transaction_id);
+        let mut file = match create_private_file(&stage_path) {
             Ok(file) => file,
             Err(error) => return create_outcome_for(error),
         };
-        if file.write_all(&protected).is_err() || file.sync_all().is_err() {
+        if interruption == Some(CreateInterruption::AfterStageCreate) {
+            return RecoveryKeyCreateOutcome::Unavailable;
+        }
+        if file.write_all(&protected).is_err() {
+            return RecoveryKeyCreateOutcome::Unavailable;
+        }
+        if interruption == Some(CreateInterruption::AfterStageWrite) {
+            return RecoveryKeyCreateOutcome::Unavailable;
+        }
+        if file.sync_all().is_err() {
+            return RecoveryKeyCreateOutcome::Unavailable;
+        }
+        if interruption == Some(CreateInterruption::AfterStageFlush) {
+            return RecoveryKeyCreateOutcome::Unavailable;
+        }
+        if let Err(error) = publish_stage_no_replace(store, &file, transaction_id) {
+            return create_outcome_for(error);
+        }
+        if interruption == Some(CreateInterruption::AfterPublish) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
         if sync_directory(&store.path).is_err() {
+            return RecoveryKeyCreateOutcome::Unavailable;
+        }
+        if interruption == Some(CreateInterruption::AfterDirectoryFlush) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
         drop(file);
@@ -389,26 +437,16 @@ mod windows_impl {
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
     ) -> RecoveryKeyOpenOutcome {
+        match path_exists(&stage_path(store, transaction_id)) {
+            Ok(true) => return RecoveryKeyOpenOutcome::Corrupt,
+            Ok(false) => {}
+            Err(error) => return open_outcome_for(error),
+        }
         let path = blob_path(store, transaction_id);
-        let mut file = match open_private_file(&path) {
-            Ok(file) => file,
+        let protected = match read_protected_file(&path) {
+            Ok(protected) => protected,
             Err(error) => return open_outcome_for(error),
         };
-        let metadata = match file.metadata() {
-            Ok(metadata) => metadata,
-            Err(source) => return open_outcome_for(NativeError::Io(io_error(&path, source))),
-        };
-        if !metadata.is_file()
-            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-            || metadata.len() == 0
-            || metadata.len() > MAX_PROTECTED_BYTES as u64
-        {
-            return RecoveryKeyOpenOutcome::Corrupt;
-        }
-        let mut protected = Vec::with_capacity(metadata.len() as usize);
-        if file.read_to_end(&mut protected).is_err() || protected.len() != metadata.len() as usize {
-            return RecoveryKeyOpenOutcome::Unavailable;
-        }
         let expected = reference_for(transaction_id, &protected);
         if verify_slices_are_equal(&expected, reference.opaque_reference()).is_err() {
             return RecoveryKeyOpenOutcome::Corrupt;
@@ -505,11 +543,141 @@ mod windows_impl {
     }
 
     fn blob_path(store: &StableStore, transaction_id: ReplacementTransactionId) -> PathBuf {
-        store.path.join(format!(
+        store.path.join(blob_file_name(transaction_id))
+    }
+
+    fn blob_file_name(transaction_id: ReplacementTransactionId) -> String {
+        format!(
             "{}{}",
             hex::encode(transaction_id.as_bytes()),
             BLOB_SUFFIX
+        )
+    }
+
+    fn stage_path(store: &StableStore, transaction_id: ReplacementTransactionId) -> PathBuf {
+        store.path.join(format!(
+            "{}{}",
+            hex::encode(transaction_id.as_bytes()),
+            STAGE_SUFFIX
         ))
+    }
+
+    fn path_exists(path: &Path) -> Result<bool, NativeError> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(NativeError::Io(io_error(path, source))),
+        }
+    }
+
+    fn read_protected_file(path: &Path) -> Result<Vec<u8>, NativeError> {
+        let mut file = open_private_file(path)?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| NativeError::Io(io_error(path, source)))?;
+        if !metadata.is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || metadata.len() == 0
+            || metadata.len() > MAX_PROTECTED_BYTES as u64
+        {
+            return Err(NativeError::Corrupt);
+        }
+        let mut protected = Vec::with_capacity(metadata.len() as usize);
+        file
+            .read_to_end(&mut protected)
+            .map_err(|source| NativeError::Io(io_error(path, source)))?;
+        if protected.len() != metadata.len() as usize {
+            return Err(NativeError::Unavailable);
+        }
+        Ok(protected)
+    }
+
+    fn reconcile_create_state(
+        store: &StableStore,
+        transaction_id: ReplacementTransactionId,
+    ) -> Result<Option<CreatedRecoveryKey>, NativeError> {
+        let final_path = blob_path(store, transaction_id);
+        let stage_path = stage_path(store, transaction_id);
+        let final_exists = path_exists(&final_path)?;
+        let stage_exists = path_exists(&stage_path)?;
+
+        match (final_exists, stage_exists) {
+            (true, true) => Err(NativeError::Corrupt),
+            (true, false) => {
+                let protected = read_protected_file(&final_path)?;
+                let reference = RecoveryKeyReference::new(
+                    PROVIDER_KIND,
+                    PROVIDER_VERSION,
+                    reference_for(transaction_id, &protected).to_vec(),
+                )
+                .map_err(|_| NativeError::Corrupt)?;
+                let key = unprotect(transaction_id, &protected)?;
+                Ok(Some(CreatedRecoveryKey { reference, key }))
+            }
+            (false, true) => {
+                let file = open_private_file(&stage_path)?;
+                let metadata = file
+                    .metadata()
+                    .map_err(|source| NativeError::Io(io_error(&stage_path, source)))?;
+                if !metadata.is_file()
+                    || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                    || metadata.len() > MAX_PROTECTED_BYTES as u64
+                {
+                    return Err(NativeError::Corrupt);
+                }
+                drop(file);
+                fs::remove_file(&stage_path)
+                    .map_err(|source| NativeError::Io(io_error(&stage_path, source)))?;
+                sync_directory(&store.path)
+                    .map_err(|source| NativeError::Io(io_error(&store.path, source)))?;
+                Ok(None)
+            }
+            (false, false) => Ok(None),
+        }
+    }
+
+    #[repr(C)]
+    struct NoReplaceRenameInfo {
+        flags: u32,
+        root_directory: windows_sys::Win32::Foundation::HANDLE,
+        file_name_length: u32,
+        file_name: [u16; BLOB_FILE_NAME_UTF16_UNITS],
+    }
+
+    fn publish_stage_no_replace(
+        store: &StableStore,
+        stage: &File,
+        transaction_id: ReplacementTransactionId,
+    ) -> Result<(), NativeError> {
+        let file_name = blob_file_name(transaction_id);
+        let encoded: Vec<u16> = file_name.encode_utf16().collect();
+        if encoded.len() != BLOB_FILE_NAME_UTF16_UNITS {
+            return Err(NativeError::Corrupt);
+        }
+        let mut info = NoReplaceRenameInfo {
+            flags: 0,
+            root_directory: store._directory.as_raw_handle(),
+            file_name_length: u32::try_from(encoded.len() * size_of::<u16>())
+                .map_err(|_| NativeError::Corrupt)?,
+            file_name: [0; BLOB_FILE_NAME_UTF16_UNITS],
+        };
+        info.file_name.copy_from_slice(&encoded);
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                stage.as_raw_handle(),
+                FileRenameInfoEx,
+                (&info as *const NoReplaceRenameInfo).cast(),
+                u32::try_from(size_of::<NoReplaceRenameInfo>())
+                    .map_err(|_| NativeError::Corrupt)?,
+            )
+        };
+        if ok == 0 {
+            return Err(NativeError::Io(io_error(
+                &stage_path(store, transaction_id),
+                io::Error::last_os_error(),
+            )));
+        }
+        Ok(())
     }
 
     fn acquire_provider_lock(store: &StableStore) -> Result<ProviderGuard, NativeError> {
@@ -554,6 +722,7 @@ mod windows_impl {
             .create_new(true)
             .read(true)
             .write(true)
+            .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
             .share_mode(FILE_SHARE_READ)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
@@ -1007,7 +1176,7 @@ mod windows_impl {
         }
 
         #[test]
-        fn concurrent_duplicate_create_publishes_exactly_one_blob() {
+        fn concurrent_duplicate_create_is_idempotent_and_publishes_exactly_one_blob() {
             use std::sync::{Arc, Barrier};
             use std::thread;
 
@@ -1022,17 +1191,21 @@ mod windows_impl {
             let spawn = |mut provider: WindowsDpapiRecoveryKeyProvider, barrier: Arc<Barrier>| {
                 thread::spawn(move || {
                     barrier.wait();
-                    matches!(
-                        provider.create(transaction_id),
-                        RecoveryKeyCreateOutcome::Created(_)
-                    )
+                    match provider.create(transaction_id) {
+                        RecoveryKeyCreateOutcome::Created(created) => created,
+                        other => panic!("unexpected create outcome: {other:?}"),
+                    }
                 })
             };
             let first = spawn(provider_a, Arc::clone(&barrier));
             let second = spawn(provider_b, barrier);
             let first_created = first.join().unwrap();
             let second_created = second.join().unwrap();
-            assert_ne!(first_created, second_created);
+            assert_eq!(first_created.reference, second_created.reference);
+            assert!(
+                verify_slices_are_equal(first_created.key.expose(), second_created.key.expose())
+                    .is_ok()
+            );
 
             let files = fs::read_dir(root.path().join(STORE_DIRECTORY))
                 .unwrap()
@@ -1040,6 +1213,99 @@ mod windows_impl {
                 .filter(|entry| entry.file_name().to_string_lossy().ends_with(BLOB_SUFFIX))
                 .count();
             assert_eq!(files, 1);
+        }
+
+        #[test]
+        fn every_create_interruption_recovers_without_a_partial_final_blob() {
+            let boundaries = [
+                CreateInterruption::AfterStageCreate,
+                CreateInterruption::AfterStageWrite,
+                CreateInterruption::AfterStageFlush,
+                CreateInterruption::AfterPublish,
+                CreateInterruption::AfterDirectoryFlush,
+            ];
+
+            for (index, boundary) in boundaries.into_iter().enumerate() {
+                let root = tempfile::tempdir().unwrap();
+                let transaction_id = transaction(0x40 + index as u8);
+                let provider =
+                    WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
+                assert!(matches!(
+                    create_with_interruption(&provider.store, transaction_id, Some(boundary)),
+                    RecoveryKeyCreateOutcome::Unavailable
+                ));
+                drop(provider);
+
+                let mut restarted =
+                    WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
+                let (reference, key) = created(restarted.create(transaction_id));
+                assert!(!stage_path(&restarted.store, transaction_id).exists());
+                let final_blob = fs::read(blob_path(&restarted.store, transaction_id)).unwrap();
+                assert!(!final_blob.is_empty());
+                assert!(final_blob.len() <= MAX_PROTECTED_BYTES);
+
+                let reopened = match restarted.open(transaction_id, &reference) {
+                    RecoveryKeyOpenOutcome::Available(key) => key,
+                    other => panic!("unexpected open after {boundary:?}: {other:?}"),
+                };
+                assert!(verify_slices_are_equal(key.expose(), reopened.expose()).is_ok());
+                assert_eq!(
+                    restarted.delete(transaction_id, &reference),
+                    RecoveryKeyDeleteOutcome::Deleted
+                );
+                assert_eq!(
+                    restarted.delete(transaction_id, &reference),
+                    RecoveryKeyDeleteOutcome::Missing
+                );
+            }
+        }
+
+        #[test]
+        fn no_replace_publication_preserves_an_existing_final_blob() {
+            let root = tempfile::tempdir().unwrap();
+            let transaction_id = transaction(0x50);
+            let mut provider =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
+            let (_reference, _) = created(provider.create(transaction_id));
+            let final_path = blob_path(&provider.store, transaction_id);
+            let original = fs::read(&final_path).unwrap();
+
+            let stage_path = stage_path(&provider.store, transaction_id);
+            let mut stage = create_private_file(&stage_path).unwrap();
+            stage.write_all(b"independent-stage-sentinel").unwrap();
+            stage.sync_all().unwrap();
+            assert!(publish_stage_no_replace(&provider.store, &stage, transaction_id).is_err());
+            assert_eq!(fs::read(&final_path).unwrap(), original);
+            assert_eq!(fs::read(&stage_path).unwrap(), b"independent-stage-sentinel");
+        }
+
+        #[test]
+        fn simultaneous_final_and_stage_state_blocks_open_create_and_delete() {
+            let root = tempfile::tempdir().unwrap();
+            let transaction_id = transaction(0x51);
+            let mut provider =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
+            let (reference, _) = created(provider.create(transaction_id));
+            let stage_path = stage_path(&provider.store, transaction_id);
+            let mut stage = create_private_file(&stage_path).unwrap();
+            stage.write_all(b"ambiguous-stage").unwrap();
+            stage.sync_all().unwrap();
+            drop(stage);
+
+            assert!(matches!(
+                provider.open(transaction_id, &reference),
+                RecoveryKeyOpenOutcome::Corrupt
+            ));
+            assert!(matches!(
+                provider.create(transaction_id),
+                RecoveryKeyCreateOutcome::Unavailable
+            ));
+            assert_eq!(
+                provider.delete(transaction_id, &reference),
+                RecoveryKeyDeleteOutcome::Corrupt
+            );
+            assert!(blob_path(&provider.store, transaction_id).exists());
+            assert!(stage_path.exists());
         }
 
         #[test]

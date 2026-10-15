@@ -257,10 +257,17 @@ references stay out of `Debug`. A separate Windows-only synthetic-root provider
 now uses current-user DPAPI without `CRYPTPROTECT_LOCAL_MACHINE`, forbids UI,
 binds the transaction into optional entropy and a checked plaintext envelope,
 and stores only a bounded protected blob behind owner-only DACLs, stable
-directory handles and an exclusive cross-instance lock. Native tests cover
-fresh-instance reopen, exact key equality, missing/wrong transaction behavior,
-tampered blob/reference refusal, idempotent deletion, lock classification and
-concurrent duplicate creation. DPAPI plaintext and temporary key arrays are
+directory handles and an exclusive cross-instance lock. Creation now writes an
+owner-private `.pending` blob, flushes it, publishes it through handle-relative
+`FileRenameInfoEx` with replacement disabled, flushes the directory and reads
+the final blob back. On an exact create retry, a bounded private stage is
+removed only when no final exists; a published blob is authenticated and
+returned idempotently, while simultaneous final/stage state is preserved and
+refused. Native tests cover every create interruption boundary, no-overwrite
+conflict preservation, fresh-instance reopen, exact key equality,
+missing/wrong transaction behavior, tampered blob/reference refusal,
+idempotent deletion, lock classification and concurrent idempotent creation.
+DPAPI plaintext and temporary key arrays are
 zeroized. Linux/macOS construction returns `UnsupportedPlatform` without
 creating a namespace; Keychain, Secret Service and all environment/CLI/database/
 plaintext fallbacks remain absent. The provider is synthetic-only and is not
