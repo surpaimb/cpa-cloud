@@ -321,8 +321,8 @@ mod platform {
         directory_path: PathBuf,
         barrier: std::sync::Arc<std::sync::Barrier>,
     ) {
-        let barriers = BEFORE_MUTATION_LOCK_BARRIERS
-            .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+        let barriers =
+            BEFORE_MUTATION_LOCK_BARRIERS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
         let replaced = barriers.lock().unwrap().insert(
             directory_path,
             BeforeMutationLockBarrier {
@@ -338,8 +338,8 @@ mod platform {
 
     #[cfg(test)]
     fn wait_before_mutation_lock(directory_path: &Path) {
-        let barriers = BEFORE_MUTATION_LOCK_BARRIERS
-            .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+        let barriers =
+            BEFORE_MUTATION_LOCK_BARRIERS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
         let barrier = {
             let mut barriers = barriers.lock().unwrap();
             let mut remove = false;
@@ -767,11 +767,19 @@ mod platform {
         let root_dir = open_root(root)?;
         let root_identity = identity(&root_dir).map_err(|source| io_error(root, source))?;
         let directory_path = root.join(TOMBSTONE_DIRECTORY);
-        let directory = open_private_directory_at(
+        let directory = match open_private_directory_at(
             root_dir.as_raw_fd(),
             OsStr::new(TOMBSTONE_DIRECTORY),
             &directory_path,
-        )?;
+        ) {
+            Ok(directory) => directory,
+            Err(CompletionTombstoneError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                return Err(CompletionTombstoneError::Missing(final_path));
+            }
+            Err(error) => return Err(error),
+        };
         let directory_identity =
             identity(&directory).map_err(|source| io_error(&directory_path, source))?;
         if require_removed {
@@ -1924,15 +1932,17 @@ mod tests {
             )
         });
         let remove_root = root_path.clone();
-        let remove = thread::spawn(move || {
-            remove_completion_tombstone(&remove_root, &authorization)
-        });
+        let remove =
+            thread::spawn(move || remove_completion_tombstone(&remove_root, &authorization));
 
         assert!(matches!(
             persist.join().unwrap(),
             Err(CompletionTombstoneError::RecoveryConflict(_))
         ));
-        assert_eq!(remove.join().unwrap().unwrap().transaction_id(), transaction_id);
+        assert_eq!(
+            remove.join().unwrap().unwrap().transaction_id(),
+            transaction_id
+        );
         let directory = root_path.join(TOMBSTONE_DIRECTORY);
         assert!(!directory.join(tombstone_name(transaction_id)).exists());
         assert!(!directory.join(deleting_name(transaction_id)).exists());
