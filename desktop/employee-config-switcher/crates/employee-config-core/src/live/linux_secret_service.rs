@@ -219,12 +219,7 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
         if SystemRandom::new().fill(&mut item_id).is_err() {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
-        let attributes = full_attributes(
-            transaction_id,
-            self.uid,
-            self.lock_namespace,
-            item_id,
-        );
+        let attributes = full_attributes(transaction_id, self.uid, self.lock_namespace, item_id);
         let envelope = Zeroizing::new(encode_envelope(
             transaction_id,
             self.uid,
@@ -287,12 +282,8 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
     ) -> RecoveryKeyOpenOutcome {
-        let parsed = match parse_reference(
-            transaction_id,
-            self.uid,
-            self.lock_namespace,
-            reference,
-        ) {
+        let parsed = match parse_reference(transaction_id, self.uid, self.lock_namespace, reference)
+        {
             ParsedReference::Valid { item_id } => item_id,
             ParsedReference::WrongIdentity => return RecoveryKeyOpenOutcome::WrongIdentity,
             ParsedReference::Corrupt => return RecoveryKeyOpenOutcome::Corrupt,
@@ -333,12 +324,8 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
     ) -> RecoveryKeyDeleteOutcome {
-        let parsed = match parse_reference(
-            transaction_id,
-            self.uid,
-            self.lock_namespace,
-            reference,
-        ) {
+        let parsed = match parse_reference(transaction_id, self.uid, self.lock_namespace, reference)
+        {
             ParsedReference::Valid { item_id } => item_id,
             ParsedReference::WrongIdentity => return RecoveryKeyDeleteOutcome::WrongIdentity,
             ParsedReference::Corrupt => return RecoveryKeyDeleteOutcome::Corrupt,
@@ -399,14 +386,7 @@ fn create_from_existing<B: SecretServiceBackend>(
     lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
     item: ServiceItem,
 ) -> RecoveryKeyCreateOutcome {
-    match verify_item(
-        backend,
-        transaction_id,
-        uid,
-        lock_namespace,
-        &item,
-        None,
-    ) {
+    match verify_item(backend, transaction_id, uid, lock_namespace, &item, None) {
         VerifiedItem::Available { item_id, key } => {
             created(transaction_id, uid, lock_namespace, item_id, key)
         }
@@ -516,10 +496,7 @@ fn base_attributes(
             hex::encode(transaction_id.as_bytes()),
         ),
         ("unix-user".to_owned(), uid.to_string()),
-        (
-            "lock-namespace".to_owned(),
-            hex::encode(lock_namespace),
-        ),
+        ("lock-namespace".to_owned(), hex::encode(lock_namespace)),
     ])
 }
 
@@ -721,10 +698,7 @@ impl ReconciliationLock {
         }
         let mut file = unsafe { File::from_raw_fd(fd) };
         verify_private_regular_file(&file, approval.uid, &approval.display.join(LOCK_FILE))?;
-        let namespace = initialize_lock_namespace(
-            &mut file,
-            &approval.display.join(LOCK_FILE),
-        )?;
+        let namespace = initialize_lock_namespace(&mut file, &approval.display.join(LOCK_FILE))?;
         approval
             .directory
             .sync_all()
@@ -818,12 +792,12 @@ fn verify_current_lock_entry(
             path.to_path_buf(),
         ));
     }
-    current.read_exact(&mut namespace).map_err(|source| {
-        LinuxSecretServiceProviderError::Io {
+    current
+        .read_exact(&mut namespace)
+        .map_err(|source| LinuxSecretServiceProviderError::Io {
             path: path.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
     if namespace != expected_namespace {
         return Err(LinuxSecretServiceProviderError::UnsafeLock(
             path.to_path_buf(),
@@ -860,9 +834,7 @@ fn initialize_lock_namespace(
         match length {
             0 => {
                 SystemRandom::new().fill(&mut namespace).map_err(|_| {
-                    LinuxSecretServiceProviderError::Setup(
-                        "lock namespace generation failed",
-                    )
+                    LinuxSecretServiceProviderError::Setup("lock namespace generation failed")
                 })?;
                 file.seek(SeekFrom::Start(0)).map_err(|source| {
                     LinuxSecretServiceProviderError::Io {
@@ -876,12 +848,11 @@ fn initialize_lock_namespace(
                         source,
                     }
                 })?;
-                file.sync_all().map_err(|source| {
-                    LinuxSecretServiceProviderError::Io {
+                file.sync_all()
+                    .map_err(|source| LinuxSecretServiceProviderError::Io {
                         path: path.to_path_buf(),
                         source,
-                    }
-                })?;
+                    })?;
             }
             length if length == LOCK_NAMESPACE_BYTES as u64 => {
                 file.seek(SeekFrom::Start(0)).map_err(|source| {
@@ -1540,13 +1511,7 @@ mod tests {
         let replacement_key = BackupKey::generate().unwrap();
         backend.state.lock().unwrap().replacement_after_delete = Some(FakeItem {
             attributes: full_attributes(tx, uid, lock_namespace, replacement_id),
-            secret: encode_envelope(
-                tx,
-                uid,
-                lock_namespace,
-                replacement_id,
-                &replacement_key,
-            ),
+            secret: encode_envelope(tx, uid, lock_namespace, replacement_id, &replacement_key),
             locked: false,
         });
         assert_eq!(
@@ -1619,8 +1584,7 @@ mod tests {
             root.path().join("displaced-lock"),
         )
         .unwrap();
-        let replacement_approval =
-            SyntheticSecretServiceApproval::for_test(root.path()).unwrap();
+        let replacement_approval = SyntheticSecretServiceApproval::for_test(root.path()).unwrap();
         let replacement = ReconciliationLock::open(replacement_approval).unwrap();
         assert_ne!(replacement.namespace, original_namespace);
         assert!(matches!(
