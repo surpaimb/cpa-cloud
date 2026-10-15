@@ -34,6 +34,8 @@ const MAX_TOMBSTONE_BYTES: usize = 16 * 1024;
 const TRANSACTION_ID_HEX_BYTES: usize = 32;
 #[cfg(target_os = "linux")]
 const TOMBSTONE_SUFFIX: &str = ".json";
+#[cfg(target_os = "linux")]
+const PENDING_SUFFIX: &str = ".pending";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -96,6 +98,8 @@ pub enum CompletionTombstoneError {
     InvalidMetadata,
     #[error("completion tombstone is corrupt")]
     Corrupt,
+    #[error("incomplete completion tombstone publication requires recovery: {0}")]
+    IncompleteWrite(PathBuf),
     #[error("completion tombstone namespace exceeds its bounded entry count")]
     TooMany,
     #[error("completion tombstone namespace or object changed: {0}")]
@@ -155,6 +159,11 @@ fn tombstone_name(transaction_id: ReplacementTransactionId) -> String {
 }
 
 #[cfg(target_os = "linux")]
+fn pending_name(transaction_id: ReplacementTransactionId) -> String {
+    format!("{}{PENDING_SUFFIX}", transaction_hex(transaction_id))
+}
+
+#[cfg(target_os = "linux")]
 fn parse_transaction_hex(
     value: &str,
 ) -> Result<ReplacementTransactionId, CompletionTombstoneError> {
@@ -211,13 +220,59 @@ mod platform {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::MetadataExt;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[allow(dead_code)]
+    pub(super) enum PersistFault {
+        None,
+        AfterStageCreated,
+        AfterStageSynced,
+        AfterPublished,
+    }
+
     pub(super) fn persist(
         root: &Path,
         terminal: CompletionTerminal,
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
     ) -> Result<CompletionTombstone, CompletionTombstoneError> {
-        if load_all(root)?.len() >= MAX_TOMBSTONES {
+        persist_inner(
+            root,
+            terminal,
+            transaction_id,
+            reference,
+            PersistFault::None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn persist_with_fault(
+        root: &Path,
+        terminal: CompletionTerminal,
+        transaction_id: ReplacementTransactionId,
+        reference: &RecoveryKeyReference,
+        fault: PersistFault,
+    ) -> Result<CompletionTombstone, CompletionTombstoneError> {
+        persist_inner(root, terminal, transaction_id, reference, fault)
+    }
+
+    fn persist_inner(
+        root: &Path,
+        terminal: CompletionTerminal,
+        transaction_id: ReplacementTransactionId,
+        reference: &RecoveryKeyReference,
+        fault: PersistFault,
+    ) -> Result<CompletionTombstone, CompletionTombstoneError> {
+        let existing = load_all(root)?;
+        if existing
+            .iter()
+            .any(|tombstone| tombstone.transaction_id == transaction_id)
+        {
+            return Err(CompletionTombstoneError::RecoveryConflict(
+                root.join(TOMBSTONE_DIRECTORY)
+                    .join(tombstone_name(transaction_id)),
+            ));
+        }
+        if existing.len() >= MAX_TOMBSTONES {
             return Err(CompletionTombstoneError::TooMany);
         }
         let root_dir = open_root(root)?;
@@ -252,21 +307,40 @@ mod platform {
             return Err(CompletionTombstoneError::InvalidMetadata);
         }
 
-        let name = tombstone_name(transaction_id);
-        let path = directory_path.join(&name);
-        let mut file = create_private_file_at(directory.as_raw_fd(), OsStr::new(&name), &path)?;
-        let file_identity = identity(&file).map_err(|source| io_error(&path, source))?;
+        let final_name = tombstone_name(transaction_id);
+        let final_path = directory_path.join(&final_name);
+        let stage_name = pending_name(transaction_id);
+        let stage_path = directory_path.join(&stage_name);
+        let mut file =
+            create_private_file_at(directory.as_raw_fd(), OsStr::new(&stage_name), &stage_path)?;
+        let file_identity = identity(&file).map_err(|source| io_error(&stage_path, source))?;
+        fail_at(fault, PersistFault::AfterStageCreated, &stage_path)?;
         file.write_all(&bytes)
-            .map_err(|source| io_error(&path, source))?;
-        verify_private_file(&file, &path)?;
-        file.sync_all().map_err(|source| io_error(&path, source))?;
+            .map_err(|source| io_error(&stage_path, source))?;
+        verify_private_file(&file, &stage_path)?;
+        file.sync_all()
+            .map_err(|source| io_error(&stage_path, source))?;
+        fail_at(fault, PersistFault::AfterStageSynced, &stage_path)?;
+        rename_no_replace(
+            directory.as_raw_fd(),
+            OsStr::new(&stage_name),
+            OsStr::new(&final_name),
+            &final_path,
+        )?;
+        fail_at(fault, PersistFault::AfterPublished, &final_path)?;
         directory
             .sync_all()
             .map_err(|source| io_error(&directory_path, source))?;
+        root_dir
+            .sync_all()
+            .map_err(|source| io_error(root, source))?;
         verify_private_directory(&directory, &directory_path)?;
-        let reopened_file = open_private_file_at(directory.as_raw_fd(), OsStr::new(&name), &path)?;
-        if identity(&reopened_file).map_err(|source| io_error(&path, source))? != file_identity {
-            return Err(CompletionTombstoneError::RecoveryConflict(path));
+        let reopened_file =
+            open_private_file_at(directory.as_raw_fd(), OsStr::new(&final_name), &final_path)?;
+        if identity(&reopened_file).map_err(|source| io_error(&final_path, source))?
+            != file_identity
+        {
+            return Err(CompletionTombstoneError::RecoveryConflict(final_path));
         }
         let reopened_directory = open_private_directory_at(
             root_dir.as_raw_fd(),
@@ -312,6 +386,12 @@ mod platform {
         let mut tombstones = Vec::with_capacity(names_before.len());
         for name in &names_before {
             let name_text = name.to_str().ok_or(CompletionTombstoneError::Corrupt)?;
+            if let Some(transaction_text) = name_text.strip_suffix(PENDING_SUFFIX) {
+                parse_transaction_hex(transaction_text)?;
+                return Err(CompletionTombstoneError::IncompleteWrite(
+                    directory_path.join(name),
+                ));
+            }
             let transaction_text = name_text
                 .strip_suffix(TOMBSTONE_SUFFIX)
                 .ok_or(CompletionTombstoneError::Corrupt)?;
@@ -321,7 +401,7 @@ mod platform {
             let opened_identity = identity(&file).map_err(|source| io_error(&path, source))?;
             let bytes = read_bounded(&mut file, MAX_TOMBSTONE_BYTES, &path)?;
             verify_private_file(&file, &path)?;
-            let reopened = open_private_file_at(directory.as_raw_fd(), name, &path)?;
+            let reopened = open_private_file_for_repair_at(directory.as_raw_fd(), name, &path)?;
             if identity(&reopened).map_err(|source| io_error(&path, source))? != opened_identity {
                 return Err(CompletionTombstoneError::RecoveryConflict(path));
             }
@@ -339,6 +419,9 @@ mod platform {
                 return Err(CompletionTombstoneError::Corrupt);
             }
             let reference = parse_reference(&manifest)?;
+            reopened
+                .sync_all()
+                .map_err(|source| io_error(&path, source))?;
             tombstones.push(CompletionTombstone {
                 transaction_id,
                 terminal: manifest.terminal,
@@ -346,6 +429,12 @@ mod platform {
             });
         }
 
+        directory
+            .sync_all()
+            .map_err(|source| io_error(&directory_path, source))?;
+        root_dir
+            .sync_all()
+            .map_err(|source| io_error(root, source))?;
         let names_after = read_directory_names(&directory, &directory_path)?;
         if names_before != names_after {
             return Err(CompletionTombstoneError::RecoveryConflict(directory_path));
@@ -460,6 +549,43 @@ mod platform {
         .map_err(|source| io_error(display, source))
     }
 
+    fn rename_no_replace(
+        parent: RawFd,
+        from: &OsStr,
+        to: &OsStr,
+        display: &Path,
+    ) -> Result<(), CompletionTombstoneError> {
+        let from = os_c_string(from)?;
+        let to = os_c_string(to)?;
+        let result = unsafe {
+            libc::renameat2(
+                parent,
+                from.as_ptr(),
+                parent,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result != 0 {
+            return Err(io_error(display, io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    fn fail_at(
+        actual: PersistFault,
+        expected: PersistFault,
+        display: &Path,
+    ) -> Result<(), CompletionTombstoneError> {
+        if actual == expected {
+            return Err(io_error(
+                display,
+                io::Error::other("injected completion tombstone crash boundary"),
+            ));
+        }
+        Ok(())
+    }
+
     fn verify_private_directory(
         directory: &File,
         display: &Path,
@@ -504,6 +630,22 @@ mod platform {
             parent,
             name,
             libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0,
+        )
+        .map_err(|source| io_error(display, source))?;
+        verify_private_file(&file, display)?;
+        Ok(file)
+    }
+
+    fn open_private_file_for_repair_at(
+        parent: RawFd,
+        name: &OsStr,
+        display: &Path,
+    ) -> Result<File, CompletionTombstoneError> {
+        let file = open_file_at(
+            parent,
+            name,
+            libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0,
         )
         .map_err(|source| io_error(display, source))?;
@@ -721,6 +863,59 @@ mod tests {
         assert_eq!(loaded[0].reference().provider_kind(), "test-provider");
         assert_eq!(loaded[0].reference().opaque_reference(), b"opaque-sentinel");
         assert!(!format!("{:?}", loaded[0]).contains("opaque-sentinel"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn crash_before_publish_never_exposes_a_partial_final_tombstone() {
+        for (byte, fault) in [
+            (0x12, platform::PersistFault::AfterStageCreated),
+            (0x13, platform::PersistFault::AfterStageSynced),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let root_path = fs::canonicalize(root.path()).unwrap();
+            let transaction_id = transaction(byte);
+            platform::persist_with_fault(
+                &root_path,
+                CompletionTerminal::Complete,
+                transaction_id,
+                &reference(),
+                fault,
+            )
+            .expect_err("fault is injected before publication");
+
+            let directory = root_path.join(TOMBSTONE_DIRECTORY);
+            assert!(!directory.join(tombstone_name(transaction_id)).exists());
+            assert!(directory.join(pending_name(transaction_id)).exists());
+            assert!(matches!(
+                load_completion_tombstones(&root_path),
+                Err(CompletionTombstoneError::IncompleteWrite(_))
+            ));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restart_repairs_a_published_but_not_directory_flushed_tombstone() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(0x14);
+        platform::persist_with_fault(
+            &root_path,
+            CompletionTerminal::Complete,
+            transaction_id,
+            &reference(),
+            platform::PersistFault::AfterPublished,
+        )
+        .expect_err("fault is injected before directory flush");
+
+        let directory = root_path.join(TOMBSTONE_DIRECTORY);
+        assert!(directory.join(tombstone_name(transaction_id)).exists());
+        assert!(!directory.join(pending_name(transaction_id)).exists());
+        let loaded = load_completion_tombstones(&root_path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].transaction_id(), transaction_id);
+        assert_eq!(loaded[0].reference(), &reference());
     }
 
     #[cfg(target_os = "linux")]

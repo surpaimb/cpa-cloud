@@ -235,11 +235,14 @@ phase on every blocking deletion outcome, and permits tombstone removal last.
 It performs none of those filesystem operations itself and cannot prove
 provider-side deletion behavior. A separate Linux-only synthetic-root
 foundation now persists and reloads versioned completion tombstones with exact
-`0700`/`0600` owner-private modes, no-follow descriptor-relative opens, bounded
-restart enumeration, file and directory flushes, and root/transaction/provider
-reference binding. Windows and macOS remain unsupported before namespace
-creation. No operating-system key provider, tombstone removal, journal wiring,
-or real client write is enabled, and same-user replacement remains a blocker.
+`0700`/`0600` owner-private modes, no-follow descriptor-relative opens, private
+staging plus no-replace atomic publication, bounded restart enumeration,
+file/directory/root flushes and root/transaction/provider-reference binding.
+Restart refuses a pre-publication `.pending` artifact and repairs durability of
+a structurally complete final record before returning it. Windows and macOS
+remain unsupported before namespace creation. No operating-system key provider,
+tombstone removal, journal wiring, or real client write is enabled, and
+same-user replacement remains a blocker.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret

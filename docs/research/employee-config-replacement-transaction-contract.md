@@ -277,13 +277,17 @@ deletion before both are recorded durable, and permits tombstone removal only
 after deletion is confirmed as `deleted` or already `missing`. Locked,
 wrong-identity, corrupt or unavailable deletion leaves the tombstone phase
 retryable. The caller assertions alone do not prove filesystem durability. A
-separate Linux-only synthetic-root module now writes a versioned non-secret
-completion tombstone as an owner-private single-link file, flushes the file and
-containing directory, binds it to the held root identity and exact
-transaction/provider reference, and reconstructs a bounded sorted set after
-restart. It reopens the named file and directory to reject replacement during
-the operation. This does not implement provider deletion, tombstone removal,
-an operating-system key provider, journal integration or real client writes.
+separate Linux-only synthetic-root module now stages a versioned non-secret
+completion tombstone as an owner-private single-link file, flushes it, and
+publishes it under the final name with no-replace `renameat2`. A crash before
+publication leaves an explicitly blocked `.pending` record rather than a
+partial final tombstone. Restart revalidates and flushes every visible complete
+record plus its directory and root before returning it as durable, binds it to
+the held root identity and exact transaction/provider reference, and
+reconstructs a bounded sorted set. It reopens the named file and directory to
+reject replacement during the operation. This does not implement provider
+deletion, tombstone removal, an operating-system key provider, journal
+integration or real client writes.
 The owner-private filesystem boundary is not authentication against another
 process running as the same user; the documented same-user race remains a
 blocker.
