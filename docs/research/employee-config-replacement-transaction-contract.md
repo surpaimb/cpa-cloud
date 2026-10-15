@@ -289,17 +289,24 @@ identities/digests/security metadata, performs no I/O, and does not implement
 the durable journal, recovery-blocked handling, publication, tool-format
 validation, rollback or cleanup.
 
-`live/recovery_key.rs` now fixes only the pure provider-call boundary and
-redacted outcome taxonomy. Recovery opens one exact non-zero transaction ID and
+`live/recovery_key.rs` fixes the provider-call boundary and redacted outcome
+taxonomy. Recovery opens one exact non-zero transaction ID and
 bounded provider reference and maps `locked`, `missing`, `wrong_identity`,
 `corrupt` and `unavailable` to distinct blocking results. The recovery helper
 has no create or delete path, so a failed open cannot silently generate a new
 key or remove evidence. Provider references and key material are redacted from
-`Debug`. No DPAPI, Keychain, Secret Service, filesystem, environment-variable
-or network provider is implemented, and no durable journal calls this interface.
-The trait boundary cannot prove that a future provider's own `open`
-implementation does not mint or replace a key; fixed native restart and
-identity-binding tests remain mandatory.
+`Debug`. `live/windows_dpapi.rs` now implements one Windows-only synthetic-root
+provider using current-user DPAPI, `CRYPTPROTECT_UI_FORBIDDEN`, transaction-bound
+optional entropy, a checked plaintext envelope, an exact protected-blob digest
+reference, owner-only protected DACLs, stable directory handles and a compatible
+exclusive lock. Create is no-replace and read-back verified; open after a fresh
+provider instance never creates or replaces a missing value; delete authenticates
+the exact existing value first and flushes its directory. DPAPI plaintext output
+and intermediate key arrays are zeroized, and neither key nor DPAPI blob enters
+the journal, receipt, `Debug`, environment, command line, database or network.
+Linux and macOS return `UnsupportedPlatform` before namespace creation. This
+provider is not wired to a durable replacement transaction or real client write;
+Keychain and Secret Service remain unimplemented.
 
 The same module includes a provider-agnostic terminal-cleanup ordering gate. It
 accepts only an already durable `Complete` or `RolledBack` decision, requires
@@ -374,11 +381,11 @@ that binding, initial cleanup-journal creation remains fail-closed. Synthetic
 tests alone mint target evidence under `cfg(test)`. The store does not delete
 transaction contents; its reviewed slice begins only after another component
 has safely removed every known child and left the exact workspace empty. It
-does not supply an operating-system key provider, remove completed
-journals/proofs, authenticate against a hostile same-user process, or
-orchestrate startup automatically. This does not implement a provider deletion
-backend, operating-system key provider, cleanup/proof garbage collection,
-automatic restart orchestration or real client writes.
+does not remove completed journals/proofs, authenticate against a hostile
+same-user process, or orchestrate startup automatically. The separate Windows
+DPAPI synthetic provider is not integrated with this Linux cleanup path. This
+does not implement cleanup/proof garbage collection, automatic restart
+orchestration or real client writes.
 As the first bounded prerequisite for later garbage collection, a durably
 `Complete` cleanup sequence can now authorize a non-mutating revalidation of
 the exact inactive completion-tombstone proof. Only the resulting exact receipt

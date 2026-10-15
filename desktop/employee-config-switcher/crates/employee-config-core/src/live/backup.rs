@@ -20,7 +20,7 @@ use std::io;
 #[cfg(target_os = "linux")]
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 // Keep rollback material outside the create-only engine namespace. That engine
 // treats every child of its transaction directory as one of its own journals.
@@ -38,8 +38,10 @@ const KEY_BYTES: usize = 32;
 pub struct BackupKey(Zeroizing<[u8; KEY_BYTES]>);
 
 impl BackupKey {
-    pub fn from_bytes(bytes: [u8; KEY_BYTES]) -> Self {
-        Self(Zeroizing::new(bytes))
+    pub fn from_bytes(mut bytes: [u8; KEY_BYTES]) -> Self {
+        let key = Self(Zeroizing::new(bytes));
+        bytes.zeroize();
+        key
     }
 
     pub fn generate() -> Result<Self, BackupError> {
@@ -50,7 +52,7 @@ impl BackupKey {
         Ok(Self::from_bytes(bytes))
     }
 
-    fn expose(&self) -> &[u8; KEY_BYTES] {
+    pub(crate) fn expose(&self) -> &[u8; KEY_BYTES] {
         &self.0
     }
 }

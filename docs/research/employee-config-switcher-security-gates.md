@@ -248,16 +248,23 @@ sorted unique set of at most 16 UTF-8 leaf names bounded to 4 KiB each and
 refuses events after a terminal state. Identities, digests, security metadata,
 durable I/O, `recovery_blocked`, publication and rollback remain unimplemented.
 
-The recovery-key boundary is also executable only as a pure interface. It
-defines bounded transaction/provider metadata, redacted create/open/delete
+The recovery-key boundary defines bounded transaction/provider metadata and
+redacted create/open/delete
 outcomes, and an open-existing helper that can only return an available
 zeroizing key or one of the five blocking recovery results. Tests prove that a
 missing key invokes neither create nor delete and that keys and opaque provider
-references stay out of `Debug`. No operating-system key provider is present;
-headless Linux and all real key custody therefore remain unsupported. A future
-provider's `open` implementation must still prove by fixed native restart tests
-that it cannot mint or replace a missing key and that temporary plaintext
-buffers are cleared.
+references stay out of `Debug`. A separate Windows-only synthetic-root provider
+now uses current-user DPAPI without `CRYPTPROTECT_LOCAL_MACHINE`, forbids UI,
+binds the transaction into optional entropy and a checked plaintext envelope,
+and stores only a bounded protected blob behind owner-only DACLs, stable
+directory handles and an exclusive cross-instance lock. Native tests cover
+fresh-instance reopen, exact key equality, missing/wrong transaction behavior,
+tampered blob/reference refusal, idempotent deletion, lock classification and
+concurrent duplicate creation. DPAPI plaintext and temporary key arrays are
+zeroized. Linux/macOS construction returns `UnsupportedPlatform` without
+creating a namespace; Keychain, Secret Service and all environment/CLI/database/
+plaintext fallbacks remain absent. The provider is synthetic-only and is not
+wired to the durable transaction or real client writes.
 
 A provider-agnostic cleanup sequence gate now also refuses provider deletion
 until a terminal decision, completion tombstone, and workspace removal have
@@ -290,8 +297,9 @@ removal and inactive-proof verification. Deterministic concurrent tests prove
 that two contenders for the 64th entry cannot publish a 65th record and that a
 duplicate publisher cannot race an authorized removal into two active states.
 Restart refuses a pre-publication `.pending` artifact and repairs durability of
-a structurally complete final record before returning it. Windows and macOS
-remain unsupported before namespace creation. No operating-system key provider,
+a structurally complete final record before returning it. This tombstone store
+remains Linux-only and unsupported on Windows/macOS before namespace creation;
+the separate Windows DPAPI synthetic provider is not integrated with it. No
 transaction-content cleanup integration, automatic crash-resume orchestration,
 or real client write is enabled. Resistance to a hostile same-user process is
 not claimed under the first-release threat model; cross-account isolation and
