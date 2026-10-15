@@ -301,8 +301,9 @@ optional entropy, a checked plaintext envelope, an exact protected-blob digest
 reference, owner-only protected DACLs, stable directory handles and a compatible
 exclusive lock. Create is no-replace and read-back verified; open after a fresh
 provider instance never creates or replaces a missing value. Creation writes
-and flushes an owner-private `.pending` blob, performs one handle-relative
-same-directory `FileRenameInfoEx` operation with replacement disabled, flushes
+and flushes an owner-private `.pending` blob, performs one same-directory
+`FileRenameInfoEx` operation on that file handle with a fixed absolute final
+path and replacement disabled, flushes
 the directory, and authenticates the final value. An exact create retry may
 remove only a bounded private unpublished stage when no final exists, or return
 the authenticated already-published value; simultaneous final/stage state is

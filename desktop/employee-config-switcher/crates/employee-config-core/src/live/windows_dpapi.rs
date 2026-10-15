@@ -29,7 +29,6 @@ const STORE_DIRECTORY: &str = ".cpa-cloud-employee-recovery-keys";
 const LOCK_FILE: &str = ".lock";
 const BLOB_SUFFIX: &str = ".dpapi";
 const STAGE_SUFFIX: &str = ".dpapi.pending";
-const BLOB_FILE_NAME_UTF16_UNITS: usize = 32 + BLOB_SUFFIX.len();
 const MAX_PROTECTED_BYTES: usize = 16 * 1024;
 const REFERENCE_BYTES: usize = 32;
 const ENVELOPE_MAGIC: &[u8; 16] = b"CPA-DPAPI-KEY-V1";
@@ -150,7 +149,7 @@ mod windows_impl {
     use ring::constant_time::verify_slices_are_equal;
     use std::fs::{self, File, OpenOptions};
     use std::io::{Read, Write};
-    use std::mem::size_of;
+    use std::mem::{offset_of, size_of};
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
@@ -176,7 +175,7 @@ mod windows_impl {
         PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FileRenameInfoEx, SetFileInformationByHandle, DELETE,
+        CreateFileW, FileRenameInfoEx, SetFileInformationByHandle, DELETE, FILE_RENAME_INFO,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
@@ -630,44 +629,51 @@ mod windows_impl {
         }
     }
 
-    #[repr(C)]
-    struct NoReplaceRenameInfo {
-        flags: u32,
-        root_directory: windows_sys::Win32::Foundation::HANDLE,
-        file_name_length: u32,
-        file_name: [u16; BLOB_FILE_NAME_UTF16_UNITS],
-    }
-
     fn publish_stage_no_replace(
         store: &StableStore,
         stage: &File,
         transaction_id: ReplacementTransactionId,
     ) -> Result<(), NativeError> {
-        let file_name = blob_file_name(transaction_id);
-        let encoded: Vec<u16> = file_name.encode_utf16().collect();
-        if encoded.len() != BLOB_FILE_NAME_UTF16_UNITS {
+        let final_path = blob_path(store, transaction_id);
+        let encoded: Vec<u16> = final_path.as_os_str().encode_wide().collect();
+        let file_name_bytes = encoded
+            .len()
+            .checked_mul(size_of::<u16>())
+            .ok_or(NativeError::Corrupt)?;
+        let buffer_bytes = offset_of!(FILE_RENAME_INFO, FileName)
+            .checked_add(file_name_bytes)
+            .ok_or(NativeError::Corrupt)?;
+        let storage_words = buffer_bytes
+            .checked_add(size_of::<usize>() - 1)
+            .ok_or(NativeError::Corrupt)?
+            / size_of::<usize>();
+        if encoded.is_empty() || storage_words == 0 {
             return Err(NativeError::Corrupt);
         }
-        let mut info = NoReplaceRenameInfo {
-            flags: 0,
-            root_directory: store._directory.as_raw_handle(),
-            file_name_length: u32::try_from(encoded.len() * size_of::<u16>())
-                .map_err(|_| NativeError::Corrupt)?,
-            file_name: [0; BLOB_FILE_NAME_UTF16_UNITS],
-        };
-        info.file_name.copy_from_slice(&encoded);
+        let mut storage = vec![0usize; storage_words];
+        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        unsafe {
+            (*info).Anonymous.Flags = 0;
+            (*info).RootDirectory = null_mut();
+            (*info).FileNameLength =
+                u32::try_from(file_name_bytes).map_err(|_| NativeError::Corrupt)?;
+            std::ptr::copy_nonoverlapping(
+                encoded.as_ptr(),
+                (*info).FileName.as_mut_ptr(),
+                encoded.len(),
+            );
+        }
         let ok = unsafe {
             SetFileInformationByHandle(
                 stage.as_raw_handle(),
                 FileRenameInfoEx,
-                (&info as *const NoReplaceRenameInfo).cast(),
-                u32::try_from(size_of::<NoReplaceRenameInfo>())
-                    .map_err(|_| NativeError::Corrupt)?,
+                info.cast(),
+                u32::try_from(buffer_bytes).map_err(|_| NativeError::Corrupt)?,
             )
         };
         if ok == 0 {
             return Err(NativeError::Io(io_error(
-                &stage_path(store, transaction_id),
+                &final_path,
                 io::Error::last_os_error(),
             )));
         }

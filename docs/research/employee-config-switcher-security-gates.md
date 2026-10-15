@@ -258,8 +258,9 @@ now uses current-user DPAPI without `CRYPTPROTECT_LOCAL_MACHINE`, forbids UI,
 binds the transaction into optional entropy and a checked plaintext envelope,
 and stores only a bounded protected blob behind owner-only DACLs, stable
 directory handles and an exclusive cross-instance lock. Creation now writes an
-owner-private `.pending` blob, flushes it, publishes it through handle-relative
-`FileRenameInfoEx` with replacement disabled, flushes the directory and reads
+owner-private `.pending` blob, flushes it, calls `FileRenameInfoEx` on that
+handle with a fixed same-directory absolute final path and replacement disabled,
+flushes the directory and reads
 the final blob back. On an exact create retry, a bounded private stage is
 removed only when no final exists; a published blob is authenticated and
 returned idempotently, while simultaneous final/stage state is preserved and
