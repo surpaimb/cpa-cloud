@@ -1088,7 +1088,7 @@ mod tests {
 
     #[test]
     fn create_retry_reconciles_unknown_post_publish_without_replacing() {
-        let (root, approval) = fixture();
+        let (_root, approval) = fixture();
         let backend = FakeBackend::default();
         let shared = backend.clone();
         backend.fault(Fault::CreatePublishedThenUnavailable);
@@ -1172,7 +1172,7 @@ mod tests {
         }
 
         let tx = transaction(0x45);
-        let created = created(provider.create(tx));
+        let created_key = created(provider.create(tx));
         backend
             .state
             .lock()
@@ -1183,11 +1183,11 @@ mod tests {
             .unwrap()
             .locked = true;
         assert!(matches!(
-            provider.open(tx, &created.reference),
+            provider.open(tx, &created_key.reference),
             RecoveryKeyOpenOutcome::Locked
         ));
         assert_eq!(
-            provider.delete(tx, &created.reference),
+            provider.delete(tx, &created_key.reference),
             RecoveryKeyDeleteOutcome::Locked
         );
         backend
@@ -1201,7 +1201,7 @@ mod tests {
             .locked = false;
         backend.fault(Fault::GetLocked);
         assert!(matches!(
-            provider.open(tx, &created.reference),
+            provider.open(tx, &created_key.reference),
             RecoveryKeyOpenOutcome::Locked
         ));
     }
@@ -1213,10 +1213,10 @@ mod tests {
         let mut provider = provider(backend.clone(), root.path());
         let tx = transaction(0x55);
         let other = transaction(0x56);
-        let created = created(provider.create(tx));
+        let created_key = created(provider.create(tx));
         let creates = backend.state.lock().unwrap().creates;
         assert!(matches!(
-            provider.open(other, &created.reference),
+            provider.open(other, &created_key.reference),
             RecoveryKeyOpenOutcome::WrongIdentity
         ));
         let corrupt =
@@ -1227,12 +1227,12 @@ mod tests {
         ));
         backend.state.lock().unwrap().items.clear();
         assert!(matches!(
-            provider.open(tx, &created.reference),
+            provider.open(tx, &created_key.reference),
             RecoveryKeyOpenOutcome::Missing
         ));
         backend.fault(Fault::SearchUnavailable);
         assert!(matches!(
-            provider.open(tx, &created.reference),
+            provider.open(tx, &created_key.reference),
             RecoveryKeyOpenOutcome::Unavailable
         ));
         assert_eq!(backend.state.lock().unwrap().creates, creates);
@@ -1244,7 +1244,7 @@ mod tests {
         let backend = FakeBackend::default();
         let mut provider = provider(backend.clone(), root.path());
         let tx = transaction(0x66);
-        let created = created(provider.create(tx));
+        let created_key = created(provider.create(tx));
         backend
             .state
             .lock()
@@ -1255,11 +1255,11 @@ mod tests {
             .unwrap()
             .secret[0] ^= 0xff;
         assert!(matches!(
-            provider.open(tx, &created.reference),
+            provider.open(tx, &created_key.reference),
             RecoveryKeyOpenOutcome::Corrupt
         ));
         assert_eq!(
-            provider.delete(tx, &created.reference),
+            provider.delete(tx, &created_key.reference),
             RecoveryKeyDeleteOutcome::Corrupt
         );
         assert_eq!(backend.state.lock().unwrap().deletes, 0);
