@@ -332,6 +332,35 @@ impl RecoveryKeyCleanupSequence {
         self.terminal
     }
 
+    pub(crate) fn transaction_id(&self) -> ReplacementTransactionId {
+        self.transaction_id
+    }
+
+    pub(crate) fn reference(&self) -> &RecoveryKeyReference {
+        &self.reference
+    }
+
+    pub(crate) fn from_durable_phase(
+        _evidence: super::cleanup_journal::DurablePhaseEvidence,
+        phase: RecoveryKeyCleanupPhase,
+        terminal: ReplacementPhase,
+        transaction_id: ReplacementTransactionId,
+        reference: RecoveryKeyReference,
+    ) -> Result<Self, RecoveryKeyCleanupError> {
+        if !matches!(
+            terminal,
+            ReplacementPhase::Complete | ReplacementPhase::RolledBack
+        ) {
+            return Err(RecoveryKeyCleanupError::InvalidTerminal);
+        }
+        Ok(Self {
+            phase,
+            terminal,
+            transaction_id,
+            reference,
+        })
+    }
+
     pub fn record_completion_tombstone_durable(&mut self) -> Result<(), RecoveryKeyCleanupError> {
         self.require_phase(RecoveryKeyCleanupPhase::TerminalRecorded)?;
         self.phase = RecoveryKeyCleanupPhase::CompletionTombstoneDurable;

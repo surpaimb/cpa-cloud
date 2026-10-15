@@ -299,10 +299,24 @@ gate to `Complete`. Public restart enumeration validates but excludes inactive
 proofs, and transaction IDs represented by a proof cannot be reused. Proofs are
 bounded by the same 64-entry namespace limit and deliberately retained because
 this slice does not implement safe proof garbage collection. Mismatched or
-fully missing records still fail closed. This does not implement a provider
-deletion backend, general durable cleanup journal, workspace removal,
-operating-system key provider, proof garbage collection, automatic restart
-orchestration or real client writes.
+fully missing records still fail closed.
+
+The separate Linux-only synthetic-root cleanup journal now persists the five
+provider-agnostic cleanup phases as immutable, bounded, owner-private event
+files. Every event repeats and validates the root, terminal decision,
+transaction and provider-reference binding; restart requires a contiguous
+phase prefix and reconstructs the exact cleanup sequence. Event publication is
+stage-and-flush followed by no-replace rename and directory/root flush. A
+visible `.pending` event blocks recovery rather than being inferred complete.
+The durable wrapper records provider deletion only after the provider returns
+`deleted` or `missing`, and an append failure rolls the in-memory sequence back
+to its preceding durable phase so a restart can retry. The journal still trusts
+caller assertions that the completion tombstone and workspace removal are
+durable; it does not inspect or delete a workspace, supply an operating-system
+key provider, remove completed journals, or orchestrate startup automatically.
+This does not implement a provider deletion backend, workspace-removal proof,
+operating-system key provider, cleanup/proof garbage collection, automatic
+restart orchestration or real client writes.
 The owner-private filesystem boundary is not authentication against another
 process running as the same user; the documented same-user race remains a
 blocker.

@@ -241,8 +241,13 @@ file/directory/root flushes and root/transaction/provider-reference binding.
 Restart refuses a pre-publication `.pending` artifact and repairs durability of
 a structurally complete final record before returning it. Windows and macOS
 remain unsupported before namespace creation. No operating-system key provider,
-durable cleanup journal, workspace-removal wiring, crash-resume orchestration,
-or real client write is enabled, and same-user replacement remains a blocker.
+workspace-removal wiring, automatic crash-resume orchestration, or real client
+write is enabled, and same-user replacement remains a blocker. A separate
+Linux-only synthetic-root journal now makes the five cleanup phases durable as
+immutable private files, rejects non-contiguous or `.pending` state on restart,
+and reconstructs the exact transaction/provider-bound cleanup sequence. It is
+limited to 64 transactions, does not prove the caller's workspace-removal
+assertion, and does not remove completed journal records.
 The pure cleanup gate can issue a non-serializable removal authorization only
 after provider deletion is confirmed; the Linux store then revalidates the
 exact transaction/reference, renames the final tombstone to a flushed

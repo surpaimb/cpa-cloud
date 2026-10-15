@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod cleanup_journal;
 pub mod completion_tombstone;
 pub mod engine;
 pub mod floor;
