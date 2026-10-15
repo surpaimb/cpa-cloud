@@ -390,16 +390,23 @@ entry point accepts only canonical `openclaw.json` and
 `cpa-cloud.ownership.json` names in the same parent directory.
 
 Codex now has a separate synthetic-root create-only projection based on the
-public OpenAI Codex configuration contract and a fixed local binary fixture. It
-creates only canonical same-parent `config.toml` and
+public OpenAI Codex configuration contract and fixed native Codex CLI `0.160.1`
+Windows x86_64 evidence. It creates only canonical same-parent `config.toml` and
 `cpa-cloud.ownership.json` files when both are absent, selects the
 server-declared Responses default, disables client retries and WebSocket
 transport, skips OpenAI login, and leaves Codex-owned `auth.json` unchanged.
 The employee Key is written only into the private new config target through the
 documented programmatic bearer-token field; it is absent from ownership,
-journal and debug output. Any existing `config.toml` remains a hard conflict,
-and the discouraged direct-token field plus missing cross-version native
-fixtures remain explicit blockers for real writes.
+journal and debug output. The fixed native CLI accepted the exact planner bytes
+under an isolated `CODEX_HOME`, sent the synthetic provider bearer and model to
+the loopback `/v1/responses` path, and preserved the existing `auth.json` bytes,
+identity, length and timestamps. The loopback returned an intentional HTTP 400,
+so no successful model response or broader transport compatibility is claimed.
+The synthetic token appeared only in `config.toml`, not the CLI state databases.
+Any existing `config.toml` remains a hard conflict, and the officially
+discouraged direct-token field, single Windows fixture, missing cross-version
+coverage, and incomplete production replacement/key-lifecycle gates remain
+explicit blockers for real writes.
 
 Claude Code now has a separate synthetic-root create-only projection based on
 the official Claude Code settings and LLM gateway contracts plus a fixed native

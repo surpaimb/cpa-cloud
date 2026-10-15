@@ -28,6 +28,14 @@ Windows 合成根目录现在有一个独立的当前用户 DPAPI recovery-key p
 
 macOS 另有一个失败关闭的 Keychain 边界和纯内存 `SecItem` 合同测试：合同固定 Data Protection Keychain、非同步、专用 access group、`WhenUnlockedThisDeviceOnly`、无交互、persistent reference、transaction/current-user/access-group 绑定以及 exact-reference 删除语义。当前应用尚未固定 signing team、entitlement 和 access group，因此生产构造在查询 Keychain 前返回 unavailable；临时 file-based Keychain 不能替代正式 Data Protection Keychain 的重启、锁定、跨用户或持久性证据。此切片不访问真实 Keychain，也不启用真实配置写入。
 
+Codex CLI 已用官方固定版 `0.160.1` Windows x64 二进制验收当前规划器的原始
+`config.toml`：隔离 `CODEX_HOME` 中的 provider 级
+`experimental_bearer_token` 被发送到合成回环 `/v1/responses`，模型选择匹配，
+已有 `auth.json` 的字节、文件标识、长度和时间戳均未改变；合成员工 Key 只出现在
+配置夹具，不出现在 Codex 状态数据库。官方 schema 明确不推荐直接 bearer 字段，
+且该证据仅覆盖此版本/平台和故意失败的 HTTP 400 请求，因此真实写入和跨版本支持
+继续保持关闭。
+
 Grok Build 的只读检测现在复现固定官方提交的 `GROK_HOME` 非空覆盖优先级，
 否则使用 `~/.grok`；环境值保持原样，不由 CPA 擅自规范化。真实写入仍必须证明
 模型 ID 满足 CPA `validIdentifier` 约束或能安全处理 Grok glob 语义，并增加

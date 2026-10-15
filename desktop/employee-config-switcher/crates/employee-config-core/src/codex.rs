@@ -257,6 +257,94 @@ mod tests {
     }
 
     #[test]
+    fn fixed_native_fixture_matches_the_planner_and_bounded_acceptance_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = CodexProfile {
+            base_url: "http://127.0.0.1:46161".into(),
+            employee_key: SecretString::new("employee-fixture-secret"),
+            default_model: "fixture-model".into(),
+        };
+        let plan = plan_new_codex(
+            &temp.path().join("config.toml"),
+            &temp.path().join("cpa-cloud.ownership.json"),
+            &profile,
+        )
+        .unwrap();
+        let native_config = include_bytes!(
+            "../tests/fixtures/codex-cli-0.160.1/native-config.toml"
+        );
+        let auth_sentinel = include_bytes!(
+            "../tests/fixtures/codex-cli-0.160.1/native-auth.json"
+        );
+        let acceptance: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/codex-cli-0.160.1/native-acceptance.json"
+        ))
+        .unwrap();
+
+        assert_eq!(plan.config.desired_bytes.as_slice(), native_config);
+        assert_eq!(
+            hex::encode(Sha256::digest(native_config)),
+            acceptance["planner_fixtures"]["config_sha256"]
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(auth_sentinel)),
+            acceptance["planner_fixtures"]["auth_sentinel_sha256"]
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(
+            acceptance["release"]["commit"],
+            "d27764b82f7118f674371e6d6e76271d9d606edb"
+        );
+        assert_eq!(
+            acceptance["release"]["schema_sha256"],
+            "7ce31bde1ed6ef15c53a96ba460bb1d0fb7b99fd9ab719b567c94c474f62b023"
+        );
+        assert_eq!(
+            acceptance["artifact"]["archive_sha256"],
+            "12cf8aa4f5e4ef3e6602f6c0e98838f8092f63357f01bd3c7379b216df27cc78"
+        );
+        assert_eq!(
+            acceptance["artifact"]["binary_sha256"],
+            "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d"
+        );
+        assert_eq!(acceptance["artifact"]["reported_version"], "codex-cli 0.160.1");
+        assert_eq!(acceptance["loopback_observation"]["request_path"], "/v1/responses");
+        assert_eq!(
+            acceptance["loopback_observation"]["authorization_matched_synthetic_fixture"],
+            true
+        );
+        assert_eq!(
+            acceptance["loopback_observation"]["model_matched_synthetic_fixture"],
+            true
+        );
+        assert_eq!(acceptance["auth_json_sentinel"]["bytes_unchanged"], true);
+        assert_eq!(
+            acceptance["auth_json_sentinel"]["file_identity_unchanged"],
+            true
+        );
+        assert_eq!(acceptance["invocation"]["strict_config"], true);
+        assert_eq!(
+            acceptance["invocation"]["unknown_config_error_observed"],
+            false
+        );
+        assert_eq!(
+            acceptance["invocation"]["stderr_contained_fixture_token"],
+            false
+        );
+        assert_eq!(
+            acceptance["storage_observation"]["fixture_token_found_in_codex_state_databases"],
+            false
+        );
+        assert!(!String::from_utf8_lossy(include_bytes!(
+            "../tests/fixtures/codex-cli-0.160.1/native-acceptance.json"
+        ))
+        .contains("employee-fixture-secret"));
+    }
+
+    #[test]
     fn create_only_transaction_publishes_codex_config_and_ownership_together() {
         let temp = tempfile::tempdir().unwrap();
         let codex = temp.path().join(".codex");
