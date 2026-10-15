@@ -362,7 +362,7 @@ mod windows_impl {
         if interruption == Some(CreateInterruption::AfterPublish) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
-        if let Err(error) = verify_published_stage(store, &file, transaction_id, staged_identity) {
+        if let Err(error) = verify_published_stage(store, file, transaction_id, staged_identity) {
             return create_outcome_for(error);
         }
         if sync_store_directory(store).is_err() {
@@ -371,8 +371,6 @@ mod windows_impl {
         if interruption == Some(CreateInterruption::AfterDirectoryFlush) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
-        drop(file);
-
         match open_locked(store, transaction_id, &reference) {
             RecoveryKeyOpenOutcome::Available(opened)
                 if verify_slices_are_equal(opened.expose(), key.expose()).is_ok() =>
@@ -697,7 +695,7 @@ mod windows_impl {
 
     fn verify_published_stage(
         store: &StableStore,
-        stage: &File,
+        stage: File,
         transaction_id: ReplacementTransactionId,
         staged_identity: (u32, u64),
     ) -> Result<(), NativeError> {
@@ -709,8 +707,24 @@ mod windows_impl {
         // rename can operate on that exact object. Windows requires every
         // concurrent opener to share that access until the retained handle is
         // closed, including this post-publication identity check.
-        let final_file = open_private_file_for_publication_verification(&final_path)?;
-        if file_identity(stage, &final_path)? != staged_identity
+        let final_file = open_file_with_delete_share(&final_path)?;
+        if file_identity(&stage, &final_path)? != staged_identity
+            || file_identity(&final_file, &final_path)? != staged_identity
+        {
+            return Err(NativeError::Corrupt);
+        }
+        drop(final_file);
+        drop(stage);
+
+        // Path-based security descriptor reads can open their own handle. Do
+        // them only after closing the DELETE-capable stage handle, then prove
+        // the ordinary private-file open still resolves to the staged object.
+        let final_file = open_private_file(&final_path)?;
+        let metadata = final_file
+            .metadata()
+            .map_err(|source| NativeError::Io(io_error(&final_path, source)))?;
+        if !metadata.is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
             || file_identity(&final_file, &final_path)? != staged_identity
         {
             return Err(NativeError::Corrupt);
@@ -800,15 +814,13 @@ mod windows_impl {
         Ok(file)
     }
 
-    fn open_private_file_for_publication_verification(path: &Path) -> Result<File, NativeError> {
-        let file = OpenOptions::new()
+    fn open_file_with_delete_share(path: &Path) -> Result<File, NativeError> {
+        OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
-            .map_err(|source| NativeError::Io(io_error(path, source)))?;
-        verify_private_permissions(path).map_err(NativeError::Io)?;
-        Ok(file)
+            .map_err(|source| NativeError::Io(io_error(path, source)))
     }
 
     fn open_stable_directory(path: &Path) -> Result<File, WindowsDpapiProviderError> {
