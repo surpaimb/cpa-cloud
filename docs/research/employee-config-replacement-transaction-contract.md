@@ -6,7 +6,7 @@ remain disabled.
 This contract defines the minimum transaction that may eventually replace one
 or more existing employee-tool configuration files. It does not authorize the
 Tauri command to write a real client directory. The current implementation only
-prepares and reloads encrypted rollback material for one existing Unix leaf;
+prepares and reloads encrypted rollback material for one existing Linux leaf;
 publication, rollback and operating-system key custody remain incomplete.
 
 ## Scope and non-goals
@@ -124,33 +124,54 @@ It contains no configuration bytes, employee Key, DEK or decrypted backup.
    identity/digest/security metadata are recorded.
 6. `Verified(target)`: the exact opened target matches the published record and
    strict tool-format validation succeeds.
-7. `RollbackPrepared`: strict validation has failed, the failure class is
-   recorded without raw content, every required pre-image was reopened and
-   authenticated, and enough journal budget remains for all restore records.
-   This durable marker changes restart policy from roll-forward to rollback.
-8. `Restored(target)`: a published target was atomically replaced with a private
-   rollback stage and its original bytes, identity and security metadata were
-   verified.
-9. `Complete` or `RolledBack`: every target is respectively verified as desired
-   or restored and verified as original. Cleanup may proceed.
+7. `RollbackPrepared`: strict validation failed, or a publication failure was
+   classified as permanently non-retryable without observing an external
+   identity. The redacted failure class, authenticated pre-image set and
+   reserved worst-case journal budget are durable. This marker changes restart
+   policy from roll-forward to rollback.
+8. `RollbackStaged(target)`: a private rollback stage has been created from the
+   authenticated pre-image, flushed, and its new stage identity, original bytes
+   digest and intended security metadata are durable. Every published target
+   must have this record before any restore begins.
+9. `Restored(target)`: a published target was atomically replaced by its recorded
+   rollback stage. The resulting `restored_identity` must equal the recorded
+   `rollback_stage_identity`; original bytes and security metadata are verified.
+10. `Complete` or `RolledBack`: every target is respectively verified as desired
+    or restored with original bytes and security metadata. Cleanup may proceed.
 
 Before `CommitPrepared`, restart recovery removes only exact known stages after
 snapshot revalidation; publication is forbidden in that phase. From
 `CommitPrepared` until `RollbackPrepared`, recovery rolls forward: an old target
 may be atomically replaced by its desired stage, and an already published target
-may be verified. If post-publication strict validation fails, recovery first
-persists `RollbackPrepared`, then restores all published targets as one
-transaction. After that marker, every restart continues rollback and never
-returns to roll-forward.
+may be verified. A retryable publication failure remains in this state and
+stops the current attempt. A confirmed permanently non-retryable publication
+failure after any publication may transition to rollback only after every
+required pre-image is available and enough space remains to record and stage
+the complete rollback. An external identity or a failure that prevents safe
+rollback preparation preserves all evidence and enters a non-terminal
+`recovery_blocked` condition; it never overwrites the target or reports success.
+If strict validation fails, recovery likewise prepares rollback. It then
+persists `RollbackPrepared`, creates and durably records every
+`RollbackStaged(target)`, and only then restores the published set. After
+`RollbackPrepared`, every restart continues rollback and never returns to
+roll-forward.
 
 For every recovery action, the live target must match either the recorded old
 identity/digest/security metadata or this transaction's recorded staged/expected
 published identity, desired digest and security metadata. This lets recovery
 recognize the narrow crash window after atomic replacement but before the
 `Published` append without accepting a same-content third-party inode. Missing
-targets, third identities, digest or permission changes, extra hard links and unrecognized workspace entries are
+targets, third identities, digest or permission changes, extra hard links and
+unrecognized workspace entries are
 `recovery_conflict`; the engine preserves evidence and never overwrites or
 deletes the external state.
+
+`original_identity` is only a compare-before-replace fact for the pre-image.
+Reconstructing encrypted bytes necessarily creates a new inode/file ID. The
+durable `rollback_stage_identity` identifies that new object before restore,
+and `restored_identity` must equal it after an atomic restore. Rollback restores
+the original bytes and complete UID/GID/mode/ACL/DACL metadata, not the obsolete
+`original_identity`.
 
 ## Ordering and crash requirements
 
@@ -166,9 +187,11 @@ deletes the external state.
 - A publication record is durable before strict post-write validation.
 - A validation failure never reports success. Before the durable
   `RollbackPrepared` marker, rollback reopens and authenticates every required
-  pre-image and reserves worst-case journal space. It then creates private
-  rollback stages, rechecks each published target, atomically replaces it, and
-  records and verifies the original bytes and metadata.
+  pre-image and reserves worst-case journal space. After that marker, it creates
+  and flushes all private rollback stages, appends every `RollbackStaged` record,
+  and revalidates the full set before the first restore. It then rechecks each
+  published target, atomically replaces it, and records the new restored
+  identity plus verification of original bytes and metadata.
 - Directory durability is required after creating/removing workspaces and after
   every atomic replacement. Unsupported directory flush semantics fail closed.
 - After `Complete` or `RolledBack`, stages and encrypted backups are removed and
@@ -190,7 +213,7 @@ published prefix; and concurrent recovery attempts. Tests must prove that an
 external edit is preserved, no plaintext pre-image survives durable completion,
 and no success receipt is produced before every target is verified.
 
-F review should approve these interfaces before publication code is added:
+Review should approve these interfaces before publication code is added:
 
 1. key-provider outcome taxonomy and deletion ordering;
 2. per-platform atomic replacement and directory-flush primitives;
@@ -201,15 +224,25 @@ F review should approve these interfaces before publication code is added:
 
 ## Current implemented subset
 
-`live/backup.rs` remains a non-publishing Unix-only foundation. Format version 2
+`live/backup.rs` remains a non-publishing Linux-only foundation. Format version 2
 authenticates the original owner UID, group GID and mode together with the root
 and target identities, digest and length. Preparation requires owner-read access
 and refuses group/world bits or special permission bits before creating backup
-material. Reload rejects a
-permission/owner/group change without modifying the target. It still accepts
+material. Backup root/workspace directories are set and read back as exact
+owner-only `0700`; ciphertext and manifest files are set and read back as exact
+owner-only, single-link `0600` objects. Reload rejects a target or backup-artifact
+identity, link-count, permission, owner or group change without modifying the
+target. The public receipt exposes no content digest. It still accepts
 only one UTF-8 leaf and a caller-supplied in-memory key; it does not implement a
 key provider, desired stage, journal decision, publication, rollback, cleanup or
-Windows support.
+Windows/macOS support. macOS returns `UnsupportedPlatform` before creating the
+backup directory, including for a private-mode target carrying an extended ACL.
+
+Format version 2 is intentionally discontinuous in this development preview.
+Version 1 manifests fail closed and have no automatic migration; they contain no
+published target mutation and require operator removal or an explicitly reviewed
+offline inspection path. A future format change must define recovery before any
+new writer is enabled.
 
 ## Public platform references
 

@@ -1,12 +1,12 @@
 //! Durable encrypted rollback material for a bounded synthetic-root slice.
 //!
 //! This module deliberately does not publish or replace a configuration file.
-//! On Unix it anchors at `/` or `.`, opens every normal root-path component
+//! On Linux it anchors at `/` or `.`, opens every normal root-path component
 //! relative to a held directory descriptor with no-follow semantics, and then
 //! does the same for the target, separate backup directory, workspace,
-//! ciphertext, and manifest. Parent traversal is rejected. Windows remains
-//! explicitly unsupported until the equivalent handle-relative implementation
-//! exists. The Tauri apply command remains fail-closed.
+//! ciphertext, and manifest. Parent traversal is rejected. Windows and macOS
+//! remain explicitly unsupported until equivalent handle-relative security
+//! metadata implementations exist. The Tauri apply command remains fail-closed.
 
 use ring::{
     aead::{self, Aad, LessSafeKey, Nonce, UnboundKey},
@@ -14,10 +14,10 @@ use ring::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::fs::File;
 use std::io;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use zeroize::Zeroizing;
@@ -65,7 +65,6 @@ impl std::fmt::Debug for BackupKey {
 pub struct BackupReceipt {
     pub workspace: String,
     pub target: PathBuf,
-    pub original_digest: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -247,7 +246,7 @@ fn io_error(path: impl Into<PathBuf>, source: io::Error) -> BackupError {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod platform {
     use super::*;
     use std::ffi::{CString, OsStr};
@@ -345,6 +344,7 @@ mod platform {
         backup_file
             .write_all(&ciphertext)
             .map_err(|source| io_error(root.join(BACKUP_FILE), source))?;
+        verify_private_regular_file(&backup_file, &root.join(BACKUP_FILE))?;
         backup_file
             .sync_all()
             .map_err(|source| io_error(root.join(BACKUP_FILE), source))?;
@@ -364,6 +364,7 @@ mod platform {
         manifest_file
             .write_all(&manifest_bytes)
             .map_err(|source| io_error(root.join(MANIFEST_FILE), source))?;
+        verify_private_regular_file(&manifest_file, &root.join(MANIFEST_FILE))?;
         manifest_file
             .sync_all()
             .map_err(|source| io_error(root.join(MANIFEST_FILE), source))?;
@@ -377,7 +378,6 @@ mod platform {
         Ok(BackupReceipt {
             workspace,
             target: target.to_path_buf(),
-            original_digest: manifest.original_digest,
         })
     }
 
@@ -402,14 +402,13 @@ mod platform {
             .join(BACKUP_DIRECTORY)
             .join(workspace)
             .join(MANIFEST_FILE);
-        let mut manifest_file = open_file_at(
+        let mut manifest_file = open_private_file_at(
             workspace_dir.as_raw_fd(),
             OsStr::new(MANIFEST_FILE),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0,
-        )
-        .map_err(|source| io_error(&manifest_path, source))?;
+            manifest_path.clone(),
+        )?;
         let manifest_bytes = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES, &manifest_path)?;
+        verify_private_regular_file(&manifest_file, &manifest_path)?;
         let manifest: BackupManifest =
             serde_json::from_slice(&manifest_bytes).map_err(|_| BackupError::CorruptManifest)?;
         if manifest.version != FORMAT_VERSION
@@ -471,22 +470,24 @@ mod platform {
             .join(BACKUP_DIRECTORY)
             .join(workspace)
             .join(BACKUP_FILE);
-        let mut backup_file = open_file_at(
+        let mut backup_file = open_private_file_at(
             workspace_dir.as_raw_fd(),
             OsStr::new(BACKUP_FILE),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0,
-        )
-        .map_err(|source| io_error(&backup_path, source))?;
+            backup_path.clone(),
+        )?;
         let ciphertext = read_bounded(
             &mut backup_file,
             MAX_TARGET_BYTES + aead::MAX_TAG_LEN,
             &backup_path,
         )?;
+        verify_private_regular_file(&backup_file, &backup_path)?;
         if digest(&ciphertext) != manifest.ciphertext_digest {
             return Err(BackupError::Authentication);
         }
-        decrypt(ciphertext, &manifest, key)
+        let plaintext = decrypt(ciphertext, &manifest, key)?;
+        verify_private_directory(&workspace_dir, &root.join(BACKUP_DIRECTORY).join(workspace))?;
+        verify_private_directory(&transaction_dir, &root.join(BACKUP_DIRECTORY))?;
+        Ok(plaintext)
     }
 
     fn open_root(path: &Path) -> Result<File, BackupError> {
@@ -510,7 +511,7 @@ mod platform {
             Path::new(".")
         };
         let c_anchor =
-            CString::new(anchor.as_os_str().as_bytes()).expect("Unix root anchors have no NUL");
+            CString::new(anchor.as_os_str().as_bytes()).expect("Linux root anchors have no NUL");
         let fd = unsafe {
             libc::open(
                 c_anchor.as_ptr(),
@@ -558,21 +559,18 @@ mod platform {
     ) -> Result<File, BackupError> {
         let c_name = os_c_string(name)?;
         let result = unsafe { libc::mkdirat(parent, c_name.as_ptr(), 0o700) };
+        let created = result == 0;
         if result != 0 {
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::AlreadyExists {
                 return Err(io_error(&display, error));
             }
         }
-        let dir = open_private_dir_at(parent, name, display.clone())?;
-        let metadata = dir
-            .metadata()
-            .map_err(|source| io_error(&display, source))?;
-        if metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.permissions().mode() & 0o077 != 0
-        {
-            return Err(BackupError::RecoveryConflict(display));
+        let dir = open_directory_at(parent, name, display.clone())?;
+        if created {
+            set_mode(&dir, 0o700, &display)?;
         }
+        verify_private_directory(&dir, &display)?;
         Ok(dir)
     }
 
@@ -581,20 +579,36 @@ mod platform {
         name: &OsStr,
         display: PathBuf,
     ) -> Result<File, BackupError> {
-        let dir = open_file_at(
+        let dir = open_directory_at(parent, name, display.clone())?;
+        verify_private_directory(&dir, &display)?;
+        Ok(dir)
+    }
+
+    fn open_directory_at(
+        parent: RawFd,
+        name: &OsStr,
+        display: PathBuf,
+    ) -> Result<File, BackupError> {
+        open_file_at(
             parent,
             name,
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0,
         )
-        .map_err(|source| io_error(&display, source))?;
-        let metadata = dir
+        .map_err(|source| io_error(display, source))
+    }
+
+    fn verify_private_directory(file: &File, display: &Path) -> Result<(), BackupError> {
+        let metadata = file
             .metadata()
-            .map_err(|source| io_error(&display, source))?;
-        if !metadata.is_dir() {
-            return Err(BackupError::RecoveryConflict(display));
+            .map_err(|source| io_error(display, source))?;
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != 0o700
+        {
+            return Err(BackupError::RecoveryConflict(display.to_path_buf()));
         }
-        Ok(dir)
+        Ok(())
     }
 
     fn create_workspace(parent: RawFd, display: PathBuf) -> Result<(String, File), BackupError> {
@@ -607,7 +621,10 @@ mod platform {
             let c_name = CString::new(name.as_bytes()).expect("generated name has no NUL");
             let result = unsafe { libc::mkdirat(parent, c_name.as_ptr(), 0o700) };
             if result == 0 {
-                let dir = open_private_dir_at(parent, OsStr::new(&name), display.join(&name))?;
+                let workspace_display = display.join(&name);
+                let dir = open_directory_at(parent, OsStr::new(&name), workspace_display.clone())?;
+                set_mode(&dir, 0o700, &workspace_display)?;
+                verify_private_directory(&dir, &workspace_display)?;
                 return Ok((name, dir));
             }
             let error = io::Error::last_os_error();
@@ -626,13 +643,53 @@ mod platform {
         name: &OsStr,
         display: PathBuf,
     ) -> Result<File, BackupError> {
-        open_file_at(
+        let file = open_file_at(
             parent,
             name,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0o600,
         )
-        .map_err(|source| io_error(display, source))
+        .map_err(|source| io_error(&display, source))?;
+        set_mode(&file, 0o600, &display)?;
+        verify_private_regular_file(&file, &display)?;
+        Ok(file)
+    }
+
+    fn open_private_file_at(
+        parent: RawFd,
+        name: &OsStr,
+        display: PathBuf,
+    ) -> Result<File, BackupError> {
+        let file = open_file_at(
+            parent,
+            name,
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0,
+        )
+        .map_err(|source| io_error(&display, source))?;
+        verify_private_regular_file(&file, &display)?;
+        Ok(file)
+    }
+
+    fn verify_private_regular_file(file: &File, display: &Path) -> Result<(), BackupError> {
+        let metadata = file
+            .metadata()
+            .map_err(|source| io_error(display, source))?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != 0o600
+        {
+            return Err(BackupError::RecoveryConflict(display.to_path_buf()));
+        }
+        Ok(())
+    }
+
+    fn set_mode(file: &File, mode: libc::mode_t, display: &Path) -> Result<(), BackupError> {
+        if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+            return Err(io_error(display, io::Error::last_os_error()));
+        }
+        Ok(())
     }
 
     fn open_file_at(
@@ -678,7 +735,7 @@ mod platform {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 mod platform {
     use super::*;
 
@@ -708,12 +765,12 @@ mod tests {
         BackupKey::from_bytes([byte; KEY_BYTES])
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn stable_root(root: &tempfile::TempDir) -> PathBuf {
         fs::canonicalize(root.path()).unwrap()
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn write_private(path: &Path, bytes: &[u8]) {
         use std::os::unix::fs::PermissionsExt;
 
@@ -738,7 +795,7 @@ mod tests {
         assert!(matches!(error, BackupError::InvalidTarget(_)));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn durable_backup_reloads_without_persisting_plaintext_or_key() {
         use std::os::unix::fs::PermissionsExt;
@@ -778,12 +835,22 @@ mod tests {
                 & 0o777,
             0o600
         );
+        assert_eq!(
+            fs::metadata(workspace.join(MANIFEST_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let rendered = format!("{receipt:?}");
+        assert!(!rendered.contains(&digest(original)));
 
         let reloaded = load_encrypted_backup(&root_path, &receipt.workspace, &key).unwrap();
         assert_eq!(&*reloaded, original);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn backup_namespace_coexists_with_create_only_recovery_after_restart() {
         use crate::live::engine::{apply_create_only, recover_create_only, CreateFilePlan};
@@ -814,7 +881,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn wrong_key_and_ciphertext_tampering_fail_authentication() {
         let root = tempfile::tempdir().unwrap();
@@ -840,7 +907,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn target_replacement_is_a_recovery_conflict() {
         let root = tempfile::tempdir().unwrap();
@@ -858,7 +925,7 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"external-edit");
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn unsafe_target_permissions_are_refused_before_backup_material() {
         use std::os::unix::fs::PermissionsExt;
@@ -876,7 +943,7 @@ mod tests {
         assert!(!root.path().join(BACKUP_DIRECTORY).exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn permission_change_after_backup_is_a_recovery_conflict() {
         use std::os::unix::fs::PermissionsExt;
@@ -896,7 +963,7 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"old-secret");
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn permission_metadata_is_authenticated_by_the_backup() {
         use std::os::unix::fs::PermissionsExt;
@@ -924,7 +991,59 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"old-secret");
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn weakened_backup_artifacts_block_restart_recovery() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config.json");
+        write_private(&target, b"old-secret");
+        let root_path = stable_root(&root);
+        let key = fixed_key(11);
+        let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
+        let transaction_root = root_path.join(BACKUP_DIRECTORY);
+        let workspace = transaction_root.join(&receipt.workspace);
+        let backup = workspace.join(BACKUP_FILE);
+        let manifest = workspace.join(MANIFEST_FILE);
+
+        fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(matches!(
+            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            Err(BackupError::RecoveryConflict(_))
+        ));
+        fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(matches!(
+            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            Err(BackupError::RecoveryConflict(_))
+        ));
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700)).unwrap();
+
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(matches!(
+            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            Err(BackupError::RecoveryConflict(_))
+        ));
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).unwrap();
+
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(matches!(
+            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            Err(BackupError::RecoveryConflict(_))
+        ));
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
+
+        fs::hard_link(&manifest, workspace.join("manifest-link.json")).unwrap();
+        assert!(matches!(
+            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            Err(BackupError::RecoveryConflict(_))
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"old-secret");
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn symlink_target_is_refused() {
         use std::os::unix::fs::symlink;
@@ -938,7 +1057,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn symlinked_root_ancestor_is_refused() {
         use std::os::unix::fs::symlink;
@@ -959,7 +1078,7 @@ mod tests {
         assert!(!real_root.join(BACKUP_DIRECTORY).exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn root_parent_traversal_is_refused() {
         let root = tempfile::tempdir().unwrap();
@@ -971,6 +1090,31 @@ mod tests {
         assert!(matches!(
             prepare_encrypted_backup(&traversing_root, Path::new("config.json"), &fixed_key(7)),
             Err(BackupError::InvalidRoot(_))
+        ));
+        assert!(!root.path().join(BACKUP_DIRECTORY).exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_acl_target_is_rejected_before_backup_directory_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config.json");
+        fs::write(&target, b"old-secret").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let status = Command::new("chmod")
+            .arg("+a")
+            .arg("everyone allow read")
+            .arg(&target)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert!(matches!(
+            prepare_encrypted_backup(root.path(), Path::new("config.json"), &fixed_key(12)),
+            Err(BackupError::UnsupportedPlatform)
         ));
         assert!(!root.path().join(BACKUP_DIRECTORY).exists());
     }

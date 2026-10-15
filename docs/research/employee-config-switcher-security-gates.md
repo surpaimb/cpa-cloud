@@ -163,14 +163,14 @@ platform review gates are specified separately in the
 [replacement transaction contract](employee-config-replacement-transaction-contract.md).
 
 The next bounded synthetic-root slice prepares, but does not yet consume, a
-durable encrypted pre-image for one existing leaf file on Unix. Format version
+durable encrypted pre-image for one existing leaf file on Linux. Format version
 2 authenticates the original owner UID, group GID and private mode, requires
 owner-read access, and refuses group/world access or special permission bits
 before creating backup material.
 The caller
 supplies a 256-bit recovery key that remains in zeroizing memory; the slice uses
 AES-256-GCM with a fresh random nonce and binds the ciphertext to the root and
-target identities, target name, original digest, length and Unix security
+target identities, target name, original digest, length and Linux security
 metadata. The ciphertext is
 flushed before a non-secret manifest is published last. Tests reload the
 pre-image using only durable state and the supplied key, scan the transaction
@@ -181,7 +181,7 @@ namespace from the create-only transaction engine; a restart/coexistence
 regression runs create-only recovery and publication while the durable backup
 remains reloadable.
 
-On Unix, the synthetic root is opened by anchoring at `/` for absolute paths or
+On Linux, the synthetic root is opened by anchoring at `/` for absolute paths or
 `.` for relative paths, then opening every normal root-path component relative
 to the held parent descriptor with no-follow semantics. Parent traversal and
 symbolic-link ancestors are refused. The target, separate backup directory,
@@ -191,15 +191,19 @@ backup-directory entry is made durable by flushing the root descriptor before
 success. Regression tests refuse both a symbolic-link root ancestor and an
 explicit parent-traversal component without creating backup material. The slice
 deliberately accepts only one UTF-8 leaf name owned by the current user, with
-one hard link and at most 4 MiB. Windows returns an explicit
-unsupported-platform error until equivalent native handle-relative traversal
-and protected-key integration exist.
+one hard link and at most 4 MiB. Backup root/workspace directories are enforced
+and read back as exact `0700`; ciphertext and manifest files are enforced and
+read back as current-owner, single-link `0600` objects on restart. Windows and
+macOS return an explicit unsupported-platform error before backup-directory
+creation until equivalent native handle-relative, ACL/security-descriptor and
+protected-key integration exists. A macOS-native negative test attaches an
+extended ACL to a `0600` target and proves this fail-closed boundary.
 
 This remains a foundation, not a replacement transaction: no target is
 modified and the pre-image identity check cannot restore a target after future
 publication. No rollback is attempted. Orphan discovery/cleanup before the
 manifest, a durable decision and publish/verify/rollback journal, recovery-key
-custody, full ACL preservation, and Windows support remain open. The
+custody, full ACL preservation, and Windows/macOS support remain open. The
 Tauri command and all real client writes therefore remain fail-closed.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted
