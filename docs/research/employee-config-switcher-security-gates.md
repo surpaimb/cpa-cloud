@@ -261,15 +261,23 @@ directory handles and an exclusive cross-instance lock. Creation now writes an
 owner-private `.pending` blob, flushes it, calls the documented user-mode
 `NtSetInformationFile(FileRenameInformation)` path on that handle with
 `RootDirectory` null, a fixed simple final leaf and replacement disabled,
-verifies the stage/final volume and file ID plus the retained store
-directory identity, flushes that revalidated directory object, and reads
+verifies the stage/final 64-bit volume serial and complete 128-bit
+`FILE_ID_INFO` plus the retained store directory identity, flushes that
+revalidated directory object, and reads
 the final blob back. On an exact create retry, a bounded private stage is
 removed only when no final exists; a published blob is authenticated and
-returned idempotently, while simultaneous final/stage state is preserved and
-refused. Native tests cover every create interruption boundary, no-overwrite
+returned idempotently only after the retained store directory is revalidated
+and flushed, while repeated flush failure remains unavailable and simultaneous
+final/stage state is preserved and refused. Native tests cover every create
+interruption boundary, same-provider post-publish retry under persistent
+directory-flush failure, no-overwrite
 conflict preservation, fresh-instance reopen, exact key equality,
 missing/wrong transaction behavior, tampered blob/reference refusal,
 idempotent deletion, lock classification and concurrent idempotent creation.
+`GetFileInformationByHandleEx(FileIdInfo)` failure and an all-zero unsupported
+128-bit ID fail closed without the ReFS-unsafe legacy 64-bit file-index
+fallback; tests distinguish an upper-half ReFS collision and two distinct live
+objects, detect same-path object replacement, and reject the missing-ID form.
 DPAPI plaintext and temporary key arrays are
 zeroized. Linux/macOS construction returns `UnsupportedPlatform` without
 creating a namespace; Keychain, Secret Service and all environment/CLI/database/

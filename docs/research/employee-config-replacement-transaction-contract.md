@@ -304,14 +304,22 @@ provider instance never creates or replaces a missing value. Creation writes
 and flushes an owner-private `.pending` blob, performs one same-directory
 `NtSetInformationFile(FileRenameInformation)` operation on that file handle
 with `RootDirectory` null, a fixed simple final leaf and replacement disabled,
-verifies the staged/final volume and file ID plus the retained store-directory
-identity, flushes
+verifies the staged/final 64-bit volume serial and complete 128-bit
+`FILE_ID_INFO` plus the retained store-directory identity, flushes
 the directory, and authenticates the final value. An exact create retry may
 remove only a bounded private unpublished stage when no final exists, or return
-the authenticated already-published value; simultaneous final/stage state is
-preserved and refused. Tests inject interruption after stage creation, write,
+the authenticated already-published value only after revalidating and flushing
+the retained store directory; repeated flush failure remains unavailable.
+Simultaneous final/stage state is preserved and refused. Tests inject
+interruption after stage creation, write,
 flush, publication, and directory flush, and prove no-overwrite conflict
-preservation plus restart reopen/delete behavior. Delete authenticates the exact
+preservation plus restart reopen/delete behavior. The provider rejects
+`GetFileInformationByHandleEx(FileIdInfo)` failure and an all-zero unsupported
+128-bit ID instead of falling back to the ReFS-unsafe legacy 64-bit file index;
+tests cover an upper-half collision invisible to that legacy index, missing-ID
+refusal, two distinct live objects, same-path object replacement, and same-
+provider post-publish retry under persistent directory-flush failure. Delete
+authenticates the exact
 existing value first and flushes its directory. DPAPI plaintext output
 and intermediate key arrays are zeroized, and neither key nor DPAPI blob enters
 the journal, receipt, `Debug`, environment, command line, database or network.

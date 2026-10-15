@@ -161,7 +161,7 @@ mod windows_impl {
     use windows_sys::Win32::Foundation::{
         GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
         ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_DATA, ERROR_INVALID_PARAMETER,
-        ERROR_LOCK_VIOLATION, ERROR_PASSWORD_RESTRICTION, ERROR_PATH_NOT_FOUND,
+        ERROR_LOCK_VIOLATION, ERROR_NOT_SUPPORTED, ERROR_PASSWORD_RESTRICTION, ERROR_PATH_NOT_FOUND,
         ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::Authorization::{
@@ -178,7 +178,7 @@ mod windows_impl {
         PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
+        CreateFileW, GetFileInformationByHandleEx, FileIdInfo, DELETE, FILE_ID_INFO,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
@@ -212,6 +212,18 @@ mod windows_impl {
         AfterStageFlush,
         AfterPublish,
         AfterDirectoryFlush,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct CreateFaults {
+        interruption: Option<CreateInterruption>,
+        fail_directory_sync: bool,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct FileIdentity {
+        volume_serial_number: u64,
+        file_id: [u8; 16],
     }
 
     struct TokenHandle(windows_sys::Win32::Foundation::HANDLE);
@@ -299,7 +311,7 @@ mod windows_impl {
         store: &StableStore,
         transaction_id: ReplacementTransactionId,
     ) -> RecoveryKeyCreateOutcome {
-        create_with_interruption(store, transaction_id, None)
+        create_with_faults(store, transaction_id, CreateFaults::default())
     }
 
     fn create_with_interruption(
@@ -307,11 +319,26 @@ mod windows_impl {
         transaction_id: ReplacementTransactionId,
         interruption: Option<CreateInterruption>,
     ) -> RecoveryKeyCreateOutcome {
+        create_with_faults(
+            store,
+            transaction_id,
+            CreateFaults {
+                interruption,
+                fail_directory_sync: false,
+            },
+        )
+    }
+
+    fn create_with_faults(
+        store: &StableStore,
+        transaction_id: ReplacementTransactionId,
+        faults: CreateFaults,
+    ) -> RecoveryKeyCreateOutcome {
         let _guard = match acquire_provider_lock(store) {
             Ok(guard) => guard,
             Err(error) => return create_failure("provider-lock", error),
         };
-        match reconcile_create_state(store, transaction_id) {
+        match reconcile_create_state(store, transaction_id, faults.fail_directory_sync) {
             Ok(Some(created)) => return RecoveryKeyCreateOutcome::Created(created),
             Ok(None) => {}
             Err(error) => return create_failure("reconcile", error),
@@ -343,19 +370,19 @@ mod windows_impl {
             Ok(file) => file,
             Err(error) => return create_failure("stage-create", error),
         };
-        if interruption == Some(CreateInterruption::AfterStageCreate) {
+        if faults.interruption == Some(CreateInterruption::AfterStageCreate) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
         if file.write_all(&protected).is_err() {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
-        if interruption == Some(CreateInterruption::AfterStageWrite) {
+        if faults.interruption == Some(CreateInterruption::AfterStageWrite) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
         if file.sync_all().is_err() {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
-        if interruption == Some(CreateInterruption::AfterStageFlush) {
+        if faults.interruption == Some(CreateInterruption::AfterStageFlush) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
         let staged_identity = match file_identity(&file, &stage_path) {
@@ -365,16 +392,16 @@ mod windows_impl {
         if let Err(error) = publish_stage_no_replace(store, &file, transaction_id) {
             return create_failure("publish", error);
         }
-        if interruption == Some(CreateInterruption::AfterPublish) {
+        if faults.interruption == Some(CreateInterruption::AfterPublish) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
         if let Err(error) = verify_published_stage(store, file, transaction_id, staged_identity) {
             return create_failure("publish-verify", error);
         }
-        if sync_store_directory(store).is_err() {
+        if sync_store_directory_for_create(store, faults.fail_directory_sync).is_err() {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
-        if interruption == Some(CreateInterruption::AfterDirectoryFlush) {
+        if faults.interruption == Some(CreateInterruption::AfterDirectoryFlush) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
         match open_locked(store, transaction_id, &reference) {
@@ -604,6 +631,7 @@ mod windows_impl {
     fn reconcile_create_state(
         store: &StableStore,
         transaction_id: ReplacementTransactionId,
+        fail_directory_sync: bool,
     ) -> Result<Option<CreatedRecoveryKey>, NativeError> {
         verify_store_identity(store)?;
         let final_path = blob_path(store, transaction_id);
@@ -622,6 +650,7 @@ mod windows_impl {
                 )
                 .map_err(|_| NativeError::Corrupt)?;
                 let key = unprotect(transaction_id, &protected)?;
+                sync_store_directory_for_create(store, fail_directory_sync)?;
                 Ok(Some(CreatedRecoveryKey { reference, key }))
             }
             (false, true) => {
@@ -638,7 +667,7 @@ mod windows_impl {
                 drop(file);
                 fs::remove_file(&stage_path)
                     .map_err(|source| NativeError::Io(io_error(&stage_path, source)))?;
-                sync_store_directory(store)?;
+                sync_store_directory_for_create(store, fail_directory_sync)?;
                 Ok(None)
             }
             (false, false) => Ok(None),
@@ -703,7 +732,7 @@ mod windows_impl {
         store: &StableStore,
         stage: File,
         transaction_id: ReplacementTransactionId,
-        staged_identity: (u32, u64),
+        staged_identity: FileIdentity,
     ) -> Result<(), NativeError> {
         if path_exists(&stage_path(store, transaction_id))? {
             return Err(NativeError::Corrupt);
@@ -732,15 +761,41 @@ mod windows_impl {
         Ok(())
     }
 
-    fn file_identity(file: &File, path: &Path) -> Result<(u32, u64), NativeError> {
-        let mut information = BY_HANDLE_FILE_INFORMATION::default();
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
-            return Err(NativeError::Io(io_error(path, io::Error::last_os_error())));
+    fn file_identity(file: &File, path: &Path) -> Result<FileIdentity, NativeError> {
+        let mut information = FILE_ID_INFO::default();
+        let buffer_size = u32::try_from(size_of::<FILE_ID_INFO>())
+            .map_err(|_| NativeError::Unavailable)?;
+        if unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (&mut information as *mut FILE_ID_INFO).cast(),
+                buffer_size,
+            )
+        } == 0
+        {
+            let source = io::Error::last_os_error();
+            return match source.raw_os_error().map(|code| code as u32) {
+                Some(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED) => {
+                    Err(NativeError::Unavailable)
+                }
+                _ => Err(NativeError::Io(io_error(path, source))),
+            };
         }
-        Ok((
-            information.dwVolumeSerialNumber,
-            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
-        ))
+        file_identity_from_information(information)
+    }
+
+    fn file_identity_from_information(
+        information: FILE_ID_INFO,
+    ) -> Result<FileIdentity, NativeError> {
+        let file_id = information.FileId.Identifier;
+        if file_id == [0; 16] {
+            return Err(NativeError::Unavailable);
+        }
+        Ok(FileIdentity {
+            volume_serial_number: information.VolumeSerialNumber,
+            file_id,
+        })
     }
 
     fn verify_store_identity(store: &StableStore) -> Result<(), NativeError> {
@@ -864,6 +919,17 @@ mod windows_impl {
         directory
             .sync_all()
             .map_err(|source| NativeError::Io(io_error(path, source)))
+    }
+
+    fn sync_store_directory_for_create(
+        store: &StableStore,
+        fail_directory_sync: bool,
+    ) -> Result<(), NativeError> {
+        if fail_directory_sync {
+            Err(NativeError::Unavailable)
+        } else {
+            sync_store_directory(store)
+        }
     }
 
     fn enforce_private_permissions(path: &Path) -> Result<(), WindowsDpapiProviderError> {
@@ -1178,6 +1244,75 @@ mod windows_impl {
         }
 
         #[test]
+        fn file_identity_uses_the_full_128_bit_id_and_rejects_missing_ids() {
+            let mut refs_width = FILE_ID_INFO::default();
+            refs_width.VolumeSerialNumber = 0x1122_3344_5566_7788;
+            refs_width.FileId.Identifier[15] = 0x80;
+            let identity = match file_identity_from_information(refs_width) {
+                Ok(identity) => identity,
+                Err(_) => panic!("128-bit file identity was rejected"),
+            };
+            let mut lower_64_bit_alias = identity;
+            lower_64_bit_alias.file_id[15] = 0;
+            assert_ne!(identity, lower_64_bit_alias);
+            assert!(matches!(
+                file_identity_from_information(FILE_ID_INFO::default()),
+                Err(NativeError::Unavailable)
+            ));
+
+            let root = tempfile::tempdir().unwrap();
+            let first_path = root.path().join("first.dpapi");
+            let second_path = root.path().join("second.dpapi");
+            let first = match create_private_file(&first_path) {
+                Ok(file) => file,
+                Err(_) => panic!("first identity fixture creation failed"),
+            };
+            let second = match create_private_file(&second_path) {
+                Ok(file) => file,
+                Err(_) => panic!("second identity fixture creation failed"),
+            };
+            let first_identity = match file_identity(&first, &first_path) {
+                Ok(identity) => identity,
+                Err(_) => panic!("first full-width identity query failed"),
+            };
+            let second_identity = match file_identity(&second, &second_path) {
+                Ok(identity) => identity,
+                Err(_) => panic!("second full-width identity query failed"),
+            };
+            assert_eq!(
+                first_identity.volume_serial_number,
+                second_identity.volume_serial_number
+            );
+            assert_ne!(first_identity.file_id, second_identity.file_id);
+        }
+
+        #[test]
+        fn file_identity_detects_a_replaced_path() {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("replace.dpapi");
+            let original = match create_private_file(&path) {
+                Ok(file) => file,
+                Err(_) => panic!("original identity fixture creation failed"),
+            };
+            let original_identity = match file_identity(&original, &path) {
+                Ok(identity) => identity,
+                Err(_) => panic!("original full-width identity query failed"),
+            };
+            drop(original);
+            fs::remove_file(&path).unwrap();
+
+            let replacement = match create_private_file(&path) {
+                Ok(file) => file,
+                Err(_) => panic!("replacement identity fixture creation failed"),
+            };
+            let replacement_identity = match file_identity(&replacement, &path) {
+                Ok(identity) => identity,
+                Err(_) => panic!("replacement full-width identity query failed"),
+            };
+            assert_ne!(original_identity, replacement_identity);
+        }
+
+        #[test]
         fn current_user_dpapi_reopens_after_provider_restart_and_deletes_idempotently() {
             let root = tempfile::tempdir().unwrap();
             let transaction_id = transaction(0x31);
@@ -1362,6 +1497,56 @@ mod windows_impl {
                     RecoveryKeyDeleteOutcome::Missing
                 );
             }
+        }
+
+        #[test]
+        fn same_provider_retry_requires_a_successful_directory_flush() {
+            let root = tempfile::tempdir().unwrap();
+            let transaction_id = transaction(0x4f);
+            let provider =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
+            assert!(matches!(
+                create_with_interruption(
+                    &provider.store,
+                    transaction_id,
+                    Some(CreateInterruption::AfterPublish)
+                ),
+                RecoveryKeyCreateOutcome::Unavailable
+            ));
+            assert!(blob_path(&provider.store, transaction_id).exists());
+            assert!(!stage_path(&provider.store, transaction_id).exists());
+
+            let persistent_flush_failure = CreateFaults {
+                interruption: None,
+                fail_directory_sync: true,
+            };
+            assert!(matches!(
+                create_with_faults(
+                    &provider.store,
+                    transaction_id,
+                    persistent_flush_failure
+                ),
+                RecoveryKeyCreateOutcome::Unavailable
+            ));
+            assert!(matches!(
+                create_with_faults(
+                    &provider.store,
+                    transaction_id,
+                    persistent_flush_failure
+                ),
+                RecoveryKeyCreateOutcome::Unavailable
+            ));
+
+            let (reference, key) = created(create_with_faults(
+                &provider.store,
+                transaction_id,
+                CreateFaults::default(),
+            ));
+            let reopened = match open(&provider.store, transaction_id, &reference) {
+                RecoveryKeyOpenOutcome::Available(key) => key,
+                other => panic!("unexpected open outcome: {other:?}"),
+            };
+            assert!(verify_slices_are_equal(key.expose(), reopened.expose()).is_ok());
         }
 
         #[test]
