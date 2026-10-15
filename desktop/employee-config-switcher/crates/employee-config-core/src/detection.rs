@@ -103,11 +103,22 @@ fn minimax_detection_home<F>(home: &Path, env: &F) -> PathBuf
 where
     F: Fn(&str) -> Option<OsString>,
 {
-    env("MINIMAX_DATA_DIR")
-        .filter(|value| !value.is_empty())
-        .or_else(|| env("MAVIS_DATA_DIR").filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
+    minimax_public_env_path(env, "MINIMAX_DATA_DIR")
+        .or_else(|| minimax_public_env_path(env, "MAVIS_DATA_DIR"))
         .unwrap_or_else(|| home.join(".minimax"))
+}
+
+fn minimax_public_env_path<F>(env: &F, name: &str) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    env(name).and_then(|value| {
+        value
+            .to_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    })
 }
 
 fn claude_desktop_candidates<F>(home: &Path, platform: Platform, env: &F) -> Vec<PathBuf>
@@ -337,6 +348,35 @@ mod tests {
         assert_eq!(
             by_id(&items, "minimax-code").detail,
             root.path().join(".minimax").display().to_string()
+        );
+    }
+
+    #[test]
+    fn minimax_detection_ignores_whitespace_primary_before_legacy() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        let env = |name: &str| match name {
+            "MINIMAX_DATA_DIR" => Some(OsString::from(" \t\r\n ")),
+            "MAVIS_DATA_DIR" => Some(legacy.clone().into_os_string()),
+            _ => None,
+        };
+        let items = detect_clients_with_env(root.path(), Platform::Linux, env);
+        assert_eq!(
+            by_id(&items, "minimax-code").detail,
+            legacy.display().to_string()
+        );
+    }
+
+    #[test]
+    fn minimax_detection_trims_the_selected_public_override() {
+        let root = tempfile::tempdir().unwrap();
+        let primary = root.path().join("primary");
+        let padded = OsString::from(format!("  {}  ", primary.display()));
+        let env = |name: &str| (name == "MINIMAX_DATA_DIR").then(|| padded.clone());
+        let items = detect_clients_with_env(root.path(), Platform::Windows, env);
+        assert_eq!(
+            by_id(&items, "minimax-code").detail,
+            primary.display().to_string()
         );
     }
 
