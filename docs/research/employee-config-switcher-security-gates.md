@@ -341,10 +341,14 @@ behavior, so native Keychain custody and real writes remain open gates.
 
 The Linux Secret Service candidate is also synthetic-only. Its approval has no
 production constructor and holds an already-open owner-private directory used
-for a descriptor-relative, single-link `0600` reconciliation lock. Stable
-non-secret lookup attributes bind application, purpose, format, transaction,
-effective UID and random item ID; checksummed reference and secret envelopes
-repeat the identity. Create is serialized across processes, uses
+for a descriptor-relative, single-link `0600` reconciliation lock. That lock
+file durably holds a random provider-namespace identity; different approved
+roots therefore cannot share one Secret Service search namespace without also
+sharing one lock. Every operation acquires the held inode and then reopens the
+directory entry no-follow to require the same device/inode, private metadata
+and namespace bytes, so lock-entry replacement fails closed. Stable non-secret lookup attributes bind application,
+purpose, format, transaction, effective UID, lock namespace and random item ID;
+checksummed reference and secret envelopes repeat the identity. Create is serialized across processes, uses
 `CreateItem(replace=false)`, reconciles a prior exact item and refuses
 duplicates. Open and delete re-search attributes instead of trusting a stored
 object path. The client never calls Unlock, Prompt or SetSecret and maps prompt
@@ -352,7 +356,8 @@ requirements to `locked`; missing, wrong-identity, corrupt and unavailable are
 kept distinct without create/overwrite fallback. Fake-service tests inject
 search/create/get/delete faults and unknown post-create completion. No test
 touches a real user keyring. The current D-Bus adapter uses the specification's
-plain session within the accepted same-login-user threat boundary; encrypted
+plain session within the accepted same-login-user threat boundary, accepts only
+the typed exact empty output string and a non-root session path; encrypted
 session negotiation plus a fixed isolated native keyring restart/lock/delete
 fixture remain required before production Linux custody or real writes.
 

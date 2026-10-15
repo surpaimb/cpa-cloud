@@ -25,7 +25,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ffi::CString,
     fs::File,
-    io,
+    io::{self, Read, Seek, SeekFrom, Write},
     os::fd::{AsRawFd, FromRawFd, RawFd},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
@@ -49,13 +49,16 @@ const DBUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ITEM_ID_BYTES: usize = 16;
 const KEY_BYTES: usize = 32;
 const CHECKSUM_BYTES: usize = 32;
+const LOCK_NAMESPACE_BYTES: usize = 32;
 const REFERENCE_MAGIC: &[u8; 16] = b"CPA-SS-REF-V1\0\0\0";
 const ENVELOPE_MAGIC: &[u8; 16] = b"CPA-SS-KEY-V1\0\0\0";
 const REFERENCE_CONTEXT: &[u8] = b"cpa-cloud/linux-secret-service/reference/v1\0";
 const ENVELOPE_CONTEXT: &[u8] = b"cpa-cloud/linux-secret-service/envelope/v1\0";
 const ATTRIBUTES_CONTEXT: &[u8] = b"cpa-cloud/linux-secret-service/attributes/v1\0";
-const REFERENCE_BYTES: usize = 16 + 16 + 4 + ITEM_ID_BYTES + CHECKSUM_BYTES + CHECKSUM_BYTES;
-const ENVELOPE_BYTES: usize = 16 + 16 + 4 + ITEM_ID_BYTES + KEY_BYTES + CHECKSUM_BYTES;
+const REFERENCE_BYTES: usize =
+    16 + 16 + 4 + LOCK_NAMESPACE_BYTES + ITEM_ID_BYTES + CHECKSUM_BYTES + CHECKSUM_BYTES;
+const ENVELOPE_BYTES: usize =
+    16 + 16 + 4 + LOCK_NAMESPACE_BYTES + ITEM_ID_BYTES + KEY_BYTES + CHECKSUM_BYTES;
 
 type Attributes = BTreeMap<String, String>;
 
@@ -169,12 +172,19 @@ struct ContractProvider<B> {
     backend: B,
     lock: ReconciliationLock,
     uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
 }
 
 impl<B: SecretServiceBackend> ContractProvider<B> {
     fn new(backend: B, lock: ReconciliationLock) -> Self {
         let uid = lock.uid;
-        Self { backend, lock, uid }
+        let lock_namespace = lock.namespace;
+        Self {
+            backend,
+            lock,
+            uid,
+            lock_namespace,
+        }
     }
 
     fn create(&mut self, transaction_id: ReplacementTransactionId) -> RecoveryKeyCreateOutcome {
@@ -184,8 +194,16 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
             Ok(guard) => guard,
             Err(_) => return RecoveryKeyCreateOutcome::Unavailable,
         };
-        match find_one(backend, transaction_id, self.uid) {
-            Ok(Some(item)) => return create_from_existing(backend, transaction_id, self.uid, item),
+        match find_one(backend, transaction_id, self.uid, self.lock_namespace) {
+            Ok(Some(item)) => {
+                return create_from_existing(
+                    backend,
+                    transaction_id,
+                    self.uid,
+                    self.lock_namespace,
+                    item,
+                );
+            }
             Ok(None) => {}
             Err(BackendError::Locked | BackendError::PromptRequired) => {
                 return RecoveryKeyCreateOutcome::Locked;
@@ -201,8 +219,19 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
         if SystemRandom::new().fill(&mut item_id).is_err() {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
-        let attributes = full_attributes(transaction_id, self.uid, item_id);
-        let envelope = Zeroizing::new(encode_envelope(transaction_id, self.uid, item_id, &key));
+        let attributes = full_attributes(
+            transaction_id,
+            self.uid,
+            self.lock_namespace,
+            item_id,
+        );
+        let envelope = Zeroizing::new(encode_envelope(
+            transaction_id,
+            self.uid,
+            self.lock_namespace,
+            item_id,
+            &key,
+        ));
         let request = CreateRequest {
             label: LABEL,
             attributes: &attributes,
@@ -217,9 +246,16 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
             }
             Err(_) => return RecoveryKeyCreateOutcome::Unavailable,
         }
-        match find_one(backend, transaction_id, self.uid) {
+        match find_one(backend, transaction_id, self.uid, self.lock_namespace) {
             Ok(Some(item)) => {
-                let result = verify_item(backend, transaction_id, self.uid, &item, Some(item_id));
+                let result = verify_item(
+                    backend,
+                    transaction_id,
+                    self.uid,
+                    self.lock_namespace,
+                    &item,
+                    Some(item_id),
+                );
                 match result {
                     VerifiedItem::Available {
                         item_id: verified_id,
@@ -227,7 +263,13 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
                     } if verified_id == item_id
                         && verify_slices_are_equal(verified_key.expose(), key.expose()).is_ok() =>
                     {
-                        created(transaction_id, self.uid, item_id, verified_key)
+                        created(
+                            transaction_id,
+                            self.uid,
+                            self.lock_namespace,
+                            item_id,
+                            verified_key,
+                        )
                     }
                     VerifiedItem::Locked => RecoveryKeyCreateOutcome::Locked,
                     _ => RecoveryKeyCreateOutcome::Unavailable,
@@ -245,7 +287,12 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
     ) -> RecoveryKeyOpenOutcome {
-        let parsed = match parse_reference(transaction_id, self.uid, reference) {
+        let parsed = match parse_reference(
+            transaction_id,
+            self.uid,
+            self.lock_namespace,
+            reference,
+        ) {
             ParsedReference::Valid { item_id } => item_id,
             ParsedReference::WrongIdentity => return RecoveryKeyOpenOutcome::WrongIdentity,
             ParsedReference::Corrupt => return RecoveryKeyOpenOutcome::Corrupt,
@@ -256,7 +303,7 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
             Ok(guard) => guard,
             Err(_) => return RecoveryKeyOpenOutcome::Unavailable,
         };
-        let item = match find_one(backend, transaction_id, self.uid) {
+        let item = match find_one(backend, transaction_id, self.uid, self.lock_namespace) {
             Ok(Some(item)) => item,
             Ok(None) => return RecoveryKeyOpenOutcome::Missing,
             Err(BackendError::Locked | BackendError::PromptRequired) => {
@@ -265,7 +312,14 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
             Err(BackendError::Corrupt) => return RecoveryKeyOpenOutcome::Corrupt,
             Err(_) => return RecoveryKeyOpenOutcome::Unavailable,
         };
-        match verify_item(backend, transaction_id, self.uid, &item, Some(parsed)) {
+        match verify_item(
+            backend,
+            transaction_id,
+            self.uid,
+            self.lock_namespace,
+            &item,
+            Some(parsed),
+        ) {
             VerifiedItem::Available { key, .. } => RecoveryKeyOpenOutcome::Available(key),
             VerifiedItem::Locked => RecoveryKeyOpenOutcome::Locked,
             VerifiedItem::WrongIdentity => RecoveryKeyOpenOutcome::WrongIdentity,
@@ -279,7 +333,12 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
     ) -> RecoveryKeyDeleteOutcome {
-        let parsed = match parse_reference(transaction_id, self.uid, reference) {
+        let parsed = match parse_reference(
+            transaction_id,
+            self.uid,
+            self.lock_namespace,
+            reference,
+        ) {
             ParsedReference::Valid { item_id } => item_id,
             ParsedReference::WrongIdentity => return RecoveryKeyDeleteOutcome::WrongIdentity,
             ParsedReference::Corrupt => return RecoveryKeyDeleteOutcome::Corrupt,
@@ -290,7 +349,7 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
             Ok(guard) => guard,
             Err(_) => return RecoveryKeyDeleteOutcome::Unavailable,
         };
-        let item = match find_one(backend, transaction_id, self.uid) {
+        let item = match find_one(backend, transaction_id, self.uid, self.lock_namespace) {
             Ok(Some(item)) => item,
             Ok(None) => return RecoveryKeyDeleteOutcome::Missing,
             Err(BackendError::Locked | BackendError::PromptRequired) => {
@@ -299,7 +358,14 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
             Err(BackendError::Corrupt) => return RecoveryKeyDeleteOutcome::Corrupt,
             Err(_) => return RecoveryKeyDeleteOutcome::Unavailable,
         };
-        match verify_item(backend, transaction_id, self.uid, &item, Some(parsed)) {
+        match verify_item(
+            backend,
+            transaction_id,
+            self.uid,
+            self.lock_namespace,
+            &item,
+            Some(parsed),
+        ) {
             VerifiedItem::Available { .. } => {}
             VerifiedItem::Locked => return RecoveryKeyDeleteOutcome::Locked,
             VerifiedItem::WrongIdentity => return RecoveryKeyDeleteOutcome::WrongIdentity,
@@ -314,7 +380,7 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
             Err(BackendError::Missing) => {}
             Err(_) => return RecoveryKeyDeleteOutcome::Unavailable,
         }
-        match find_one(backend, transaction_id, self.uid) {
+        match find_one(backend, transaction_id, self.uid, self.lock_namespace) {
             Ok(None) => RecoveryKeyDeleteOutcome::Deleted,
             Ok(Some(_)) => RecoveryKeyDeleteOutcome::WrongIdentity,
             Err(BackendError::Locked | BackendError::PromptRequired) => {
@@ -330,10 +396,20 @@ fn create_from_existing<B: SecretServiceBackend>(
     backend: &mut B,
     transaction_id: ReplacementTransactionId,
     uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
     item: ServiceItem,
 ) -> RecoveryKeyCreateOutcome {
-    match verify_item(backend, transaction_id, uid, &item, None) {
-        VerifiedItem::Available { item_id, key } => created(transaction_id, uid, item_id, key),
+    match verify_item(
+        backend,
+        transaction_id,
+        uid,
+        lock_namespace,
+        &item,
+        None,
+    ) {
+        VerifiedItem::Available { item_id, key } => {
+            created(transaction_id, uid, lock_namespace, item_id, key)
+        }
         VerifiedItem::Locked => RecoveryKeyCreateOutcome::Locked,
         _ => RecoveryKeyCreateOutcome::Unavailable,
     }
@@ -342,13 +418,14 @@ fn create_from_existing<B: SecretServiceBackend>(
 fn created(
     transaction_id: ReplacementTransactionId,
     uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
     item_id: [u8; ITEM_ID_BYTES],
     key: BackupKey,
 ) -> RecoveryKeyCreateOutcome {
     let reference = match RecoveryKeyReference::new(
         PROVIDER_KIND,
         PROVIDER_VERSION,
-        encode_reference(transaction_id, uid, item_id),
+        encode_reference(transaction_id, uid, lock_namespace, item_id),
     ) {
         Ok(reference) => reference,
         Err(_) => return RecoveryKeyCreateOutcome::Unavailable,
@@ -360,8 +437,9 @@ fn find_one<B: SecretServiceBackend>(
     backend: &mut B,
     transaction_id: ReplacementTransactionId,
     uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
 ) -> Result<Option<ServiceItem>, BackendError> {
-    let items = backend.search(&base_attributes(transaction_id, uid))?;
+    let items = backend.search(&base_attributes(transaction_id, uid, lock_namespace))?;
     if items.len() > 1 {
         return Err(BackendError::Corrupt);
     }
@@ -389,6 +467,7 @@ fn verify_item<B: SecretServiceBackend>(
     backend: &mut B,
     transaction_id: ReplacementTransactionId,
     uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
     item: &ServiceItem,
     expected_item_id: Option<[u8; ITEM_ID_BYTES]>,
 ) -> VerifiedItem {
@@ -404,7 +483,7 @@ fn verify_item<B: SecretServiceBackend>(
     if expected_item_id.is_some_and(|expected| expected != item_id) {
         return VerifiedItem::WrongIdentity;
     }
-    if item.attributes != full_attributes(transaction_id, uid, item_id) {
+    if item.attributes != full_attributes(transaction_id, uid, lock_namespace, item_id) {
         return VerifiedItem::Corrupt;
     }
     let secret = match backend.get_secret(&item.handle) {
@@ -413,14 +492,18 @@ fn verify_item<B: SecretServiceBackend>(
         Err(BackendError::Corrupt) => return VerifiedItem::Corrupt,
         Err(_) => return VerifiedItem::Unavailable,
     };
-    match decode_envelope(transaction_id, uid, item_id, &secret) {
+    match decode_envelope(transaction_id, uid, lock_namespace, item_id, &secret) {
         Envelope::Available(key) => VerifiedItem::Available { item_id, key },
         Envelope::WrongIdentity => VerifiedItem::WrongIdentity,
         Envelope::Corrupt => VerifiedItem::Corrupt,
     }
 }
 
-fn base_attributes(transaction_id: ReplacementTransactionId, uid: u32) -> Attributes {
+fn base_attributes(
+    transaction_id: ReplacementTransactionId,
+    uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
+) -> Attributes {
     BTreeMap::from([
         ("application".to_owned(), "cpa-cloud".to_owned()),
         (
@@ -433,15 +516,20 @@ fn base_attributes(transaction_id: ReplacementTransactionId, uid: u32) -> Attrib
             hex::encode(transaction_id.as_bytes()),
         ),
         ("unix-user".to_owned(), uid.to_string()),
+        (
+            "lock-namespace".to_owned(),
+            hex::encode(lock_namespace),
+        ),
     ])
 }
 
 fn full_attributes(
     transaction_id: ReplacementTransactionId,
     uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
     item_id: [u8; ITEM_ID_BYTES],
 ) -> Attributes {
-    let mut attributes = base_attributes(transaction_id, uid);
+    let mut attributes = base_attributes(transaction_id, uid, lock_namespace);
     attributes.insert("item-id".to_owned(), hex::encode(item_id));
     attributes
 }
@@ -461,16 +549,19 @@ fn attributes_digest(attributes: &Attributes) -> [u8; CHECKSUM_BYTES] {
 fn encode_reference(
     transaction_id: ReplacementTransactionId,
     uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
     item_id: [u8; ITEM_ID_BYTES],
 ) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(REFERENCE_BYTES);
     bytes.extend_from_slice(REFERENCE_MAGIC);
     bytes.extend_from_slice(transaction_id.as_bytes());
     bytes.extend_from_slice(&uid.to_be_bytes());
+    bytes.extend_from_slice(&lock_namespace);
     bytes.extend_from_slice(&item_id);
     bytes.extend_from_slice(&attributes_digest(&full_attributes(
         transaction_id,
         uid,
+        lock_namespace,
         item_id,
     )));
     let mut hasher = Sha256::new();
@@ -489,6 +580,7 @@ enum ParsedReference {
 fn parse_reference(
     transaction_id: ReplacementTransactionId,
     uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
     reference: &RecoveryKeyReference,
 ) -> ParsedReference {
     if reference.provider_kind() != PROVIDER_KIND
@@ -511,13 +603,19 @@ fn parse_reference(
     let stored_uid = u32::from_be_bytes(bytes[32..36].try_into().expect("fixed reference"));
     if verify_slices_are_equal(stored_transaction, transaction_id.as_bytes()).is_err()
         || stored_uid != uid
+        || verify_slices_are_equal(&bytes[36..68], &lock_namespace).is_err()
     {
         return ParsedReference::WrongIdentity;
     }
     let mut item_id = [0_u8; ITEM_ID_BYTES];
-    item_id.copy_from_slice(&bytes[36..52]);
-    let expected_attributes = attributes_digest(&full_attributes(transaction_id, uid, item_id));
-    if verify_slices_are_equal(&expected_attributes, &bytes[52..84]).is_err() {
+    item_id.copy_from_slice(&bytes[68..84]);
+    let expected_attributes = attributes_digest(&full_attributes(
+        transaction_id,
+        uid,
+        lock_namespace,
+        item_id,
+    ));
+    if verify_slices_are_equal(&expected_attributes, &bytes[84..116]).is_err() {
         return ParsedReference::Corrupt;
     }
     ParsedReference::Valid { item_id }
@@ -526,6 +624,7 @@ fn parse_reference(
 fn encode_envelope(
     transaction_id: ReplacementTransactionId,
     uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
     item_id: [u8; ITEM_ID_BYTES],
     key: &BackupKey,
 ) -> Vec<u8> {
@@ -533,6 +632,7 @@ fn encode_envelope(
     bytes.extend_from_slice(ENVELOPE_MAGIC);
     bytes.extend_from_slice(transaction_id.as_bytes());
     bytes.extend_from_slice(&uid.to_be_bytes());
+    bytes.extend_from_slice(&lock_namespace);
     bytes.extend_from_slice(&item_id);
     bytes.extend_from_slice(key.expose());
     let mut hasher = Sha256::new();
@@ -551,6 +651,7 @@ enum Envelope {
 fn decode_envelope(
     transaction_id: ReplacementTransactionId,
     uid: u32,
+    lock_namespace: [u8; LOCK_NAMESPACE_BYTES],
     item_id: [u8; ITEM_ID_BYTES],
     bytes: &[u8],
 ) -> Envelope {
@@ -567,12 +668,13 @@ fn decode_envelope(
     let stored_uid = u32::from_be_bytes(bytes[32..36].try_into().expect("fixed envelope"));
     if verify_slices_are_equal(&bytes[16..32], transaction_id.as_bytes()).is_err()
         || stored_uid != uid
-        || verify_slices_are_equal(&bytes[36..52], &item_id).is_err()
+        || verify_slices_are_equal(&bytes[36..68], &lock_namespace).is_err()
+        || verify_slices_are_equal(&bytes[68..84], &item_id).is_err()
     {
         return Envelope::WrongIdentity;
     }
     let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
-    key.copy_from_slice(&bytes[52..84]);
+    key.copy_from_slice(&bytes[84..116]);
     Envelope::Available(BackupKey::from_bytes(key))
 }
 
@@ -582,6 +684,7 @@ struct ReconciliationLock {
     display: PathBuf,
     local: Mutex<()>,
     uid: u32,
+    namespace: [u8; LOCK_NAMESPACE_BYTES],
 }
 
 struct ReconciliationGuard<'a> {
@@ -616,13 +719,12 @@ impl ReconciliationLock {
                 source: io::Error::last_os_error(),
             });
         }
-        let file = unsafe { File::from_raw_fd(fd) };
+        let mut file = unsafe { File::from_raw_fd(fd) };
         verify_private_regular_file(&file, approval.uid, &approval.display.join(LOCK_FILE))?;
-        file.sync_all()
-            .map_err(|source| LinuxSecretServiceProviderError::Io {
-                path: approval.display.join(LOCK_FILE),
-                source,
-            })?;
+        let namespace = initialize_lock_namespace(
+            &mut file,
+            &approval.display.join(LOCK_FILE),
+        )?;
         approval
             .directory
             .sync_all()
@@ -636,6 +738,7 @@ impl ReconciliationLock {
             display: approval.display,
             local: Mutex::new(()),
             uid: approval.uid,
+            namespace,
         })
     }
 
@@ -648,10 +751,18 @@ impl ReconciliationLock {
         verify_private_regular_file(&self.file, self.uid, &self.display.join(LOCK_FILE))?;
         loop {
             if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                return Ok(ReconciliationGuard {
+                let guard = ReconciliationGuard {
                     file: &self.file,
                     _local: local,
-                });
+                };
+                verify_current_lock_entry(
+                    &self.directory,
+                    &self.file,
+                    self.uid,
+                    self.namespace,
+                    &self.display.join(LOCK_FILE),
+                )?;
+                return Ok(guard);
             }
             let source = io::Error::last_os_error();
             if source.kind() != io::ErrorKind::Interrupted {
@@ -662,6 +773,142 @@ impl ReconciliationLock {
             }
         }
     }
+}
+
+fn verify_current_lock_entry(
+    directory: &File,
+    held: &File,
+    uid: u32,
+    expected_namespace: [u8; LOCK_NAMESPACE_BYTES],
+    path: &Path,
+) -> Result<(), LinuxSecretServiceProviderError> {
+    let name = CString::new(LOCK_FILE).expect("fixed lock name has no NUL");
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(LinuxSecretServiceProviderError::UnsafeLock(
+            path.to_path_buf(),
+        ));
+    }
+    let mut current = unsafe { File::from_raw_fd(fd) };
+    verify_private_regular_file(&current, uid, path)?;
+    let held_stat = stat(held.as_raw_fd(), path)?;
+    let current_stat = stat(current.as_raw_fd(), path)?;
+    if held_stat.st_dev != current_stat.st_dev || held_stat.st_ino != current_stat.st_ino {
+        return Err(LinuxSecretServiceProviderError::UnsafeLock(
+            path.to_path_buf(),
+        ));
+    }
+    let mut namespace = [0_u8; LOCK_NAMESPACE_BYTES];
+    if current
+        .metadata()
+        .map_err(|source| LinuxSecretServiceProviderError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len()
+        != LOCK_NAMESPACE_BYTES as u64
+    {
+        return Err(LinuxSecretServiceProviderError::UnsafeLock(
+            path.to_path_buf(),
+        ));
+    }
+    current.read_exact(&mut namespace).map_err(|source| {
+        LinuxSecretServiceProviderError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    if namespace != expected_namespace {
+        return Err(LinuxSecretServiceProviderError::UnsafeLock(
+            path.to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
+fn initialize_lock_namespace(
+    file: &mut File,
+    path: &Path,
+) -> Result<[u8; LOCK_NAMESPACE_BYTES], LinuxSecretServiceProviderError> {
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            break;
+        }
+        let source = io::Error::last_os_error();
+        if source.kind() != io::ErrorKind::Interrupted {
+            return Err(LinuxSecretServiceProviderError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    let result = (|| {
+        let length = file
+            .metadata()
+            .map_err(|source| LinuxSecretServiceProviderError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .len();
+        let mut namespace = [0_u8; LOCK_NAMESPACE_BYTES];
+        match length {
+            0 => {
+                SystemRandom::new().fill(&mut namespace).map_err(|_| {
+                    LinuxSecretServiceProviderError::Setup(
+                        "lock namespace generation failed",
+                    )
+                })?;
+                file.seek(SeekFrom::Start(0)).map_err(|source| {
+                    LinuxSecretServiceProviderError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })?;
+                file.write_all(&namespace).map_err(|source| {
+                    LinuxSecretServiceProviderError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })?;
+                file.sync_all().map_err(|source| {
+                    LinuxSecretServiceProviderError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })?;
+            }
+            length if length == LOCK_NAMESPACE_BYTES as u64 => {
+                file.seek(SeekFrom::Start(0)).map_err(|source| {
+                    LinuxSecretServiceProviderError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })?;
+                file.read_exact(&mut namespace).map_err(|source| {
+                    LinuxSecretServiceProviderError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })?;
+            }
+            _ => {
+                return Err(LinuxSecretServiceProviderError::UnsafeLock(
+                    path.to_path_buf(),
+                ));
+            }
+        }
+        Ok(namespace)
+    })();
+    unsafe {
+        libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+    }
+    result
 }
 
 fn open_approved_directory(
@@ -744,15 +991,15 @@ struct DbusBackend {
 
 impl DbusBackend {
     fn connect() -> Result<Self, LinuxSecretServiceProviderError> {
-        use dbus::arg::{RefArg, Variant};
+        use dbus::arg::Variant;
         let connection = dbus::blocking::Connection::new_session()
             .map_err(|_| LinuxSecretServiceProviderError::SessionUnavailable)?;
         let proxy = connection.with_proxy(SERVICE_NAME, SERVICE_PATH, DBUS_TIMEOUT);
-        let input: Variant<Box<dyn RefArg>> = Variant(Box::new(String::new()));
-        let (_output, session): (Variant<Box<dyn RefArg>>, dbus::Path<'static>) = proxy
+        let input = Variant(String::new());
+        let (Variant(output), session): (Variant<String>, dbus::Path<'static>) = proxy
             .method_call(SERVICE_INTERFACE, "OpenSession", ("plain", input))
             .map_err(|_| LinuxSecretServiceProviderError::SessionUnavailable)?;
-        if session.to_string() == ROOT_PATH {
+        if !valid_plain_session(&output, &session.to_string()) {
             return Err(LinuxSecretServiceProviderError::SessionUnavailable);
         }
         Ok(Self {
@@ -780,6 +1027,10 @@ impl DbusBackend {
             .map_err(|error| Self::classify(&error))?;
         Ok(attributes.into_iter().collect())
     }
+}
+
+fn valid_plain_session(output: &str, session_path: &str) -> bool {
+    output.is_empty() && session_path != ROOT_PATH
 }
 
 impl SecretServiceBackend for DbusBackend {
@@ -888,6 +1139,7 @@ mod tests {
         process::Command,
         sync::{Arc, Barrier},
         thread,
+        time::Instant,
     };
 
     #[derive(Clone)]
@@ -1066,7 +1318,7 @@ mod tests {
             assert_eq!(state.creates, 1);
             assert_eq!(state.last_replace, Some(false));
             let attributes = &state.items.values().next().unwrap().attributes;
-            assert_eq!(attributes.len(), 6);
+            assert_eq!(attributes.len(), 7);
             assert!(!attributes
                 .values()
                 .any(|value| value.contains(&hex::encode(key))));
@@ -1114,6 +1366,8 @@ mod tests {
         let backend = FakeBackend::default();
         let tx = transaction(0x33);
         let uid = unsafe { libc::geteuid() };
+        let mut provider = provider(backend.clone(), root.path());
+        let lock_namespace = provider.lock_namespace;
         let key = BackupKey::generate().unwrap();
         let ids = [[1_u8; ITEM_ID_BYTES], [2_u8; ITEM_ID_BYTES]];
         {
@@ -1122,8 +1376,8 @@ mod tests {
                 state.items.insert(
                     format!("/item/{index}"),
                     FakeItem {
-                        attributes: full_attributes(tx, uid, item_id),
-                        secret: encode_envelope(tx, uid, item_id, &key),
+                        attributes: full_attributes(tx, uid, lock_namespace, item_id),
+                        secret: encode_envelope(tx, uid, lock_namespace, item_id, &key),
                         locked: false,
                     },
                 );
@@ -1132,10 +1386,9 @@ mod tests {
         let reference = RecoveryKeyReference::new(
             PROVIDER_KIND,
             PROVIDER_VERSION,
-            encode_reference(tx, uid, ids[0]),
+            encode_reference(tx, uid, lock_namespace, ids[0]),
         )
         .unwrap();
-        let mut provider = provider(backend.clone(), root.path());
         assert!(matches!(
             provider.create(tx),
             RecoveryKeyCreateOutcome::Unavailable
@@ -1282,11 +1535,18 @@ mod tests {
         let tx = transaction(0x68);
         let created = created(provider.create(tx));
         let uid = unsafe { libc::geteuid() };
+        let lock_namespace = provider.lock_namespace;
         let replacement_id = [0xa5; ITEM_ID_BYTES];
         let replacement_key = BackupKey::generate().unwrap();
         backend.state.lock().unwrap().replacement_after_delete = Some(FakeItem {
-            attributes: full_attributes(tx, uid, replacement_id),
-            secret: encode_envelope(tx, uid, replacement_id, &replacement_key),
+            attributes: full_attributes(tx, uid, lock_namespace, replacement_id),
+            secret: encode_envelope(
+                tx,
+                uid,
+                lock_namespace,
+                replacement_id,
+                &replacement_key,
+            ),
             locked: false,
         });
         assert_eq!(
@@ -1330,6 +1590,56 @@ mod tests {
         )
         .unwrap();
         assert!(lock.exclusive().is_err());
+    }
+
+    #[test]
+    fn lock_namespace_persists_and_distinct_roots_do_not_alias() {
+        let (first_root, first_approval) = fixture();
+        let first_lock = ReconciliationLock::open(first_approval).unwrap();
+        let first_namespace = first_lock.namespace;
+        drop(first_lock);
+
+        let reopened_approval =
+            SyntheticSecretServiceApproval::for_test(first_root.path()).unwrap();
+        let reopened = ReconciliationLock::open(reopened_approval).unwrap();
+        assert_eq!(reopened.namespace, first_namespace);
+
+        let (_second_root, second_approval) = fixture();
+        let second = ReconciliationLock::open(second_approval).unwrap();
+        assert_ne!(second.namespace, first_namespace);
+    }
+
+    #[test]
+    fn replacing_the_lock_directory_entry_invalidates_the_held_lock() {
+        let (root, approval) = fixture();
+        let original = ReconciliationLock::open(approval).unwrap();
+        let original_namespace = original.namespace;
+        fs::rename(
+            root.path().join(LOCK_FILE),
+            root.path().join("displaced-lock"),
+        )
+        .unwrap();
+        let replacement_approval =
+            SyntheticSecretServiceApproval::for_test(root.path()).unwrap();
+        let replacement = ReconciliationLock::open(replacement_approval).unwrap();
+        assert_ne!(replacement.namespace, original_namespace);
+        assert!(matches!(
+            original.exclusive(),
+            Err(LinuxSecretServiceProviderError::UnsafeLock(_))
+        ));
+    }
+
+    #[test]
+    fn plain_session_requires_exact_empty_output_and_non_root_path() {
+        assert!(valid_plain_session(
+            "",
+            "/org/freedesktop/secrets/session/fixture"
+        ));
+        assert!(!valid_plain_session(
+            "unexpected",
+            "/org/freedesktop/secrets/session/fixture"
+        ));
+        assert!(!valid_plain_session("", ROOT_PATH));
     }
 
     struct BlockingBackend {
@@ -1401,15 +1711,84 @@ mod tests {
     }
 
     #[test]
+    fn distinct_lock_roots_are_distinct_persistent_provider_namespaces() {
+        let (first_root, first_approval) = fixture();
+        let (second_root, second_approval) = fixture();
+        let shared = FakeBackend::default();
+        let entered = Arc::new(Barrier::new(3));
+        let release = Arc::new(Barrier::new(3));
+        let first_backend = BlockingBackend {
+            inner: shared.clone(),
+            entered: entered.clone(),
+            release: release.clone(),
+            blocked: false,
+        };
+        let second_backend = BlockingBackend {
+            inner: shared.clone(),
+            entered: entered.clone(),
+            release: release.clone(),
+            blocked: false,
+        };
+        let mut first = ContractProvider::new(
+            first_backend,
+            ReconciliationLock::open(first_approval).unwrap(),
+        );
+        let mut second = ContractProvider::new(
+            second_backend,
+            ReconciliationLock::open(second_approval).unwrap(),
+        );
+        assert_ne!(first.lock_namespace, second.lock_namespace);
+        let tx = transaction(0x7b);
+        let first_thread = thread::spawn(move || {
+            let outcome = first.create(tx);
+            (outcome, first)
+        });
+        let second_thread = thread::spawn(move || {
+            let outcome = second.create(tx);
+            (outcome, second)
+        });
+        entered.wait();
+        release.wait();
+        let (first_outcome, mut first) = first_thread.join().unwrap();
+        let (second_outcome, mut second) = second_thread.join().unwrap();
+        let first_created = created(first_outcome);
+        let second_created = created(second_outcome);
+        assert_ne!(first_created.reference, second_created.reference);
+        assert!(matches!(
+            first.open(tx, &second_created.reference),
+            RecoveryKeyOpenOutcome::WrongIdentity
+        ));
+        assert!(matches!(
+            second.open(tx, &first_created.reference),
+            RecoveryKeyOpenOutcome::WrongIdentity
+        ));
+        let first_retry = created(first.create(tx));
+        let second_retry = created(second.create(tx));
+        assert_eq!(first_retry.reference, first_created.reference);
+        assert_eq!(second_retry.reference, second_created.reference);
+        let state = shared.state.lock().unwrap();
+        assert_eq!(state.items.len(), 2);
+        let namespaces: std::collections::BTreeSet<_> = state
+            .items
+            .values()
+            .map(|item| item.attributes["lock-namespace"].clone())
+            .collect();
+        assert_eq!(namespaces.len(), 2);
+        drop((first_root, second_root));
+    }
+
+    #[test]
     fn cross_process_lock_child() {
         let Some(root) = std::env::var_os("CPA_SS_LOCK_CHILD_ROOT") else {
             return;
         };
-        let marker = std::env::var_os("CPA_SS_LOCK_CHILD_MARKER").unwrap();
+        let attempted = std::env::var_os("CPA_SS_LOCK_CHILD_ATTEMPTED").unwrap();
+        let acquired = std::env::var_os("CPA_SS_LOCK_CHILD_ACQUIRED").unwrap();
+        fs::write(attempted, b"attempted").unwrap();
         let approval = SyntheticSecretServiceApproval::for_test(Path::new(&root)).unwrap();
         let lock = ReconciliationLock::open(approval).unwrap();
         let _guard = lock.exclusive().unwrap();
-        fs::write(marker, b"locked").unwrap();
+        fs::write(acquired, b"acquired").unwrap();
     }
 
     #[test]
@@ -1417,19 +1796,25 @@ mod tests {
         let (root, approval) = fixture();
         let lock = ReconciliationLock::open(approval).unwrap();
         let guard = lock.exclusive().unwrap();
-        let marker = root.path().join("child-acquired");
+        let attempted = root.path().join("child-attempted");
+        let acquired = root.path().join("child-acquired");
         let mut child = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("live::linux_secret_service::tests::cross_process_lock_child")
             .arg("--nocapture")
             .env("CPA_SS_LOCK_CHILD_ROOT", root.path())
-            .env("CPA_SS_LOCK_CHILD_MARKER", &marker)
+            .env("CPA_SS_LOCK_CHILD_ATTEMPTED", &attempted)
+            .env("CPA_SS_LOCK_CHILD_ACQUIRED", &acquired)
             .spawn()
             .unwrap();
-        thread::sleep(Duration::from_millis(150));
-        assert!(!marker.exists());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !attempted.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(fs::read(&attempted).unwrap(), b"attempted");
+        assert!(!acquired.exists());
         drop(guard);
         assert!(child.wait().unwrap().success());
-        assert_eq!(fs::read(marker).unwrap(), b"locked");
+        assert_eq!(fs::read(acquired).unwrap(), b"acquired");
     }
 }

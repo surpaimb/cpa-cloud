@@ -125,8 +125,11 @@ Planned platform providers are gated separately:
 - Linux desktop: a Secret Service item located by stable case-sensitive,
   non-secret lookup attributes rather than a persisted object path. The current
   Linux-only candidate is synthetic/integration-only: tests alone can approve
-  its owner-private reconciliation-lock directory. It serializes create under
-  a per-user cross-process `flock`, always calls `CreateItem` with
+  its owner-private reconciliation-lock directory. The private lock file
+  durably establishes a random provider namespace carried by lookup attributes,
+  references and envelopes, so two independently approved roots cannot share a
+  search namespace without sharing a lock. It serializes create under the
+  namespace's cross-process `flock`, always calls `CreateItem` with
   `replace=false`, returns the same authenticated key/reference on retry, and
   refuses duplicate matches. It never invokes Unlock or Prompt; locked items or
   prompt requirements are explicit `locked` states. A fixed isolated native
@@ -408,10 +411,11 @@ A separate macOS boundary now keeps production construction unavailable until
 signing/access-group identity can be verified and exercises the intended
 Data-Protection-Keychain request/state contract against an in-memory fake only.
 The Linux Secret Service candidate similarly requires a test-only synthetic
-approval, uses stable non-secret transaction/UID/item attributes plus a
+approval, uses stable non-secret transaction/UID/lock-namespace/item attributes plus a
 checksummed identity-bound envelope/reference, and exercises no-prompt,
 no-replace create/open/delete behavior against a fake service fault matrix.
-Its session-bus transport compiles only on Linux, but no fixed native keyring
+Its typed plain-session negotiation requires an exact empty output string and
+non-root session path. The session-bus transport compiles only on Linux, but no fixed native keyring
 fixture has yet established restart, locked-session or deletion behavior; it is
 not a production provider.
 
