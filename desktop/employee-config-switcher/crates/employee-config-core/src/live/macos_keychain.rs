@@ -71,10 +71,7 @@ impl RecoveryKeyProvider for MacosKeychainRecoveryKeyProvider {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
-    use crate::live::{
-        backup::BackupKey,
-        recovery_key::CreatedRecoveryKey,
-    };
+    use crate::live::{backup::BackupKey, recovery_key::CreatedRecoveryKey};
     use ring::{
         constant_time::verify_slices_are_equal,
         rand::{SecureRandom, SystemRandom},
@@ -292,10 +289,7 @@ mod contract_tests {
             }
         }
 
-        fn create(
-            &mut self,
-            transaction_id: ReplacementTransactionId,
-        ) -> RecoveryKeyCreateOutcome {
+        fn create(&mut self, transaction_id: ReplacementTransactionId) -> RecoveryKeyCreateOutcome {
             let Ok(key) = BackupKey::generate() else {
                 return RecoveryKeyCreateOutcome::Unavailable;
             };
@@ -478,7 +472,8 @@ mod contract_tests {
                 Err(status) if locked_status(status) => return VerifiedRecord::Locked,
                 Err(_) => return VerifiedRecord::Unavailable,
             };
-            if primary.len() != 1 || primary[0].persistent_reference != record.persistent_reference {
+            if primary.len() != 1 || primary[0].persistent_reference != record.persistent_reference
+            {
                 return VerifiedRecord::WrongIdentity;
             }
             let reference = match make_reference(
@@ -536,7 +531,8 @@ mod contract_tests {
         item_id: [u8; ITEM_ID_BYTES],
         identity: &VerifiedIdentity,
     ) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(4 + TRANSACTION_BYTES + ITEM_ID_BYTES + COMMITMENT_BYTES);
+        let mut bytes =
+            Vec::with_capacity(4 + TRANSACTION_BYTES + ITEM_ID_BYTES + COMMITMENT_BYTES);
         bytes.extend_from_slice(&PROVIDER_VERSION.to_be_bytes());
         bytes.extend_from_slice(transaction_id.as_bytes());
         bytes.extend_from_slice(&item_id);
@@ -768,7 +764,10 @@ mod contract_tests {
             self.adds += 1;
             self.last_add = Some(request.clone());
             self.take_error()?;
-            if !self.matching_primary(&primary_query_from_record(&request.record)).is_empty() {
+            if !self
+                .matching_primary(&primary_query_from_record(&request.record))
+                .is_empty()
+            {
                 return Err(SecItemStatus::DuplicateItem);
             }
             self.next_reference += 1;
@@ -857,9 +856,13 @@ mod contract_tests {
     #[test]
     fn every_request_has_the_fixed_data_protection_policy() {
         let tx = transaction(0x11);
-        let mut provider = ContractProvider::for_verified_test_identity(FakeBackend::default(), user(1));
+        let mut provider =
+            ContractProvider::for_verified_test_identity(FakeBackend::default(), user(1));
         let created = created(provider.create(tx));
-        assert!(matches!(provider.open(tx, &created.reference), RecoveryKeyOpenOutcome::Available(_)));
+        assert!(matches!(
+            provider.open(tx, &created.reference),
+            RecoveryKeyOpenOutcome::Available(_)
+        ));
 
         let backend = &provider.backend;
         let add = backend.last_add.as_ref().unwrap();
@@ -871,13 +874,16 @@ mod contract_tests {
         let primary = backend.last_primary.as_ref().unwrap();
         assert_eq!(primary.policy, SecItemPolicy::fixed());
         assert_eq!(primary.match_limit, MatchLimit::All);
-        assert!(primary.return_attributes && primary.return_data && primary.return_persistent_reference);
+        assert!(
+            primary.return_attributes && primary.return_data && primary.return_persistent_reference
+        );
     }
 
     #[test]
     fn create_is_idempotent_and_restart_reopens_the_same_key() {
         let tx = transaction(0x22);
-        let mut provider = ContractProvider::for_verified_test_identity(FakeBackend::default(), user(2));
+        let mut provider =
+            ContractProvider::for_verified_test_identity(FakeBackend::default(), user(2));
         let first = created(provider.create(tx));
         let expected_key = *first.key.expose();
         let second = created(provider.create(tx));
@@ -904,17 +910,24 @@ mod contract_tests {
     #[test]
     fn wrong_user_and_transaction_are_rejected_before_any_backend_query() {
         let tx = transaction(0x33);
-        let mut owner = ContractProvider::for_verified_test_identity(FakeBackend::default(), user(3));
+        let mut owner =
+            ContractProvider::for_verified_test_identity(FakeBackend::default(), user(3));
         let created = created(owner.create(tx));
         let backend = owner.into_backend();
         let mut wrong_user = ContractProvider::for_verified_test_identity(backend, user(4));
-        let before = (wrong_user.backend.exact_reads, wrong_user.backend.primary_reads);
+        let before = (
+            wrong_user.backend.exact_reads,
+            wrong_user.backend.primary_reads,
+        );
         assert!(matches!(
             wrong_user.open(tx, &created.reference),
             RecoveryKeyOpenOutcome::WrongIdentity
         ));
         assert_eq!(
-            (wrong_user.backend.exact_reads, wrong_user.backend.primary_reads),
+            (
+                wrong_user.backend.exact_reads,
+                wrong_user.backend.primary_reads
+            ),
             before
         );
         assert_eq!(
@@ -927,16 +940,24 @@ mod contract_tests {
     #[test]
     fn corrupt_reference_and_value_never_fall_back_to_creation() {
         let tx = transaction(0x44);
-        let mut provider = ContractProvider::for_verified_test_identity(FakeBackend::default(), user(5));
+        let mut provider =
+            ContractProvider::for_verified_test_identity(FakeBackend::default(), user(5));
         let created = created(provider.create(tx));
         let adds = provider.backend.adds;
-        let corrupt = RecoveryKeyReference::new(PROVIDER_KIND, PROVIDER_VERSION, vec![1, 2, 3]).unwrap();
-        assert!(matches!(provider.open(tx, &corrupt), RecoveryKeyOpenOutcome::Corrupt));
+        let corrupt =
+            RecoveryKeyReference::new(PROVIDER_KIND, PROVIDER_VERSION, vec![1, 2, 3]).unwrap();
+        assert!(matches!(
+            provider.open(tx, &corrupt),
+            RecoveryKeyOpenOutcome::Corrupt
+        ));
         assert_eq!(provider.backend.adds, adds);
 
         let record = provider.backend.records.values_mut().next().unwrap();
         record.value_data[0] ^= 0xff;
-        assert!(matches!(provider.open(tx, &created.reference), RecoveryKeyOpenOutcome::Corrupt));
+        assert!(matches!(
+            provider.open(tx, &created.reference),
+            RecoveryKeyOpenOutcome::Corrupt
+        ));
         assert_eq!(provider.backend.adds, adds);
     }
 
@@ -957,7 +978,10 @@ mod contract_tests {
             let mut backend = FakeBackend::default();
             backend.next_error = Some(status);
             let mut provider = ContractProvider::for_verified_test_identity(backend, user(6));
-            assert!(matches!(provider.create(transaction(0x55)), RecoveryKeyCreateOutcome::Locked));
+            assert!(matches!(
+                provider.create(transaction(0x55)),
+                RecoveryKeyCreateOutcome::Locked
+            ));
         }
         for status in [
             SecItemStatus::AuthFailed,
@@ -967,14 +991,18 @@ mod contract_tests {
             let mut backend = FakeBackend::default();
             backend.next_error = Some(status);
             let mut provider = ContractProvider::for_verified_test_identity(backend, user(7));
-            assert!(matches!(provider.create(transaction(0x56)), RecoveryKeyCreateOutcome::Unavailable));
+            assert!(matches!(
+                provider.create(transaction(0x56)),
+                RecoveryKeyCreateOutcome::Unavailable
+            ));
         }
     }
 
     #[test]
     fn delete_uses_exact_reference_and_preserves_a_replacement_item() {
         let tx = transaction(0x66);
-        let mut provider = ContractProvider::for_verified_test_identity(FakeBackend::default(), user(8));
+        let mut provider =
+            ContractProvider::for_verified_test_identity(FakeBackend::default(), user(8));
         let created = created(provider.create(tx));
         let original = provider.backend.records.values().next().unwrap().clone();
         let mut replacement = original.clone();
@@ -996,7 +1024,8 @@ mod contract_tests {
     #[test]
     fn debug_output_redacts_keychain_material() {
         let tx = transaction(0x77);
-        let mut provider = ContractProvider::for_verified_test_identity(FakeBackend::default(), user(9));
+        let mut provider =
+            ContractProvider::for_verified_test_identity(FakeBackend::default(), user(9));
         let created = created(provider.create(tx));
         let rendered_reference = format!("{:?}", created.reference);
         let rendered_add = format!("{:?}", provider.backend.last_add.as_ref().unwrap());
@@ -1011,7 +1040,8 @@ mod contract_tests {
     #[test]
     fn decode_status_maps_to_corrupt_after_reference_identity_is_verified() {
         let tx = transaction(0x78);
-        let mut provider = ContractProvider::for_verified_test_identity(FakeBackend::default(), user(10));
+        let mut provider =
+            ContractProvider::for_verified_test_identity(FakeBackend::default(), user(10));
         let created = created(provider.create(tx));
         provider.backend.next_error = Some(SecItemStatus::Decode);
         assert!(matches!(
