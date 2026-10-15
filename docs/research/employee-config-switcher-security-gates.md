@@ -232,10 +232,16 @@ each been recorded durable in that order. Workspace durability is no longer a
 free-form caller assertion: the Linux synthetic-root path requires the exact
 receipt from a bounded owner-private proof store after it removes one stable,
 empty transaction workspace and flushes the transaction directory and root.
-Restart and provider deletion revalidate the retained proof and exact workspace
-name absence; pending, renamed, replaced, non-empty or mismatched state blocks
-cleanup. The slice does not remove transaction contents and remains gated on a
-producer that safely empties the exact workspace first. It retains the exact
+The durable cleanup journal repeats the expected workspace leaf and
+device/inode in every event; authorization, caller path, proof, restart and
+provider deletion must all match that binding and the exact workspace name must
+remain absent. Pending, cross-workspace, renamed, replaced, non-empty or
+mismatched state blocks cleanup. No production constructor currently issues
+the initial trusted workspace-target evidence, so cleanup-journal creation is
+fail-closed until the durable replacement transaction provides it; only
+`cfg(test)` synthetic fixtures mint that evidence. The slice does not remove
+transaction contents and remains gated on a producer that safely empties the
+exact workspace first. It retains the exact
 transaction/reference pair, treats
 `deleted` and already-`missing` as idempotent completion, preserves the tombstone
 phase on every blocking deletion outcome, and permits tombstone removal last.

@@ -7,9 +7,14 @@
 //! pending proof blocks recovery; absence alone is never treated as success.
 
 use super::{
-    recovery_key::{RecoveryKeyReference, ReplacementTransactionId, WorkspaceRemovalAuthorization},
+    recovery_key::{
+        valid_workspace_name, RecoveryKeyReference, ReplacementTransactionId,
+        WorkspaceRemovalAuthorization,
+    },
     replacement::ReplacementPhase,
 };
+#[cfg(test)]
+use super::recovery_key::WorkspaceRemovalTarget;
 #[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
 use std::{
@@ -36,6 +41,9 @@ pub(crate) struct WorkspaceRemovalReceipt {
     terminal: ReplacementPhase,
     transaction_id: ReplacementTransactionId,
     reference: RecoveryKeyReference,
+    workspace_name: String,
+    workspace_device: u64,
+    workspace_inode: u64,
 }
 
 impl WorkspaceRemovalReceipt {
@@ -51,12 +59,27 @@ impl WorkspaceRemovalReceipt {
         &self.reference
     }
 
+    pub(crate) fn workspace_name(&self) -> &str {
+        &self.workspace_name
+    }
+
+    pub(crate) fn workspace_device(&self) -> u64 {
+        self.workspace_device
+    }
+
+    pub(crate) fn workspace_inode(&self) -> u64 {
+        self.workspace_inode
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(authorization: &WorkspaceRemovalAuthorization) -> Self {
         Self {
             terminal: authorization.terminal(),
             transaction_id: authorization.transaction_id(),
             reference: authorization.reference().clone(),
+            workspace_name: authorization.workspace_name().to_owned(),
+            workspace_device: authorization.workspace_device(),
+            workspace_inode: authorization.workspace_inode(),
         }
     }
 }
@@ -237,6 +260,11 @@ mod platform {
         F: FnMut() -> Result<(), WorkspaceRemovalError>,
     {
         let workspace_name = validate_workspace_path(root, workspace)?;
+        if workspace_name != OsStr::new(authorization.workspace_name()) {
+            return Err(WorkspaceRemovalError::InvalidWorkspace(
+                workspace.to_path_buf(),
+            ));
+        }
         let root_dir = open_root(root)?;
         let root_identity = identity(&root_dir).map_err(|source| io_error(root, source))?;
         let transaction_lock = acquire_transaction_lock(root, &root_dir)?;
@@ -405,6 +433,13 @@ mod platform {
         let pending_path = proof_path.join(&pending_name);
         let workspace_identity =
             identity(&workspace_dir).map_err(|source| io_error(workspace, source))?;
+        if workspace_identity.device != authorization.workspace_device()
+            || workspace_identity.inode != authorization.workspace_inode()
+        {
+            return Err(WorkspaceRemovalError::RecoveryConflict(
+                workspace.to_path_buf(),
+            ));
+        }
         let proof = WorkspaceRemovalProof {
             version: FORMAT_VERSION,
             transaction_id: transaction_hex(authorization.transaction_id()),
@@ -614,6 +649,9 @@ mod platform {
             || proof.provider_kind != authorization.reference().provider_kind()
             || proof.provider_version != authorization.reference().provider_version()
             || proof.opaque_reference != hex::encode(authorization.reference().opaque_reference())
+            || proof.workspace_name != authorization.workspace_name()
+            || proof.workspace_identity.device != authorization.workspace_device()
+            || proof.workspace_identity.inode != authorization.workspace_inode()
             || proof.workspace_parent_identity != transaction_identity
             || !valid_workspace_name(&proof.workspace_name)
         {
@@ -623,6 +661,9 @@ mod platform {
             terminal: authorization.terminal(),
             transaction_id: authorization.transaction_id(),
             reference: authorization.reference().clone(),
+            workspace_name: authorization.workspace_name().to_owned(),
+            workspace_device: authorization.workspace_device(),
+            workspace_inode: authorization.workspace_inode(),
         })
     }
 
@@ -687,25 +728,6 @@ mod platform {
             ));
         }
         Ok(name)
-    }
-
-    fn valid_workspace_name(name: &str) -> bool {
-        let mut parts = name.split('-');
-        let (Some(prefix), Some(pid), Some(nonce), Some(count), None) = (
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-        ) else {
-            return false;
-        };
-        prefix == "tx"
-            && pid
-                .parse::<u32>()
-                .is_ok_and(|value| value.to_string() == pid)
-            && u128::from_str_radix(nonce, 16).is_ok_and(|value| format!("{value:x}") == nonce)
-            && u64::from_str_radix(count, 16).is_ok_and(|value| format!("{value:x}") == count)
     }
 
     fn acquire_transaction_lock(
@@ -1079,7 +1101,10 @@ mod tests {
     use super::*;
     use crate::live::recovery_key::RecoveryKeyCleanupSequence;
     #[cfg(target_os = "linux")]
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+    };
 
     fn transaction(byte: u8) -> ReplacementTransactionId {
         ReplacementTransactionId::from_bytes([byte; 16]).unwrap()
@@ -1090,11 +1115,12 @@ mod tests {
             .unwrap()
     }
 
-    fn authorization(byte: u8) -> WorkspaceRemovalAuthorization {
+    fn authorization(byte: u8, target: WorkspaceRemovalTarget) -> WorkspaceRemovalAuthorization {
         let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(
             ReplacementPhase::Complete,
             transaction(byte),
             reference(),
+            target,
         )
         .unwrap();
         cleanup.record_completion_tombstone_durable().unwrap();
@@ -1118,11 +1144,21 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn workspace_target(workspace: &Path) -> WorkspaceRemovalTarget {
+        let metadata = fs::metadata(workspace).unwrap();
+        WorkspaceRemovalTarget::for_test(
+            workspace.file_name().unwrap().to_str().unwrap(),
+            metadata.dev(),
+            metadata.ino(),
+        )
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn exact_empty_workspace_is_removed_and_proof_reloads() {
         let (root, workspace) = fixture(0x21);
         let root_path = fs::canonicalize(root.path()).unwrap();
-        let authorization = authorization(0x21);
+        let authorization = authorization(0x21, workspace_target(&workspace));
         let verified = remove_workspace(&root_path, &authorization, &workspace).unwrap();
         assert!(!workspace.exists());
         assert_eq!(verified.receipt().transaction_id(), transaction(0x21));
@@ -1135,10 +1171,47 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn existing_proof_cannot_authorize_a_different_workspace() {
+        let (root, workspace) = fixture(0x26);
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let authorization = authorization(0x26, workspace_target(&workspace));
+        remove_workspace(&root_path, &authorization, &workspace).unwrap();
+
+        let other = workspace.with_file_name("tx-1-28-0");
+        fs::create_dir(&other).unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(
+            remove_workspace(&root_path, &authorization, &other),
+            Err(WorkspaceRemovalError::InvalidWorkspace(path)) if path == other
+        ));
+        assert!(other.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn authorization_for_one_workspace_cannot_delete_another() {
+        let (root, workspace) = fixture(0x29);
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let other = workspace.with_file_name("tx-1-2b-0");
+        fs::create_dir(&other).unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o700)).unwrap();
+        let authorization = authorization(0x29, workspace_target(&workspace));
+
+        assert!(matches!(
+            remove_workspace(&root_path, &authorization, &other),
+            Err(WorkspaceRemovalError::InvalidWorkspace(path)) if path == other
+        ));
+        assert!(workspace.exists());
+        assert!(other.exists());
+        assert!(!root_path.join(PROOF_DIRECTORY).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn interruption_after_delete_leaves_pending_and_never_infers_success() {
         let (root, workspace) = fixture(0x22);
         let root_path = fs::canonicalize(root.path()).unwrap();
-        let authorization = authorization(0x22);
+        let authorization = authorization(0x22, workspace_target(&workspace));
         assert!(matches!(
             platform::remove_with_hook(&root_path, &authorization, &workspace, true, || Ok(())),
             Err(WorkspaceRemovalError::InjectedCrash)
@@ -1155,7 +1228,7 @@ mod tests {
     fn workspace_replacement_before_delete_is_preserved_and_blocks_proof() {
         let (root, workspace) = fixture(0x23);
         let root_path = fs::canonicalize(root.path()).unwrap();
-        let authorization = authorization(0x23);
+        let authorization = authorization(0x23, workspace_target(&workspace));
         let moved = workspace.with_extension("moved");
         let result =
             platform::remove_with_hook(&root_path, &authorization, &workspace, false, || {
@@ -1182,7 +1255,7 @@ mod tests {
         let sentinel = workspace.join("journal.jsonl");
         fs::write(&sentinel, b"sentinel").unwrap();
         fs::set_permissions(&sentinel, fs::Permissions::from_mode(0o600)).unwrap();
-        let authorization = authorization(0x24);
+        let authorization = authorization(0x24, workspace_target(&workspace));
         assert!(matches!(
             remove_workspace(&root_path, &authorization, &workspace),
             Err(WorkspaceRemovalError::RecoveryConflict(_))
@@ -1197,7 +1270,10 @@ mod tests {
             return;
         }
         let root = tempfile::tempdir().unwrap();
-        let authorization = authorization(0x25);
+        let authorization = authorization(
+            0x25,
+            WorkspaceRemovalTarget::for_test("tx-1-26-0", 1, 1),
+        );
         assert!(matches!(
             remove_workspace(root.path(), &authorization, Path::new("workspace")),
             Err(WorkspaceRemovalError::UnsupportedPlatform)

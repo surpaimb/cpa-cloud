@@ -1228,6 +1228,11 @@ mod tests {
             ReplacementPhase::Complete,
             transaction_id,
             reference,
+            crate::live::recovery_key::WorkspaceRemovalTarget::for_test(
+                "tx-1-1-0",
+                1,
+                1,
+            ),
         )
         .unwrap();
         cleanup.record_completion_tombstone_durable().unwrap();

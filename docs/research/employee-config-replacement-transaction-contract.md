@@ -306,7 +306,8 @@ fully missing records still fail closed.
 The separate Linux-only synthetic-root cleanup journal now persists the five
 provider-agnostic cleanup phases as immutable, bounded, owner-private event
 files. Every event repeats and validates the root, terminal decision,
-transaction and provider-reference binding; restart requires a contiguous
+transaction, provider-reference, and expected workspace leaf/device/inode
+binding; restart requires a contiguous
 phase prefix and reconstructs the exact cleanup sequence. Event publication is
 stage-and-flush followed by no-replace rename and directory/root flush. One
 stable directory descriptor and advisory lock cover namespace enumeration,
@@ -328,7 +329,13 @@ revalidate the exact root, transaction-directory and proof identity bindings
 plus absence of the original workspace name. A crash after directory removal
 but before proof publication leaves `.pending` and blocks automatic cleanup
 rather than inferring success from absence. Renamed, replaced, non-empty,
-missing or mismatched state likewise fails closed. The store does not delete
+missing, cross-workspace or mismatched state likewise fails closed. The
+authorization, caller path and proof must all match the workspace leaf and
+device/inode already recorded in the durable cleanup journal. This bounded
+slice intentionally has no production constructor for the initial trusted
+workspace-target evidence; until the durable replacement transaction supplies
+that binding, initial cleanup-journal creation remains fail-closed. Synthetic
+tests alone mint target evidence under `cfg(test)`. The store does not delete
 transaction contents; its reviewed slice begins only after another component
 has safely removed every known child and left the exact workspace empty. It
 does not supply an operating-system key provider, remove completed
