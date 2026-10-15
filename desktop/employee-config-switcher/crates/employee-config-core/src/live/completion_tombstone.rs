@@ -1444,7 +1444,7 @@ mod tests {
         let proof_receipt =
             verify_removed_completion_tombstone(&root_path, &proof_authorization).unwrap();
         assert_eq!(proof_receipt.transaction_id(), transaction_id);
-        assert_eq!(proof_receipt.reference(), &reference());
+        assert_eq!(proof_receipt.reference(), &reference);
         remove_completion_tombstone(&root_path, &authorization)
             .expect("the exact durable proof supports idempotent restart recovery");
         let other_reference =
