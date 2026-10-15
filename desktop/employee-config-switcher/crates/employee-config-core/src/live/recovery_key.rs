@@ -5,7 +5,10 @@
 //! `open` failure into key creation. Platform providers remain separately
 //! gated before any real replacement transaction can use this interface.
 
-use super::{backup::BackupKey, replacement::ReplacementPhase};
+use super::{
+    backup::BackupKey, completion_tombstone::CompletionTombstoneRemovalReceipt,
+    replacement::ReplacementPhase,
+};
 
 const TRANSACTION_ID_BYTES: usize = 16;
 const MAX_PROVIDER_KIND_BYTES: usize = 64;
@@ -270,39 +273,12 @@ impl CompletionTombstoneRemovalAuthorization {
     pub(crate) fn reference(&self) -> &RecoveryKeyReference {
         &self.reference
     }
-
-    pub(crate) fn durable_removal_receipt(&self) -> CompletionTombstoneRemovalReceipt {
-        CompletionTombstoneRemovalReceipt {
-            terminal: self.terminal,
-            transaction_id: self.transaction_id,
-            reference: self.reference.clone(),
-        }
-    }
 }
 
 impl std::fmt::Debug for CompletionTombstoneRemovalAuthorization {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CompletionTombstoneRemovalAuthorization")
-            .field("terminal", &self.terminal)
-            .field("transaction_id", &self.transaction_id)
-            .field("reference", &self.reference)
-            .finish()
-    }
-}
-
-/// Evidence returned only after the tombstone store has removed and flushed
-/// the exact authorized record.
-pub struct CompletionTombstoneRemovalReceipt {
-    terminal: ReplacementPhase,
-    transaction_id: ReplacementTransactionId,
-    reference: RecoveryKeyReference,
-}
-
-impl std::fmt::Debug for CompletionTombstoneRemovalReceipt {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("CompletionTombstoneRemovalReceipt")
             .field("terminal", &self.terminal)
             .field("transaction_id", &self.transaction_id)
             .field("reference", &self.reference)
@@ -408,9 +384,9 @@ impl RecoveryKeyCleanupSequence {
         receipt: CompletionTombstoneRemovalReceipt,
     ) -> Result<(), RecoveryKeyCleanupError> {
         self.require_phase(RecoveryKeyCleanupPhase::KeyDeletionConfirmed)?;
-        if receipt.terminal != self.terminal
-            || receipt.transaction_id != self.transaction_id
-            || receipt.reference != self.reference
+        if receipt.terminal() != self.terminal
+            || receipt.transaction_id() != self.transaction_id
+            || receipt.reference() != &self.reference
         {
             return Err(RecoveryKeyCleanupError::InvalidTransition(self.phase));
         }
@@ -507,16 +483,6 @@ mod tests {
         cleanup.record_completion_tombstone_durable().unwrap();
         cleanup.record_workspace_removal_durable().unwrap();
         cleanup
-    }
-
-    fn removal_receipt() -> CompletionTombstoneRemovalReceipt {
-        let mut cleanup = cleanup_ready_for_key_deletion();
-        let mut provider = FakeProvider::deleting(RecoveryKeyDeleteOutcome::Deleted);
-        cleanup.delete_key(&mut provider).unwrap();
-        cleanup
-            .authorize_completion_tombstone_removal()
-            .unwrap()
-            .durable_removal_receipt()
     }
 
     #[test]
@@ -673,19 +639,10 @@ mod tests {
         assert_eq!(authorization.transaction_id(), transaction_id());
         assert_eq!(authorization.reference(), &reference());
         assert!(!format!("{authorization:?}").contains("opaque-sentinel"));
-
-        cleanup
-            .record_completion_tombstone_removal_durable(authorization.durable_removal_receipt())
-            .unwrap();
-        assert_eq!(cleanup.phase(), RecoveryKeyCleanupPhase::Complete);
-        assert!(matches!(
-            cleanup.record_completion_tombstone_removal_durable(
-                authorization.durable_removal_receipt()
-            ),
-            Err(RecoveryKeyCleanupError::InvalidTransition(
-                RecoveryKeyCleanupPhase::Complete
-            ))
-        ));
+        assert_eq!(
+            cleanup.phase(),
+            RecoveryKeyCleanupPhase::KeyDeletionConfirmed
+        );
     }
 
     #[test]
@@ -702,7 +659,7 @@ mod tests {
             RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
         );
         assert!(matches!(
-            cleanup.record_completion_tombstone_removal_durable(removal_receipt()),
+            cleanup.authorize_completion_tombstone_removal(),
             Err(RecoveryKeyCleanupError::InvalidTransition(
                 RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
             ))
@@ -710,11 +667,11 @@ mod tests {
 
         provider.next_delete = Some(RecoveryKeyDeleteOutcome::Missing);
         cleanup.delete_key(&mut provider).unwrap();
-        let authorization = cleanup.authorize_completion_tombstone_removal().unwrap();
-        cleanup
-            .record_completion_tombstone_removal_durable(authorization.durable_removal_receipt())
-            .unwrap();
-        assert_eq!(cleanup.phase(), RecoveryKeyCleanupPhase::Complete);
+        cleanup.authorize_completion_tombstone_removal().unwrap();
+        assert_eq!(
+            cleanup.phase(),
+            RecoveryKeyCleanupPhase::KeyDeletionConfirmed
+        );
         assert_eq!(provider.delete_calls, 2);
     }
 

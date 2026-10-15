@@ -246,8 +246,9 @@ or real client write is enabled, and same-user replacement remains a blocker.
 The pure cleanup gate can issue a non-serializable removal authorization only
 after provider deletion is confirmed; the Linux store then revalidates the
 exact transaction/reference before unlinking one final tombstone and flushing
-the namespace and root. Only that operation's exact receipt can advance the
-cleanup gate to `Complete`; missing and mismatched records are not accepted as
+the namespace and root. The receipt is constructible only inside the tombstone
+store after those operations succeed; only that exact receipt can advance the
+cleanup gate to `Complete`. Missing and mismatched records are not accepted as
 successful removal.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted

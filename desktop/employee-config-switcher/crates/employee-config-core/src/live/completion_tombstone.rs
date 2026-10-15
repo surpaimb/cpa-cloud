@@ -9,8 +9,7 @@
 use super::recovery_key::RecoveryKeyMetadataError;
 use super::{
     recovery_key::{
-        CompletionTombstoneRemovalAuthorization, CompletionTombstoneRemovalReceipt,
-        RecoveryKeyReference, ReplacementTransactionId,
+        CompletionTombstoneRemovalAuthorization, RecoveryKeyReference, ReplacementTransactionId,
     },
     replacement::ReplacementPhase,
 };
@@ -84,6 +83,42 @@ impl std::fmt::Debug for CompletionTombstone {
             .debug_struct("CompletionTombstone")
             .field("transaction_id", &self.transaction_id)
             .field("terminal", &self.terminal)
+            .field("reference", &self.reference)
+            .finish()
+    }
+}
+
+/// Evidence produced only after the tombstone store has removed and flushed
+/// the exact authorized record.
+///
+/// Its fields are private to this module, so other core modules cannot mint a
+/// receipt from an authorization without executing the filesystem operation.
+pub struct CompletionTombstoneRemovalReceipt {
+    terminal: ReplacementPhase,
+    transaction_id: ReplacementTransactionId,
+    reference: RecoveryKeyReference,
+}
+
+impl CompletionTombstoneRemovalReceipt {
+    pub(crate) fn terminal(&self) -> ReplacementPhase {
+        self.terminal
+    }
+
+    pub(crate) fn transaction_id(&self) -> ReplacementTransactionId {
+        self.transaction_id
+    }
+
+    pub(crate) fn reference(&self) -> &RecoveryKeyReference {
+        &self.reference
+    }
+}
+
+impl std::fmt::Debug for CompletionTombstoneRemovalReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompletionTombstoneRemovalReceipt")
+            .field("terminal", &self.terminal)
+            .field("transaction_id", &self.transaction_id)
             .field("reference", &self.reference)
             .finish()
     }
@@ -562,7 +597,11 @@ mod platform {
         {
             return Err(CompletionTombstoneError::RecoveryConflict(directory_path));
         }
-        Ok(authorization.durable_removal_receipt())
+        Ok(CompletionTombstoneRemovalReceipt {
+            terminal: authorization.terminal(),
+            transaction_id: authorization.transaction_id(),
+            reference: authorization.reference().clone(),
+        })
     }
 
     fn open_root(path: &Path) -> Result<File, CompletionTombstoneError> {

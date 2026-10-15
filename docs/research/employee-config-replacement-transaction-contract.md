@@ -289,10 +289,12 @@ reject replacement during the operation. After the provider-agnostic cleanup
 gate reaches `KeyDeletionConfirmed`, it can issue a non-serializable
 authorization for the Linux store to revalidate the exact
 transaction/reference, unlink that one final tombstone, and flush the namespace
-and root. Only the resulting exact removal receipt can advance the cleanup gate
-to `Complete`; missing or mismatched records fail closed. This does not implement a
-provider deletion backend, durable cleanup journal, workspace removal,
-operating-system key provider, crash-resume orchestration or real client writes.
+and root. The receipt has no production constructor outside the tombstone store;
+only the exact receipt returned after successful unlink and both flushes can
+advance the cleanup gate to `Complete`. Missing or mismatched records fail
+closed. This does not implement a provider deletion backend, durable cleanup
+journal, workspace removal, operating-system key provider, crash-resume
+orchestration or real client writes.
 The owner-private filesystem boundary is not authentication against another
 process running as the same user; the documented same-user race remains a
 blocker.
