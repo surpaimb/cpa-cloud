@@ -1266,7 +1266,10 @@ mod windows_impl {
             let original = fs::read(&final_path).unwrap();
 
             let stage_path = stage_path(&provider.store, transaction_id);
-            let mut stage = create_private_file(&stage_path).unwrap();
+            let mut stage = match create_private_file(&stage_path) {
+                Ok(stage) => stage,
+                Err(_) => panic!("synthetic stage creation failed"),
+            };
             stage.write_all(b"independent-stage-sentinel").unwrap();
             stage.sync_all().unwrap();
             assert!(publish_stage_no_replace(&provider.store, &stage, transaction_id).is_err());
@@ -1285,7 +1288,10 @@ mod windows_impl {
                 WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
             let (reference, _) = created(provider.create(transaction_id));
             let stage_path = stage_path(&provider.store, transaction_id);
-            let mut stage = create_private_file(&stage_path).unwrap();
+            let mut stage = match create_private_file(&stage_path) {
+                Ok(stage) => stage,
+                Err(_) => panic!("synthetic stage creation failed"),
+            };
             stage.write_all(b"ambiguous-stage").unwrap();
             stage.sync_all().unwrap();
             drop(stage);
