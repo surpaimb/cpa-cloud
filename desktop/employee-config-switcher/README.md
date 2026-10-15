@@ -22,6 +22,8 @@ connectors 也用于 MCP 工具与数据；两者都不是可替换 Claude 模�
 
 首版本地威胁模型信任同一登录系统账号下的进程；恶意同账号进程读取工具配置中的员工 Key、绕过 advisory lock 或主动竞态替换目录项明确不在首版范围。跨账号访问、意外并发修改、崩溃恢复与对象身份变化仍在范围内，必须保留 CAS/稳定路径与权限、兼容锁、原子替换、加密备份/回滚、OS Key provider 与 Key 生命周期，以及逐工具原生验收。这一范围选择不启用 `apply_configuration`，也不代表十个工具已可真实写入。
 
+Linux 合成根目录的加密备份格式现为 v3：AES-256-GCM 认证数据除目标身份、摘要、长度与权限外，还绑定唯一 replacement transaction ID、Key provider 类型/版本和 opaque reference 的 SHA-256 承诺；manifest 不保存 opaque reference 原文。重启加载没有公开的 raw-key 绕过路径：先验证持久 workspace、私有权限、绑定、目标身份和密文摘要，再对精确引用调用一次 provider `open`；解密前会从当前 root 路径重新打开完整命名链，并要求 root、备份目录、workspace、manifest、target 和 ciphertext 仍与先前持有对象身份相同。缺失、格式损坏、绑定/身份冲突及密文摘要不符等可在取 Key 前识别的状态保持零次 `open`；验证后的 rename/replace 竞态或 AEAD 认证失败会在一次 `open` 后阻断。Locked/Missing/WrongIdentity/Corrupt/Unavailable 均失败关闭，且不能退化到 `create` 或 `delete`。这仍未提供 Linux 生产 Key provider、替换发布或回滚写入。
+
 Linux 合成根目录的 completion tombstone 现在用同一稳定目录句柄和兼容 advisory lock 覆盖枚举、容量/重复校验、发布、逻辑删除与 inactive-proof 验证，并用确定性并发测试覆盖第 64 条边界及发布/删除竞态。这只是后续 artifact retirement 的并发安全前置条件；跨命名空间退休与真实配置替换仍未实现。
 
 Windows 合成根目录现在有一个独立的当前用户 DPAPI recovery-key provider。它使用无 UI、非 machine-scope 的 DPAPI，磁盘只保存带应用层完整性 envelope 的受保护 blob，provider reference 绑定 transaction 与 blob 摘要；owner-only protected DACL、稳定目录句柄、跨实例排他锁、create-only 发布、重启 reopen、删除和目录 flush 均失败关闭。Linux/macOS 在构造 provider 时明确返回 `UnsupportedPlatform`，没有环境变量、命令行、数据库、网络或明文文件回退。该 provider 尚未接入真实 replacement transaction，`apply_configuration` 仍保持失败关闭。

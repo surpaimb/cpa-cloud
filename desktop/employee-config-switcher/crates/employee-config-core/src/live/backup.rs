@@ -18,16 +18,20 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io;
 #[cfg(target_os = "linux")]
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use zeroize::Zeroizing;
+
+use super::recovery_key::{
+    RecoveryKeyBlocked, RecoveryKeyProvider, RecoveryKeyReference, ReplacementTransactionId,
+};
 
 // Keep rollback material outside the create-only engine namespace. That engine
 // treats every child of its transaction directory as one of its own journals.
 const BACKUP_DIRECTORY: &str = ".cpa-cloud-employee-config-backups";
 const BACKUP_FILE: &str = "rollback.aes256gcm";
 const MANIFEST_FILE: &str = "rollback.json";
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 const MAX_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 const NONCE_BYTES: usize = 12;
@@ -87,6 +91,10 @@ pub enum BackupError {
     CorruptManifest,
     #[error("encrypted rollback material failed authentication")]
     Authentication,
+    #[error("encrypted rollback material belongs to a different transaction or recovery key")]
+    BindingMismatch,
+    #[error("recovery key cannot be opened: {0}")]
+    RecoveryKey(#[from] RecoveryKeyBlocked),
     #[error("cryptographic operation failed")]
     Cryptography,
     #[error("filesystem operation failed for {path}: {source}")]
@@ -107,6 +115,10 @@ struct FileIdentity {
 #[serde(deny_unknown_fields)]
 struct BackupManifest {
     version: u32,
+    transaction_id: String,
+    recovery_key_provider_kind: String,
+    recovery_key_provider_version: u32,
+    recovery_key_reference_digest: String,
     target: String,
     root_identity: FileIdentity,
     target_identity: FileIdentity,
@@ -122,22 +134,53 @@ struct BackupManifest {
 pub fn prepare_encrypted_backup(
     root: &Path,
     target: &Path,
+    transaction_id: ReplacementTransactionId,
+    recovery_key_reference: &RecoveryKeyReference,
     key: &BackupKey,
 ) -> Result<BackupReceipt, BackupError> {
     validate_target(target)?;
-    platform::prepare(root, target, key)
+    platform::prepare(root, target, transaction_id, recovery_key_reference, key)
 }
 
 /// Reload encrypted rollback material using only durable state plus the
 /// caller-supplied recovery key. The target must still have the identity and
 /// digest captured before any future publication step.
-pub fn load_encrypted_backup(
+#[cfg(test)]
+fn load_encrypted_backup_with_key(
     root: &Path,
     workspace: &str,
+    transaction_id: ReplacementTransactionId,
+    recovery_key_reference: &RecoveryKeyReference,
     key: &BackupKey,
 ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
     validate_workspace(workspace)?;
-    platform::load(root, workspace, key)
+    platform::load(
+        root,
+        workspace,
+        transaction_id,
+        recovery_key_reference,
+        key,
+    )
+}
+
+/// Reloads rollback material after opening exactly the recovery key named by
+/// durable transaction state. This path never calls `create` or `delete` and
+/// maps every non-available provider outcome to a fail-closed error.
+pub fn load_encrypted_backup_with_provider<P: RecoveryKeyProvider + ?Sized>(
+    root: &Path,
+    workspace: &str,
+    transaction_id: ReplacementTransactionId,
+    recovery_key_reference: &RecoveryKeyReference,
+    provider: &mut P,
+) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+    validate_workspace(workspace)?;
+    platform::load_with_provider(
+        root,
+        workspace,
+        transaction_id,
+        recovery_key_reference,
+        provider,
+    )
 }
 
 fn validate_target(target: &Path) -> Result<&std::ffi::OsStr, BackupError> {
@@ -173,10 +216,33 @@ fn is_sha256_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn transaction_id_text(transaction_id: ReplacementTransactionId) -> String {
+    hex::encode(transaction_id.as_bytes())
+}
+
+fn reference_digest(reference: &RecoveryKeyReference) -> String {
+    digest(reference.opaque_reference())
+}
+
+fn manifest_binding_matches(
+    manifest: &BackupManifest,
+    transaction_id: ReplacementTransactionId,
+    recovery_key_reference: &RecoveryKeyReference,
+) -> bool {
+    manifest.transaction_id == transaction_id_text(transaction_id)
+        && manifest.recovery_key_provider_kind == recovery_key_reference.provider_kind()
+        && manifest.recovery_key_provider_version == recovery_key_reference.provider_version()
+        && manifest.recovery_key_reference_digest == reference_digest(recovery_key_reference)
+}
+
 fn associated_data(manifest: &BackupManifest) -> Vec<u8> {
     format!(
-        "cpa-cloud-employee-config-backup-v{}\n{}\n{}:{}\n{}:{}\n{:o}:{}:{}\n{}\n{}",
+        "cpa-cloud-employee-config-backup-v{}\n{}\n{}\n{}\n{}\n{}\n{}:{}\n{}:{}\n{:o}:{}:{}\n{}\n{}",
         manifest.version,
+        manifest.transaction_id,
+        manifest.recovery_key_provider_kind,
+        manifest.recovery_key_provider_version,
+        manifest.recovery_key_reference_digest,
         manifest.target,
         manifest.root_identity.volume,
         manifest.root_identity.file,
@@ -249,6 +315,7 @@ fn io_error(path: impl Into<PathBuf>, source: io::Error) -> BackupError {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
+    use crate::live::recovery_key::open_existing_recovery_key;
     use std::ffi::{CString, OsStr};
     use std::os::fd::{AsRawFd, FromRawFd, RawFd};
     use std::os::unix::ffi::OsStrExt;
@@ -257,6 +324,8 @@ mod platform {
     pub(super) fn prepare(
         root: &Path,
         target: &Path,
+        transaction_id: ReplacementTransactionId,
+        recovery_key_reference: &RecoveryKeyReference,
         key: &BackupKey,
     ) -> Result<BackupReceipt, BackupError> {
         let target_name = validate_target(target)?;
@@ -320,6 +389,10 @@ mod platform {
             .map_err(|_| BackupError::Cryptography)?;
         let mut manifest = BackupManifest {
             version: FORMAT_VERSION,
+            transaction_id: transaction_id_text(transaction_id),
+            recovery_key_provider_kind: recovery_key_reference.provider_kind().to_owned(),
+            recovery_key_provider_version: recovery_key_reference.provider_version(),
+            recovery_key_reference_digest: reference_digest(recovery_key_reference),
             target: target_text.to_owned(),
             root_identity,
             target_identity,
@@ -381,27 +454,156 @@ mod platform {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn load(
         root: &Path,
         workspace: &str,
+        transaction_id: ReplacementTransactionId,
+        recovery_key_reference: &RecoveryKeyReference,
         key: &BackupKey,
     ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+        validate_for_load(root, workspace, transaction_id, recovery_key_reference)?.finish(key)
+    }
+
+    pub(super) fn load_with_provider<P: RecoveryKeyProvider + ?Sized>(
+        root: &Path,
+        workspace: &str,
+        transaction_id: ReplacementTransactionId,
+        recovery_key_reference: &RecoveryKeyReference,
+        provider: &mut P,
+    ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+        let validated = validate_for_load(
+            root,
+            workspace,
+            transaction_id,
+            recovery_key_reference,
+        )?;
+        let key = open_existing_recovery_key(provider, transaction_id, recovery_key_reference)?;
+        validated.finish(&key)
+    }
+
+    struct ValidatedBackup {
+        root_path: PathBuf,
+        workspace_name: String,
+        transaction_path: PathBuf,
+        workspace_path: PathBuf,
+        manifest_path: PathBuf,
+        target_path: PathBuf,
+        backup_path: PathBuf,
+        root_dir: File,
+        transaction_dir: File,
+        workspace_dir: File,
+        manifest_file: File,
+        target_file: File,
+        backup_file: File,
+        manifest_bytes: Zeroizing<Vec<u8>>,
+        manifest: BackupManifest,
+    }
+
+    impl ValidatedBackup {
+        fn finish(self, key: &BackupKey) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+            let current_root = open_root(&self.root_path)
+                .map_err(|_| BackupError::RecoveryConflict(self.root_path.clone()))?;
+            require_same_identity(
+                &current_root,
+                &self.root_dir,
+                &self.root_path,
+            )?;
+            let current_transaction = open_private_dir_at(
+                current_root.as_raw_fd(),
+                OsStr::new(BACKUP_DIRECTORY),
+                self.transaction_path.clone(),
+            )
+            .map_err(|_| BackupError::RecoveryConflict(self.transaction_path.clone()))?;
+            require_same_identity(
+                &current_transaction,
+                &self.transaction_dir,
+                &self.transaction_path,
+            )?;
+            let current_workspace = open_private_dir_at(
+                current_transaction.as_raw_fd(),
+                OsStr::new(&self.workspace_name),
+                self.workspace_path.clone(),
+            )
+            .map_err(|_| BackupError::RecoveryConflict(self.workspace_path.clone()))?;
+            require_same_identity(
+                &current_workspace,
+                &self.workspace_dir,
+                &self.workspace_path,
+            )?;
+
+            let mut current_manifest = open_private_file_at(
+                current_workspace.as_raw_fd(),
+                OsStr::new(MANIFEST_FILE),
+                self.manifest_path.clone(),
+            )
+            .map_err(|_| BackupError::RecoveryConflict(self.manifest_path.clone()))?;
+            require_same_identity(
+                &current_manifest,
+                &self.manifest_file,
+                &self.manifest_path,
+            )?;
+            let current_manifest = read_bounded(
+                &mut current_manifest,
+                MAX_MANIFEST_BYTES,
+                &self.manifest_path,
+            )?;
+            if current_manifest != self.manifest_bytes {
+                return Err(BackupError::RecoveryConflict(self.manifest_path));
+            }
+            if identity(&current_root).map_err(|source| io_error(&self.root_path, source))?
+                != self.manifest.root_identity
+            {
+                return Err(BackupError::RecoveryConflict(self.root_path));
+            }
+            let target_leaf = PathBuf::from(&self.manifest.target);
+            let target_name = validate_target(&target_leaf)?;
+            let mut current_target = open_file_at(
+                current_root.as_raw_fd(),
+                target_name,
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0,
+            )
+            .map_err(|_| BackupError::RecoveryConflict(self.target_path.clone()))?;
+            require_same_identity(&current_target, &self.target_file, &self.target_path)?;
+            validate_target_file(&mut current_target, &self.manifest, &self.target_path)?;
+
+            let mut current_backup = open_private_file_at(
+                current_workspace.as_raw_fd(),
+                OsStr::new(BACKUP_FILE),
+                self.backup_path.clone(),
+            )
+            .map_err(|_| BackupError::RecoveryConflict(self.backup_path.clone()))?;
+            require_same_identity(&current_backup, &self.backup_file, &self.backup_path)?;
+            let ciphertext =
+                read_validated_ciphertext(&mut current_backup, &self.manifest, &self.backup_path)?;
+            verify_private_directory(&current_workspace, &self.workspace_path)?;
+            verify_private_directory(&current_transaction, &self.transaction_path)?;
+            decrypt(ciphertext, &self.manifest, key)
+        }
+    }
+
+    fn validate_for_load(
+        root: &Path,
+        workspace: &str,
+        transaction_id: ReplacementTransactionId,
+        recovery_key_reference: &RecoveryKeyReference,
+    ) -> Result<ValidatedBackup, BackupError> {
         validate_workspace(workspace)?;
         let root_dir = open_root(root)?;
+        let transaction_path = root.join(BACKUP_DIRECTORY);
         let transaction_dir = open_private_dir_at(
             root_dir.as_raw_fd(),
             OsStr::new(BACKUP_DIRECTORY),
-            root.join(BACKUP_DIRECTORY),
+            transaction_path.clone(),
         )?;
+        let workspace_path = transaction_path.join(workspace);
         let workspace_dir = open_private_dir_at(
             transaction_dir.as_raw_fd(),
             OsStr::new(workspace),
-            root.join(BACKUP_DIRECTORY).join(workspace),
+            workspace_path.clone(),
         )?;
-        let manifest_path = root
-            .join(BACKUP_DIRECTORY)
-            .join(workspace)
-            .join(MANIFEST_FILE);
+        let manifest_path = workspace_path.join(MANIFEST_FILE);
         let mut manifest_file = open_private_file_at(
             workspace_dir.as_raw_fd(),
             OsStr::new(MANIFEST_FILE),
@@ -411,51 +613,134 @@ mod platform {
         verify_private_regular_file(&manifest_file, &manifest_path)?;
         let manifest: BackupManifest =
             serde_json::from_slice(&manifest_bytes).map_err(|_| BackupError::CorruptManifest)?;
-        if manifest.version != FORMAT_VERSION
-            || manifest.original_len > MAX_TARGET_BYTES
-            || manifest.original_mode & 0o400 == 0
-            || manifest.original_mode & 0o077 != 0
-            || manifest.original_mode & 0o7000 != 0
-            || manifest.original_uid != unsafe { libc::geteuid() }
-            || !is_sha256_digest(&manifest.original_digest)
-            || !is_sha256_digest(&manifest.ciphertext_digest)
-        {
+        if !valid_manifest(&manifest) {
             return Err(BackupError::CorruptManifest);
+        }
+        if !manifest_binding_matches(&manifest, transaction_id, recovery_key_reference) {
+            return Err(BackupError::BindingMismatch);
         }
         if identity(&root_dir).map_err(|source| io_error(root, source))? != manifest.root_identity {
             return Err(BackupError::RecoveryConflict(root.to_path_buf()));
         }
-        let target_path = PathBuf::from(&manifest.target);
-        let target_name = validate_target(&target_path)?;
+        let target_leaf = PathBuf::from(&manifest.target);
+        let target_name = validate_target(&target_leaf)?;
+        let target_path = root.join(&target_leaf);
         let mut target_file = open_file_at(
             root_dir.as_raw_fd(),
             target_name,
             libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0,
         )
-        .map_err(|source| io_error(root.join(&target_path), source))?;
+        .map_err(|source| io_error(&target_path, source))?;
+        validate_target_file(&mut target_file, &manifest, &target_path)?;
+
+        let backup_path = workspace_path.join(BACKUP_FILE);
+        let mut backup_file = open_private_file_at(
+            workspace_dir.as_raw_fd(),
+            OsStr::new(BACKUP_FILE),
+            backup_path.clone(),
+        )?;
+        let _ciphertext =
+            read_validated_ciphertext(&mut backup_file, &manifest, &backup_path)?;
+        verify_private_directory(&workspace_dir, &workspace_path)?;
+        verify_private_directory(&transaction_dir, &transaction_path)?;
+
+        Ok(ValidatedBackup {
+            root_path: root.to_path_buf(),
+            workspace_name: workspace.to_owned(),
+            transaction_path,
+            workspace_path,
+            manifest_path,
+            target_path,
+            backup_path,
+            root_dir,
+            transaction_dir,
+            workspace_dir,
+            manifest_file,
+            target_file,
+            backup_file,
+            manifest_bytes,
+            manifest,
+        })
+    }
+
+    fn require_same_identity(
+        current: &File,
+        held: &File,
+        display: &Path,
+    ) -> Result<(), BackupError> {
+        let current_identity =
+            identity(current).map_err(|source| io_error(display, source))?;
+        let held_identity = identity(held).map_err(|source| io_error(display, source))?;
+        if current_identity != held_identity {
+            return Err(BackupError::RecoveryConflict(display.to_path_buf()));
+        }
+        Ok(())
+    }
+
+    fn valid_manifest(manifest: &BackupManifest) -> bool {
+        manifest.version == FORMAT_VERSION
+            && manifest.transaction_id.len() == 32
+            && manifest.transaction_id.bytes().all(|byte| {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            })
+            && !manifest.transaction_id.bytes().all(|byte| byte == b'0')
+            && !manifest.recovery_key_provider_kind.is_empty()
+            && manifest.recovery_key_provider_kind.len() <= 64
+            && manifest
+                .recovery_key_provider_kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            && manifest
+                .recovery_key_provider_kind
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && manifest
+                .recovery_key_provider_kind
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && manifest.recovery_key_provider_version != 0
+            && is_sha256_digest(&manifest.recovery_key_reference_digest)
+            && manifest.original_len <= MAX_TARGET_BYTES
+            && manifest.original_mode & 0o400 != 0
+            && manifest.original_mode & 0o077 == 0
+            && manifest.original_mode & 0o7000 == 0
+            && manifest.original_uid == unsafe { libc::geteuid() }
+            && is_sha256_digest(&manifest.original_digest)
+            && is_sha256_digest(&manifest.ciphertext_digest)
+    }
+
+    fn validate_target_file(
+        target_file: &mut File,
+        manifest: &BackupManifest,
+        target_path: &Path,
+    ) -> Result<(), BackupError> {
         let target_metadata = target_file
             .metadata()
-            .map_err(|source| io_error(root.join(&target_path), source))?;
+            .map_err(|source| io_error(target_path, source))?;
         if !target_metadata.is_file()
             || target_metadata.nlink() != 1
             || target_metadata.mode() & 0o7777 != manifest.original_mode
             || target_metadata.uid() != manifest.original_uid
             || target_metadata.gid() != manifest.original_gid
         {
-            return Err(BackupError::RecoveryConflict(root.join(&target_path)));
+            return Err(BackupError::RecoveryConflict(target_path.to_path_buf()));
         }
-        if identity(&target_file).map_err(|source| io_error(root.join(&target_path), source))?
+        if identity(target_file).map_err(|source| io_error(target_path, source))?
             != manifest.target_identity
         {
-            return Err(BackupError::RecoveryConflict(root.join(target_path)));
+            return Err(BackupError::RecoveryConflict(target_path.to_path_buf()));
         }
-        let target_bytes =
-            read_bounded(&mut target_file, MAX_TARGET_BYTES, root.join(&target_path))?;
+        target_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|source| io_error(target_path, source))?;
+        let target_bytes = read_bounded(target_file, MAX_TARGET_BYTES, target_path)?;
         let final_metadata = target_file
             .metadata()
-            .map_err(|source| io_error(root.join(&target_path), source))?;
-        if identity(&target_file).map_err(|source| io_error(root.join(&target_path), source))?
+            .map_err(|source| io_error(target_path, source))?;
+        if identity(target_file).map_err(|source| io_error(target_path, source))?
             != manifest.target_identity
             || final_metadata.nlink() != 1
             || final_metadata.mode() & 0o7777 != manifest.original_mode
@@ -463,31 +748,29 @@ mod platform {
             || final_metadata.gid() != manifest.original_gid
             || digest(&target_bytes) != manifest.original_digest
         {
-            return Err(BackupError::RecoveryConflict(root.join(target_path)));
+            return Err(BackupError::RecoveryConflict(target_path.to_path_buf()));
         }
+        Ok(())
+    }
 
-        let backup_path = root
-            .join(BACKUP_DIRECTORY)
-            .join(workspace)
-            .join(BACKUP_FILE);
-        let mut backup_file = open_private_file_at(
-            workspace_dir.as_raw_fd(),
-            OsStr::new(BACKUP_FILE),
-            backup_path.clone(),
-        )?;
+    fn read_validated_ciphertext(
+        backup_file: &mut File,
+        manifest: &BackupManifest,
+        backup_path: &Path,
+    ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+        backup_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|source| io_error(backup_path, source))?;
         let ciphertext = read_bounded(
-            &mut backup_file,
+            backup_file,
             MAX_TARGET_BYTES + aead::MAX_TAG_LEN,
-            &backup_path,
+            backup_path,
         )?;
-        verify_private_regular_file(&backup_file, &backup_path)?;
+        verify_private_regular_file(backup_file, backup_path)?;
         if digest(&ciphertext) != manifest.ciphertext_digest {
             return Err(BackupError::Authentication);
         }
-        let plaintext = decrypt(ciphertext, &manifest, key)?;
-        verify_private_directory(&workspace_dir, &root.join(BACKUP_DIRECTORY).join(workspace))?;
-        verify_private_directory(&transaction_dir, &root.join(BACKUP_DIRECTORY))?;
-        Ok(plaintext)
+        Ok(ciphertext)
     }
 
     fn open_root(path: &Path) -> Result<File, BackupError> {
@@ -742,15 +1025,30 @@ mod platform {
     pub(super) fn prepare(
         _root: &Path,
         _target: &Path,
+        _transaction_id: ReplacementTransactionId,
+        _recovery_key_reference: &RecoveryKeyReference,
         _key: &BackupKey,
     ) -> Result<BackupReceipt, BackupError> {
         Err(BackupError::UnsupportedPlatform)
     }
 
+    #[cfg(test)]
     pub(super) fn load(
         _root: &Path,
         _workspace: &str,
+        _transaction_id: ReplacementTransactionId,
+        _recovery_key_reference: &RecoveryKeyReference,
         _key: &BackupKey,
+    ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+        Err(BackupError::UnsupportedPlatform)
+    }
+
+    pub(super) fn load_with_provider<P: RecoveryKeyProvider + ?Sized>(
+        _root: &Path,
+        _workspace: &str,
+        _transaction_id: ReplacementTransactionId,
+        _recovery_key_reference: &RecoveryKeyReference,
+        _provider: &mut P,
     ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
         Err(BackupError::UnsupportedPlatform)
     }
@@ -759,10 +1057,148 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::live::recovery_key::{
+        RecoveryKeyCreateOutcome, RecoveryKeyDeleteOutcome, RecoveryKeyOpenOutcome,
+    };
     use std::fs;
 
     fn fixed_key(byte: u8) -> BackupKey {
         BackupKey::from_bytes(Zeroizing::new([byte; KEY_BYTES]))
+    }
+
+    fn fixed_transaction(byte: u8) -> ReplacementTransactionId {
+        ReplacementTransactionId::from_bytes([byte; 16]).unwrap()
+    }
+
+    fn fixed_reference(byte: u8) -> RecoveryKeyReference {
+        RecoveryKeyReference::new("synthetic-test", 1, vec![byte; 24]).unwrap()
+    }
+
+    fn prepare_test_backup(
+        root: &Path,
+        target: &Path,
+        key: &BackupKey,
+    ) -> Result<BackupReceipt, BackupError> {
+        prepare_encrypted_backup(
+            root,
+            target,
+            fixed_transaction(0x11),
+            &fixed_reference(0x22),
+            key,
+        )
+    }
+
+    fn load_test_backup(
+        root: &Path,
+        workspace: &str,
+        key: &BackupKey,
+    ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
+        load_encrypted_backup_with_key(
+            root,
+            workspace,
+            fixed_transaction(0x11),
+            &fixed_reference(0x22),
+            key,
+        )
+    }
+
+    struct RecordingProvider {
+        outcome: Option<RecoveryKeyOpenOutcome>,
+        create_calls: usize,
+        open_calls: usize,
+        delete_calls: usize,
+        opened_transaction: Option<ReplacementTransactionId>,
+        opened_reference: Option<RecoveryKeyReference>,
+    }
+
+    impl RecordingProvider {
+        fn new(outcome: RecoveryKeyOpenOutcome) -> Self {
+            Self {
+                outcome: Some(outcome),
+                create_calls: 0,
+                open_calls: 0,
+                delete_calls: 0,
+                opened_transaction: None,
+                opened_reference: None,
+            }
+        }
+    }
+
+    impl RecoveryKeyProvider for RecordingProvider {
+        fn create(
+            &mut self,
+            _transaction_id: ReplacementTransactionId,
+        ) -> RecoveryKeyCreateOutcome {
+            self.create_calls += 1;
+            RecoveryKeyCreateOutcome::Unavailable
+        }
+
+        fn open(
+            &mut self,
+            transaction_id: ReplacementTransactionId,
+            reference: &RecoveryKeyReference,
+        ) -> RecoveryKeyOpenOutcome {
+            self.open_calls += 1;
+            self.opened_transaction = Some(transaction_id);
+            self.opened_reference = Some(reference.clone());
+            self.outcome
+                .take()
+                .unwrap_or(RecoveryKeyOpenOutcome::Unavailable)
+        }
+
+        fn delete(
+            &mut self,
+            _transaction_id: ReplacementTransactionId,
+            _reference: &RecoveryKeyReference,
+        ) -> RecoveryKeyDeleteOutcome {
+            self.delete_calls += 1;
+            RecoveryKeyDeleteOutcome::Unavailable
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct ReplacingTargetProvider {
+        target: PathBuf,
+        moved: PathBuf,
+        expected_transaction: ReplacementTransactionId,
+        expected_reference: RecoveryKeyReference,
+        key_byte: u8,
+        create_calls: usize,
+        open_calls: usize,
+        delete_calls: usize,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl RecoveryKeyProvider for ReplacingTargetProvider {
+        fn create(
+            &mut self,
+            _transaction_id: ReplacementTransactionId,
+        ) -> RecoveryKeyCreateOutcome {
+            self.create_calls += 1;
+            RecoveryKeyCreateOutcome::Unavailable
+        }
+
+        fn open(
+            &mut self,
+            transaction_id: ReplacementTransactionId,
+            reference: &RecoveryKeyReference,
+        ) -> RecoveryKeyOpenOutcome {
+            self.open_calls += 1;
+            assert_eq!(transaction_id, self.expected_transaction);
+            assert_eq!(reference, &self.expected_reference);
+            fs::rename(&self.target, &self.moved).unwrap();
+            write_private(&self.target, b"external-edit-during-provider-open");
+            RecoveryKeyOpenOutcome::Available(fixed_key(self.key_byte))
+        }
+
+        fn delete(
+            &mut self,
+            _transaction_id: ReplacementTransactionId,
+            _reference: &RecoveryKeyReference,
+        ) -> RecoveryKeyDeleteOutcome {
+            self.delete_calls += 1;
+            RecoveryKeyDeleteOutcome::Unavailable
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -787,10 +1223,49 @@ mod tests {
     }
 
     #[test]
+    fn invalid_workspace_is_rejected_before_opening_a_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let mut provider = RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
+        assert!(matches!(
+            load_encrypted_backup_with_provider(
+                root.path(),
+                "not-a-workspace",
+                fixed_transaction(0x11),
+                &fixed_reference(0x22),
+                &mut provider,
+            ),
+            Err(BackupError::InvalidWorkspace)
+        ));
+        assert_eq!(provider.create_calls, 0);
+        assert_eq!(provider.open_calls, 0);
+        assert_eq!(provider.delete_calls, 0);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unsupported_platform_refuses_before_opening_a_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let mut provider = RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
+        assert!(matches!(
+            load_encrypted_backup_with_provider(
+                root.path(),
+                "backup-00000000000000000000000000000000",
+                fixed_transaction(0x11),
+                &fixed_reference(0x22),
+                &mut provider,
+            ),
+            Err(BackupError::UnsupportedPlatform)
+        ));
+        assert_eq!(provider.create_calls, 0);
+        assert_eq!(provider.open_calls, 0);
+        assert_eq!(provider.delete_calls, 0);
+    }
+
+    #[test]
     fn rejects_non_leaf_targets() {
         let root = tempfile::tempdir().unwrap();
         let error =
-            prepare_encrypted_backup(root.path(), Path::new("nested/config.json"), &fixed_key(1))
+            prepare_test_backup(root.path(), Path::new("nested/config.json"), &fixed_key(1))
                 .expect_err("nested paths remain outside this bounded slice");
         assert!(matches!(error, BackupError::InvalidTarget(_)));
     }
@@ -807,7 +1282,7 @@ mod tests {
         let root_path = stable_root(&root);
         let key = fixed_key(0x5a);
 
-        let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
+        let receipt = prepare_test_backup(&root_path, Path::new("config.json"), &key).unwrap();
         let workspace = root_path.join(BACKUP_DIRECTORY).join(&receipt.workspace);
         let backup = fs::read(workspace.join(BACKUP_FILE)).unwrap();
         let manifest = fs::read(workspace.join(MANIFEST_FILE)).unwrap();
@@ -846,8 +1321,448 @@ mod tests {
         let rendered = format!("{receipt:?}");
         assert!(!rendered.contains(&digest(original)));
 
-        let reloaded = load_encrypted_backup(&root_path, &receipt.workspace, &key).unwrap();
+        let reloaded = load_test_backup(&root_path, &receipt.workspace, &key).unwrap();
         assert_eq!(&*reloaded, original);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backup_is_bound_to_the_exact_transaction_and_recovery_key_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config.json");
+        let original = b"old-secret\nuser-setting=true\n";
+        write_private(&target, original);
+        let root_path = stable_root(&root);
+        let key = fixed_key(0x71);
+        let transaction_id = fixed_transaction(0x31);
+        let reference = RecoveryKeyReference::new(
+            "synthetic-test",
+            7,
+            b"opaque-reference-must-not-be-persisted".to_vec(),
+        )
+        .unwrap();
+
+        let receipt = prepare_encrypted_backup(
+            &root_path,
+            Path::new("config.json"),
+            transaction_id,
+            &reference,
+            &key,
+        )
+        .unwrap();
+        let manifest_path = root_path
+            .join(BACKUP_DIRECTORY)
+            .join(&receipt.workspace)
+            .join(MANIFEST_FILE);
+        let manifest_bytes = fs::read(&manifest_path).unwrap();
+        assert!(!manifest_bytes
+            .windows(reference.opaque_reference().len())
+            .any(|window| window == reference.opaque_reference()));
+
+        assert!(matches!(
+            load_encrypted_backup_with_key(
+                &root_path,
+                &receipt.workspace,
+                fixed_transaction(0x32),
+                &reference,
+                &key,
+            ),
+            Err(BackupError::BindingMismatch)
+        ));
+
+        let mismatched_references = [
+            RecoveryKeyReference::new(
+                "other-provider",
+                reference.provider_version(),
+                reference.opaque_reference().to_vec(),
+            )
+            .unwrap(),
+            RecoveryKeyReference::new(
+                reference.provider_kind(),
+                reference.provider_version() + 1,
+                reference.opaque_reference().to_vec(),
+            )
+            .unwrap(),
+            RecoveryKeyReference::new(
+                reference.provider_kind(),
+                reference.provider_version(),
+                b"different-opaque-reference".to_vec(),
+            )
+            .unwrap(),
+        ];
+        for mismatched_reference in &mismatched_references {
+            assert!(matches!(
+                load_encrypted_backup_with_key(
+                    &root_path,
+                    &receipt.workspace,
+                    transaction_id,
+                    mismatched_reference,
+                    &key,
+                ),
+                Err(BackupError::BindingMismatch)
+            ));
+        }
+        assert_eq!(fs::read(&target).unwrap(), original);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn authenticated_binding_rejects_manifest_rebinding() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config.json");
+        let original = b"old-secret";
+        write_private(&target, original);
+        let root_path = stable_root(&root);
+        let key = fixed_key(0x72);
+        let transaction_id = fixed_transaction(0x41);
+        let original_reference = fixed_reference(0x42);
+        let changed_reference = fixed_reference(0x43);
+        let receipt = prepare_encrypted_backup(
+            &root_path,
+            Path::new("config.json"),
+            transaction_id,
+            &original_reference,
+            &key,
+        )
+        .unwrap();
+        let manifest_path = root_path
+            .join(BACKUP_DIRECTORY)
+            .join(&receipt.workspace)
+            .join(MANIFEST_FILE);
+        let mut manifest: BackupManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.recovery_key_reference_digest = reference_digest(&changed_reference);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        assert!(matches!(
+            load_encrypted_backup_with_key(
+                &root_path,
+                &receipt.workspace,
+                transaction_id,
+                &changed_reference,
+                &key,
+            ),
+            Err(BackupError::Authentication)
+        ));
+        assert_eq!(fs::read(&target).unwrap(), original);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restart_load_opens_only_the_exact_existing_provider_key() {
+        let root = tempfile::tempdir().unwrap();
+        let original = b"old-secret";
+        write_private(&root.path().join("config.json"), original);
+        let root_path = stable_root(&root);
+        let key = fixed_key(0x51);
+        let transaction_id = fixed_transaction(0x52);
+        let reference = fixed_reference(0x53);
+        let receipt = prepare_encrypted_backup(
+            &root_path,
+            Path::new("config.json"),
+            transaction_id,
+            &reference,
+            &key,
+        )
+        .unwrap();
+        drop(key);
+
+        let mut provider =
+            RecordingProvider::new(RecoveryKeyOpenOutcome::Available(fixed_key(0x51)));
+        let reloaded = load_encrypted_backup_with_provider(
+            &root_path,
+            &receipt.workspace,
+            transaction_id,
+            &reference,
+            &mut provider,
+        )
+        .unwrap();
+        assert_eq!(&*reloaded, original);
+        assert_eq!(provider.create_calls, 0);
+        assert_eq!(provider.open_calls, 1);
+        assert_eq!(provider.delete_calls, 0);
+        assert_eq!(provider.opened_transaction, Some(transaction_id));
+        assert_eq!(provider.opened_reference.as_ref(), Some(&reference));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn target_replaced_during_provider_open_is_a_recovery_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = stable_root(&root);
+        let target = root_path.join("config.json");
+        let moved = root_path.join("original.json");
+        let original = b"old-secret";
+        write_private(&target, original);
+        let transaction_id = fixed_transaction(0x64);
+        let reference = fixed_reference(0x65);
+        let receipt = prepare_encrypted_backup(
+            &root_path,
+            Path::new("config.json"),
+            transaction_id,
+            &reference,
+            &fixed_key(0x66),
+        )
+        .unwrap();
+        let mut provider = ReplacingTargetProvider {
+            target: target.clone(),
+            moved: moved.clone(),
+            expected_transaction: transaction_id,
+            expected_reference: reference.clone(),
+            key_byte: 0x66,
+            create_calls: 0,
+            open_calls: 0,
+            delete_calls: 0,
+        };
+
+        assert!(matches!(
+            load_encrypted_backup_with_provider(
+                &root_path,
+                &receipt.workspace,
+                transaction_id,
+                &reference,
+                &mut provider,
+            ),
+            Err(BackupError::RecoveryConflict(path)) if path == target
+        ));
+        assert_eq!(provider.create_calls, 0);
+        assert_eq!(provider.open_calls, 1);
+        assert_eq!(provider.delete_calls, 0);
+        assert_eq!(fs::read(&target).unwrap(), b"external-edit-during-provider-open");
+        assert_eq!(fs::read(&moved).unwrap(), original);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_durable_state_is_rejected_before_provider_open() {
+        let transaction_id = fixed_transaction(0x54);
+        let reference = fixed_reference(0x55);
+
+        let missing_root = tempfile::tempdir().unwrap();
+        let mut missing_provider = RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
+        assert!(load_encrypted_backup_with_provider(
+            &stable_root(&missing_root),
+            "backup-00000000000000000000000000000000",
+            transaction_id,
+            &reference,
+            &mut missing_provider,
+        )
+        .is_err());
+        assert_eq!(missing_provider.open_calls, 0);
+
+        let corrupt_root = tempfile::tempdir().unwrap();
+        write_private(&corrupt_root.path().join("config.json"), b"old-secret");
+        let corrupt_root_path = stable_root(&corrupt_root);
+        let corrupt_receipt = prepare_encrypted_backup(
+            &corrupt_root_path,
+            Path::new("config.json"),
+            transaction_id,
+            &reference,
+            &fixed_key(0x56),
+        )
+        .unwrap();
+        fs::write(
+            corrupt_root_path
+                .join(BACKUP_DIRECTORY)
+                .join(&corrupt_receipt.workspace)
+                .join(MANIFEST_FILE),
+            b"not-json",
+        )
+        .unwrap();
+        let mut corrupt_provider = RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
+        assert!(matches!(
+            load_encrypted_backup_with_provider(
+                &corrupt_root_path,
+                &corrupt_receipt.workspace,
+                transaction_id,
+                &reference,
+                &mut corrupt_provider,
+            ),
+            Err(BackupError::CorruptManifest)
+        ));
+        assert_eq!(corrupt_provider.open_calls, 0);
+
+        let binding_root = tempfile::tempdir().unwrap();
+        write_private(&binding_root.path().join("config.json"), b"old-secret");
+        let binding_root_path = stable_root(&binding_root);
+        let binding_receipt = prepare_encrypted_backup(
+            &binding_root_path,
+            Path::new("config.json"),
+            transaction_id,
+            &reference,
+            &fixed_key(0x57),
+        )
+        .unwrap();
+        let mut binding_provider = RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
+        assert!(matches!(
+            load_encrypted_backup_with_provider(
+                &binding_root_path,
+                &binding_receipt.workspace,
+                fixed_transaction(0x58),
+                &reference,
+                &mut binding_provider,
+            ),
+            Err(BackupError::BindingMismatch)
+        ));
+        assert_eq!(binding_provider.open_calls, 0);
+
+        let ciphertext_root = tempfile::tempdir().unwrap();
+        write_private(
+            &ciphertext_root.path().join("config.json"),
+            b"old-secret",
+        );
+        let ciphertext_root_path = stable_root(&ciphertext_root);
+        let ciphertext_receipt = prepare_encrypted_backup(
+            &ciphertext_root_path,
+            Path::new("config.json"),
+            transaction_id,
+            &reference,
+            &fixed_key(0x58),
+        )
+        .unwrap();
+        let ciphertext_path = ciphertext_root_path
+            .join(BACKUP_DIRECTORY)
+            .join(&ciphertext_receipt.workspace)
+            .join(BACKUP_FILE);
+        let mut ciphertext_bytes = fs::read(&ciphertext_path).unwrap();
+        ciphertext_bytes[0] ^= 0x80;
+        fs::write(&ciphertext_path, ciphertext_bytes).unwrap();
+        let mut ciphertext_provider =
+            RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
+        assert!(matches!(
+            load_encrypted_backup_with_provider(
+                &ciphertext_root_path,
+                &ciphertext_receipt.workspace,
+                transaction_id,
+                &reference,
+                &mut ciphertext_provider,
+            ),
+            Err(BackupError::Authentication)
+        ));
+        assert_eq!(ciphertext_provider.open_calls, 0);
+
+        let root_identity_root = tempfile::tempdir().unwrap();
+        write_private(
+            &root_identity_root.path().join("config.json"),
+            b"old-secret",
+        );
+        let root_identity_path = stable_root(&root_identity_root);
+        let root_identity_receipt = prepare_encrypted_backup(
+            &root_identity_path,
+            Path::new("config.json"),
+            transaction_id,
+            &reference,
+            &fixed_key(0x58),
+        )
+        .unwrap();
+        let root_manifest_path = root_identity_path
+            .join(BACKUP_DIRECTORY)
+            .join(&root_identity_receipt.workspace)
+            .join(MANIFEST_FILE);
+        let mut root_manifest: BackupManifest =
+            serde_json::from_slice(&fs::read(&root_manifest_path).unwrap()).unwrap();
+        root_manifest.root_identity.file ^= 1;
+        fs::write(
+            &root_manifest_path,
+            serde_json::to_vec(&root_manifest).unwrap(),
+        )
+        .unwrap();
+        let mut root_identity_provider =
+            RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
+        assert!(matches!(
+            load_encrypted_backup_with_provider(
+                &root_identity_path,
+                &root_identity_receipt.workspace,
+                transaction_id,
+                &reference,
+                &mut root_identity_provider,
+            ),
+            Err(BackupError::RecoveryConflict(_))
+        ));
+        assert_eq!(root_identity_provider.open_calls, 0);
+
+        let identity_root = tempfile::tempdir().unwrap();
+        let identity_target = identity_root.path().join("config.json");
+        write_private(&identity_target, b"old-secret");
+        let identity_root_path = stable_root(&identity_root);
+        let identity_receipt = prepare_encrypted_backup(
+            &identity_root_path,
+            Path::new("config.json"),
+            transaction_id,
+            &reference,
+            &fixed_key(0x59),
+        )
+        .unwrap();
+        fs::rename(
+            &identity_target,
+            identity_root.path().join("original.json"),
+        )
+        .unwrap();
+        write_private(&identity_target, b"external-edit");
+        let mut identity_provider = RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
+        assert!(matches!(
+            load_encrypted_backup_with_provider(
+                &identity_root_path,
+                &identity_receipt.workspace,
+                transaction_id,
+                &reference,
+                &mut identity_provider,
+            ),
+            Err(BackupError::RecoveryConflict(_))
+        ));
+        assert_eq!(identity_provider.open_calls, 0);
+        assert_eq!(fs::read(identity_target).unwrap(), b"external-edit");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_unavailable_provider_outcome_blocks_without_create_or_delete() {
+        let root = tempfile::tempdir().unwrap();
+        let original = b"old-secret";
+        write_private(&root.path().join("config.json"), original);
+        let root_path = stable_root(&root);
+        let transaction_id = fixed_transaction(0x61);
+        let reference = fixed_reference(0x62);
+        let receipt = prepare_encrypted_backup(
+            &root_path,
+            Path::new("config.json"),
+            transaction_id,
+            &reference,
+            &fixed_key(0x63),
+        )
+        .unwrap();
+
+        let cases = [
+            (RecoveryKeyOpenOutcome::Locked, RecoveryKeyBlocked::Locked),
+            (RecoveryKeyOpenOutcome::Missing, RecoveryKeyBlocked::Missing),
+            (
+                RecoveryKeyOpenOutcome::WrongIdentity,
+                RecoveryKeyBlocked::WrongIdentity,
+            ),
+            (RecoveryKeyOpenOutcome::Corrupt, RecoveryKeyBlocked::Corrupt),
+            (
+                RecoveryKeyOpenOutcome::Unavailable,
+                RecoveryKeyBlocked::Unavailable,
+            ),
+        ];
+        for (outcome, expected) in cases {
+            let mut provider = RecordingProvider::new(outcome);
+            let error = load_encrypted_backup_with_provider(
+                &root_path,
+                &receipt.workspace,
+                transaction_id,
+                &reference,
+                &mut provider,
+            )
+            .expect_err("provider failure must block restart recovery");
+            assert!(matches!(error, BackupError::RecoveryKey(actual) if actual == expected));
+            assert_eq!(provider.create_calls, 0);
+            assert_eq!(provider.open_calls, 1);
+            assert_eq!(provider.delete_calls, 0);
+            assert_eq!(provider.opened_transaction, Some(transaction_id));
+            assert_eq!(provider.opened_reference.as_ref(), Some(&reference));
+            assert_eq!(fs::read(root.path().join("config.json")).unwrap(), original);
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -860,7 +1775,7 @@ mod tests {
         write_private(&root.path().join("config.json"), original);
         let root_path = stable_root(&root);
         let receipt =
-            prepare_encrypted_backup(&root_path, Path::new("config.json"), &fixed_key(0x33))
+            prepare_test_backup(&root_path, Path::new("config.json"), &fixed_key(0x33))
                 .unwrap();
         let workspace = receipt.workspace.clone();
         drop(receipt);
@@ -873,7 +1788,7 @@ mod tests {
         .unwrap();
         recover_create_only(root.path()).unwrap();
 
-        let reloaded = load_encrypted_backup(&root_path, &workspace, &fixed_key(0x33)).unwrap();
+        let reloaded = load_test_backup(&root_path, &workspace, &fixed_key(0x33)).unwrap();
         assert_eq!(&*reloaded, original);
         assert_eq!(
             fs::read(root.path().join("created.json")).unwrap(),
@@ -888,9 +1803,9 @@ mod tests {
         write_private(&root.path().join("config.json"), b"old-secret");
         let root_path = stable_root(&root);
         let receipt =
-            prepare_encrypted_backup(&root_path, Path::new("config.json"), &fixed_key(1)).unwrap();
+            prepare_test_backup(&root_path, Path::new("config.json"), &fixed_key(1)).unwrap();
         assert!(matches!(
-            load_encrypted_backup(&root_path, &receipt.workspace, &fixed_key(2)),
+            load_test_backup(&root_path, &receipt.workspace, &fixed_key(2)),
             Err(BackupError::Authentication)
         ));
 
@@ -902,7 +1817,7 @@ mod tests {
         bytes[0] ^= 0x80;
         fs::write(&backup_path, bytes).unwrap();
         assert!(matches!(
-            load_encrypted_backup(&root_path, &receipt.workspace, &fixed_key(1)),
+            load_test_backup(&root_path, &receipt.workspace, &fixed_key(1)),
             Err(BackupError::Authentication)
         ));
     }
@@ -915,11 +1830,11 @@ mod tests {
         write_private(&target, b"old-secret");
         let root_path = stable_root(&root);
         let key = fixed_key(3);
-        let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
+        let receipt = prepare_test_backup(&root_path, Path::new("config.json"), &key).unwrap();
         fs::rename(&target, root.path().join("moved.json")).unwrap();
         fs::write(&target, b"external-edit").unwrap();
         assert!(matches!(
-            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            load_test_backup(&root_path, &receipt.workspace, &key),
             Err(BackupError::RecoveryConflict(_))
         ));
         assert_eq!(fs::read(&target).unwrap(), b"external-edit");
@@ -937,7 +1852,7 @@ mod tests {
         let root_path = stable_root(&root);
 
         assert!(matches!(
-            prepare_encrypted_backup(&root_path, Path::new("config.json"), &fixed_key(8)),
+            prepare_test_backup(&root_path, Path::new("config.json"), &fixed_key(8)),
             Err(BackupError::UnsafePermissions(_))
         ));
         assert!(!root.path().join(BACKUP_DIRECTORY).exists());
@@ -953,11 +1868,11 @@ mod tests {
         write_private(&target, b"old-secret");
         let root_path = stable_root(&root);
         let key = fixed_key(9);
-        let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
+        let receipt = prepare_test_backup(&root_path, Path::new("config.json"), &key).unwrap();
 
         fs::set_permissions(&target, fs::Permissions::from_mode(0o400)).unwrap();
         assert!(matches!(
-            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            load_test_backup(&root_path, &receipt.workspace, &key),
             Err(BackupError::RecoveryConflict(_))
         ));
         assert_eq!(fs::read(&target).unwrap(), b"old-secret");
@@ -973,7 +1888,7 @@ mod tests {
         write_private(&target, b"old-secret");
         let root_path = stable_root(&root);
         let key = fixed_key(10);
-        let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
+        let receipt = prepare_test_backup(&root_path, Path::new("config.json"), &key).unwrap();
         let manifest_path = root_path
             .join(BACKUP_DIRECTORY)
             .join(&receipt.workspace)
@@ -985,7 +1900,7 @@ mod tests {
         fs::set_permissions(&target, fs::Permissions::from_mode(0o400)).unwrap();
 
         assert!(matches!(
-            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            load_test_backup(&root_path, &receipt.workspace, &key),
             Err(BackupError::Authentication)
         ));
         assert_eq!(fs::read(&target).unwrap(), b"old-secret");
@@ -1001,7 +1916,7 @@ mod tests {
         write_private(&target, b"old-secret");
         let root_path = stable_root(&root);
         let key = fixed_key(11);
-        let receipt = prepare_encrypted_backup(&root_path, Path::new("config.json"), &key).unwrap();
+        let receipt = prepare_test_backup(&root_path, Path::new("config.json"), &key).unwrap();
         let transaction_root = root_path.join(BACKUP_DIRECTORY);
         let workspace = transaction_root.join(&receipt.workspace);
         let backup = workspace.join(BACKUP_FILE);
@@ -1009,35 +1924,35 @@ mod tests {
 
         fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o750)).unwrap();
         assert!(matches!(
-            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            load_test_backup(&root_path, &receipt.workspace, &key),
             Err(BackupError::RecoveryConflict(_))
         ));
         fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o700)).unwrap();
 
         fs::set_permissions(&workspace, fs::Permissions::from_mode(0o750)).unwrap();
         assert!(matches!(
-            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            load_test_backup(&root_path, &receipt.workspace, &key),
             Err(BackupError::RecoveryConflict(_))
         ));
         fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700)).unwrap();
 
         fs::set_permissions(&backup, fs::Permissions::from_mode(0o640)).unwrap();
         assert!(matches!(
-            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            load_test_backup(&root_path, &receipt.workspace, &key),
             Err(BackupError::RecoveryConflict(_))
         ));
         fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).unwrap();
 
         fs::set_permissions(&manifest, fs::Permissions::from_mode(0o640)).unwrap();
         assert!(matches!(
-            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            load_test_backup(&root_path, &receipt.workspace, &key),
             Err(BackupError::RecoveryConflict(_))
         ));
         fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
 
         fs::hard_link(&manifest, workspace.join("manifest-link.json")).unwrap();
         assert!(matches!(
-            load_encrypted_backup(&root_path, &receipt.workspace, &key),
+            load_test_backup(&root_path, &receipt.workspace, &key),
             Err(BackupError::RecoveryConflict(_))
         ));
         assert_eq!(fs::read(&target).unwrap(), b"old-secret");
@@ -1053,7 +1968,7 @@ mod tests {
         symlink(outside.path(), root.path().join("config.json")).unwrap();
         let root_path = stable_root(&root);
         assert!(
-            prepare_encrypted_backup(&root_path, Path::new("config.json"), &fixed_key(4)).is_err()
+            prepare_test_backup(&root_path, Path::new("config.json"), &fixed_key(4)).is_err()
         );
     }
 
@@ -1072,7 +1987,7 @@ mod tests {
 
         let linked_root = parent_path.join("linked-parent").join("root");
         assert!(
-            prepare_encrypted_backup(&linked_root, Path::new("config.json"), &fixed_key(6))
+            prepare_test_backup(&linked_root, Path::new("config.json"), &fixed_key(6))
                 .is_err()
         );
         assert!(!real_root.join(BACKUP_DIRECTORY).exists());
@@ -1088,7 +2003,7 @@ mod tests {
         let root_path = stable_root(&root);
         let traversing_root = root_path.join("child").join("..");
         assert!(matches!(
-            prepare_encrypted_backup(&traversing_root, Path::new("config.json"), &fixed_key(7)),
+            prepare_test_backup(&traversing_root, Path::new("config.json"), &fixed_key(7)),
             Err(BackupError::InvalidRoot(_))
         ));
         assert!(!root.path().join(BACKUP_DIRECTORY).exists());
@@ -1113,7 +2028,7 @@ mod tests {
         assert!(status.success());
 
         assert!(matches!(
-            prepare_encrypted_backup(root.path(), Path::new("config.json"), &fixed_key(12)),
+            prepare_test_backup(root.path(), Path::new("config.json"), &fixed_key(12)),
             Err(BackupError::UnsupportedPlatform)
         ));
         assert!(!root.path().join(BACKUP_DIRECTORY).exists());
@@ -1125,7 +2040,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("config.json"), b"old-secret").unwrap();
         assert!(matches!(
-            prepare_encrypted_backup(root.path(), Path::new("config.json"), &fixed_key(5)),
+            prepare_test_backup(root.path(), Path::new("config.json"), &fixed_key(5)),
             Err(BackupError::UnsupportedPlatform)
         ));
     }

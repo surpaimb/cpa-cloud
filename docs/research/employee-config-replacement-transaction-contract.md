@@ -263,9 +263,12 @@ Review should approve these interfaces before publication code is added:
 
 ## Current implemented subset
 
-`live/backup.rs` remains a non-publishing Linux-only foundation. Format version 2
-authenticates the original owner UID, group GID and mode together with the root
-and target identities, digest and length. Preparation requires owner-read access
+`live/backup.rs` remains a non-publishing Linux-only foundation. Format version 3
+authenticates the exact nonzero transaction ID, recovery-key provider
+kind/version and SHA-256 commitment of its opaque reference together with the
+original owner UID, group GID and mode, root and target identities, digest and
+length. The raw opaque reference is not copied into the backup manifest.
+Preparation requires owner-read access
 and refuses group/world bits or special permission bits before creating backup
 material. Backup root/workspace directories are set and read back as exact
 owner-only `0700`; ciphertext and manifest files are set and read back as exact
@@ -273,17 +276,25 @@ owner-only, single-link `0600` objects. Reload rejects a target identity change
 or a backup-artifact type, link-count, permission or owner change without
 modifying the target; backup contents remain authenticated by digest and
 AES-GCM, but artifact inode identities are not persisted. The public receipt
-exposes no content digest. It still accepts
-only one UTF-8 leaf and a caller-supplied in-memory key; it does not implement a
+exposes no content digest. Preparation still accepts only one UTF-8 leaf and a
+caller-supplied in-memory key. Restart reload has no public raw-key bypass: it
+first validates the durable path, private metadata, manifest binding, root and
+target identities and ciphertext digest, then calls `RecoveryKeyProvider::open`
+once with the exact durable transaction/reference. It then reopens the current
+root-to-artifact namespace chain and requires the root, backup directory,
+workspace, manifest, target and ciphertext identities to match the held objects
+before decrypting. Every non-available provider outcome blocks without
+calling `create` or `delete`. The slice does not implement a production Linux
 key provider, desired stage, journal decision, publication, rollback, cleanup or
-Windows/macOS support. macOS returns `UnsupportedPlatform` before creating the
-backup directory, including for a private-mode target carrying an extended ACL.
+Windows/macOS backup support. macOS returns `UnsupportedPlatform` before
+creating the backup directory, including for a private-mode target carrying an
+extended ACL.
 
-Format version 2 is intentionally discontinuous in this development preview.
-Version 1 manifests fail closed and have no automatic migration; they contain no
-published target mutation and require operator removal or an explicitly reviewed
-offline inspection path. A future format change must define recovery before any
-new writer is enabled.
+Format version 3 is intentionally discontinuous in this development preview.
+Version 1 and version 2 manifests both fail closed and have no automatic
+migration; they contain no published target mutation and require operator
+removal or an explicitly reviewed offline inspection path. A future format
+change must define recovery before any new writer is enabled.
 
 `live/replacement.rs` now makes only the redacted event ordering executable in
 memory. It enforces the 16-target sorted unique UTF-8 leaf set with a 4 KiB

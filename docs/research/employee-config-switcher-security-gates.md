@@ -197,14 +197,17 @@ platform review gates are specified separately in the
 
 The next bounded synthetic-root slice prepares, but does not yet consume, a
 durable encrypted pre-image for one existing leaf file on Linux. Format version
-2 authenticates the original owner UID, group GID and private mode, requires
-owner-read access, and refuses group/world access or special permission bits
+3 authenticates the exact nonzero replacement transaction ID, recovery-key
+provider kind/version and SHA-256 commitment of the opaque provider reference,
+in addition to the original owner UID, group GID and private mode. The raw
+opaque reference is not copied into the backup manifest. The slice requires
+owner-read access and refuses group/world access or special permission bits
 before creating backup material.
 The caller
 supplies a 256-bit recovery key that remains in zeroizing memory; the slice uses
 AES-256-GCM with a fresh random nonce and binds the ciphertext to the root and
-target identities, target name, original digest, length and Linux security
-metadata. The ciphertext is
+target identities, target name, original digest, length, Linux security
+metadata and exact transaction/provider reference commitment. The ciphertext is
 flushed before a non-secret manifest is published last. Tests reload the
 pre-image using only durable state and the supplied key, scan the transaction
 workspace for the old employee-Key substring and recovery key, reject the wrong
@@ -213,6 +216,24 @@ overwriting the external edit. The encrypted-backup directory has a separate
 namespace from the create-only transaction engine; a restart/coexistence
 regression runs create-only recovery and publication while the durable backup
 remains reloadable.
+
+Restart loading can now receive the exact durable transaction ID and provider
+reference. It validates the durable workspace, private artifact metadata,
+manifest binding, root/target identities and ciphertext digest before calling
+only `RecoveryKeyProvider::open`, then reopens the current root, backup
+directory, workspace, manifest, target and ciphertext names and requires their
+identities to match the held objects before decrypting. There is no public
+raw-key restart loader and no create/delete
+fallback. Missing or corrupt durable state, binding/identity conflicts, and
+locked, missing, wrong-identity, corrupt or unavailable provider outcomes all
+block recovery. Synthetic provider tests prove invalid durable state performs
+zero provider opens, a successful restart performs one exact open and zero
+creates/deletes, and every blocked provider outcome also performs zero
+creates/deletes. The zero-open claim is limited to missing/malformed state,
+binding or identity conflicts, and ciphertext-digest mismatch detectable before
+key access; a post-validation rename/replace or AEAD authentication failure can
+block after one open. This is interface wiring, not acceptance of a production
+Linux key provider.
 
 On Linux, the synthetic root is opened by anchoring at `/` for absolute paths or
 `.` for relative paths, then opening every normal root-path component relative
@@ -235,8 +256,9 @@ extended ACL to a `0600` target and proves this fail-closed boundary.
 This remains a foundation, not a replacement transaction: no target is
 modified and the pre-image identity check cannot restore a target after future
 publication. No rollback is attempted. Orphan discovery/cleanup before the
-manifest, a durable decision and publish/verify/rollback journal, recovery-key
-custody, full ACL preservation, and Windows/macOS support remain open. The
+manifest, a durable decision and publish/verify/rollback journal, production
+Linux recovery-key custody, full ACL preservation, and Windows/macOS backup
+support remain open. The
 Tauri command and all real client writes therefore remain fail-closed.
 
 A separate pure in-memory replacement sequence gate now exercises the reviewed
