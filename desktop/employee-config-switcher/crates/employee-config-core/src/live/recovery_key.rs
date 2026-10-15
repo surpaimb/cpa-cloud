@@ -5,7 +5,7 @@
 //! `open` failure into key creation. Platform providers remain separately
 //! gated before any real replacement transaction can use this interface.
 
-use super::backup::BackupKey;
+use super::{backup::BackupKey, replacement::ReplacementPhase};
 
 const TRANSACTION_ID_BYTES: usize = 16;
 const MAX_PROVIDER_KIND_BYTES: usize = 64;
@@ -215,6 +215,134 @@ pub fn open_existing_recovery_key<P: RecoveryKeyProvider + ?Sized>(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryKeyCleanupPhase {
+    TerminalRecorded,
+    CompletionTombstoneDurable,
+    WorkspaceRemovalDurable,
+    KeyDeletionConfirmed,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub enum RecoveryKeyDeleteBlocked {
+    #[error("recovery-key provider is locked")]
+    Locked,
+    #[error("recovery key belongs to a different identity")]
+    WrongIdentity,
+    #[error("recovery-key metadata or protected value is corrupt")]
+    Corrupt,
+    #[error("recovery-key provider is unavailable")]
+    Unavailable,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RecoveryKeyCleanupError {
+    #[error("key cleanup requires a durable Complete or RolledBack decision")]
+    InvalidTerminal,
+    #[error("key-cleanup event is not valid in phase {0:?}")]
+    InvalidTransition(RecoveryKeyCleanupPhase),
+    #[error("key deletion is blocked: {0}")]
+    DeleteBlocked(RecoveryKeyDeleteBlocked),
+}
+
+/// Provider-agnostic ordering gate for terminal recovery-key cleanup.
+///
+/// The caller must durably perform and flush each named filesystem action
+/// before recording it here. This type does not serialize a tombstone, remove a
+/// workspace or flush a directory. It retains the exact transaction/reference
+/// pair and invokes provider deletion only after the caller records both a
+/// durable terminal decision and durable workspace removal.
+#[derive(Debug)]
+pub struct RecoveryKeyCleanupSequence {
+    phase: RecoveryKeyCleanupPhase,
+    terminal: ReplacementPhase,
+    transaction_id: ReplacementTransactionId,
+    reference: RecoveryKeyReference,
+}
+
+impl RecoveryKeyCleanupSequence {
+    pub fn after_durable_terminal(
+        terminal: ReplacementPhase,
+        transaction_id: ReplacementTransactionId,
+        reference: RecoveryKeyReference,
+    ) -> Result<Self, RecoveryKeyCleanupError> {
+        if !matches!(
+            terminal,
+            ReplacementPhase::Complete | ReplacementPhase::RolledBack
+        ) {
+            return Err(RecoveryKeyCleanupError::InvalidTerminal);
+        }
+        Ok(Self {
+            phase: RecoveryKeyCleanupPhase::TerminalRecorded,
+            terminal,
+            transaction_id,
+            reference,
+        })
+    }
+
+    pub fn phase(&self) -> RecoveryKeyCleanupPhase {
+        self.phase
+    }
+
+    pub fn terminal(&self) -> ReplacementPhase {
+        self.terminal
+    }
+
+    pub fn record_completion_tombstone_durable(&mut self) -> Result<(), RecoveryKeyCleanupError> {
+        self.require_phase(RecoveryKeyCleanupPhase::TerminalRecorded)?;
+        self.phase = RecoveryKeyCleanupPhase::CompletionTombstoneDurable;
+        Ok(())
+    }
+
+    pub fn record_workspace_removal_durable(&mut self) -> Result<(), RecoveryKeyCleanupError> {
+        self.require_phase(RecoveryKeyCleanupPhase::CompletionTombstoneDurable)?;
+        self.phase = RecoveryKeyCleanupPhase::WorkspaceRemovalDurable;
+        Ok(())
+    }
+
+    pub fn delete_key<P: RecoveryKeyProvider + ?Sized>(
+        &mut self,
+        provider: &mut P,
+    ) -> Result<(), RecoveryKeyCleanupError> {
+        self.require_phase(RecoveryKeyCleanupPhase::WorkspaceRemovalDurable)?;
+        match provider.delete(self.transaction_id, &self.reference) {
+            RecoveryKeyDeleteOutcome::Deleted | RecoveryKeyDeleteOutcome::Missing => {
+                self.phase = RecoveryKeyCleanupPhase::KeyDeletionConfirmed;
+                Ok(())
+            }
+            RecoveryKeyDeleteOutcome::Locked => Err(RecoveryKeyCleanupError::DeleteBlocked(
+                RecoveryKeyDeleteBlocked::Locked,
+            )),
+            RecoveryKeyDeleteOutcome::WrongIdentity => Err(RecoveryKeyCleanupError::DeleteBlocked(
+                RecoveryKeyDeleteBlocked::WrongIdentity,
+            )),
+            RecoveryKeyDeleteOutcome::Corrupt => Err(RecoveryKeyCleanupError::DeleteBlocked(
+                RecoveryKeyDeleteBlocked::Corrupt,
+            )),
+            RecoveryKeyDeleteOutcome::Unavailable => Err(RecoveryKeyCleanupError::DeleteBlocked(
+                RecoveryKeyDeleteBlocked::Unavailable,
+            )),
+        }
+    }
+
+    pub fn record_completion_tombstone_removal_durable(
+        &mut self,
+    ) -> Result<(), RecoveryKeyCleanupError> {
+        self.require_phase(RecoveryKeyCleanupPhase::KeyDeletionConfirmed)?;
+        self.phase = RecoveryKeyCleanupPhase::Complete;
+        Ok(())
+    }
+
+    fn require_phase(&self, phase: RecoveryKeyCleanupPhase) -> Result<(), RecoveryKeyCleanupError> {
+        if self.phase == phase {
+            Ok(())
+        } else {
+            Err(RecoveryKeyCleanupError::InvalidTransition(self.phase))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +352,7 @@ mod tests {
         open_calls: usize,
         delete_calls: usize,
         next_open: Option<RecoveryKeyOpenOutcome>,
+        next_delete: Option<RecoveryKeyDeleteOutcome>,
     }
 
     impl FakeProvider {
@@ -233,6 +362,17 @@ mod tests {
                 open_calls: 0,
                 delete_calls: 0,
                 next_open: Some(outcome),
+                next_delete: Some(RecoveryKeyDeleteOutcome::Unavailable),
+            }
+        }
+
+        fn deleting(outcome: RecoveryKeyDeleteOutcome) -> Self {
+            Self {
+                create_calls: 0,
+                open_calls: 0,
+                delete_calls: 0,
+                next_open: Some(RecoveryKeyOpenOutcome::Unavailable),
+                next_delete: Some(outcome),
             }
         }
     }
@@ -261,7 +401,7 @@ mod tests {
             _reference: &RecoveryKeyReference,
         ) -> RecoveryKeyDeleteOutcome {
             self.delete_calls += 1;
-            RecoveryKeyDeleteOutcome::Unavailable
+            self.next_delete.take().unwrap()
         }
     }
 
@@ -271,6 +411,18 @@ mod tests {
 
     fn reference() -> RecoveryKeyReference {
         RecoveryKeyReference::new("test-provider", 1, b"opaque-sentinel".to_vec()).unwrap()
+    }
+
+    fn cleanup_ready_for_key_deletion() -> RecoveryKeyCleanupSequence {
+        let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(
+            ReplacementPhase::RolledBack,
+            transaction_id(),
+            reference(),
+        )
+        .unwrap();
+        cleanup.record_completion_tombstone_durable().unwrap();
+        cleanup.record_workspace_removal_durable().unwrap();
+        cleanup
     }
 
     #[test]
@@ -371,5 +523,126 @@ mod tests {
         assert!(rendered.contains("test-provider"));
         assert!(!rendered.contains("opaque-sentinel"));
         assert_eq!(reference.opaque_reference(), b"opaque-sentinel");
+    }
+
+    #[test]
+    fn cleanup_never_deletes_a_key_before_tombstone_and_workspace_durability() {
+        assert!(matches!(
+            RecoveryKeyCleanupSequence::after_durable_terminal(
+                ReplacementPhase::CommitPrepared,
+                transaction_id(),
+                reference()
+            ),
+            Err(RecoveryKeyCleanupError::InvalidTerminal)
+        ));
+
+        let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(
+            ReplacementPhase::Complete,
+            transaction_id(),
+            reference(),
+        )
+        .unwrap();
+        let mut provider = FakeProvider::deleting(RecoveryKeyDeleteOutcome::Deleted);
+
+        assert!(matches!(
+            cleanup.delete_key(&mut provider),
+            Err(RecoveryKeyCleanupError::InvalidTransition(
+                RecoveryKeyCleanupPhase::TerminalRecorded
+            ))
+        ));
+        assert_eq!(provider.delete_calls, 0);
+
+        cleanup.record_completion_tombstone_durable().unwrap();
+        assert!(matches!(
+            cleanup.delete_key(&mut provider),
+            Err(RecoveryKeyCleanupError::InvalidTransition(
+                RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+            ))
+        ));
+        assert_eq!(provider.delete_calls, 0);
+
+        cleanup.record_workspace_removal_durable().unwrap();
+        cleanup.delete_key(&mut provider).unwrap();
+        assert_eq!(provider.delete_calls, 1);
+        assert_eq!(
+            cleanup.phase(),
+            RecoveryKeyCleanupPhase::KeyDeletionConfirmed
+        );
+
+        cleanup
+            .record_completion_tombstone_removal_durable()
+            .unwrap();
+        assert_eq!(cleanup.phase(), RecoveryKeyCleanupPhase::Complete);
+        assert!(matches!(
+            cleanup.record_completion_tombstone_removal_durable(),
+            Err(RecoveryKeyCleanupError::InvalidTransition(
+                RecoveryKeyCleanupPhase::Complete
+            ))
+        ));
+    }
+
+    #[test]
+    fn blocked_key_deletion_preserves_the_tombstone_for_retry() {
+        let mut cleanup = cleanup_ready_for_key_deletion();
+        let mut provider = FakeProvider::deleting(RecoveryKeyDeleteOutcome::Locked);
+
+        assert_eq!(
+            cleanup.delete_key(&mut provider).unwrap_err(),
+            RecoveryKeyCleanupError::DeleteBlocked(RecoveryKeyDeleteBlocked::Locked)
+        );
+        assert_eq!(
+            cleanup.phase(),
+            RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
+        );
+        assert!(matches!(
+            cleanup.record_completion_tombstone_removal_durable(),
+            Err(RecoveryKeyCleanupError::InvalidTransition(
+                RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
+            ))
+        ));
+
+        provider.next_delete = Some(RecoveryKeyDeleteOutcome::Missing);
+        cleanup.delete_key(&mut provider).unwrap();
+        cleanup
+            .record_completion_tombstone_removal_durable()
+            .unwrap();
+        assert_eq!(cleanup.phase(), RecoveryKeyCleanupPhase::Complete);
+        assert_eq!(provider.delete_calls, 2);
+    }
+
+    #[test]
+    fn every_blocking_delete_outcome_keeps_cleanup_retryable() {
+        let cases = [
+            (
+                RecoveryKeyDeleteOutcome::Locked,
+                RecoveryKeyDeleteBlocked::Locked,
+            ),
+            (
+                RecoveryKeyDeleteOutcome::WrongIdentity,
+                RecoveryKeyDeleteBlocked::WrongIdentity,
+            ),
+            (
+                RecoveryKeyDeleteOutcome::Corrupt,
+                RecoveryKeyDeleteBlocked::Corrupt,
+            ),
+            (
+                RecoveryKeyDeleteOutcome::Unavailable,
+                RecoveryKeyDeleteBlocked::Unavailable,
+            ),
+        ];
+
+        for (outcome, expected) in cases {
+            let mut cleanup = cleanup_ready_for_key_deletion();
+            let mut provider = FakeProvider::deleting(outcome);
+            assert_eq!(
+                cleanup.delete_key(&mut provider).unwrap_err(),
+                RecoveryKeyCleanupError::DeleteBlocked(expected)
+            );
+            assert_eq!(
+                cleanup.phase(),
+                RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
+            );
+            assert_eq!(provider.delete_calls, 1);
+        }
     }
 }

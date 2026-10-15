@@ -264,6 +264,19 @@ has no create or delete path, so a failed open cannot silently generate a new
 key or remove evidence. Provider references and key material are redacted from
 `Debug`. No DPAPI, Keychain, Secret Service, filesystem, environment-variable
 or network provider is implemented, and no durable journal calls this interface.
+The trait boundary cannot prove that a future provider's own `open`
+implementation does not mint or replace a key; fixed native restart and
+identity-binding tests remain mandatory.
+
+The same module includes a provider-agnostic terminal-cleanup ordering gate. It
+accepts only an already durable `Complete` or `RolledBack` decision, requires
+the completion tombstone before workspace removal, refuses to call provider
+deletion before both are recorded durable, and permits tombstone removal only
+after deletion is confirmed as `deleted` or already `missing`. Locked,
+wrong-identity, corrupt or unavailable deletion leaves the tombstone phase
+retryable. The caller assertions do not prove filesystem durability, and no
+tombstone encoding, directory flush, provider deletion implementation or crash
+recovery is present.
 
 ## Public platform references
 

@@ -221,7 +221,19 @@ outcomes, and an open-existing helper that can only return an available
 zeroizing key or one of the five blocking recovery results. Tests prove that a
 missing key invokes neither create nor delete and that keys and opaque provider
 references stay out of `Debug`. No operating-system key provider is present;
-headless Linux and all real key custody therefore remain unsupported.
+headless Linux and all real key custody therefore remain unsupported. A future
+provider's `open` implementation must still prove by fixed native restart tests
+that it cannot mint or replace a missing key and that temporary plaintext
+buffers are cleared.
+
+A provider-agnostic cleanup sequence gate now also refuses provider deletion
+until a terminal decision, completion tombstone, and workspace removal have
+each been recorded durable in that order. It retains the exact
+transaction/reference pair, treats
+`deleted` and already-`missing` as idempotent completion, preserves the tombstone
+phase on every blocking deletion outcome, and permits tombstone removal last.
+It performs none of those filesystem operations itself and cannot prove flush,
+crash-recovery or provider-side deletion behavior.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret
