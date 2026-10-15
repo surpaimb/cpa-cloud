@@ -128,11 +128,15 @@ Planned platform providers are gated separately:
   its owner-private reconciliation-lock directory. The private lock file
   durably stores a magic/versioned checksummed record binding UID, lock
   device/inode and a random seed; those same fields derive
-  the provider namespace carried by lookup attributes,
-  references and envelopes, so corruption or a copied record fails closed and two independently approved roots cannot share a
-  search namespace without sharing a lock. It serializes create under the
-  namespace's cross-process `flock`, always calls `CreateItem` with
-  `replace=false`, returns the same authenticated key/reference on retry, and
+  the provider namespace carried by lookup attributes, references and
+  envelopes, so corruption or a copied record fails closed and two
+  independently approved roots cannot share a search namespace without sharing
+  a lock. It serializes create under the
+  namespace's cross-process `flock`. Only explicit one-time fresh provisioning
+  may create the record with create-exclusive; normal restart requires the
+  existing complete record and refuses missing, empty or truncated state. It
+  always calls `CreateItem` with `replace=false`, returns the same authenticated
+  key/reference on retry, and
   refuses duplicate matches. It never invokes Unlock or Prompt; locked items or
   prompt requirements are explicit `locked` states. A fixed isolated native
   keyring restart/lock/delete fixture and encrypted transfer session remain

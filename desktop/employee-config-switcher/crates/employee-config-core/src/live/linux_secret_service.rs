@@ -86,17 +86,23 @@ pub(crate) enum LinuxSecretServiceProviderError {
 }
 
 /// Opaque proof that an isolated owner-private lock directory was explicitly
-/// approved. Production code has no constructor for this value.
+/// approved. Production code has no constructor for this value, and tests must
+/// distinguish one-time fresh provisioning from normal fail-closed reopen.
 pub(crate) struct SyntheticSecretServiceApproval {
     directory: File,
     display: PathBuf,
     uid: u32,
+    allow_initialization: bool,
 }
 
 #[cfg(test)]
 impl SyntheticSecretServiceApproval {
     fn for_test(path: &Path) -> Result<Self, LinuxSecretServiceProviderError> {
-        open_approved_directory(path)
+        open_approved_directory(path, false)
+    }
+
+    fn for_test_fresh(path: &Path) -> Result<Self, LinuxSecretServiceProviderError> {
+        open_approved_directory(path, true)
     }
 }
 
@@ -687,24 +693,36 @@ impl ReconciliationLock {
         approval: SyntheticSecretServiceApproval,
     ) -> Result<Self, LinuxSecretServiceProviderError> {
         let name = CString::new(LOCK_FILE).expect("fixed lock name has no NUL");
+        let flags = if approval.allow_initialization {
+            libc::O_RDWR
+                | libc::O_CREAT
+                | libc::O_EXCL
+                | libc::O_CLOEXEC
+                | libc::O_NOFOLLOW
+        } else {
+            libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW
+        };
         let fd = unsafe {
             libc::openat(
                 approval.directory.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                flags,
                 0o600,
             )
         };
         if fd < 0 {
-            return Err(LinuxSecretServiceProviderError::Io {
-                path: approval.display.join(LOCK_FILE),
-                source: io::Error::last_os_error(),
-            });
+            return Err(LinuxSecretServiceProviderError::UnsafeLock(
+                approval.display.join(LOCK_FILE),
+            ));
         }
         let mut file = unsafe { File::from_raw_fd(fd) };
         verify_private_regular_file(&file, approval.uid, &approval.display.join(LOCK_FILE))?;
-        let seed =
-            initialize_lock_namespace(&mut file, approval.uid, &approval.display.join(LOCK_FILE))?;
+        let seed = initialize_lock_namespace(
+            &mut file,
+            approval.uid,
+            approval.allow_initialization,
+            &approval.display.join(LOCK_FILE),
+        )?;
         let namespace =
             derive_lock_namespace(&file, approval.uid, seed, &approval.display.join(LOCK_FILE))?;
         approval
@@ -815,6 +833,7 @@ fn derive_lock_namespace(
 fn initialize_lock_namespace(
     file: &mut File,
     uid: u32,
+    allow_initialization: bool,
     path: &Path,
 ) -> Result<[u8; LOCK_SEED_BYTES], LinuxSecretServiceProviderError> {
     loop {
@@ -838,7 +857,7 @@ fn initialize_lock_namespace(
             })?
             .len();
         match length {
-            0 => {
+            0 if allow_initialization => {
                 let mut seed = [0_u8; LOCK_SEED_BYTES];
                 SystemRandom::new().fill(&mut seed).map_err(|_| {
                     LinuxSecretServiceProviderError::Setup("lock namespace generation failed")
@@ -942,6 +961,7 @@ fn read_lock_seed(
 
 fn open_approved_directory(
     path: &Path,
+    allow_initialization: bool,
 ) -> Result<SyntheticSecretServiceApproval, LinuxSecretServiceProviderError> {
     let c_path = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| LinuxSecretServiceProviderError::InvalidLockRoot(path.to_path_buf()))?;
@@ -964,6 +984,7 @@ fn open_approved_directory(
         directory,
         display: path.to_path_buf(),
         uid,
+        allow_initialization,
     })
 }
 
@@ -1313,6 +1334,8 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, SyntheticSecretServiceApproval) {
         let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let fresh = SyntheticSecretServiceApproval::for_test_fresh(root.path()).unwrap();
+        drop(ReconciliationLock::open(fresh).unwrap());
         let approval = SyntheticSecretServiceApproval::for_test(root.path()).unwrap();
         (root, approval)
     }
@@ -1387,6 +1410,37 @@ mod tests {
         let state = shared.state.lock().unwrap();
         assert_eq!(state.creates, 1);
         assert_eq!(state.items.len(), 1);
+    }
+
+    #[test]
+    fn unknown_post_publish_never_reprovisions_a_missing_or_empty_lock_record() {
+        for truncate in [false, true] {
+            let (root, approval) = fixture();
+            let backend = FakeBackend::default();
+            backend.fault(Fault::CreatePublishedThenUnavailable);
+            let mut provider = ContractProvider::new(
+                backend.clone(),
+                ReconciliationLock::open(approval).unwrap(),
+            );
+            assert!(matches!(
+                provider.create(transaction(if truncate { 0x24 } else { 0x23 })),
+                RecoveryKeyCreateOutcome::Unavailable
+            ));
+            assert_eq!(backend.state.lock().unwrap().creates, 1);
+            drop(provider);
+            if truncate {
+                fs::write(root.path().join(LOCK_FILE), b"").unwrap();
+            } else {
+                fs::remove_file(root.path().join(LOCK_FILE)).unwrap();
+            }
+            let restart_approval =
+                SyntheticSecretServiceApproval::for_test(root.path()).unwrap();
+            assert!(matches!(
+                ReconciliationLock::open(restart_approval),
+                Err(LinuxSecretServiceProviderError::UnsafeLock(_))
+            ));
+            assert_eq!(backend.state.lock().unwrap().creates, 1);
+        }
     }
 
     #[test]
@@ -1605,7 +1659,7 @@ mod tests {
         ));
 
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let approval = SyntheticSecretServiceApproval::for_test(root.path()).unwrap();
+        let approval = SyntheticSecretServiceApproval::for_test_fresh(root.path()).unwrap();
         let lock = ReconciliationLock::open(approval).unwrap();
         fs::set_permissions(
             root.path().join(LOCK_FILE),
@@ -1671,8 +1725,11 @@ mod tests {
         )
         .unwrap();
         let replacement_approval = SyntheticSecretServiceApproval::for_test(root.path()).unwrap();
-        let replacement = ReconciliationLock::open(replacement_approval).unwrap();
-        assert_ne!(replacement.namespace, original_namespace);
+        assert!(matches!(
+            ReconciliationLock::open(replacement_approval),
+            Err(LinuxSecretServiceProviderError::UnsafeLock(_))
+        ));
+        assert_ne!(original_namespace, [0_u8; LOCK_NAMESPACE_BYTES]);
         assert!(matches!(
             original.exclusive(),
             Err(LinuxSecretServiceProviderError::UnsafeLock(_))

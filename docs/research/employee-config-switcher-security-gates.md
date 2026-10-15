@@ -344,11 +344,14 @@ production constructor and holds an already-open owner-private directory used
 for a descriptor-relative, single-link `0600` reconciliation lock. That lock
 file durably holds a magic/versioned checksummed record binding a random seed,
 UID and the lock device/inode; the same fields derive the provider-namespace
-identity, while corruption or copying the record to another inode fails closed. Different approved roots
-therefore cannot share one Secret Service search namespace without also
-sharing one lock. Every operation acquires the held inode and then reopens the
-directory entry no-follow to require the same device/inode, private metadata
-and namespace bytes, so lock-entry replacement fails closed. Stable non-secret lookup attributes bind application,
+identity, while corruption or copying the record to another inode fails closed.
+Different approved roots therefore cannot share one Secret Service search namespace without also
+sharing one lock. Explicit one-time fresh provisioning alone may create the
+record with create-exclusive; normal reopen refuses missing, empty or truncated
+records instead of minting a new namespace. Every operation acquires the held
+inode and then reopens the directory entry no-follow to require the same
+device/inode, private metadata and namespace bytes, so lock-entry replacement
+fails closed. Stable non-secret lookup attributes bind application,
 purpose, format, transaction, effective UID, lock namespace and random item ID;
 checksummed reference and secret envelopes repeat the identity. Create is serialized across processes, uses
 `CreateItem(replace=false)`, reconciles a prior exact item and refuses
