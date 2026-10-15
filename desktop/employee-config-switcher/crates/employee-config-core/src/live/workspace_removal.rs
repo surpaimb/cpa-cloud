@@ -6,6 +6,8 @@
 //! transaction directory and synthetic root are flushed. An interrupted
 //! pending proof blocks recovery; absence alone is never treated as success.
 
+#[cfg(test)]
+use super::recovery_key::WorkspaceRemovalTarget;
 use super::{
     recovery_key::{
         valid_workspace_name, RecoveryKeyReference, ReplacementTransactionId,
@@ -13,8 +15,6 @@ use super::{
     },
     replacement::ReplacementPhase,
 };
-#[cfg(test)]
-use super::recovery_key::WorkspaceRemovalTarget;
 #[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1270,10 +1270,8 @@ mod tests {
             return;
         }
         let root = tempfile::tempdir().unwrap();
-        let authorization = authorization(
-            0x25,
-            WorkspaceRemovalTarget::for_test("tx-1-26-0", 1, 1),
-        );
+        let authorization =
+            authorization(0x25, WorkspaceRemovalTarget::for_test("tx-1-26-0", 1, 1));
         assert!(matches!(
             remove_workspace(root.path(), &authorization, Path::new("workspace")),
             Err(WorkspaceRemovalError::UnsupportedPlatform)
