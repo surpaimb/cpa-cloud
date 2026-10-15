@@ -572,9 +572,7 @@ mod tests {
         cleanup.record_completion_tombstone_durable().unwrap();
         let authorization = cleanup.authorize_workspace_removal().unwrap();
         let receipt = WorkspaceRemovalReceipt::for_test(&authorization);
-        cleanup
-            .record_workspace_removal_durable(&receipt)
-            .unwrap();
+        cleanup.record_workspace_removal_durable(&receipt).unwrap();
         cleanup
     }
 

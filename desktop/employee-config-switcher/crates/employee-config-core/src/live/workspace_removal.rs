@@ -7,14 +7,16 @@
 //! pending proof blocks recovery; absence alone is never treated as success.
 
 use super::{
-    recovery_key::{
-        RecoveryKeyReference, ReplacementTransactionId, WorkspaceRemovalAuthorization,
-    },
+    recovery_key::{RecoveryKeyReference, ReplacementTransactionId, WorkspaceRemovalAuthorization},
     replacement::ReplacementPhase,
 };
 #[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
-use std::{fs::File, io, path::{Component, Path, PathBuf}};
+use std::{
+    fs::File,
+    io,
+    path::{Component, Path, PathBuf},
+};
 
 const TRANSACTION_DIRECTORY: &str = ".cpa-cloud-employee-config-transactions";
 const TRANSACTION_LOCK: &str = ".cpa-cloud-employee-config.lock";
@@ -195,7 +197,9 @@ mod platform {
         authorization: &WorkspaceRemovalAuthorization,
         workspace: &Path,
     ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError> {
-        remove_inner(root, authorization, workspace, RemovalFault::Never, || Ok(()))
+        remove_inner(root, authorization, workspace, RemovalFault::Never, || {
+            Ok(())
+        })
     }
 
     #[cfg(test)]
@@ -299,11 +303,8 @@ mod platform {
             );
         }
 
-        let workspace_dir = open_private_directory_at(
-            transaction_dir.as_raw_fd(),
-            workspace_name,
-            workspace,
-        )?;
+        let workspace_dir =
+            open_private_directory_at(transaction_dir.as_raw_fd(), workspace_name, workspace)?;
         ensure_empty(&workspace_dir, workspace)?;
         let (proof_dir, created) = open_or_create_private_directory(
             root_dir.as_raw_fd(),
@@ -357,11 +358,8 @@ mod platform {
     where
         F: FnMut() -> Result<(), WorkspaceRemovalError>,
     {
-        let workspace_dir = open_private_directory_at(
-            transaction_dir.as_raw_fd(),
-            workspace_name,
-            workspace,
-        )?;
+        let workspace_dir =
+            open_private_directory_at(transaction_dir.as_raw_fd(), workspace_name, workspace)?;
         ensure_empty(&workspace_dir, workspace)?;
         remove_new_with_workspace(
             root,
@@ -487,18 +485,13 @@ mod platform {
         root_dir
             .sync_all()
             .map_err(|source| io_error(root, source))?;
-        let reopened = open_private_file_at(proof_dir.as_raw_fd(), OsStr::new(&final_name), &final_path)?;
-        if identity(&reopened).map_err(|source| io_error(&final_path, source))?
-            != pending_identity
+        let reopened =
+            open_private_file_at(proof_dir.as_raw_fd(), OsStr::new(&final_name), &final_path)?;
+        if identity(&reopened).map_err(|source| io_error(&final_path, source))? != pending_identity
         {
             return Err(WorkspaceRemovalError::RecoveryConflict(final_path));
         }
-        let receipt = validate_proof(
-            &proof,
-            root_identity,
-            authorization,
-            transaction_identity,
-        )?;
+        let receipt = validate_proof(&proof, root_identity, authorization, transaction_identity)?;
         Ok(VerifiedWorkspaceRemoval {
             receipt,
             _transaction_lock: Some(transaction_lock),
@@ -575,15 +568,8 @@ mod platform {
         }
         let proof: WorkspaceRemovalProof =
             serde_json::from_slice(&bytes).map_err(|_| WorkspaceRemovalError::Corrupt)?;
-        let receipt = validate_proof(
-            &proof,
-            root_identity,
-            authorization,
-            transaction_identity,
-        )?;
-        let workspace = root
-            .join(TRANSACTION_DIRECTORY)
-            .join(&proof.workspace_name);
+        let receipt = validate_proof(&proof, root_identity, authorization, transaction_identity)?;
+        let workspace = root.join(TRANSACTION_DIRECTORY).join(&proof.workspace_name);
         ensure_child_absent(
             transaction_dir,
             OsStr::new(&proof.workspace_name),
@@ -718,13 +704,14 @@ mod platform {
             && pid
                 .parse::<u32>()
                 .is_ok_and(|value| value.to_string() == pid)
-            && u128::from_str_radix(nonce, 16)
-                .is_ok_and(|value| format!("{value:x}") == nonce)
-            && u64::from_str_radix(count, 16)
-                .is_ok_and(|value| format!("{value:x}") == count)
+            && u128::from_str_radix(nonce, 16).is_ok_and(|value| format!("{value:x}") == nonce)
+            && u64::from_str_radix(count, 16).is_ok_and(|value| format!("{value:x}") == count)
     }
 
-    fn acquire_transaction_lock(root: &Path, root_dir: &File) -> Result<File, WorkspaceRemovalError> {
+    fn acquire_transaction_lock(
+        root: &Path,
+        root_dir: &File,
+    ) -> Result<File, WorkspaceRemovalError> {
         let path = root.join(TRANSACTION_LOCK);
         let file = open_private_file_at(root_dir.as_raw_fd(), OsStr::new(TRANSACTION_LOCK), &path)?;
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
@@ -741,9 +728,13 @@ mod platform {
         {
             return Err(WorkspaceRemovalError::InvalidRoot(path.to_path_buf()));
         }
-        let anchor = if path.is_absolute() { Path::new("/") } else { Path::new(".") };
-        let c_anchor = CString::new(anchor.as_os_str().as_bytes())
-            .expect("Linux root anchors contain no NUL");
+        let anchor = if path.is_absolute() {
+            Path::new("/")
+        } else {
+            Path::new(".")
+        };
+        let c_anchor =
+            CString::new(anchor.as_os_str().as_bytes()).expect("Linux root anchors contain no NUL");
         let fd = unsafe {
             libc::open(
                 c_anchor.as_ptr(),
@@ -848,7 +839,12 @@ mod platform {
         Ok(file)
     }
 
-    fn open_file_at(parent: RawFd, name: &OsStr, flags: i32, mode: libc::mode_t) -> io::Result<File> {
+    fn open_file_at(
+        parent: RawFd,
+        name: &OsStr,
+        flags: i32,
+        mode: libc::mode_t,
+    ) -> io::Result<File> {
         let name = CString::new(name.as_bytes())
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         let fd = unsafe { libc::openat(parent, name.as_ptr(), flags, mode as libc::c_uint) };
@@ -866,7 +862,9 @@ mod platform {
     ) -> Result<(), WorkspaceRemovalError> {
         let reopened = open_private_directory_at(parent.as_raw_fd(), name, display)?;
         if identity(&reopened).map_err(|source| io_error(display, source))? != expected {
-            return Err(WorkspaceRemovalError::RecoveryConflict(display.to_path_buf()));
+            return Err(WorkspaceRemovalError::RecoveryConflict(
+                display.to_path_buf(),
+            ));
         }
         Ok(())
     }
@@ -875,7 +873,9 @@ mod platform {
         if read_directory_names(directory, display)?.is_empty() {
             Ok(())
         } else {
-            Err(WorkspaceRemovalError::RecoveryConflict(display.to_path_buf()))
+            Err(WorkspaceRemovalError::RecoveryConflict(
+                display.to_path_buf(),
+            ))
         }
     }
 
@@ -907,7 +907,9 @@ mod platform {
             )
         } == 0
         {
-            return Err(WorkspaceRemovalError::RecoveryConflict(display.to_path_buf()));
+            return Err(WorkspaceRemovalError::RecoveryConflict(
+                display.to_path_buf(),
+            ));
         }
         let error = io::Error::last_os_error();
         if error.kind() == io::ErrorKind::NotFound {
@@ -941,29 +943,41 @@ mod platform {
     }
 
     fn verify_private_directory(file: &File, display: &Path) -> Result<(), WorkspaceRemovalError> {
-        let metadata = file.metadata().map_err(|source| io_error(display, source))?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| io_error(display, source))?;
         if !metadata.is_dir()
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.mode() & 0o7777 != 0o700
         {
-            return Err(WorkspaceRemovalError::RecoveryConflict(display.to_path_buf()));
+            return Err(WorkspaceRemovalError::RecoveryConflict(
+                display.to_path_buf(),
+            ));
         }
         Ok(())
     }
 
     fn verify_private_file(file: &File, display: &Path) -> Result<(), WorkspaceRemovalError> {
-        let metadata = file.metadata().map_err(|source| io_error(display, source))?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| io_error(display, source))?;
         if !metadata.is_file()
             || metadata.nlink() != 1
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.mode() & 0o7777 != 0o600
         {
-            return Err(WorkspaceRemovalError::RecoveryConflict(display.to_path_buf()));
+            return Err(WorkspaceRemovalError::RecoveryConflict(
+                display.to_path_buf(),
+            ));
         }
         Ok(())
     }
 
-    fn set_mode(file: &File, mode: libc::mode_t, display: &Path) -> Result<(), WorkspaceRemovalError> {
+    fn set_mode(
+        file: &File,
+        mode: libc::mode_t,
+        display: &Path,
+    ) -> Result<(), WorkspaceRemovalError> {
         if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
             return Err(io_error(display, io::Error::last_os_error()));
         }
@@ -1143,19 +1157,14 @@ mod tests {
         let root_path = fs::canonicalize(root.path()).unwrap();
         let authorization = authorization(0x23);
         let moved = workspace.with_extension("moved");
-        let result = platform::remove_with_hook(
-            &root_path,
-            &authorization,
-            &workspace,
-            false,
-            || {
+        let result =
+            platform::remove_with_hook(&root_path, &authorization, &workspace, false, || {
                 fs::rename(&workspace, &moved).map_err(|source| io_error(&workspace, source))?;
                 fs::create_dir(&workspace).map_err(|source| io_error(&workspace, source))?;
                 fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))
                     .map_err(|source| io_error(&workspace, source))?;
                 Ok(())
-            },
-        );
+            });
         let error = match result {
             Ok(_) => panic!("workspace replacement must block removal"),
             Err(error) => error,

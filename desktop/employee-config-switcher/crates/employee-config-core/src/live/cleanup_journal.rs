@@ -13,9 +13,7 @@ use super::{
         ReplacementTransactionId,
     },
     replacement::ReplacementPhase,
-    workspace_removal::{
-        remove_workspace, verify_workspace_removal, WorkspaceRemovalError,
-    },
+    workspace_removal::{remove_workspace, verify_workspace_removal, WorkspaceRemovalError},
 };
 #[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
@@ -1098,11 +1096,11 @@ mod tests {
         RecoveryKeyCreateOutcome, RecoveryKeyDeleteOutcome, RecoveryKeyOpenOutcome,
     };
     #[cfg(target_os = "linux")]
-    use std::{fs, os::unix::fs::PermissionsExt};
-    #[cfg(target_os = "linux")]
     use std::sync::{Arc, Barrier};
     #[cfg(target_os = "linux")]
     use std::thread;
+    #[cfg(target_os = "linux")]
+    use std::{fs, os::unix::fs::PermissionsExt};
 
     fn transaction(byte: u8) -> ReplacementTransactionId {
         ReplacementTransactionId::from_bytes([byte; 16]).unwrap()
