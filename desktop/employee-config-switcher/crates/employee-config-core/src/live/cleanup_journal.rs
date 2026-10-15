@@ -1323,10 +1323,17 @@ mod tests {
             .map(|worker| worker.join().unwrap())
             .collect();
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let expected_conflict_path = root_path.join(CLEANUP_DIRECTORY);
         assert_eq!(
             results
                 .iter()
-                .filter(|result| matches!(result, Err(CleanupJournalError::RecoveryConflict(_))))
+                .filter(|result| {
+                    matches!(
+                        result,
+                        Err(CleanupJournalError::RecoveryConflict(path))
+                            if path == &expected_conflict_path
+                    )
+                })
                 .count(),
             1
         );
