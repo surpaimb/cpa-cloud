@@ -228,7 +228,14 @@ buffers are cleared.
 
 A provider-agnostic cleanup sequence gate now also refuses provider deletion
 until a terminal decision, completion tombstone, and workspace removal have
-each been recorded durable in that order. It retains the exact
+each been recorded durable in that order. Workspace durability is no longer a
+free-form caller assertion: the Linux synthetic-root path requires the exact
+receipt from a bounded owner-private proof store after it removes one stable,
+empty transaction workspace and flushes the transaction directory and root.
+Restart and provider deletion revalidate the retained proof and exact workspace
+name absence; pending, renamed, replaced, non-empty or mismatched state blocks
+cleanup. The slice does not remove transaction contents and remains gated on a
+producer that safely empties the exact workspace first. It retains the exact
 transaction/reference pair, treats
 `deleted` and already-`missing` as idempotent completion, preserves the tombstone
 phase on every blocking deletion outcome, and permits tombstone removal last.
@@ -241,16 +248,18 @@ file/directory/root flushes and root/transaction/provider-reference binding.
 Restart refuses a pre-publication `.pending` artifact and repairs durability of
 a structurally complete final record before returning it. Windows and macOS
 remain unsupported before namespace creation. No operating-system key provider,
-workspace-removal wiring, automatic crash-resume orchestration, or real client
-write is enabled, and same-user replacement remains a blocker. A separate
+transaction-content cleanup integration, automatic crash-resume orchestration,
+or real client write is enabled, and a hostile same-user process remains a
+blocker. A separate
 Linux-only synthetic-root journal now makes the five cleanup phases durable as
 immutable private files, rejects non-contiguous or `.pending` state on restart,
 and reconstructs the exact transaction/provider-bound cleanup sequence. Its
 stable directory descriptor and advisory lock cover enumeration, the 64-entry
 capacity/duplicate or append-prefix decision, and no-replace publication;
 concurrent boundary tests cover both phase-zero capacity and duplicate append.
-It does not prove the caller's workspace-removal assertion and does not remove
-completed journal records.
+Its workspace phase now requires and revalidates the exact durable removal
+proof described above; it still does not remove completed journal or proof
+records.
 The pure cleanup gate can issue a non-serializable removal authorization only
 after provider deletion is confirmed; the Linux store then revalidates the
 exact transaction/reference, renames the final tombstone to a flushed

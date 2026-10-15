@@ -13,6 +13,9 @@ use super::{
         ReplacementTransactionId,
     },
     replacement::ReplacementPhase,
+    workspace_removal::{
+        remove_workspace, verify_workspace_removal, WorkspaceRemovalError,
+    },
 };
 #[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
@@ -59,6 +62,8 @@ pub enum CleanupJournalError {
     RecoveryConflict(PathBuf),
     #[error("cleanup transition failed: {0}")]
     Cleanup(#[from] RecoveryKeyCleanupError),
+    #[error("workspace removal failed: {0}")]
+    WorkspaceRemoval(#[from] WorkspaceRemovalError),
     #[error("cleanup journal filesystem operation failed for {path}: {source}")]
     Io {
         path: PathBuf,
@@ -95,9 +100,15 @@ impl DurableCleanupJournal {
         self.persist_or_restore(previous)
     }
 
-    pub fn record_workspace_removal_durable(&mut self) -> Result<(), CleanupJournalError> {
+    pub fn remove_workspace_durable(
+        &mut self,
+        workspace: &Path,
+    ) -> Result<(), CleanupJournalError> {
+        let authorization = self.sequence.authorize_workspace_removal()?;
+        let verified = remove_workspace(&self.root, &authorization, workspace)?;
         let previous = self.phase();
-        self.sequence.record_workspace_removal_durable()?;
+        self.sequence
+            .record_workspace_removal_durable(verified.receipt())?;
         self.persist_or_restore(previous)
     }
 
@@ -105,6 +116,13 @@ impl DurableCleanupJournal {
         &mut self,
         provider: &mut P,
     ) -> Result<(), CleanupJournalError> {
+        if self.phase() != RecoveryKeyCleanupPhase::WorkspaceRemovalDurable {
+            return Err(CleanupJournalError::Cleanup(
+                RecoveryKeyCleanupError::InvalidTransition(self.phase()),
+            ));
+        }
+        let authorization = self.sequence.workspace_removal_authorization();
+        let _verified = verify_workspace_removal(&self.root, &authorization)?;
         let previous = self.phase();
         self.sequence.delete_key(provider)?;
         self.persist_or_restore(previous)
@@ -173,15 +191,24 @@ pub fn create_durable_cleanup_journal(
 pub fn load_durable_cleanup_journals(
     root: &Path,
 ) -> Result<Vec<DurableCleanupJournal>, CleanupJournalError> {
-    platform::load(root).map(|sequences| {
-        sequences
-            .into_iter()
-            .map(|sequence| DurableCleanupJournal {
+    platform::load(root)?
+        .into_iter()
+        .map(|sequence| {
+            if matches!(
+                sequence.phase(),
+                RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
+                    | RecoveryKeyCleanupPhase::KeyDeletionConfirmed
+                    | RecoveryKeyCleanupPhase::Complete
+            ) {
+                let authorization = sequence.workspace_removal_authorization();
+                let _verified = verify_workspace_removal(root, &authorization)?;
+            }
+            Ok(DurableCleanupJournal {
                 root: root.to_path_buf(),
                 sequence,
             })
-            .collect()
-    })
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -1071,7 +1098,7 @@ mod tests {
         RecoveryKeyCreateOutcome, RecoveryKeyDeleteOutcome, RecoveryKeyOpenOutcome,
     };
     #[cfg(target_os = "linux")]
-    use std::fs;
+    use std::{fs, os::unix::fs::PermissionsExt};
     #[cfg(target_os = "linux")]
     use std::sync::{Arc, Barrier};
     #[cfg(target_os = "linux")]
@@ -1086,7 +1113,27 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    struct DeletedProvider;
+    fn empty_workspace(root: &Path, suffix: u8) -> PathBuf {
+        let lock = root.join(".cpa-cloud-employee-config.lock");
+        if !lock.exists() {
+            fs::write(&lock, b"").unwrap();
+            fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let transaction_root = root.join(".cpa-cloud-employee-config-transactions");
+        if !transaction_root.exists() {
+            fs::create_dir(&transaction_root).unwrap();
+            fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let workspace = transaction_root.join(format!("tx-1-{:x}-0", suffix as u128 + 1));
+        fs::create_dir(&workspace).unwrap();
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700)).unwrap();
+        workspace
+    }
+
+    #[cfg(target_os = "linux")]
+    struct DeletedProvider {
+        delete_calls: usize,
+    }
 
     #[cfg(target_os = "linux")]
     impl RecoveryKeyProvider for DeletedProvider {
@@ -1110,6 +1157,7 @@ mod tests {
             _transaction_id: ReplacementTransactionId,
             _reference: &RecoveryKeyReference,
         ) -> RecoveryKeyDeleteOutcome {
+            self.delete_calls += 1;
             RecoveryKeyDeleteOutcome::Deleted
         }
     }
@@ -1145,7 +1193,9 @@ mod tests {
             journal.phase(),
             RecoveryKeyCleanupPhase::CompletionTombstoneDurable
         );
-        journal.record_workspace_removal_durable().unwrap();
+        let workspace = empty_workspace(&root_path, 0x61);
+        journal.remove_workspace_durable(&workspace).unwrap();
+        assert!(!workspace.exists());
         drop(journal);
 
         let mut journal = load_durable_cleanup_journals(&root_path).unwrap().remove(0);
@@ -1153,8 +1203,19 @@ mod tests {
             journal.phase(),
             RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
         );
-        let mut provider = DeletedProvider;
+        fs::create_dir(&workspace).unwrap();
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut provider = DeletedProvider { delete_calls: 0 };
+        assert!(matches!(
+            journal.delete_key(&mut provider),
+            Err(CleanupJournalError::WorkspaceRemoval(
+                WorkspaceRemovalError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(provider.delete_calls, 0);
+        fs::remove_dir(&workspace).unwrap();
         journal.delete_key(&mut provider).unwrap();
+        assert_eq!(provider.delete_calls, 1);
         drop(journal);
 
         let mut restarted = load_durable_cleanup_journals(&root_path).unwrap().remove(0);
@@ -1228,7 +1289,7 @@ mod tests {
             Err(CleanupJournalError::AlreadyExists(_))
         ));
         assert!(matches!(
-            journal.record_workspace_removal_durable(),
+            journal.remove_workspace_durable(Path::new("unused")),
             Err(CleanupJournalError::Cleanup(_))
         ));
         assert_eq!(journal.phase(), RecoveryKeyCleanupPhase::TerminalRecorded);

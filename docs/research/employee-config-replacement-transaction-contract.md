@@ -276,7 +276,9 @@ the completion tombstone before workspace removal, refuses to call provider
 deletion before both are recorded durable, and permits tombstone removal only
 after deletion is confirmed as `deleted` or already `missing`. Locked,
 wrong-identity, corrupt or unavailable deletion leaves the tombstone phase
-retryable. The caller assertions alone do not prove filesystem durability. A
+retryable. The completion-tombstone transition remains a caller assertion at
+this pure layer; the workspace transition now requires the concrete removal
+receipt described below. A
 separate Linux-only synthetic-root module now stages a versioned non-secret
 completion tombstone as an owner-private single-link file, flushes it, and
 publishes it under the final name with no-replace `renameat2`. A crash before
@@ -314,13 +316,26 @@ transaction, and concurrent duplicate appends cannot leave a pending record. A
 visible `.pending` event blocks recovery rather than being inferred complete.
 The durable wrapper records provider deletion only after the provider returns
 `deleted` or `missing`, and an append failure rolls the in-memory sequence back
-to its preceding durable phase so a restart can retry. The journal still trusts
-caller assertions that the completion tombstone and workspace removal are
-durable; it does not inspect or delete a workspace, supply an operating-system
-key provider, remove completed journals, or orchestrate startup automatically.
-This does not implement a provider deletion backend, workspace-removal proof,
-operating-system key provider, cleanup/proof garbage collection, automatic
-restart orchestration or real client writes.
+to its preceding durable phase so a restart can retry. The completion-tombstone
+transition remains a caller assertion. The workspace transition no longer is:
+a separate Linux-only synthetic-root store accepts only one exact empty `0700`
+transaction workspace while holding the existing transaction lock, flushes a
+private pending proof before descriptor-relative removal, flushes the
+transaction directory and root, then atomically publishes and flushes a bounded
+`.removed.json` proof. The receipt is non-serializable and is the only production
+path into `WorkspaceRemovalDurable`. Restart and every key-deletion attempt
+revalidate the exact root, transaction-directory and proof identity bindings
+plus absence of the original workspace name. A crash after directory removal
+but before proof publication leaves `.pending` and blocks automatic cleanup
+rather than inferring success from absence. Renamed, replaced, non-empty,
+missing or mismatched state likewise fails closed. The store does not delete
+transaction contents; its reviewed slice begins only after another component
+has safely removed every known child and left the exact workspace empty. It
+does not supply an operating-system key provider, remove completed
+journals/proofs, authenticate against a hostile same-user process, or
+orchestrate startup automatically. This does not implement a provider deletion
+backend, operating-system key provider, cleanup/proof garbage collection,
+automatic restart orchestration or real client writes.
 The owner-private filesystem boundary is not authentication against another
 process running as the same user; the documented same-user race remains a
 blocker.

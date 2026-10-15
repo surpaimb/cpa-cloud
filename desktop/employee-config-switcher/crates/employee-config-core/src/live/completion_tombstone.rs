@@ -1231,7 +1231,14 @@ mod tests {
         )
         .unwrap();
         cleanup.record_completion_tombstone_durable().unwrap();
-        cleanup.record_workspace_removal_durable().unwrap();
+        let workspace_authorization = cleanup.authorize_workspace_removal().unwrap();
+        let workspace_receipt =
+            crate::live::workspace_removal::WorkspaceRemovalReceipt::for_test(
+                &workspace_authorization,
+            );
+        cleanup
+            .record_workspace_removal_durable(&workspace_receipt)
+            .unwrap();
         let mut provider = DeletedProvider;
         cleanup.delete_key(&mut provider).unwrap();
         let authorization = cleanup.authorize_completion_tombstone_removal().unwrap();

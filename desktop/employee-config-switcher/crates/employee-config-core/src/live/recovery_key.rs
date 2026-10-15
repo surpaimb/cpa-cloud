@@ -7,7 +7,7 @@
 
 use super::{
     backup::BackupKey, completion_tombstone::CompletionTombstoneRemovalReceipt,
-    replacement::ReplacementPhase,
+    replacement::ReplacementPhase, workspace_removal::WorkspaceRemovalReceipt,
 };
 
 const TRANSACTION_ID_BYTES: usize = 16;
@@ -287,13 +287,48 @@ impl std::fmt::Debug for CompletionTombstoneRemovalAuthorization {
     }
 }
 
+/// Proof that the completion tombstone is durable and that one exact
+/// transaction workspace may now be removed. It is intentionally not
+/// serializable and carries no key material.
+pub struct WorkspaceRemovalAuthorization {
+    terminal: ReplacementPhase,
+    transaction_id: ReplacementTransactionId,
+    reference: RecoveryKeyReference,
+}
+
+impl WorkspaceRemovalAuthorization {
+    pub(crate) fn terminal(&self) -> ReplacementPhase {
+        self.terminal
+    }
+
+    pub(crate) fn transaction_id(&self) -> ReplacementTransactionId {
+        self.transaction_id
+    }
+
+    pub(crate) fn reference(&self) -> &RecoveryKeyReference {
+        &self.reference
+    }
+}
+
+impl std::fmt::Debug for WorkspaceRemovalAuthorization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkspaceRemovalAuthorization")
+            .field("terminal", &self.terminal)
+            .field("transaction_id", &self.transaction_id)
+            .field("reference", &self.reference)
+            .finish()
+    }
+}
+
 /// Provider-agnostic ordering gate for terminal recovery-key cleanup.
 ///
-/// The caller must durably perform and flush each named filesystem action
-/// before recording it here. This type does not serialize a tombstone, remove a
-/// workspace or flush a directory. It retains the exact transaction/reference
-/// pair and invokes provider deletion only after the caller records both a
-/// durable terminal decision and durable workspace removal. Its final
+/// This pure type does not itself serialize a tombstone, remove a workspace or
+/// flush a directory. Its workspace transition accepts only the receipt issued
+/// by the synthetic-root removal store after exact deletion and durability
+/// checks. It retains the exact transaction/reference pair and invokes provider
+/// deletion only after both a durable terminal decision and verified durable
+/// workspace removal. Its final
 /// transition requires the exact receipt returned by the tombstone store after
 /// logical removal to an inactive proof and directory/root flush.
 #[derive(Debug)]
@@ -367,8 +402,32 @@ impl RecoveryKeyCleanupSequence {
         Ok(())
     }
 
-    pub fn record_workspace_removal_durable(&mut self) -> Result<(), RecoveryKeyCleanupError> {
+    pub fn authorize_workspace_removal(
+        &self,
+    ) -> Result<WorkspaceRemovalAuthorization, RecoveryKeyCleanupError> {
         self.require_phase(RecoveryKeyCleanupPhase::CompletionTombstoneDurable)?;
+        Ok(self.workspace_removal_authorization())
+    }
+
+    pub(crate) fn workspace_removal_authorization(&self) -> WorkspaceRemovalAuthorization {
+        WorkspaceRemovalAuthorization {
+            terminal: self.terminal,
+            transaction_id: self.transaction_id,
+            reference: self.reference.clone(),
+        }
+    }
+
+    pub(crate) fn record_workspace_removal_durable(
+        &mut self,
+        receipt: &WorkspaceRemovalReceipt,
+    ) -> Result<(), RecoveryKeyCleanupError> {
+        self.require_phase(RecoveryKeyCleanupPhase::CompletionTombstoneDurable)?;
+        if receipt.terminal() != self.terminal
+            || receipt.transaction_id() != self.transaction_id
+            || receipt.reference() != &self.reference
+        {
+            return Err(RecoveryKeyCleanupError::InvalidTransition(self.phase));
+        }
         self.phase = RecoveryKeyCleanupPhase::WorkspaceRemovalDurable;
         Ok(())
     }
@@ -511,7 +570,11 @@ mod tests {
         )
         .unwrap();
         cleanup.record_completion_tombstone_durable().unwrap();
-        cleanup.record_workspace_removal_durable().unwrap();
+        let authorization = cleanup.authorize_workspace_removal().unwrap();
+        let receipt = WorkspaceRemovalReceipt::for_test(&authorization);
+        cleanup
+            .record_workspace_removal_durable(&receipt)
+            .unwrap();
         cleanup
     }
 
@@ -657,7 +720,11 @@ mod tests {
         ));
         assert_eq!(provider.delete_calls, 0);
 
-        cleanup.record_workspace_removal_durable().unwrap();
+        let workspace_authorization = cleanup.authorize_workspace_removal().unwrap();
+        let workspace_receipt = WorkspaceRemovalReceipt::for_test(&workspace_authorization);
+        cleanup
+            .record_workspace_removal_durable(&workspace_receipt)
+            .unwrap();
         cleanup.delete_key(&mut provider).unwrap();
         assert_eq!(provider.delete_calls, 1);
         assert_eq!(
