@@ -34,11 +34,7 @@ where
             "Codex CLI",
             vec![env_path(&env, "CODEX_HOME", home.join(".codex"))],
         ),
-        (
-            "gemini",
-            "Gemini CLI",
-            vec![gemini_home(home, &env)],
-        ),
+        ("gemini", "Gemini CLI", vec![gemini_home(home, &env)]),
         (
             "claude-desktop",
             "Claude Desktop",

@@ -444,9 +444,7 @@ mod tests {
 
         assert_eq!(
             plan.settings.desired_bytes.as_slice(),
-            include_bytes!(
-                "../tests/fixtures/gemini-cli-0.62.0/native-settings.json"
-            )
+            include_bytes!("../tests/fixtures/gemini-cli-0.62.0/native-settings.json")
         );
         assert_eq!(
             plan.environment.desired_bytes.as_slice(),
@@ -462,10 +460,7 @@ mod tests {
         assert_eq!(acceptance["package"]["version"], "0.62.0");
         assert_eq!(acceptance["package"]["bin_entry"], "bundle/gemini.js");
         assert_eq!(acceptance["runtime"]["node_version"], "v22.22.0");
-        assert_eq!(
-            acceptance["loopback_observation"]["request_method"],
-            "POST"
-        );
+        assert_eq!(acceptance["loopback_observation"]["request_method"], "POST");
         assert_eq!(
             acceptance["loopback_observation"]["request_path"],
             "/v1beta/models/gemini-fixture-model:streamGenerateContent?alt=sse"
@@ -479,8 +474,14 @@ mod tests {
             false
         );
         assert_eq!(acceptance["loopback_observation"]["exit_code"], 0);
-        assert_eq!(acceptance["trusted_folders_sentinel"]["bytes_unchanged"], true);
-        assert_eq!(acceptance["trusted_folders_sentinel"]["mtime_unchanged"], true);
+        assert_eq!(
+            acceptance["trusted_folders_sentinel"]["bytes_unchanged"],
+            true
+        );
+        assert_eq!(
+            acceptance["trusted_folders_sentinel"]["mtime_unchanged"],
+            true
+        );
     }
 
     #[test]
