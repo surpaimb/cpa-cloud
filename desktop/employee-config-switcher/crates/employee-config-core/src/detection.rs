@@ -128,9 +128,7 @@ where
     match platform {
         Platform::Windows => {
             let roaming = env_path(env, "APPDATA", home.join("AppData").join("Roaming"));
-            vec![roaming
-                .join("Claude")
-                .join("claude_desktop_config.json")]
+            vec![roaming.join("Claude").join("claude_desktop_config.json")]
         }
         Platform::Macos => {
             let application_support = home.join("Library").join("Application Support");
@@ -244,9 +242,7 @@ mod tests {
     fn windows_desktop_uses_roaming_app_data_and_requires_the_official_config_file() {
         let root = tempfile::tempdir().unwrap();
         let roaming = root.path().join("RoamingAppData");
-        let official = roaming
-            .join("Claude")
-            .join("claude_desktop_config.json");
+        let official = roaming.join("Claude").join("claude_desktop_config.json");
         fs::create_dir_all(official.parent().unwrap()).unwrap();
         fs::write(&official, br#"{"mcpServers":{}}"#).unwrap();
         let env = fake_env(HashMap::from([("APPDATA", roaming)]));
