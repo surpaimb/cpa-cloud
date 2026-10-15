@@ -26,6 +26,10 @@ const REPLACEMENT_DIRECTORY: &str = ".cpa-cloud-employee-config-replacements";
 const TARGET_LOCK_FILE: &str = "single-target.lock";
 const JOURNAL_FILE: &str = "journal.jsonl";
 const PENDING_EVENT_FILE: &str = "journal.pending";
+const PENDING_EVENT_CAPACITY: usize = 16 * 1024;
+const PENDING_EVENT_MAGIC: &[u8; 8] = b"CPAPND01";
+const PENDING_EVENT_HEADER: usize = 8 + 4 + 32;
+const PENDING_SLOT_PREFIX: &str = ".journal-pending-";
 const DESIRED_STAGE: &str = "desired.stage";
 const ROLLBACK_STAGE: &str = "rollback.stage";
 const ROLLBACK_STAGE_PENDING: &str = "rollback.stage.pending";
@@ -74,8 +78,16 @@ pub(crate) enum FaultPoint {
     AfterBackup,
     AfterStage,
     RollbackReservationFailure,
+    PendingSlotReservationFailure,
+    JournalReservationFailure,
     AfterCommitPrepared,
+    AfterExchangeBeforeVerify,
     ExternalEditBeforeExchange,
+    ExternalEditThenCrashAfterExchange,
+    ExternalSymlinkThenCrashAfterExchange,
+    ExternalPublicModeThenCrashAfterExchange,
+    ExternalHardlinkThenCrashAfterExchange,
+    ExternalSymlinkThenCrashAfterRollbackExchange,
     AfterPublish,
     AfterPublished,
     AfterVerified,
@@ -107,6 +119,8 @@ pub(crate) enum SyntheticReplacementError {
     Uncommitted,
     #[error("recovery-key provider cannot create a key")]
     KeyCreateBlocked,
+    #[error("recovery-key provider does not guarantee transaction-idempotent creation")]
+    KeyCreateNotIdempotent,
     #[error("encrypted rollback material failed: {0}")]
     Backup(#[from] BackupError),
     #[error("filesystem operation failed for {path}: {source}")]
@@ -286,6 +300,16 @@ mod platform {
         state: JournalState,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct RawEntryState {
+        device: u64,
+        inode: u64,
+        mode: u32,
+        links: u64,
+        uid: u32,
+        gid: u32,
+    }
+
     pub(super) fn replace<P: RecoveryKeyProvider + ?Sized>(
         approval: &SyntheticRootApproval,
         target: &Path,
@@ -295,6 +319,9 @@ mod platform {
         validation: SyntheticValidation,
         fault: Option<FaultPoint>,
     ) -> Result<ReplacementReceipt, SyntheticReplacementError> {
+        if !provider.create_is_transaction_idempotent() {
+            return Err(SyntheticReplacementError::KeyCreateNotIdempotent);
+        }
         let target_name = validate_target(target)?.to_owned();
         if desired.len() > MAX_TARGET_BYTES {
             return Err(SyntheticReplacementError::TooLarge);
@@ -441,7 +468,8 @@ mod platform {
             &workspace_path.join(ROLLBACK_STAGE_PENDING),
             fault,
         )?;
-        reserve_journal_space(&journal, &workspace_path.join(JOURNAL_FILE))?;
+        reserve_pending_event_slots(&workspace, &workspace_path, fault)?;
+        reserve_journal_space(&journal, &workspace_path.join(JOURNAL_FILE), fault)?;
         require_journal_budget(&journal, 16 * 1024)?;
         append_event(
             &mut journal,
@@ -471,6 +499,9 @@ mod platform {
         validation: SyntheticValidation,
         fault: Option<FaultPoint>,
     ) -> Result<ReplacementReceipt, SyntheticReplacementError> {
+        if !provider.create_is_transaction_idempotent() {
+            return Err(SyntheticReplacementError::KeyCreateNotIdempotent);
+        }
         let mut transaction = open_transaction(approval, transaction_id)?;
         drive(&mut transaction, provider, validation, fault)
     }
@@ -482,6 +513,9 @@ mod platform {
         fault: Option<FaultPoint>,
     ) -> Result<ReplacementReceipt, SyntheticReplacementError> {
         if transaction.state.reference.is_none() {
+            if !provider.create_is_transaction_idempotent() {
+                return Err(SyntheticReplacementError::KeyCreateNotIdempotent);
+            }
             let created = match provider.create(transaction.state.transaction_id) {
                 RecoveryKeyCreateOutcome::Created(created) => created,
                 RecoveryKeyCreateOutcome::Locked | RecoveryKeyCreateOutcome::Unavailable => {
@@ -543,7 +577,32 @@ mod platform {
                 )?;
                 inject(fault, FaultPoint::AfterPublish)?;
             } else if current == desired_state {
-                require_stage_state(transaction, DESIRED_STAGE, &transaction.state.original)?;
+                match read_stage_state(transaction, DESIRED_STAGE) {
+                    Ok(displaced) if displaced == transaction.state.original => {}
+                    Ok(displaced) => {
+                        undo_unverified_exchange(
+                            transaction,
+                            DESIRED_STAGE,
+                            &desired_state,
+                            &displaced,
+                        )?;
+                        return Err(SyntheticReplacementError::RecoveryConflict);
+                    }
+                    Err(_) => {
+                        let displaced = raw_entry_state(
+                            transaction.workspace.as_raw_fd(),
+                            OsStr::new(DESIRED_STAGE),
+                            &transaction.workspace_path.join(DESIRED_STAGE),
+                        )?;
+                        undo_unverified_exchange_raw(
+                            transaction,
+                            DESIRED_STAGE,
+                            &desired_state,
+                            displaced,
+                        )?;
+                        return Err(SyntheticReplacementError::RecoveryConflict);
+                    }
+                }
             } else {
                 return Err(SyntheticReplacementError::RecoveryConflict);
             }
@@ -751,7 +810,32 @@ mod platform {
                 )?;
                 inject(fault, FaultPoint::AfterRestore)?;
             } else if current == restored_state {
-                require_stage_state(transaction, ROLLBACK_STAGE, &desired_state)?;
+                match read_stage_state(transaction, ROLLBACK_STAGE) {
+                    Ok(displaced) if displaced == desired_state => {}
+                    Ok(displaced) => {
+                        undo_unverified_exchange(
+                            transaction,
+                            ROLLBACK_STAGE,
+                            &restored_state,
+                            &displaced,
+                        )?;
+                        return Err(SyntheticReplacementError::RecoveryConflict);
+                    }
+                    Err(_) => {
+                        let displaced = raw_entry_state(
+                            transaction.workspace.as_raw_fd(),
+                            OsStr::new(ROLLBACK_STAGE),
+                            &transaction.workspace_path.join(ROLLBACK_STAGE),
+                        )?;
+                        undo_unverified_exchange_raw(
+                            transaction,
+                            ROLLBACK_STAGE,
+                            &restored_state,
+                            displaced,
+                        )?;
+                        return Err(SyntheticReplacementError::RecoveryConflict);
+                    }
+                }
             } else {
                 return Err(SyntheticReplacementError::RecoveryConflict);
             }
@@ -825,6 +909,7 @@ mod platform {
         )?;
         lock_exclusive(&journal, &journal_path)?;
         repair_pending_event(&workspace, &workspace_path, &mut journal)?;
+        repair_reserved_pending_event(&workspace, &workspace_path, &mut journal)?;
         let state = read_journal(&mut journal)?;
         if state.transaction_id != transaction_id
             || state.root_identity != identity(&root, &approval.root)?
@@ -1051,13 +1136,51 @@ mod platform {
         if current + bytes.len() > MAX_JOURNAL_BYTES {
             return Err(SyntheticReplacementError::CorruptJournal);
         }
+        let envelope = encode_pending_event(&bytes)?;
+        if entry_exists(workspace.as_raw_fd(), OsStr::new(&pending_slot_name(0)))? {
+            let event_count = read_journal_bytes(journal)?
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count();
+            if event_count >= MAX_EVENTS {
+                return Err(SyntheticReplacementError::CorruptJournal);
+            }
+            write_reserved_pending_event(workspace, workspace_path, event_count, &envelope)?;
+            raw_append(journal, workspace_path, &bytes)?;
+            return Ok(());
+        }
         let mut pending = create_private_file(
             workspace.as_raw_fd(),
             OsStr::new(PENDING_EVENT_FILE),
             workspace_path.join(PENDING_EVENT_FILE),
         )?;
+        workspace
+            .sync_all()
+            .map_err(|source| io_error(workspace_path, source))?;
+        let allocation = unsafe {
+            libc::posix_fallocate(
+                pending.as_raw_fd(),
+                0,
+                PENDING_EVENT_CAPACITY as libc::off_t,
+            )
+        };
+        if allocation != 0 {
+            return Err(io_error(
+                workspace_path.join(PENDING_EVENT_FILE),
+                io::Error::from_raw_os_error(allocation),
+            ));
+        }
         pending
-            .write_all(&bytes)
+            .set_len(PENDING_EVENT_CAPACITY as u64)
+            .map_err(|source| io_error(workspace_path.join(PENDING_EVENT_FILE), source))?;
+        pending
+            .sync_all()
+            .map_err(|source| io_error(workspace_path.join(PENDING_EVENT_FILE), source))?;
+        pending
+            .seek(SeekFrom::Start(0))
+            .map_err(|source| io_error(workspace_path.join(PENDING_EVENT_FILE), source))?;
+        pending
+            .write_all(&envelope)
             .map_err(|source| io_error(workspace_path.join(PENDING_EVENT_FILE), source))?;
         pending
             .sync_all()
@@ -1074,6 +1197,162 @@ mod platform {
         workspace
             .sync_all()
             .map_err(|source| io_error(workspace_path, source))?;
+        Ok(())
+    }
+
+    fn encode_pending_event(bytes: &[u8]) -> Result<Vec<u8>, SyntheticReplacementError> {
+        if bytes.is_empty() || bytes.len() > PENDING_EVENT_CAPACITY - PENDING_EVENT_HEADER {
+            return Err(SyntheticReplacementError::CorruptJournal);
+        }
+        let mut envelope = vec![0_u8; PENDING_EVENT_CAPACITY];
+        envelope[..8].copy_from_slice(PENDING_EVENT_MAGIC);
+        envelope[8..12].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        envelope[12..44].copy_from_slice(&Sha256::digest(bytes));
+        envelope[44..44 + bytes.len()].copy_from_slice(bytes);
+        Ok(envelope)
+    }
+
+    fn decode_pending_event(bytes: &[u8]) -> Option<Vec<u8>> {
+        if bytes.len() != PENDING_EVENT_CAPACITY || &bytes[..8] != PENDING_EVENT_MAGIC {
+            return None;
+        }
+        let length = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
+        if length == 0 || length > PENDING_EVENT_CAPACITY - PENDING_EVENT_HEADER {
+            return None;
+        }
+        let payload = &bytes[44..44 + length];
+        if bytes[44 + length..].iter().any(|byte| *byte != 0)
+            || Sha256::digest(payload).as_slice() != &bytes[12..44]
+            || !payload.ends_with(b"\n")
+            || payload[..payload.len() - 1].contains(&b'\n')
+            || serde_json::from_slice::<JournalEvent>(&payload[..payload.len() - 1]).is_err()
+        {
+            return None;
+        }
+        Some(payload.to_vec())
+    }
+
+    fn pending_slot_name(index: usize) -> String {
+        format!("{PENDING_SLOT_PREFIX}{index:02}")
+    }
+
+    fn reserve_pending_event_slots(
+        workspace: &File,
+        workspace_path: &Path,
+        fault: Option<FaultPoint>,
+    ) -> Result<(), SyntheticReplacementError> {
+        for index in 0..MAX_EVENTS {
+            let name = pending_slot_name(index);
+            let display = workspace_path.join(&name);
+            let slot =
+                create_private_file(workspace.as_raw_fd(), OsStr::new(&name), display.clone())?;
+            if fault == Some(FaultPoint::PendingSlotReservationFailure) && index == MAX_EVENTS / 2 {
+                return Err(io_error(
+                    &display,
+                    io::Error::from_raw_os_error(libc::ENOSPC),
+                ));
+            }
+            let allocation = unsafe {
+                libc::posix_fallocate(slot.as_raw_fd(), 0, PENDING_EVENT_CAPACITY as libc::off_t)
+            };
+            if allocation != 0 {
+                return Err(io_error(&display, io::Error::from_raw_os_error(allocation)));
+            }
+            slot.set_len(PENDING_EVENT_CAPACITY as u64)
+                .map_err(|source| io_error(&display, source))?;
+            slot.sync_all()
+                .map_err(|source| io_error(&display, source))?;
+        }
+        workspace
+            .sync_all()
+            .map_err(|source| io_error(workspace_path, source))?;
+        Ok(())
+    }
+
+    fn write_reserved_pending_event(
+        workspace: &File,
+        workspace_path: &Path,
+        index: usize,
+        envelope: &[u8],
+    ) -> Result<(), SyntheticReplacementError> {
+        let name = pending_slot_name(index);
+        let display = workspace_path.join(&name);
+        let mut slot = open_private_file(workspace.as_raw_fd(), OsStr::new(&name), &display)?;
+        if slot
+            .metadata()
+            .map_err(|source| io_error(&display, source))?
+            .len()
+            != PENDING_EVENT_CAPACITY as u64
+        {
+            return Err(SyntheticReplacementError::RecoveryConflict);
+        }
+        slot.seek(SeekFrom::Start(0))
+            .map_err(|source| io_error(&display, source))?;
+        slot.write_all(envelope)
+            .map_err(|source| io_error(&display, source))?;
+        slot.sync_all()
+            .map_err(|source| io_error(&display, source))?;
+        Ok(())
+    }
+
+    fn repair_reserved_pending_event(
+        workspace: &File,
+        workspace_path: &Path,
+        journal: &mut File,
+    ) -> Result<(), SyntheticReplacementError> {
+        if !entry_exists(workspace.as_raw_fd(), OsStr::new(&pending_slot_name(0)))? {
+            return Ok(());
+        }
+        let bytes = read_journal_bytes(journal)?;
+        let prefix_len = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        let prefix = &bytes[..prefix_len];
+        if prefix.is_empty() || parse_journal_bytes(prefix).is_err() {
+            return Err(SyntheticReplacementError::CorruptJournal);
+        }
+        let event_count = prefix.iter().filter(|byte| **byte == b'\n').count();
+        if event_count >= MAX_EVENTS {
+            return if prefix_len == bytes.len() {
+                Ok(())
+            } else {
+                Err(SyntheticReplacementError::CorruptJournal)
+            };
+        }
+        let name = pending_slot_name(event_count);
+        let display = workspace_path.join(&name);
+        let mut slot = open_private_file(workspace.as_raw_fd(), OsStr::new(&name), &display)?;
+        let mut envelope = Vec::new();
+        slot.take((PENDING_EVENT_CAPACITY + 1) as u64)
+            .read_to_end(&mut envelope)
+            .map_err(|source| io_error(&display, source))?;
+        let Some(pending) = decode_pending_event(&envelope) else {
+            return if prefix_len == bytes.len() {
+                Ok(())
+            } else {
+                Err(SyntheticReplacementError::CorruptJournal)
+            };
+        };
+        let suffix = &bytes[prefix_len..];
+        if !pending.starts_with(suffix) || prefix_len + pending.len() > MAX_JOURNAL_BYTES {
+            return Err(SyntheticReplacementError::CorruptJournal);
+        }
+        let mut candidate = prefix.to_vec();
+        candidate.extend_from_slice(&pending);
+        parse_journal_bytes(&candidate)?;
+        journal
+            .seek(SeekFrom::Start(prefix_len as u64))
+            .map_err(|source| io_error(workspace_path.join(JOURNAL_FILE), source))?;
+        journal
+            .write_all(&pending)
+            .map_err(|source| io_error(workspace_path.join(JOURNAL_FILE), source))?;
+        journal
+            .set_len(candidate.len() as u64)
+            .map_err(|source| io_error(workspace_path.join(JOURNAL_FILE), source))?;
+        journal
+            .sync_all()
+            .map_err(|source| io_error(workspace_path.join(JOURNAL_FILE), source))?;
         Ok(())
     }
 
@@ -1107,30 +1386,21 @@ mod platform {
             OsStr::new(PENDING_EVENT_FILE),
             &workspace_path.join(PENDING_EVENT_FILE),
         )?;
-        let mut pending_bytes = Vec::new();
+        let mut pending_envelope = Vec::new();
         pending
-            .take((MAX_JOURNAL_BYTES + 1) as u64)
-            .read_to_end(&mut pending_bytes)
+            .take((PENDING_EVENT_CAPACITY + 1) as u64)
+            .read_to_end(&mut pending_envelope)
             .map_err(|source| io_error(workspace_path.join(PENDING_EVENT_FILE), source))?;
-        if pending_bytes.is_empty()
-            || pending_bytes.len() > MAX_JOURNAL_BYTES
-            || !pending_bytes.ends_with(b"\n")
-            || pending_bytes[..pending_bytes.len() - 1].contains(&b'\n')
-            || serde_json::from_slice::<JournalEvent>(&pending_bytes[..pending_bytes.len() - 1])
-                .is_err()
-        {
-            return Err(SyntheticReplacementError::CorruptJournal);
-        }
         let bytes = read_journal_bytes(journal)?;
+        let Some(pending_bytes) = decode_pending_event(&pending_envelope) else {
+            if parse_journal_bytes(&bytes).is_err() {
+                truncate_incomplete_journal_tail(journal, workspace_path, &bytes)?;
+            }
+            finish_pending_repair(workspace, workspace_path)?;
+            return Ok(());
+        };
         if parse_journal_bytes(&bytes).is_ok() && bytes.ends_with(&pending_bytes) {
-            unlink_entry(
-                workspace.as_raw_fd(),
-                OsStr::new(PENDING_EVENT_FILE),
-                &workspace_path.join(PENDING_EVENT_FILE),
-            )?;
-            workspace
-                .sync_all()
-                .map_err(|source| io_error(workspace_path, source))?;
+            finish_pending_repair(workspace, workspace_path)?;
             return Ok(());
         }
         let prefix_len = bytes
@@ -1153,6 +1423,36 @@ mod platform {
         raw_append(journal, workspace_path, &pending_bytes)?;
         let repaired = read_journal_bytes(journal)?;
         parse_journal_bytes(&repaired)?;
+        finish_pending_repair(workspace, workspace_path)?;
+        Ok(())
+    }
+
+    fn truncate_incomplete_journal_tail(
+        journal: &mut File,
+        workspace_path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), SyntheticReplacementError> {
+        let prefix_len = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        let prefix = &bytes[..prefix_len];
+        if prefix.is_empty() || parse_journal_bytes(prefix).is_err() {
+            return Err(SyntheticReplacementError::CorruptJournal);
+        }
+        journal
+            .set_len(prefix_len as u64)
+            .map_err(|source| io_error(workspace_path.join(JOURNAL_FILE), source))?;
+        journal
+            .sync_all()
+            .map_err(|source| io_error(workspace_path.join(JOURNAL_FILE), source))?;
+        Ok(())
+    }
+
+    fn finish_pending_repair(
+        workspace: &File,
+        workspace_path: &Path,
+    ) -> Result<(), SyntheticReplacementError> {
         unlink_entry(
             workspace.as_raw_fd(),
             OsStr::new(PENDING_EVENT_FILE),
@@ -1184,7 +1484,14 @@ mod platform {
     fn reserve_journal_space(
         journal: &File,
         display: &Path,
+        fault: Option<FaultPoint>,
     ) -> Result<(), SyntheticReplacementError> {
+        if fault == Some(FaultPoint::JournalReservationFailure) {
+            return Err(io_error(
+                display,
+                io::Error::from_raw_os_error(libc::ENOSPC),
+            ));
+        }
         if unsafe {
             libc::fallocate(
                 journal.as_raw_fd(),
@@ -1252,7 +1559,7 @@ mod platform {
             display.to_path_buf(),
         )?;
         if unsafe { libc::fchown(reserve.as_raw_fd(), original.uid, original.gid) } != 0
-            || unsafe { libc::fchmod(reserve.as_raw_fd(), original.mode) } != 0
+            || unsafe { libc::fchmod(reserve.as_raw_fd(), 0o600) } != 0
         {
             return Err(io_error(display, io::Error::last_os_error()));
         }
@@ -1317,15 +1624,13 @@ mod platform {
             return Err(SyntheticReplacementError::RecoveryConflict);
         }
         let pending_display = workspace_path.join(ROLLBACK_STAGE_PENDING);
-        let mut pending = open_file_at(
+        let mut pending = open_private_or_original_mode_file(
             workspace.as_raw_fd(),
             OsStr::new(ROLLBACK_STAGE_PENDING),
-            libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0,
-        )
-        .map_err(|source| io_error(&pending_display, source))?;
+            &pending_display,
+        )?;
         let before = state_from_open_file(&mut pending, &pending_display)?;
-        if before.mode != expected.mode
+        if (before.mode != expected.mode && before.mode != 0o600)
             || before.uid != expected.uid
             || before.gid != expected.gid
             || before.len != expected.len
@@ -1333,6 +1638,17 @@ mod platform {
             return Err(SyntheticReplacementError::RecoveryConflict);
         }
         if before.digest != expected.digest {
+            if before.mode != 0o600 {
+                return Err(SyntheticReplacementError::RecoveryConflict);
+            }
+            drop(pending);
+            pending = open_file_at(
+                workspace.as_raw_fd(),
+                OsStr::new(ROLLBACK_STAGE_PENDING),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0,
+            )
+            .map_err(|source| io_error(&pending_display, source))?;
             pending
                 .seek(SeekFrom::Start(0))
                 .map_err(|source| io_error(&pending_display, source))?;
@@ -1345,10 +1661,35 @@ mod platform {
             pending
                 .sync_all()
                 .map_err(|source| io_error(&pending_display, source))?;
+            if unsafe { libc::fchmod(pending.as_raw_fd(), expected.mode) } != 0 {
+                return Err(io_error(&pending_display, io::Error::last_os_error()));
+            }
+            pending
+                .sync_all()
+                .map_err(|source| io_error(&pending_display, source))?;
             workspace
                 .sync_all()
                 .map_err(|source| io_error(workspace_path, source))?;
             inject(fault, FaultPoint::AfterRollbackStageWrite)?;
+        } else if before.mode != expected.mode {
+            if before.mode != 0o600 {
+                return Err(SyntheticReplacementError::RecoveryConflict);
+            }
+            if unsafe { libc::fchmod(pending.as_raw_fd(), expected.mode) } != 0 {
+                return Err(io_error(&pending_display, io::Error::last_os_error()));
+            }
+            pending
+                .sync_all()
+                .map_err(|source| io_error(&pending_display, source))?;
+        }
+        let final_state = state_from_open_file(&mut pending, &pending_display)?;
+        if final_state.digest != expected.digest
+            || final_state.len != expected.len
+            || final_state.mode != expected.mode
+            || final_state.uid != expected.uid
+            || final_state.gid != expected.gid
+        {
+            return Err(SyntheticReplacementError::RecoveryConflict);
         }
         drop(pending);
         let from = c_string(OsStr::new(ROLLBACK_STAGE_PENDING))?;
@@ -1412,8 +1753,19 @@ mod platform {
             expected_current,
         )?;
         #[cfg(test)]
-        if fault == Some(FaultPoint::ExternalEditBeforeExchange) {
-            simulate_external_edit_before_exchange(transaction)?;
+        if matches!(
+            fault,
+            Some(
+                FaultPoint::ExternalEditBeforeExchange
+                    | FaultPoint::ExternalEditThenCrashAfterExchange
+                    | FaultPoint::ExternalSymlinkThenCrashAfterExchange
+                    | FaultPoint::ExternalPublicModeThenCrashAfterExchange
+                    | FaultPoint::ExternalHardlinkThenCrashAfterExchange
+            )
+        ) || (fault == Some(FaultPoint::ExternalSymlinkThenCrashAfterRollbackExchange)
+            && stage == ROLLBACK_STAGE)
+        {
+            simulate_external_edit_before_exchange(transaction, fault.unwrap())?;
         }
         let from = c_string(OsStr::new(stage))?;
         let to = c_string(OsStr::new(&transaction.state.target))?;
@@ -1440,6 +1792,17 @@ mod platform {
             .workspace
             .sync_all()
             .map_err(|source| io_error(&transaction.workspace_path, source))?;
+        inject(fault, FaultPoint::AfterExchangeBeforeVerify)?;
+        inject(fault, FaultPoint::ExternalEditThenCrashAfterExchange)?;
+        inject(fault, FaultPoint::ExternalSymlinkThenCrashAfterExchange)?;
+        inject(fault, FaultPoint::ExternalPublicModeThenCrashAfterExchange)?;
+        inject(fault, FaultPoint::ExternalHardlinkThenCrashAfterExchange)?;
+        if stage == ROLLBACK_STAGE {
+            inject(
+                fault,
+                FaultPoint::ExternalSymlinkThenCrashAfterRollbackExchange,
+            )?;
+        }
         let target_after = read_target_state(
             &transaction.root,
             &transaction.state.target,
@@ -1461,33 +1824,136 @@ mod platform {
         // two names still identify exactly the objects produced by our swap.
         if let (Ok(target_state), Ok(displaced_state)) = (&target_after, &displaced_after) {
             if target_state == expected_replacement && displaced_state != expected_current {
-                let undo = unsafe {
-                    libc::renameat2(
-                        transaction.workspace.as_raw_fd(),
-                        from.as_ptr(),
-                        transaction.root.as_raw_fd(),
-                        to.as_ptr(),
-                        libc::RENAME_EXCHANGE,
-                    )
-                };
-                if undo == 0 {
-                    transaction
-                        .root
-                        .sync_all()
-                        .map_err(|source| io_error(&transaction.root_path, source))?;
-                    transaction
-                        .workspace
-                        .sync_all()
-                        .map_err(|source| io_error(&transaction.workspace_path, source))?;
-                }
+                undo_unverified_exchange(
+                    transaction,
+                    stage,
+                    expected_replacement,
+                    displaced_state,
+                )?;
             }
         }
+        if target_after
+            .as_ref()
+            .is_ok_and(|state| state == expected_replacement)
+            && displaced_after.is_err()
+        {
+            let displaced = raw_entry_state(
+                transaction.workspace.as_raw_fd(),
+                OsStr::new(stage),
+                &transaction.workspace_path.join(stage),
+            )?;
+            undo_unverified_exchange_raw(transaction, stage, expected_replacement, displaced)?;
+        }
         Err(SyntheticReplacementError::RecoveryConflict)
+    }
+
+    fn undo_unverified_exchange(
+        transaction: &OpenTransaction,
+        stage: &str,
+        expected_target: &TargetState,
+        displaced: &TargetState,
+    ) -> Result<(), SyntheticReplacementError> {
+        require_target_state(
+            &transaction.root,
+            &transaction.state.target,
+            &transaction.root_path.join(&transaction.state.target),
+            expected_target,
+        )?;
+        require_stage_state(transaction, stage, displaced)?;
+        let from = c_string(OsStr::new(stage))?;
+        let to = c_string(OsStr::new(&transaction.state.target))?;
+        if unsafe {
+            libc::renameat2(
+                transaction.workspace.as_raw_fd(),
+                from.as_ptr(),
+                transaction.root.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        } != 0
+        {
+            return Err(io_error(
+                transaction.root_path.join(&transaction.state.target),
+                io::Error::last_os_error(),
+            ));
+        }
+        transaction
+            .root
+            .sync_all()
+            .map_err(|source| io_error(&transaction.root_path, source))?;
+        transaction
+            .workspace
+            .sync_all()
+            .map_err(|source| io_error(&transaction.workspace_path, source))?;
+        require_target_state(
+            &transaction.root,
+            &transaction.state.target,
+            &transaction.root_path.join(&transaction.state.target),
+            displaced,
+        )?;
+        require_stage_state(transaction, stage, expected_target)
+    }
+
+    fn undo_unverified_exchange_raw(
+        transaction: &OpenTransaction,
+        stage: &str,
+        expected_target: &TargetState,
+        displaced: RawEntryState,
+    ) -> Result<(), SyntheticReplacementError> {
+        require_target_state(
+            &transaction.root,
+            &transaction.state.target,
+            &transaction.root_path.join(&transaction.state.target),
+            expected_target,
+        )?;
+        if raw_entry_state(
+            transaction.workspace.as_raw_fd(),
+            OsStr::new(stage),
+            &transaction.workspace_path.join(stage),
+        )? != displaced
+        {
+            return Err(SyntheticReplacementError::RecoveryConflict);
+        }
+        let from = c_string(OsStr::new(stage))?;
+        let to = c_string(OsStr::new(&transaction.state.target))?;
+        if unsafe {
+            libc::renameat2(
+                transaction.workspace.as_raw_fd(),
+                from.as_ptr(),
+                transaction.root.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        } != 0
+        {
+            return Err(io_error(
+                transaction.root_path.join(&transaction.state.target),
+                io::Error::last_os_error(),
+            ));
+        }
+        transaction
+            .root
+            .sync_all()
+            .map_err(|source| io_error(&transaction.root_path, source))?;
+        transaction
+            .workspace
+            .sync_all()
+            .map_err(|source| io_error(&transaction.workspace_path, source))?;
+        if raw_entry_state(
+            transaction.root.as_raw_fd(),
+            OsStr::new(&transaction.state.target),
+            &transaction.root_path.join(&transaction.state.target),
+        )? != displaced
+        {
+            return Err(SyntheticReplacementError::RecoveryConflict);
+        }
+        require_stage_state(transaction, stage, expected_target)
     }
 
     #[cfg(test)]
     fn simulate_external_edit_before_exchange(
         transaction: &OpenTransaction,
+        fault: FaultPoint,
     ) -> Result<(), SyntheticReplacementError> {
         let target = c_string(OsStr::new(&transaction.state.target))?;
         let saved = c_string(OsStr::new("external-window-original"))?;
@@ -1506,25 +1972,65 @@ mod platform {
                 io::Error::last_os_error(),
             ));
         }
-        let mut external = create_private_file(
-            transaction.root.as_raw_fd(),
-            OsStr::new(&transaction.state.target),
-            transaction.root_path.join(&transaction.state.target),
-        )?;
-        external
-            .write_all(b"external-window-edit")
-            .map_err(|source| {
-                io_error(
-                    transaction.root_path.join(&transaction.state.target),
-                    source,
-                )
-            })?;
-        external.sync_all().map_err(|source| {
-            io_error(
-                transaction.root_path.join(&transaction.state.target),
-                source,
-            )
-        })?;
+        let target_display = transaction.root_path.join(&transaction.state.target);
+        match fault {
+            FaultPoint::ExternalSymlinkThenCrashAfterExchange
+            | FaultPoint::ExternalSymlinkThenCrashAfterRollbackExchange => {
+                let link = CString::new("external-window-original").expect("fixed link");
+                if unsafe {
+                    libc::symlinkat(link.as_ptr(), transaction.root.as_raw_fd(), target.as_ptr())
+                } != 0
+                {
+                    return Err(io_error(&target_display, io::Error::last_os_error()));
+                }
+            }
+            FaultPoint::ExternalHardlinkThenCrashAfterExchange => {
+                let backing_name = OsStr::new("external-window-backing");
+                let backing_display = transaction.root_path.join(backing_name);
+                let mut backing = create_private_file(
+                    transaction.root.as_raw_fd(),
+                    backing_name,
+                    backing_display.clone(),
+                )?;
+                backing
+                    .write_all(b"external-window-edit")
+                    .map_err(|source| io_error(&backing_display, source))?;
+                backing
+                    .sync_all()
+                    .map_err(|source| io_error(&backing_display, source))?;
+                let backing = c_string(backing_name)?;
+                if unsafe {
+                    libc::linkat(
+                        transaction.root.as_raw_fd(),
+                        backing.as_ptr(),
+                        transaction.root.as_raw_fd(),
+                        target.as_ptr(),
+                        0,
+                    )
+                } != 0
+                {
+                    return Err(io_error(&target_display, io::Error::last_os_error()));
+                }
+            }
+            _ => {
+                let mut external = create_private_file(
+                    transaction.root.as_raw_fd(),
+                    OsStr::new(&transaction.state.target),
+                    target_display.clone(),
+                )?;
+                external
+                    .write_all(b"external-window-edit")
+                    .map_err(|source| io_error(&target_display, source))?;
+                if fault == FaultPoint::ExternalPublicModeThenCrashAfterExchange
+                    && unsafe { libc::fchmod(external.as_raw_fd(), 0o644) } != 0
+                {
+                    return Err(io_error(&target_display, io::Error::last_os_error()));
+                }
+                external
+                    .sync_all()
+                    .map_err(|source| io_error(&target_display, source))?;
+            }
+        }
         transaction
             .root
             .sync_all()
@@ -1627,6 +2133,35 @@ mod platform {
         )
         .map_err(|_| SyntheticReplacementError::RecoveryConflict)?;
         state_from_open_file(&mut file, display)
+    }
+
+    fn raw_entry_state(
+        parent: RawFd,
+        name: &OsStr,
+        display: &Path,
+    ) -> Result<RawEntryState, SyntheticReplacementError> {
+        let c_name = c_string(name)?;
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+        if unsafe {
+            libc::fstatat(
+                parent,
+                c_name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(io_error(display, io::Error::last_os_error()));
+        }
+        let stat = unsafe { stat.assume_init() };
+        Ok(RawEntryState {
+            device: stat.st_dev as u64,
+            inode: stat.st_ino as u64,
+            mode: stat.st_mode as u32,
+            links: stat.st_nlink as u64,
+            uid: stat.st_uid,
+            gid: stat.st_gid,
+        })
     }
 
     fn read_target_bytes(
@@ -2100,19 +2635,20 @@ mod tests {
     };
     use std::{
         fs::{self, File, OpenOptions},
-        io::Write,
-        os::{
-            fd::AsRawFd,
-            unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        io::{Seek, SeekFrom, Write},
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Barrier,
         },
-        sync::atomic::{AtomicUsize, Ordering},
+        thread,
     };
     use tempfile::TempDir;
     use zeroize::Zeroizing;
 
     struct TestProvider {
-        key: [u8; 32],
-        reference: RecoveryKeyReference,
+        byte: u8,
+        idempotent: bool,
         creates: AtomicUsize,
         opens: AtomicUsize,
     }
@@ -2120,38 +2656,50 @@ mod tests {
     impl TestProvider {
         fn new(byte: u8) -> Self {
             Self {
-                key: [byte; 32],
-                reference: RecoveryKeyReference::new(
-                    "synthetic-test",
-                    1,
-                    b"opaque-reference".to_vec(),
-                )
-                .unwrap(),
+                byte,
+                idempotent: true,
                 creates: AtomicUsize::new(0),
                 opens: AtomicUsize::new(0),
             }
         }
+
+        fn key_for(&self, transaction_id: ReplacementTransactionId) -> [u8; 32] {
+            let mut key = [self.byte; 32];
+            for (index, byte) in key.iter_mut().enumerate() {
+                *byte ^= transaction_id.as_bytes()[index % 16];
+            }
+            key
+        }
+
+        fn reference_for(&self, transaction_id: ReplacementTransactionId) -> RecoveryKeyReference {
+            let mut opaque = b"opaque-reference".to_vec();
+            opaque.extend_from_slice(transaction_id.as_bytes());
+            RecoveryKeyReference::new("synthetic-test", 1, opaque).unwrap()
+        }
     }
 
     impl RecoveryKeyProvider for TestProvider {
-        fn create(
-            &mut self,
-            _transaction_id: ReplacementTransactionId,
-        ) -> RecoveryKeyCreateOutcome {
+        fn create_is_transaction_idempotent(&self) -> bool {
+            self.idempotent
+        }
+
+        fn create(&mut self, transaction_id: ReplacementTransactionId) -> RecoveryKeyCreateOutcome {
             self.creates.fetch_add(1, Ordering::SeqCst);
             RecoveryKeyCreateOutcome::Created(CreatedRecoveryKey {
-                reference: self.reference.clone(),
-                key: BackupKey::from_bytes(Zeroizing::new(self.key)),
+                reference: self.reference_for(transaction_id),
+                key: BackupKey::from_bytes(Zeroizing::new(self.key_for(transaction_id))),
             })
         }
         fn open(
             &mut self,
-            _transaction_id: ReplacementTransactionId,
+            transaction_id: ReplacementTransactionId,
             reference: &RecoveryKeyReference,
         ) -> RecoveryKeyOpenOutcome {
             self.opens.fetch_add(1, Ordering::SeqCst);
-            if reference == &self.reference {
-                RecoveryKeyOpenOutcome::Available(BackupKey::from_bytes(Zeroizing::new(self.key)))
+            if reference == &self.reference_for(transaction_id) {
+                RecoveryKeyOpenOutcome::Available(BackupKey::from_bytes(Zeroizing::new(
+                    self.key_for(transaction_id),
+                )))
             } else {
                 RecoveryKeyOpenOutcome::WrongIdentity
             }
@@ -2162,6 +2710,40 @@ mod tests {
             _reference: &RecoveryKeyReference,
         ) -> RecoveryKeyDeleteOutcome {
             RecoveryKeyDeleteOutcome::Unavailable
+        }
+    }
+
+    struct BlockingProvider {
+        inner: TestProvider,
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    impl RecoveryKeyProvider for BlockingProvider {
+        fn create_is_transaction_idempotent(&self) -> bool {
+            true
+        }
+
+        fn create(&mut self, transaction_id: ReplacementTransactionId) -> RecoveryKeyCreateOutcome {
+            self.entered.wait();
+            self.release.wait();
+            self.inner.create(transaction_id)
+        }
+
+        fn open(
+            &mut self,
+            transaction_id: ReplacementTransactionId,
+            reference: &RecoveryKeyReference,
+        ) -> RecoveryKeyOpenOutcome {
+            self.inner.open(transaction_id, reference)
+        }
+
+        fn delete(
+            &mut self,
+            transaction_id: ReplacementTransactionId,
+            reference: &RecoveryKeyReference,
+        ) -> RecoveryKeyDeleteOutcome {
+            self.inner.delete(transaction_id, reference)
         }
     }
 
@@ -2191,28 +2773,30 @@ mod tests {
         let workspace = workspace(root, tx);
         let mut bytes = serde_json::to_vec(&event).unwrap();
         bytes.push(b'\n');
-        let pending = workspace.join(PENDING_EVENT_FILE);
+        let journal_path = workspace.join(JOURNAL_FILE);
+        let journal_bytes = fs::read(&journal_path).unwrap();
+        let event_count = journal_bytes.iter().filter(|byte| **byte == b'\n').count();
+        let pending = workspace.join(pending_slot_name(event_count));
         let mut pending_file = OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
-            .mode(0o600)
             .open(&pending)
             .unwrap();
-        pending_file.write_all(&bytes).unwrap();
-        pending_file.sync_all().unwrap();
-        let mut journal = OpenOptions::new()
-            .append(true)
-            .open(workspace.join(JOURNAL_FILE))
+        pending_file.seek(SeekFrom::Start(0)).unwrap();
+        pending_file
+            .write_all(&encode_pending_event(&bytes).unwrap())
             .unwrap();
+        pending_file.sync_all().unwrap();
+        let mut journal = OpenOptions::new().append(true).open(journal_path).unwrap();
         journal.write_all(&bytes[..bytes.len() / 2]).unwrap();
         journal.sync_all().unwrap();
-        File::open(&workspace).unwrap().sync_all().unwrap();
     }
 
     #[test]
     fn committed_interruptions_recover_idempotently() {
         for (index, fault) in [
             FaultPoint::AfterCommitPrepared,
+            FaultPoint::AfterExchangeBeforeVerify,
             FaultPoint::AfterPublish,
             FaultPoint::AfterPublished,
             FaultPoint::AfterVerified,
@@ -2306,12 +2890,70 @@ mod tests {
                 fault,
             )
             .is_err());
+            let journal_path = workspace(root.path(), tx).join(JOURNAL_FILE);
+            let reserved_blocks = fs::metadata(&journal_path).unwrap().blocks();
             simulate_torn_event(root.path(), tx, event);
             let receipt =
                 recover_existing_synthetic(&approval, tx, &mut provider, validation).unwrap();
             assert_eq!(receipt.outcome, outcome);
             assert!(!workspace(root.path(), tx).join(PENDING_EVENT_FILE).exists());
+            assert!(fs::metadata(journal_path).unwrap().blocks() >= reserved_blocks);
         }
+    }
+
+    #[test]
+    fn torn_rollback_decision_and_stage_records_recover_from_reserved_slots() {
+        let (root, approval) = fixture();
+        let mut provider = TestProvider::new(0xb8);
+        let tx = transaction(108);
+        assert!(platform::replace_with_fault(
+            &approval,
+            Path::new("config.json"),
+            b"new-employee-key",
+            tx,
+            &mut provider,
+            SyntheticValidation::Reject,
+            FaultPoint::AfterPublished,
+        )
+        .is_err());
+        simulate_torn_event(root.path(), tx, JournalEvent::RollbackPrepared);
+        assert_eq!(
+            recover_existing_synthetic(&approval, tx, &mut provider, SyntheticValidation::Reject,)
+                .unwrap()
+                .outcome,
+            ReplacementOutcome::RolledBack
+        );
+
+        let (root, approval) = fixture();
+        let mut provider = TestProvider::new(0xb9);
+        let tx = transaction(109);
+        assert!(platform::replace_with_fault(
+            &approval,
+            Path::new("config.json"),
+            b"new-employee-key",
+            tx,
+            &mut provider,
+            SyntheticValidation::Reject,
+            FaultPoint::AfterRollbackStagePublish,
+        )
+        .is_err());
+        let metadata = fs::metadata(workspace(root.path(), tx).join(ROLLBACK_STAGE)).unwrap();
+        simulate_torn_event(
+            root.path(),
+            tx,
+            JournalEvent::RollbackStaged {
+                identity: FileIdentity {
+                    volume: metadata.dev(),
+                    file: metadata.ino(),
+                },
+            },
+        );
+        assert_eq!(
+            recover_existing_synthetic(&approval, tx, &mut provider, SyntheticValidation::Reject,)
+                .unwrap()
+                .outcome,
+            ReplacementOutcome::RolledBack
+        );
     }
 
     #[test]
@@ -2338,30 +2980,126 @@ mod tests {
     }
 
     #[test]
+    fn restart_undoes_unverified_exchange_for_unsafe_external_entries() {
+        for (index, fault) in [
+            FaultPoint::ExternalEditThenCrashAfterExchange,
+            FaultPoint::ExternalSymlinkThenCrashAfterExchange,
+            FaultPoint::ExternalPublicModeThenCrashAfterExchange,
+            FaultPoint::ExternalHardlinkThenCrashAfterExchange,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (root, approval) = fixture();
+            let mut provider = TestProvider::new(0xc4 + index as u8);
+            let tx = transaction(114 + index as u8);
+            assert!(matches!(
+                platform::replace_with_fault(
+                    &approval,
+                    Path::new("config.json"),
+                    b"new-employee-key",
+                    tx,
+                    &mut provider,
+                    SyntheticValidation::Accept,
+                    fault,
+                ),
+                Err(SyntheticReplacementError::Injected(point)) if point == fault
+            ));
+            assert!(matches!(
+                recover_existing_synthetic(
+                    &approval,
+                    tx,
+                    &mut provider,
+                    SyntheticValidation::Accept,
+                ),
+                Err(SyntheticReplacementError::RecoveryConflict)
+            ));
+            let target = root.path().join("config.json");
+            match fault {
+                FaultPoint::ExternalSymlinkThenCrashAfterExchange => {
+                    assert!(fs::symlink_metadata(&target)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink());
+                }
+                FaultPoint::ExternalPublicModeThenCrashAfterExchange => {
+                    assert_eq!(fs::metadata(&target).unwrap().mode() & 0o7777, 0o644);
+                    assert_eq!(fs::read(&target).unwrap(), b"external-window-edit");
+                }
+                FaultPoint::ExternalHardlinkThenCrashAfterExchange => {
+                    assert_eq!(fs::metadata(&target).unwrap().nlink(), 2);
+                    assert_eq!(fs::read(&target).unwrap(), b"external-window-edit");
+                }
+                FaultPoint::ExternalEditThenCrashAfterExchange => {
+                    assert_eq!(fs::read(&target).unwrap(), b"external-window-edit");
+                }
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                recover_existing_synthetic(
+                    &approval,
+                    tx,
+                    &mut provider,
+                    SyntheticValidation::Accept,
+                ),
+                Err(SyntheticReplacementError::RecoveryConflict)
+            ));
+        }
+    }
+
+    #[test]
+    fn restart_undoes_unsafe_external_entry_raced_into_rollback_exchange() {
+        let (root, approval) = fixture();
+        let mut provider = TestProvider::new(0xca);
+        let tx = transaction(119);
+        assert!(matches!(
+            platform::replace_with_fault(
+                &approval,
+                Path::new("config.json"),
+                b"rejected-new-key",
+                tx,
+                &mut provider,
+                SyntheticValidation::Reject,
+                FaultPoint::ExternalSymlinkThenCrashAfterRollbackExchange,
+            ),
+            Err(SyntheticReplacementError::Injected(
+                FaultPoint::ExternalSymlinkThenCrashAfterRollbackExchange
+            ))
+        ));
+        assert!(matches!(
+            recover_existing_synthetic(&approval, tx, &mut provider, SyntheticValidation::Reject,),
+            Err(SyntheticReplacementError::RecoveryConflict)
+        ));
+        assert!(fs::symlink_metadata(root.path().join("config.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
     fn shared_target_lock_blocks_a_second_transaction() {
         let (root, approval) = fixture();
-        let mut first_provider = TestProvider::new(0xc2);
-        let first = transaction(112);
-        assert!(platform::replace_with_fault(
-            &approval,
-            Path::new("config.json"),
-            b"first-new-key",
-            first,
-            &mut first_provider,
-            SyntheticValidation::Accept,
-            FaultPoint::AfterCommitPrepared,
-        )
-        .is_err());
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(
-                root.path()
-                    .join(REPLACEMENT_DIRECTORY)
-                    .join(TARGET_LOCK_FILE),
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let first_approval = approval.clone();
+        let first_entered = Arc::clone(&entered);
+        let first_release = Arc::clone(&release);
+        let first = thread::spawn(move || {
+            let mut provider = BlockingProvider {
+                inner: TestProvider::new(0xc2),
+                entered: first_entered,
+                release: first_release,
+            };
+            replace_existing_synthetic(
+                &first_approval,
+                Path::new("config.json"),
+                b"first-new-key",
+                transaction(112),
+                &mut provider,
+                SyntheticValidation::Accept,
             )
-            .unwrap();
-        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+        });
+        entered.wait();
         let mut second_provider = TestProvider::new(0xc3);
         assert!(matches!(
             replace_existing_synthetic(
@@ -2374,9 +3112,15 @@ mod tests {
             ),
             Err(SyntheticReplacementError::Io { .. })
         ));
+        assert_eq!(second_provider.creates.load(Ordering::SeqCst), 0);
         assert_eq!(
             fs::read(root.path().join("config.json")).unwrap(),
             b"old-employee-key"
+        );
+        release.wait();
+        assert_eq!(
+            first.join().unwrap().unwrap().outcome,
+            ReplacementOutcome::Complete
         );
     }
 
@@ -2457,30 +3201,99 @@ mod tests {
     }
 
     #[test]
-    fn rollback_reservation_enospc_fails_before_commit_or_publication() {
+    fn provider_contract_is_transaction_scoped_and_non_idempotent_providers_are_rejected() {
         let (root, approval) = fixture();
-        let mut provider = TestProvider::new(0xd2);
-        let tx = transaction(121);
+        let mut provider = TestProvider::new(0xd4);
+        let first = transaction(123);
+        let second = transaction(124);
+        assert_eq!(provider.reference_for(first), provider.reference_for(first));
+        assert_ne!(
+            provider.reference_for(first),
+            provider.reference_for(second)
+        );
+        assert_eq!(provider.key_for(first), provider.key_for(first));
+        assert_ne!(provider.key_for(first), provider.key_for(second));
+
+        provider.idempotent = false;
         assert!(matches!(
-            platform::replace_with_fault(
+            replace_existing_synthetic(
                 &approval,
                 Path::new("config.json"),
                 b"new-employee-key",
-                tx,
+                first,
                 &mut provider,
                 SyntheticValidation::Accept,
-                FaultPoint::RollbackReservationFailure,
             ),
-            Err(SyntheticReplacementError::Io { .. })
+            Err(SyntheticReplacementError::KeyCreateNotIdempotent)
         ));
-        assert_eq!(
-            fs::read(root.path().join("config.json")).unwrap(),
-            b"old-employee-key"
-        );
-        assert!(matches!(
-            recover_existing_synthetic(&approval, tx, &mut provider, SyntheticValidation::Accept,),
-            Err(SyntheticReplacementError::Uncommitted)
-        ));
+        assert_eq!(provider.creates.load(Ordering::SeqCst), 0);
+        assert!(!root.path().join(REPLACEMENT_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn rollback_reservation_enospc_fails_before_commit_or_publication() {
+        for (index, fault) in [
+            FaultPoint::RollbackReservationFailure,
+            FaultPoint::PendingSlotReservationFailure,
+            FaultPoint::JournalReservationFailure,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (root, approval) = fixture();
+            let mut provider = TestProvider::new(0xd2 + index as u8);
+            let tx = transaction(121 + index as u8);
+            assert!(matches!(
+                platform::replace_with_fault(
+                    &approval,
+                    Path::new("config.json"),
+                    b"new-employee-key",
+                    tx,
+                    &mut provider,
+                    SyntheticValidation::Accept,
+                    fault,
+                ),
+                Err(SyntheticReplacementError::Io { .. })
+            ));
+            assert_eq!(
+                fs::read(root.path().join("config.json")).unwrap(),
+                b"old-employee-key"
+            );
+            assert!(matches!(
+                recover_existing_synthetic(
+                    &approval,
+                    tx,
+                    &mut provider,
+                    SyntheticValidation::Accept,
+                ),
+                Err(SyntheticReplacementError::Uncommitted)
+            ));
+        }
+    }
+
+    #[test]
+    fn commit_prepares_physical_journal_and_pending_slot_capacity() {
+        let (root, approval) = fixture();
+        let mut provider = TestProvider::new(0xd5);
+        let tx = transaction(125);
+        assert!(platform::replace_with_fault(
+            &approval,
+            Path::new("config.json"),
+            b"new-employee-key",
+            tx,
+            &mut provider,
+            SyntheticValidation::Accept,
+            FaultPoint::AfterCommitPrepared,
+        )
+        .is_err());
+        let workspace = workspace(root.path(), tx);
+        let journal = fs::metadata(workspace.join(JOURNAL_FILE)).unwrap();
+        assert!(journal.blocks() * 512 >= MAX_JOURNAL_BYTES as u64);
+        for index in 0..MAX_EVENTS {
+            let slot = fs::metadata(workspace.join(pending_slot_name(index))).unwrap();
+            assert_eq!(slot.len(), PENDING_EVENT_CAPACITY as u64);
+            assert!(slot.blocks() * 512 >= PENDING_EVENT_CAPACITY as u64);
+        }
     }
 
     #[test]
@@ -2563,6 +3376,28 @@ mod tests {
                 .unwrap(),
                 receipt
             );
+        }
+    }
+
+    #[test]
+    fn read_only_private_modes_can_publish_and_rollback_without_reopen_failure() {
+        for (index, mode) in [0o400, 0o500].into_iter().enumerate() {
+            let (root, approval) = fixture();
+            let target = root.path().join("config.json");
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode)).unwrap();
+            let mut provider = TestProvider::new(0xe0 + index as u8);
+            let receipt = replace_existing_synthetic(
+                &approval,
+                Path::new("config.json"),
+                b"rejected-new-key",
+                transaction(126 + index as u8),
+                &mut provider,
+                SyntheticValidation::Reject,
+            )
+            .unwrap();
+            assert_eq!(receipt.outcome, ReplacementOutcome::RolledBack);
+            assert_eq!(fs::read(&target).unwrap(), b"old-employee-key");
+            assert_eq!(fs::metadata(&target).unwrap().mode() & 0o7777, mode);
         }
     }
 
@@ -2655,6 +3490,7 @@ mod tests {
         let (root, approval) = fixture();
         let mut provider = TestProvider::new(0xa5);
         let tx = transaction(90);
+        let recovery_key = provider.key_for(tx);
         let receipt = replace_existing_synthetic(
             &approval,
             Path::new("config.json"),
@@ -2681,7 +3517,7 @@ mod tests {
                 assert!(!bytes
                     .windows(b"old-employee-key".len())
                     .any(|window| window == b"old-employee-key"));
-                assert!(!bytes.windows(32).any(|window| window == [0xa5; 32]));
+                assert!(!bytes.windows(32).any(|window| window == recovery_key));
             }
         }
     }

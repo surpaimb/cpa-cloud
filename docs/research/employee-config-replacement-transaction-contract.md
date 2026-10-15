@@ -315,11 +315,14 @@ effective user, single-linked and private, under an owner-private `0700` root.
 The module creates an owner-private transaction workspace and a bounded,
 flushed JSON-lines journal containing identities, digests,
 lengths, original UID/GID/mode, the non-secret provider reference and durable
-phase events, but no configuration bytes or DEK. Each append first publishes a
-complete owner-private pending record; restart may truncate only a tail that is
-an exact prefix of that record, append the complete record, flush it, and remove
-the pending file. A key-create intent is durable before the provider call, and
-recovery requires provider creation to be idempotent for the transaction ID.
+phase events, but no configuration bytes or DEK. Before the commit decision it
+physically allocates the complete journal plus a fixed owner-private pending
+slot for every bounded event. Post-commit append reuses one slot exactly once;
+restart verifies its length, checksum and event sequence, then overwrites or
+extends only the incomplete journal suffix without truncating reserved extents.
+A key-create intent is durable before the provider call, and the provider trait
+must explicitly advertise transaction-idempotent creation before this slice
+will call it.
 Before `CommitPrepared` it
 requires the version-3 encrypted pre-image, a flushed desired stage, a current
 old-target comparison, physically allocated journal capacity and rollback-stage
@@ -330,11 +333,13 @@ Publication and restoration hold one synthetic-root target lock and use
 `renameat2(RENAME_EXCHANGE)` between held workspace/root descriptors after
 rechecking the expected current inode, digest, length, link count and security
 metadata. Both post-exchange names are verified; a check-to-syscall mismatch is
-undone only while those names still identify the exchange result. The displaced
-inode remains as durable recovery evidence until `Published` or `Restored` is
-flushed. Restart therefore recognizes only the exact two-object crash shape; a
-symlink, added hard link, stale inode, changed content/metadata or third-party
-replacement is preserved as a recovery conflict. Synthetic validation
+undone only while the target remains the exact replacement and the displaced
+entry retains the raw no-follow device/inode/type/metadata observed in the
+workspace. The same bounded undo runs after restart if a crash occurs before
+live verification, including for a symlink, public-mode file or multiply-linked
+entry. The displaced entry remains durable recovery evidence until `Published`
+or `Restored` is flushed. Other stale identity, content or metadata changes are
+preserved as a recovery conflict. Synthetic validation
 rejection authenticates the complete pre-image and records a rollback-stage
 intent before rewriting the preallocated pending inode, flushing it and
 publishing it no-replace. Terminal recovery is idempotent and revalidates the
@@ -342,8 +347,11 @@ exact desired or restored inode.
 
 Tests interrupt after each key-intent/create/backup/stage/decision/publication/
 verification/rollback-stage/restore/terminal boundary, repair torn journal
-tails after mutation, exercise a deterministic check-to-exchange edit and the
-shared target lock, exercise stale targets plus symlink and hard-link changes,
+tails from preallocated slots after mutation, exercise deterministic
+check-to-exchange edits including crash/restart with symlink, public-mode and
+hard-linked entries, and overlap two real transactions at the shared target
+lock. Tests also cover owner-read-only `0400`/`0500` rollback, physical journal/
+slot allocation, stale targets plus symlink and hard-link changes,
 preserve a post-publication external edit, scan durable
 metadata for the original Key and DEK, and repeat terminal recovery. Before the
 commit decision, restart returns a non-mutating `Uncommitted` blocker and

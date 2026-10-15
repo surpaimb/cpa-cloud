@@ -256,13 +256,15 @@ extended ACL to a `0600` target and proves this fail-closed boundary.
 `live/backup.rs` itself remains non-publishing, but a separate bounded
 `live/linux_replacement.rs` slice now consumes its version-3 material for one
 existing leaf under a test-only approved Linux synthetic root. That slice uses
-a private bounded journal whose complete pending record repairs only an exact
-torn tail, and it persists key-create intent before requiring idempotent
-provider creation. It serializes synthetic transactions with one shared target
-lock, allocates journal and rollback-stage space before `CommitPrepared`, and uses
-descriptor-relative `RENAME_EXCHANGE` so the displaced inode remains available
-for post-syscall verification and bounded undo. It recognizes only the exact
-target/stage pair in the post-exchange/pre-event crash window. Before a
+a private bounded journal whose physically allocated per-event slots repair an
+exact torn tail without shrinking reserved extents, and it persists key-create
+intent before requiring an explicit transaction-idempotent provider capability.
+It serializes synthetic transactions with one shared target lock; two real
+transactions overlap in the lock test. Journal, pending slots and rollback-stage
+space are allocated before `CommitPrepared`. Descriptor-relative
+`RENAME_EXCHANGE` keeps the displaced entry available for live or restart undo;
+raw no-follow identity/type evidence covers unsafe-mode, hard-linked and symlink
+entries without treating them as valid configuration. Before a
 synthetic validation rejection is made durably rollback-directed, it
 authenticates the pre-image; rollback then persists a stage intent, rewrites the
 preallocated inode, flushes it and publishes it no-replace. Every restart after

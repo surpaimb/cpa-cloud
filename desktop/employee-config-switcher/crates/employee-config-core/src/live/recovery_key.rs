@@ -168,10 +168,17 @@ pub enum RecoveryKeyDeleteOutcome {
 
 /// Platform implementations must never generate a key from `open`.
 ///
-/// `create` is used only before the first encrypted backup. Recovery calls
+/// `create` is used only before the first encrypted backup. A provider that
+/// returns `true` from `create_is_transaction_idempotent` must return the exact
+/// same key and reference for every successful retry of one transaction ID; it
+/// must never replace a value already published for that ID. Recovery calls
 /// `open` with the exact durable reference, and terminal cleanup calls `delete`
 /// only after the workspace has been durably removed.
 pub trait RecoveryKeyProvider {
+    fn create_is_transaction_idempotent(&self) -> bool {
+        false
+    }
+
     fn create(&mut self, transaction_id: ReplacementTransactionId) -> RecoveryKeyCreateOutcome;
 
     fn open(

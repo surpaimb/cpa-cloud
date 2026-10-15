@@ -83,6 +83,10 @@ impl WindowsDpapiRecoveryKeyProvider {
 }
 
 impl RecoveryKeyProvider for WindowsDpapiRecoveryKeyProvider {
+    fn create_is_transaction_idempotent(&self) -> bool {
+        true
+    }
+
     fn create(&mut self, transaction_id: ReplacementTransactionId) -> RecoveryKeyCreateOutcome {
         #[cfg(windows)]
         {
