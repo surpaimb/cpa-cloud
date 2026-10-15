@@ -348,7 +348,15 @@ mod windows_impl {
         };
         match open_locked(store, transaction_id, reference) {
             RecoveryKeyOpenOutcome::Available(_) => {}
-            RecoveryKeyOpenOutcome::Missing => return RecoveryKeyDeleteOutcome::Missing,
+            RecoveryKeyOpenOutcome::Missing => {
+                return match sync_directory(&store.path) {
+                    Ok(()) => RecoveryKeyDeleteOutcome::Missing,
+                    Err(source) => delete_outcome_for(NativeError::Io(io_error(
+                        &store.path,
+                        source,
+                    ))),
+                }
+            }
             RecoveryKeyOpenOutcome::Locked => return RecoveryKeyDeleteOutcome::Locked,
             RecoveryKeyOpenOutcome::WrongIdentity => {
                 return RecoveryKeyDeleteOutcome::WrongIdentity
