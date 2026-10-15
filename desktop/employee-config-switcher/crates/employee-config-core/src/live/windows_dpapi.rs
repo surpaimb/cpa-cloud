@@ -483,11 +483,9 @@ mod windows_impl {
         {
             return Err(NativeError::Corrupt);
         }
-        let mut key = [0u8; 32];
+        let mut key = Zeroizing::new([0u8; 32]);
         key.copy_from_slice(&plaintext[32..64]);
-        let result = BackupKey::from_bytes(key);
-        key.zeroize();
-        Ok(result)
+        Ok(BackupKey::from_bytes(key))
     }
 
     fn entropy(transaction_id: ReplacementTransactionId) -> Zeroizing<Vec<u8>> {

@@ -841,18 +841,20 @@ mod tests {
     #[test]
     fn available_key_and_debug_output_remain_redacted() {
         let mut provider = FakeProvider::opening(RecoveryKeyOpenOutcome::Available(
-            BackupKey::from_bytes([0x7a; 32]),
+            BackupKey::from_bytes(zeroize::Zeroizing::new([0x7a; 32])),
         ));
         let key = open_existing_recovery_key(&mut provider, transaction_id(), &reference())
             .expect("available key should be returned");
         assert_eq!(format!("{key:?}"), "BackupKey([REDACTED])");
 
-        let opened = RecoveryKeyOpenOutcome::Available(BackupKey::from_bytes([0x7b; 32]));
+        let opened = RecoveryKeyOpenOutcome::Available(BackupKey::from_bytes(
+            zeroize::Zeroizing::new([0x7b; 32]),
+        ));
         assert_eq!(format!("{opened:?}"), "Available([REDACTED])");
 
         let created = CreatedRecoveryKey {
             reference: reference(),
-            key: BackupKey::from_bytes([0x7c; 32]),
+            key: BackupKey::from_bytes(zeroize::Zeroizing::new([0x7c; 32])),
         };
         let rendered = format!("{created:?}");
         assert!(rendered.contains("test-provider"));
