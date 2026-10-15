@@ -215,6 +215,14 @@ sorted unique set of at most 16 UTF-8 leaf names bounded to 4 KiB each and
 refuses events after a terminal state. Identities, digests, security metadata,
 durable I/O, `recovery_blocked`, publication and rollback remain unimplemented.
 
+The recovery-key boundary is also executable only as a pure interface. It
+defines bounded transaction/provider metadata, redacted create/open/delete
+outcomes, and an open-existing helper that can only return an available
+zeroizing key or one of the five blocking recovery results. Tests prove that a
+missing key invokes neither create nor delete and that keys and opaque provider
+references stay out of `Debug`. No operating-system key provider is present;
+headless Linux and all real key custody therefore remain unsupported.
+
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret
 ownership record together only when both are absent. It deliberately leaves

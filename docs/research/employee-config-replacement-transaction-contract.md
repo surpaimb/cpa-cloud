@@ -256,6 +256,15 @@ identities/digests/security metadata, performs no I/O, and does not implement
 the durable journal, recovery-blocked handling, publication, tool-format
 validation, rollback or cleanup.
 
+`live/recovery_key.rs` now fixes only the pure provider-call boundary and
+redacted outcome taxonomy. Recovery opens one exact non-zero transaction ID and
+bounded provider reference and maps `locked`, `missing`, `wrong_identity`,
+`corrupt` and `unavailable` to distinct blocking results. The recovery helper
+has no create or delete path, so a failed open cannot silently generate a new
+key or remove evidence. Provider references and key material are redacted from
+`Debug`. No DPAPI, Keychain, Secret Service, filesystem, environment-variable
+or network provider is implemented, and no durable journal calls this interface.
+
 ## Public platform references
 
 - [Microsoft `CryptProtectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
