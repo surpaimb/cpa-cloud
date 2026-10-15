@@ -703,17 +703,10 @@ impl ReconciliationLock {
         }
         let mut file = unsafe { File::from_raw_fd(fd) };
         verify_private_regular_file(&file, approval.uid, &approval.display.join(LOCK_FILE))?;
-        let seed = initialize_lock_namespace(
-            &mut file,
-            approval.uid,
-            &approval.display.join(LOCK_FILE),
-        )?;
-        let namespace = derive_lock_namespace(
-            &file,
-            approval.uid,
-            seed,
-            &approval.display.join(LOCK_FILE),
-        )?;
+        let seed =
+            initialize_lock_namespace(&mut file, approval.uid, &approval.display.join(LOCK_FILE))?;
+        let namespace =
+            derive_lock_namespace(&file, approval.uid, seed, &approval.display.join(LOCK_FILE))?;
         approval
             .directory
             .sync_all()
@@ -857,12 +850,11 @@ fn initialize_lock_namespace(
                         source,
                     }
                 })?;
-                file.write_all(&record).map_err(|source| {
-                    LinuxSecretServiceProviderError::Io {
+                file.write_all(&record)
+                    .map_err(|source| LinuxSecretServiceProviderError::Io {
                         path: path.to_path_buf(),
                         source,
-                    }
-                })?;
+                    })?;
                 file.sync_all()
                     .map_err(|source| LinuxSecretServiceProviderError::Io {
                         path: path.to_path_buf(),
@@ -915,28 +907,24 @@ fn read_lock_seed(
             path.to_path_buf(),
         ));
     }
-    file.seek(SeekFrom::Start(0)).map_err(|source| {
-        LinuxSecretServiceProviderError::Io {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|source| LinuxSecretServiceProviderError::Io {
             path: path.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
     let mut record = [0_u8; LOCK_RECORD_BYTES];
-    file.read_exact(&mut record).map_err(|source| {
-        LinuxSecretServiceProviderError::Io {
+    file.read_exact(&mut record)
+        .map_err(|source| LinuxSecretServiceProviderError::Io {
             path: path.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
     let checksum_offset = LOCK_RECORD_BYTES - CHECKSUM_BYTES;
     let mut hasher = Sha256::new();
     hasher.update(LOCK_RECORD_CONTEXT);
     hasher.update(&record[..checksum_offset]);
     let stored_uid = u32::from_be_bytes(record[16..20].try_into().expect("fixed lock record"));
-    let stored_device =
-        u64::from_be_bytes(record[20..28].try_into().expect("fixed lock record"));
-    let stored_inode =
-        u64::from_be_bytes(record[28..36].try_into().expect("fixed lock record"));
+    let stored_device = u64::from_be_bytes(record[20..28].try_into().expect("fixed lock record"));
+    let stored_inode = u64::from_be_bytes(record[28..36].try_into().expect("fixed lock record"));
     if &record[..16] != LOCK_RECORD_MAGIC
         || stored_uid != uid
         || stored_device != metadata.st_dev as u64
@@ -1655,8 +1643,7 @@ mod tests {
             fs::Permissions::from_mode(0o600),
         )
         .unwrap();
-        let copied_approval =
-            SyntheticSecretServiceApproval::for_test(copied_root.path()).unwrap();
+        let copied_approval = SyntheticSecretServiceApproval::for_test(copied_root.path()).unwrap();
         assert!(matches!(
             ReconciliationLock::open(copied_approval),
             Err(LinuxSecretServiceProviderError::UnsafeLock(_))
