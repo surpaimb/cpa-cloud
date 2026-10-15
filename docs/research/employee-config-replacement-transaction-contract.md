@@ -289,15 +289,19 @@ reject replacement during the operation. After the provider-agnostic cleanup
 gate reaches `KeyDeletionConfirmed`, it can issue a non-serializable
 authorization for the Linux store to revalidate the exact
 transaction/reference, rename that one final tombstone to a `.deleting` intent,
-and flush the namespace and root before unlinking the intent. A restart with a
-fresh exact authorization can resume a durable intent. The receipt has no
+flush it, then rename the intent to an inactive `.removed` completion proof and
+flush the namespace and root again. A restart with fresh exact authorization
+can resume either durable state, and an already durable proof can reproduce the
+exact receipt without treating an absent record as success. The receipt has no
 production constructor outside the tombstone store; only the exact receipt
-returned after successful intent unlink and both final flushes can advance the
-cleanup gate to `Complete`. If unlink succeeds but the following flush fails,
-the operation returns no receipt and a retry that sees neither name remains
-`Missing` rather than claiming success. Mismatched records also fail closed.
-This does not implement a provider deletion backend, durable cleanup journal,
-workspace removal, operating-system key provider, automatic restart
+returned after the inactive proof and both final flushes can advance the cleanup
+gate to `Complete`. Public restart enumeration validates but excludes inactive
+proofs, and transaction IDs represented by a proof cannot be reused. Proofs are
+bounded by the same 64-entry namespace limit and deliberately retained because
+this slice does not implement safe proof garbage collection. Mismatched or
+fully missing records still fail closed. This does not implement a provider
+deletion backend, general durable cleanup journal, workspace removal,
+operating-system key provider, proof garbage collection, automatic restart
 orchestration or real client writes.
 The owner-private filesystem boundary is not authentication against another
 process running as the same user; the documented same-user race remains a

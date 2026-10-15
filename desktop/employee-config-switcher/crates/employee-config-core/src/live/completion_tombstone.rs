@@ -40,6 +40,8 @@ const TOMBSTONE_SUFFIX: &str = ".json";
 const PENDING_SUFFIX: &str = ".pending";
 #[cfg(target_os = "linux")]
 const DELETING_SUFFIX: &str = ".deleting";
+#[cfg(target_os = "linux")]
+const REMOVED_SUFFIX: &str = ".removed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -196,10 +198,10 @@ pub fn load_completion_tombstones(
 /// confirmed by the cleanup sequence.
 ///
 /// The Linux implementation revalidates the durable transaction/reference
-/// binding, durably renames only the final record to a resumable removal
-/// intent, then unlinks and flushes that intent. Missing records fail closed
-/// rather than being accepted as an idempotent success. Windows and macOS
-/// remain unsupported.
+/// binding, durably renames only the final record through a resumable removal
+/// intent to a bounded inactive proof, then flushes that proof and the
+/// namespace. Missing records fail closed rather than being accepted as an
+/// idempotent success. Windows and macOS remain unsupported.
 pub fn remove_completion_tombstone(
     root: &Path,
     authorization: &CompletionTombstoneRemovalAuthorization,
@@ -225,6 +227,11 @@ fn pending_name(transaction_id: ReplacementTransactionId) -> String {
 #[cfg(target_os = "linux")]
 fn deleting_name(transaction_id: ReplacementTransactionId) -> String {
     format!("{}{DELETING_SUFFIX}", transaction_hex(transaction_id))
+}
+
+#[cfg(target_os = "linux")]
+fn removed_name(transaction_id: ReplacementTransactionId) -> String {
+    format!("{}{REMOVED_SUFFIX}", transaction_hex(transaction_id))
 }
 
 #[cfg(target_os = "linux")]
@@ -298,12 +305,21 @@ mod platform {
     pub(super) enum RemovalFault {
         None,
         AfterIntentDurable,
-        AfterUnlink,
+        AfterProofDurable,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TombstoneState {
+        Active,
+        Deleting,
+        Removed,
     }
 
     struct LoadSnapshot {
         tombstones: Vec<CompletionTombstone>,
         deleting: Option<CompletionTombstone>,
+        removed: Vec<CompletionTombstone>,
+        entry_count: usize,
     }
 
     pub(super) fn persist(
@@ -339,9 +355,11 @@ mod platform {
         reference: &RecoveryKeyReference,
         fault: PersistFault,
     ) -> Result<CompletionTombstone, CompletionTombstoneError> {
-        let existing = load_all(root)?;
+        let existing = load_snapshot(root, None)?;
         if existing
+            .tombstones
             .iter()
+            .chain(existing.removed.iter())
             .any(|tombstone| tombstone.transaction_id == transaction_id)
         {
             return Err(CompletionTombstoneError::RecoveryConflict(
@@ -349,7 +367,7 @@ mod platform {
                     .join(tombstone_name(transaction_id)),
             ));
         }
-        if existing.len() >= MAX_TOMBSTONES {
+        if existing.entry_count >= MAX_TOMBSTONES {
             return Err(CompletionTombstoneError::TooMany);
         }
         let root_dir = open_root(root)?;
@@ -462,6 +480,8 @@ mod platform {
                 return Ok(LoadSnapshot {
                     tombstones: Vec::new(),
                     deleting: None,
+                    removed: Vec::new(),
+                    entry_count: 0,
                 });
             }
             Err(error) => return Err(error),
@@ -472,6 +492,8 @@ mod platform {
         let names_before = read_directory_names(&directory, &directory_path)?;
         let mut tombstones = Vec::with_capacity(names_before.len());
         let mut deleting = None;
+        let mut removed = Vec::new();
+        let mut seen_transactions = Vec::with_capacity(names_before.len());
         for name in &names_before {
             let name_text = name.to_str().ok_or(CompletionTombstoneError::Corrupt)?;
             if let Some(transaction_text) = name_text.strip_suffix(PENDING_SUFFIX) {
@@ -480,20 +502,26 @@ mod platform {
                     directory_path.join(name),
                 ));
             }
-            let (transaction_text, is_deleting) =
+            let (transaction_text, state) =
                 if let Some(transaction_text) = name_text.strip_suffix(DELETING_SUFFIX) {
-                    (transaction_text, true)
+                    (transaction_text, TombstoneState::Deleting)
+                } else if let Some(transaction_text) = name_text.strip_suffix(REMOVED_SUFFIX) {
+                    (transaction_text, TombstoneState::Removed)
                 } else {
                     (
                         name_text
                             .strip_suffix(TOMBSTONE_SUFFIX)
                             .ok_or(CompletionTombstoneError::Corrupt)?,
-                        false,
+                        TombstoneState::Active,
                     )
                 };
             let expected_transaction = parse_transaction_hex(transaction_text)?;
+            if seen_transactions.contains(&expected_transaction) {
+                return Err(CompletionTombstoneError::Corrupt);
+            }
+            seen_transactions.push(expected_transaction);
             let path = directory_path.join(name);
-            if is_deleting && allowed_deleting != Some(expected_transaction) {
+            if state == TombstoneState::Deleting && allowed_deleting != Some(expected_transaction) {
                 return Err(CompletionTombstoneError::RemovalInProgress(path));
             }
             let mut file = open_private_file_at(directory.as_raw_fd(), name, &path)?;
@@ -526,12 +554,14 @@ mod platform {
                 terminal: manifest.terminal,
                 reference,
             };
-            if is_deleting {
-                if deleting.replace(tombstone).is_some() {
-                    return Err(CompletionTombstoneError::Corrupt);
+            match state {
+                TombstoneState::Active => tombstones.push(tombstone),
+                TombstoneState::Deleting => {
+                    if deleting.replace(tombstone).is_some() {
+                        return Err(CompletionTombstoneError::Corrupt);
+                    }
                 }
-            } else {
-                tombstones.push(tombstone);
+                TombstoneState::Removed => removed.push(tombstone),
             }
         }
 
@@ -559,6 +589,8 @@ mod platform {
         Ok(LoadSnapshot {
             tombstones,
             deleting,
+            removed,
+            entry_count: names_after.len(),
         })
     }
 
@@ -588,21 +620,38 @@ mod platform {
         let final_path = root.join(TOMBSTONE_DIRECTORY).join(&final_name);
         let deleting_name = deleting_name(transaction_id);
         let deleting_path = root.join(TOMBSTONE_DIRECTORY).join(&deleting_name);
+        let removed_name = removed_name(transaction_id);
+        let removed_path = root.join(TOMBSTONE_DIRECTORY).join(&removed_name);
         let loaded = load_snapshot(root, Some(transaction_id))?;
         let final_tombstone = loaded
             .tombstones
             .iter()
             .find(|tombstone| tombstone.transaction_id == transaction_id);
-        let (expected, resuming_removal) = match (final_tombstone, loaded.deleting.as_ref()) {
-            (Some(_), Some(_)) => return Err(CompletionTombstoneError::Corrupt),
-            (Some(tombstone), None) => (tombstone, false),
-            (None, Some(tombstone)) => (tombstone, true),
-            (None, None) => return Err(CompletionTombstoneError::Missing(final_path)),
+        let removed_tombstone = loaded
+            .removed
+            .iter()
+            .find(|tombstone| tombstone.transaction_id == transaction_id);
+        let (expected, state) = match (final_tombstone, loaded.deleting.as_ref(), removed_tombstone)
+        {
+            (Some(tombstone), None, None) => (tombstone, TombstoneState::Active),
+            (None, Some(tombstone), None) => (tombstone, TombstoneState::Deleting),
+            (None, None, Some(tombstone)) => (tombstone, TombstoneState::Removed),
+            (None, None, None) => {
+                return Err(CompletionTombstoneError::Missing(final_path));
+            }
+            _ => return Err(CompletionTombstoneError::Corrupt),
+        };
+        let (source_name, source_path) = match state {
+            TombstoneState::Active => (&final_name, &final_path),
+            TombstoneState::Deleting => (&deleting_name, &deleting_path),
+            TombstoneState::Removed => (&removed_name, &removed_path),
         };
         if expected.terminal() != CompletionTerminal::from_phase(authorization.terminal())?
             || expected.reference() != authorization.reference()
         {
-            return Err(CompletionTombstoneError::RecoveryConflict(final_path));
+            return Err(CompletionTombstoneError::RecoveryConflict(
+                source_path.to_path_buf(),
+            ));
         }
 
         let root_dir = open_root(root)?;
@@ -615,11 +664,6 @@ mod platform {
         )?;
         let directory_identity =
             identity(&directory).map_err(|source| io_error(&directory_path, source))?;
-        let (source_name, source_path) = if resuming_removal {
-            (&deleting_name, &deleting_path)
-        } else {
-            (&final_name, &final_path)
-        };
         let mut file =
             open_private_file_at(directory.as_raw_fd(), OsStr::new(source_name), source_path)?;
         let file_identity = identity(&file).map_err(|source| io_error(source_path, source))?;
@@ -658,7 +702,7 @@ mod platform {
             return Err(CompletionTombstoneError::RecoveryConflict(directory_path));
         }
 
-        if !resuming_removal {
+        if state == TombstoneState::Active {
             rename_no_replace(
                 directory.as_raw_fd(),
                 OsStr::new(&final_name),
@@ -684,12 +728,32 @@ mod platform {
             }
         }
 
-        unlink_file_at(
-            directory.as_raw_fd(),
-            OsStr::new(&deleting_name),
-            &deleting_path,
-        )?;
-        fail_removal_at(fault, RemovalFault::AfterUnlink, &deleting_path)?;
+        if state != TombstoneState::Removed {
+            rename_no_replace(
+                directory.as_raw_fd(),
+                OsStr::new(&deleting_name),
+                OsStr::new(&removed_name),
+                &removed_path,
+            )?;
+            directory
+                .sync_all()
+                .map_err(|source| io_error(&directory_path, source))?;
+            root_dir
+                .sync_all()
+                .map_err(|source| io_error(root, source))?;
+            fail_removal_at(fault, RemovalFault::AfterProofDurable, &removed_path)?;
+            let removed_file = open_private_file_at(
+                directory.as_raw_fd(),
+                OsStr::new(&removed_name),
+                &removed_path,
+            )?;
+            if identity(&removed_file).map_err(|source| io_error(&removed_path, source))?
+                != file_identity
+            {
+                return Err(CompletionTombstoneError::RecoveryConflict(removed_path));
+            }
+        }
+
         directory
             .sync_all()
             .map_err(|source| io_error(&directory_path, source))?;
@@ -707,6 +771,14 @@ mod platform {
                 }
                 Err(error) => return Err(error),
             }
+        }
+        let proof = open_private_file_at(
+            directory.as_raw_fd(),
+            OsStr::new(&removed_name),
+            &removed_path,
+        )?;
+        if identity(&proof).map_err(|source| io_error(&removed_path, source))? != file_identity {
+            return Err(CompletionTombstoneError::RecoveryConflict(removed_path));
         }
         verify_private_directory(&directory, &directory_path)?;
         let rebound_directory = open_private_directory_at(
@@ -840,18 +912,6 @@ mod platform {
             )
         };
         if result != 0 {
-            return Err(io_error(display, io::Error::last_os_error()));
-        }
-        Ok(())
-    }
-
-    fn unlink_file_at(
-        parent: RawFd,
-        name: &OsStr,
-        display: &Path,
-    ) -> Result<(), CompletionTombstoneError> {
-        let name = os_c_string(name)?;
-        if unsafe { libc::unlinkat(parent, name.as_ptr(), 0) } != 0 {
             return Err(io_error(display, io::Error::last_os_error()));
         }
         Ok(())
@@ -1302,9 +1362,29 @@ mod tests {
             .unwrap();
         assert_eq!(cleanup.phase(), RecoveryKeyCleanupPhase::Complete);
         assert!(load_completion_tombstones(&root_path).unwrap().is_empty());
+        assert!(root_path
+            .join(TOMBSTONE_DIRECTORY)
+            .join(removed_name(transaction_id))
+            .exists());
+        remove_completion_tombstone(&root_path, &authorization)
+            .expect("the exact durable proof supports idempotent restart recovery");
+        let other_reference =
+            RecoveryKeyReference::new("test-provider", 1, b"other-proof-reference".to_vec())
+                .unwrap();
+        let (_other_cleanup, other_authorization) =
+            removal_authorization(transaction_id, other_reference);
         assert!(matches!(
-            remove_completion_tombstone(&root_path, &authorization),
-            Err(CompletionTombstoneError::Missing(_))
+            remove_completion_tombstone(&root_path, &other_authorization),
+            Err(CompletionTombstoneError::RecoveryConflict(_))
+        ));
+        assert!(matches!(
+            persist_completion_tombstone(
+                &root_path,
+                ReplacementPhase::Complete,
+                transaction_id,
+                authorization.reference(),
+            ),
+            Err(CompletionTombstoneError::RecoveryConflict(_))
         ));
     }
 
@@ -1347,11 +1427,12 @@ mod tests {
             .unwrap();
         assert_eq!(restarted_cleanup.phase(), RecoveryKeyCleanupPhase::Complete);
         assert!(load_completion_tombstones(&root_path).unwrap().is_empty());
+        assert!(directory.join(removed_name(transaction_id)).exists());
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn unlink_without_final_flush_returns_no_receipt_and_missing_stays_fail_closed() {
+    fn restart_recovers_from_the_durable_inactive_completion_proof() {
         let root = tempfile::tempdir().unwrap();
         let root_path = fs::canonicalize(root.path()).unwrap();
         let transaction_id = transaction(0x18);
@@ -1363,25 +1444,42 @@ mod tests {
             &reference,
         )
         .unwrap();
-        let (cleanup, authorization) = removal_authorization(transaction_id, reference);
+        let (_interrupted_cleanup, authorization) =
+            removal_authorization(transaction_id, reference.clone());
 
         platform::remove_with_fault(
             &root_path,
             &authorization,
-            platform::RemovalFault::AfterUnlink,
+            platform::RemovalFault::AfterProofDurable,
         )
-        .expect_err("fault is injected after unlink and before final flush");
+        .expect_err("fault is injected after the inactive proof is durable");
         let directory = root_path.join(TOMBSTONE_DIRECTORY);
         assert!(!directory.join(tombstone_name(transaction_id)).exists());
         assert!(!directory.join(deleting_name(transaction_id)).exists());
+        assert!(directory.join(removed_name(transaction_id)).exists());
+        assert!(load_completion_tombstones(&root_path).unwrap().is_empty());
+
+        let (mut restarted_cleanup, restarted_authorization) =
+            removal_authorization(transaction_id, reference);
+        let receipt = remove_completion_tombstone(&root_path, &restarted_authorization).unwrap();
+        restarted_cleanup
+            .record_completion_tombstone_removal_durable(receipt)
+            .unwrap();
+        assert_eq!(restarted_cleanup.phase(), RecoveryKeyCleanupPhase::Complete);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_record_without_an_inactive_proof_stays_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(0x19);
+        let (_cleanup, authorization) = removal_authorization(transaction_id, reference());
+
         assert!(matches!(
             remove_completion_tombstone(&root_path, &authorization),
             Err(CompletionTombstoneError::Missing(_))
         ));
-        assert_eq!(
-            cleanup.phase(),
-            RecoveryKeyCleanupPhase::KeyDeletionConfirmed
-        );
     }
 
     #[cfg(target_os = "linux")]

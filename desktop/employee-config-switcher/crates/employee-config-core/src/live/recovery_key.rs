@@ -253,8 +253,9 @@ pub enum RecoveryKeyCleanupError {
 /// and recovery-key reference.
 ///
 /// This value can only be obtained from a cleanup sequence in
-/// `KeyDeletionConfirmed`; it authorizes the separate tombstone store to remove
-/// that exact non-secret record. It is intentionally not serializable.
+/// `KeyDeletionConfirmed`; it authorizes the separate tombstone store to move
+/// that exact non-secret record to its inactive durable proof state. It is
+/// intentionally not serializable.
 pub struct CompletionTombstoneRemovalAuthorization {
     terminal: ReplacementPhase,
     transaction_id: ReplacementTransactionId,
@@ -294,7 +295,7 @@ impl std::fmt::Debug for CompletionTombstoneRemovalAuthorization {
 /// pair and invokes provider deletion only after the caller records both a
 /// durable terminal decision and durable workspace removal. Its final
 /// transition requires the exact receipt returned by the tombstone store after
-/// removal and directory/root flush.
+/// logical removal to an inactive proof and directory/root flush.
 #[derive(Debug)]
 pub struct RecoveryKeyCleanupSequence {
     phase: RecoveryKeyCleanupPhase,

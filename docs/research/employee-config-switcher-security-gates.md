@@ -246,13 +246,15 @@ or real client write is enabled, and same-user replacement remains a blocker.
 The pure cleanup gate can issue a non-serializable removal authorization only
 after provider deletion is confirmed; the Linux store then revalidates the
 exact transaction/reference, renames the final tombstone to a flushed
-`.deleting` intent, and then unlinks and flushes that intent. A fresh exact
-authorization can resume a durable intent after restart. The receipt is
-constructible only inside the tombstone store after the final unlink and
+`.deleting` intent, then renames and flushes it as an inactive `.removed`
+completion proof. A fresh exact authorization can resume either durable state
+after restart, and the proof can reproduce only its exact receipt. The receipt
+is constructible only inside the tombstone store after the inactive proof and
 namespace/root flush succeed; only that exact receipt can advance the cleanup
-gate to `Complete`. If unlink succeeds but final flush fails, a later missing
-name still fails closed and yields no receipt. Mismatched records are never
-accepted as successful removal.
+gate to `Complete`. Public enumeration validates but omits inactive proofs,
+while a fully missing or mismatched record is never accepted as successful
+removal. The bounded proof remains on disk because safe proof garbage
+collection is not implemented by this slice.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret
