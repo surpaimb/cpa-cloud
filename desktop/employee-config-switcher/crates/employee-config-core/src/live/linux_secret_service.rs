@@ -623,12 +623,13 @@ impl ReconciliationLock {
                 path: approval.display.join(LOCK_FILE),
                 source,
             })?;
-        approval.directory.sync_all().map_err(|source| {
-            LinuxSecretServiceProviderError::Io {
+        approval
+            .directory
+            .sync_all()
+            .map_err(|source| LinuxSecretServiceProviderError::Io {
                 path: approval.display.clone(),
                 source,
-            }
-        })?;
+            })?;
         Ok(Self {
             directory: approval.directory,
             file,
@@ -829,11 +830,9 @@ impl SecretServiceBackend for DbusBackend {
             request.secret.to_vec(),
             request.content_type.to_owned(),
         );
-        let proxy = self.connection.with_proxy(
-            SERVICE_NAME,
-            DEFAULT_COLLECTION_PATH,
-            DBUS_TIMEOUT,
-        );
+        let proxy = self
+            .connection
+            .with_proxy(SERVICE_NAME, DEFAULT_COLLECTION_PATH, DBUS_TIMEOUT);
         let (item, prompt): (dbus::Path<'static>, dbus::Path<'static>) = proxy
             .method_call(
                 COLLECTION_INTERFACE,
@@ -954,7 +953,9 @@ mod tests {
                 .iter()
                 .filter(|(_, item)| {
                     attributes.iter().all(|(name, value)| {
-                        item.attributes.get(name).is_some_and(|actual| actual == value)
+                        item.attributes
+                            .get(name)
+                            .is_some_and(|actual| actual == value)
                     })
                 })
                 .map(|(handle, item)| ServiceItem {
@@ -975,7 +976,10 @@ mod tests {
                 return Err(BackendError::PromptRequired);
             }
             state.next += 1;
-            let handle = format!("/org/freedesktop/secrets/collection/default/item{}", state.next);
+            let handle = format!(
+                "/org/freedesktop/secrets/collection/default/item{}",
+                state.next
+            );
             state.items.insert(
                 handle.clone(),
                 FakeItem {
@@ -1013,7 +1017,9 @@ mod tests {
                 return Err(BackendError::Missing);
             }
             if let Some(replacement) = state.replacement_after_delete.take() {
-                state.items.insert(format!("{handle}-replacement"), replacement);
+                state
+                    .items
+                    .insert(format!("{handle}-replacement"), replacement);
             }
             Ok(())
         }
@@ -1030,10 +1036,7 @@ mod tests {
         (root, approval)
     }
 
-    fn provider(
-        backend: FakeBackend,
-        root: &Path,
-    ) -> ContractProvider<FakeBackend> {
+    fn provider(backend: FakeBackend, root: &Path) -> ContractProvider<FakeBackend> {
         let approval = SyntheticSecretServiceApproval::for_test(root).unwrap();
         ContractProvider::new(backend, ReconciliationLock::open(approval).unwrap())
     }
@@ -1064,7 +1067,9 @@ mod tests {
             assert_eq!(state.last_replace, Some(false));
             let attributes = &state.items.values().next().unwrap().attributes;
             assert_eq!(attributes.len(), 6);
-            assert!(!attributes.values().any(|value| value.contains(&hex::encode(key))));
+            assert!(!attributes
+                .values()
+                .any(|value| value.contains(&hex::encode(key))));
         }
         let mut restarted = provider(shared.clone(), root.path());
         match restarted.open(tx, &created_first.reference) {
@@ -1089,7 +1094,10 @@ mod tests {
         backend.fault(Fault::CreatePublishedThenUnavailable);
         let mut first = ContractProvider::new(backend, ReconciliationLock::open(approval).unwrap());
         let tx = transaction(0x22);
-        assert!(matches!(first.create(tx), RecoveryKeyCreateOutcome::Unavailable));
+        assert!(matches!(
+            first.create(tx),
+            RecoveryKeyCreateOutcome::Unavailable
+        ));
         let recovered = created(first.create(tx));
         assert!(matches!(
             first.open(tx, &recovered.reference),
@@ -1128,12 +1136,18 @@ mod tests {
         )
         .unwrap();
         let mut provider = provider(backend.clone(), root.path());
-        assert!(matches!(provider.create(tx), RecoveryKeyCreateOutcome::Unavailable));
+        assert!(matches!(
+            provider.create(tx),
+            RecoveryKeyCreateOutcome::Unavailable
+        ));
         assert!(matches!(
             provider.open(tx, &reference),
             RecoveryKeyOpenOutcome::Corrupt
         ));
-        assert_eq!(provider.delete(tx, &reference), RecoveryKeyDeleteOutcome::Corrupt);
+        assert_eq!(
+            provider.delete(tx, &reference),
+            RecoveryKeyDeleteOutcome::Corrupt
+        );
         let state = backend.state.lock().unwrap();
         assert_eq!(state.items.len(), 2);
         assert_eq!(state.creates, 0);
@@ -1159,12 +1173,23 @@ mod tests {
 
         let tx = transaction(0x45);
         let created = created(provider.create(tx));
-        backend.state.lock().unwrap().items.values_mut().next().unwrap().locked = true;
+        backend
+            .state
+            .lock()
+            .unwrap()
+            .items
+            .values_mut()
+            .next()
+            .unwrap()
+            .locked = true;
         assert!(matches!(
             provider.open(tx, &created.reference),
             RecoveryKeyOpenOutcome::Locked
         ));
-        assert_eq!(provider.delete(tx, &created.reference), RecoveryKeyDeleteOutcome::Locked);
+        assert_eq!(
+            provider.delete(tx, &created.reference),
+            RecoveryKeyDeleteOutcome::Locked
+        );
         backend
             .state
             .lock()
@@ -1194,8 +1219,8 @@ mod tests {
             provider.open(other, &created.reference),
             RecoveryKeyOpenOutcome::WrongIdentity
         ));
-        let corrupt = RecoveryKeyReference::new(PROVIDER_KIND, PROVIDER_VERSION, vec![1, 2, 3])
-            .unwrap();
+        let corrupt =
+            RecoveryKeyReference::new(PROVIDER_KIND, PROVIDER_VERSION, vec![1, 2, 3]).unwrap();
         assert!(matches!(
             provider.open(tx, &corrupt),
             RecoveryKeyOpenOutcome::Corrupt
@@ -1220,18 +1245,32 @@ mod tests {
         let mut provider = provider(backend.clone(), root.path());
         let tx = transaction(0x66);
         let created = created(provider.create(tx));
-        backend.state.lock().unwrap().items.values_mut().next().unwrap().secret[0] ^= 0xff;
+        backend
+            .state
+            .lock()
+            .unwrap()
+            .items
+            .values_mut()
+            .next()
+            .unwrap()
+            .secret[0] ^= 0xff;
         assert!(matches!(
             provider.open(tx, &created.reference),
             RecoveryKeyOpenOutcome::Corrupt
         ));
-        assert_eq!(provider.delete(tx, &created.reference), RecoveryKeyDeleteOutcome::Corrupt);
+        assert_eq!(
+            provider.delete(tx, &created.reference),
+            RecoveryKeyDeleteOutcome::Corrupt
+        );
         assert_eq!(backend.state.lock().unwrap().deletes, 0);
 
         let tx2 = transaction(0x67);
         let created2 = created(provider.create(tx2));
         backend.fault(Fault::DeletePrompt);
-        assert_eq!(provider.delete(tx2, &created2.reference), RecoveryKeyDeleteOutcome::Locked);
+        assert_eq!(
+            provider.delete(tx2, &created2.reference),
+            RecoveryKeyDeleteOutcome::Locked
+        );
         assert_eq!(backend.state.lock().unwrap().items.len(), 2);
     }
 
