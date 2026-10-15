@@ -40,6 +40,12 @@ pub enum WindowsDpapiProviderError {
     LinkedPath(PathBuf),
     #[error("recovery-key path is not an owner-private object: {0}")]
     UnsafePermissions(PathBuf),
+    #[error("recovery-key provider namespace is locked: {0}")]
+    Locked(PathBuf),
+    #[error("recovery-key provider namespace is corrupt: {0}")]
+    Corrupt(PathBuf),
+    #[error("recovery-key provider is unavailable for: {0}")]
+    Unavailable(PathBuf),
     #[error("recovery-key filesystem operation failed for {path}: {source}")]
     Io {
         path: PathBuf,
@@ -132,6 +138,7 @@ fn valid_reference(reference: &RecoveryKeyReference) -> bool {
 }
 
 #[cfg(windows)]
+#[allow(deprecated)]
 mod windows_impl {
     use super::*;
     use ring::constant_time::verify_slices_are_equal;
@@ -257,7 +264,8 @@ mod windows_impl {
             _root: root_handle,
             _directory: store_handle,
         };
-        let _guard = acquire_provider_lock(&store)?;
+        let _guard = acquire_provider_lock(&store)
+            .map_err(|error| provider_error_for(error, &store.path))?;
         sync_directory(&store.path).map_err(|source| io_error(&store.path, source))?;
         Ok(store)
     }
@@ -798,6 +806,22 @@ mod windows_impl {
                 source.raw_os_error().map(|code| code as u32)
             }
             _ => None,
+        }
+    }
+
+    fn provider_error_for(error: NativeError, path: &Path) -> WindowsDpapiProviderError {
+        if is_locked(&error) {
+            WindowsDpapiProviderError::Locked(path.to_path_buf())
+        } else if is_corrupt(&error) {
+            WindowsDpapiProviderError::Corrupt(path.to_path_buf())
+        } else {
+            match error {
+                NativeError::Io(error) => error,
+                NativeError::Dpapi(_) | NativeError::Unavailable => {
+                    WindowsDpapiProviderError::Unavailable(path.to_path_buf())
+                }
+                NativeError::Corrupt => WindowsDpapiProviderError::Corrupt(path.to_path_buf()),
+            }
         }
     }
 
