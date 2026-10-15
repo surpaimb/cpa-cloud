@@ -245,11 +245,14 @@ durable cleanup journal, workspace-removal wiring, crash-resume orchestration,
 or real client write is enabled, and same-user replacement remains a blocker.
 The pure cleanup gate can issue a non-serializable removal authorization only
 after provider deletion is confirmed; the Linux store then revalidates the
-exact transaction/reference before unlinking one final tombstone and flushing
-the namespace and root. The receipt is constructible only inside the tombstone
-store after those operations succeed; only that exact receipt can advance the
-cleanup gate to `Complete`. Missing and mismatched records are not accepted as
-successful removal.
+exact transaction/reference, renames the final tombstone to a flushed
+`.deleting` intent, and then unlinks and flushes that intent. A fresh exact
+authorization can resume a durable intent after restart. The receipt is
+constructible only inside the tombstone store after the final unlink and
+namespace/root flush succeed; only that exact receipt can advance the cleanup
+gate to `Complete`. If unlink succeeds but final flush fails, a later missing
+name still fails closed and yields no receipt. Mismatched records are never
+accepted as successful removal.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret

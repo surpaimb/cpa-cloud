@@ -288,12 +288,16 @@ reconstructs a bounded sorted set. It reopens the named file and directory to
 reject replacement during the operation. After the provider-agnostic cleanup
 gate reaches `KeyDeletionConfirmed`, it can issue a non-serializable
 authorization for the Linux store to revalidate the exact
-transaction/reference, unlink that one final tombstone, and flush the namespace
-and root. The receipt has no production constructor outside the tombstone store;
-only the exact receipt returned after successful unlink and both flushes can
-advance the cleanup gate to `Complete`. Missing or mismatched records fail
-closed. This does not implement a provider deletion backend, durable cleanup
-journal, workspace removal, operating-system key provider, crash-resume
+transaction/reference, rename that one final tombstone to a `.deleting` intent,
+and flush the namespace and root before unlinking the intent. A restart with a
+fresh exact authorization can resume a durable intent. The receipt has no
+production constructor outside the tombstone store; only the exact receipt
+returned after successful intent unlink and both final flushes can advance the
+cleanup gate to `Complete`. If unlink succeeds but the following flush fails,
+the operation returns no receipt and a retry that sees neither name remains
+`Missing` rather than claiming success. Mismatched records also fail closed.
+This does not implement a provider deletion backend, durable cleanup journal,
+workspace removal, operating-system key provider, automatic restart
 orchestration or real client writes.
 The owner-private filesystem boundary is not authentication against another
 process running as the same user; the documented same-user race remains a
