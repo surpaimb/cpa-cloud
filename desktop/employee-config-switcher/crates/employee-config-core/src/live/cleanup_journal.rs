@@ -6,12 +6,11 @@
 //! with a no-replace rename after its contents are flushed.
 
 use super::{
-    completion_tombstone::{
-        CompletionTombstoneRemovalAuthorization, CompletionTombstoneRemovalReceipt,
-    },
+    completion_tombstone::CompletionTombstoneRemovalReceipt,
     recovery_key::{
-        RecoveryKeyCleanupError, RecoveryKeyCleanupPhase, RecoveryKeyCleanupSequence,
-        RecoveryKeyProvider, RecoveryKeyReference, ReplacementTransactionId,
+        CompletionTombstoneRemovalAuthorization, RecoveryKeyCleanupError, RecoveryKeyCleanupPhase,
+        RecoveryKeyCleanupSequence, RecoveryKeyProvider, RecoveryKeyReference,
+        ReplacementTransactionId,
     },
     replacement::ReplacementPhase,
 };
