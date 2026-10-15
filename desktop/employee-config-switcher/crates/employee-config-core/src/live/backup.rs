@@ -204,7 +204,11 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 fn is_sha256_digest(value: &str) -> bool {
-    value.len() == 64
+    is_lower_hex(value, 64)
+}
+
+fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -689,6 +693,7 @@ mod platform {
             && manifest.original_mode & 0o7000 == 0
             && manifest.original_uid == unsafe { libc::geteuid() }
             && is_sha256_digest(&manifest.original_digest)
+            && is_lower_hex(&manifest.nonce, NONCE_BYTES * 2)
             && is_sha256_digest(&manifest.ciphertext_digest)
     }
 
@@ -1564,6 +1569,42 @@ mod tests {
             Err(BackupError::CorruptManifest)
         ));
         assert_eq!(corrupt_provider.open_calls, 0);
+
+        let nonce_root = tempfile::tempdir().unwrap();
+        write_private(&nonce_root.path().join("config.json"), b"old-secret");
+        let nonce_root_path = stable_root(&nonce_root);
+        let nonce_receipt = prepare_encrypted_backup(
+            &nonce_root_path,
+            Path::new("config.json"),
+            transaction_id,
+            &reference,
+            &fixed_key(0x57),
+        )
+        .unwrap();
+        let nonce_manifest_path = nonce_root_path
+            .join(BACKUP_DIRECTORY)
+            .join(&nonce_receipt.workspace)
+            .join(MANIFEST_FILE);
+        let mut nonce_manifest: BackupManifest =
+            serde_json::from_slice(&fs::read(&nonce_manifest_path).unwrap()).unwrap();
+        nonce_manifest.nonce = "zz".to_owned();
+        fs::write(
+            &nonce_manifest_path,
+            serde_json::to_vec(&nonce_manifest).unwrap(),
+        )
+        .unwrap();
+        let mut nonce_provider = RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
+        assert!(matches!(
+            load_encrypted_backup_with_provider(
+                &nonce_root_path,
+                &nonce_receipt.workspace,
+                transaction_id,
+                &reference,
+                &mut nonce_provider,
+            ),
+            Err(BackupError::CorruptManifest)
+        ));
+        assert_eq!(nonce_provider.open_calls, 0);
 
         let binding_root = tempfile::tempdir().unwrap();
         write_private(&binding_root.path().join("config.json"), b"old-secret");
