@@ -157,11 +157,10 @@ mod windows_impl {
     use std::ptr::{null, null_mut};
     use std::sync::{Mutex, MutexGuard};
     use windows_sys::Win32::Foundation::{
-        GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
+        GetLastError, LocalFree, DELETE, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
         ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_DATA, ERROR_INVALID_PARAMETER,
         ERROR_LOCK_VIOLATION, ERROR_PASSWORD_RESTRICTION, ERROR_PATH_NOT_FOUND,
-        ERROR_SHARING_VIOLATION, ERROR_SUCCESS, DELETE, GENERIC_READ, GENERIC_WRITE,
-        INVALID_HANDLE_VALUE,
+        ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW,
@@ -177,9 +176,9 @@ mod windows_impl {
         PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, SetFileInformationByHandle, FileRenameInfoEx,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FileRenameInfoEx, SetFileInformationByHandle, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use zeroize::{Zeroize, Zeroizing};
@@ -547,11 +546,7 @@ mod windows_impl {
     }
 
     fn blob_file_name(transaction_id: ReplacementTransactionId) -> String {
-        format!(
-            "{}{}",
-            hex::encode(transaction_id.as_bytes()),
-            BLOB_SUFFIX
-        )
+        format!("{}{}", hex::encode(transaction_id.as_bytes()), BLOB_SUFFIX)
     }
 
     fn stage_path(store: &StableStore, transaction_id: ReplacementTransactionId) -> PathBuf {
@@ -583,8 +578,7 @@ mod windows_impl {
             return Err(NativeError::Corrupt);
         }
         let mut protected = Vec::with_capacity(metadata.len() as usize);
-        file
-            .read_to_end(&mut protected)
+        file.read_to_end(&mut protected)
             .map_err(|source| NativeError::Io(io_error(path, source)))?;
         if protected.len() != metadata.len() as usize {
             return Err(NativeError::Unavailable);
@@ -1202,10 +1196,11 @@ mod windows_impl {
             let first_created = first.join().unwrap();
             let second_created = second.join().unwrap();
             assert_eq!(first_created.reference, second_created.reference);
-            assert!(
-                verify_slices_are_equal(first_created.key.expose(), second_created.key.expose())
-                    .is_ok()
-            );
+            assert!(verify_slices_are_equal(
+                first_created.key.expose(),
+                second_created.key.expose()
+            )
+            .is_ok());
 
             let files = fs::read_dir(root.path().join(STORE_DIRECTORY))
                 .unwrap()
@@ -1276,7 +1271,10 @@ mod windows_impl {
             stage.sync_all().unwrap();
             assert!(publish_stage_no_replace(&provider.store, &stage, transaction_id).is_err());
             assert_eq!(fs::read(&final_path).unwrap(), original);
-            assert_eq!(fs::read(&stage_path).unwrap(), b"independent-stage-sentinel");
+            assert_eq!(
+                fs::read(&stage_path).unwrap(),
+                b"independent-stage-sentinel"
+            );
         }
 
         #[test]
