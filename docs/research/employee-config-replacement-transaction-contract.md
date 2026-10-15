@@ -5,9 +5,11 @@ remain disabled.
 
 This contract defines the minimum transaction that may eventually replace one
 or more existing employee-tool configuration files. It does not authorize the
-Tauri command to write a real client directory. The current implementation only
-prepares and reloads encrypted rollback material for one existing Linux leaf;
-publication, rollback and operating-system key custody remain incomplete.
+Tauri command to write a real client directory. The current implementation
+prepares and reloads encrypted rollback material for one existing Linux leaf
+and persists a separate bounded Linux completion tombstone in a synthetic root.
+Publication, rollback, operating-system key custody and tombstone removal remain
+incomplete.
 
 ## Scope and non-goals
 
@@ -274,9 +276,17 @@ the completion tombstone before workspace removal, refuses to call provider
 deletion before both are recorded durable, and permits tombstone removal only
 after deletion is confirmed as `deleted` or already `missing`. Locked,
 wrong-identity, corrupt or unavailable deletion leaves the tombstone phase
-retryable. The caller assertions do not prove filesystem durability, and no
-tombstone encoding, directory flush, provider deletion implementation or crash
-recovery is present.
+retryable. The caller assertions alone do not prove filesystem durability. A
+separate Linux-only synthetic-root module now writes a versioned non-secret
+completion tombstone as an owner-private single-link file, flushes the file and
+containing directory, binds it to the held root identity and exact
+transaction/provider reference, and reconstructs a bounded sorted set after
+restart. It reopens the named file and directory to reject replacement during
+the operation. This does not implement provider deletion, tombstone removal,
+an operating-system key provider, journal integration or real client writes.
+The owner-private filesystem boundary is not authentication against another
+process running as the same user; the documented same-user race remains a
+blocker.
 
 ## Public platform references
 

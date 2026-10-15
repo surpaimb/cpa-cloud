@@ -232,8 +232,14 @@ each been recorded durable in that order. It retains the exact
 transaction/reference pair, treats
 `deleted` and already-`missing` as idempotent completion, preserves the tombstone
 phase on every blocking deletion outcome, and permits tombstone removal last.
-It performs none of those filesystem operations itself and cannot prove flush,
-crash-recovery or provider-side deletion behavior.
+It performs none of those filesystem operations itself and cannot prove
+provider-side deletion behavior. A separate Linux-only synthetic-root
+foundation now persists and reloads versioned completion tombstones with exact
+`0700`/`0600` owner-private modes, no-follow descriptor-relative opens, bounded
+restart enumeration, file and directory flushes, and root/transaction/provider
+reference binding. Windows and macOS remain unsupported before namespace
+creation. No operating-system key provider, tombstone removal, journal wiring,
+or real client write is enabled, and same-user replacement remains a blocker.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret
