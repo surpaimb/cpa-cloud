@@ -879,17 +879,11 @@ mod contract_tests {
         let backend = &provider.backend;
         let add = backend.last_add.as_ref().unwrap();
         assert_eq!(add.record.policy, SecItemPolicy::fixed());
-        assert_eq!(
-            add.record.policy.item_class,
-            SecItemClass::GenericPassword
-        );
+        assert_eq!(add.record.policy.item_class, SecItemClass::GenericPassword);
         assert!(add.return_persistent_reference);
         let exact_read = backend.last_exact_read.as_ref().unwrap();
         assert_eq!(exact_read.policy, SecItemPolicy::fixed());
-        assert_eq!(
-            exact_read.policy.item_class,
-            SecItemClass::GenericPassword
-        );
+        assert_eq!(exact_read.policy.item_class, SecItemClass::GenericPassword);
         assert!(
             exact_read.return_attributes
                 && exact_read.return_data
@@ -1060,10 +1054,7 @@ mod contract_tests {
         let created = created(provider.create(tx));
         let rendered_reference = format!("{:?}", created.reference);
         let rendered_add = format!("{:?}", provider.backend.last_add.as_ref().unwrap());
-        let rendered_exact = format!(
-            "{:?}",
-            provider.backend.last_exact_read.as_ref().unwrap()
-        );
+        let rendered_exact = format!("{:?}", provider.backend.last_exact_read.as_ref().unwrap());
         assert!(!rendered_reference.contains("persistent-ref"));
         assert!(!rendered_add.contains("persistent-ref"));
         assert!(!rendered_exact.contains("persistent-ref"));
