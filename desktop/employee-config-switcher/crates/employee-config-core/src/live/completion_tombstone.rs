@@ -1426,7 +1426,8 @@ mod tests {
             &reference,
         )
         .unwrap();
-        let (mut cleanup, authorization) = removal_authorization(transaction_id, reference);
+        let (mut cleanup, authorization) =
+            removal_authorization(transaction_id, reference.clone());
 
         let receipt = remove_completion_tombstone(&root_path, &authorization).unwrap();
         cleanup
