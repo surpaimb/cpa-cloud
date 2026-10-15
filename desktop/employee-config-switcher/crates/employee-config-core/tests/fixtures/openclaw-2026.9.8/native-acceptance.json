@@ -63,7 +63,8 @@
     "trusted_profile_injection": "pure-validation-api-only",
     "real_openclaw_state_overlap_is_rejected": true,
     "artifact_hashes_are_fixed": true,
-    "fresh_environment_is_synthetic_test_only": true
+    "fresh_environment_mapping_is_pure_test_only": true,
+    "process_launcher_exported": false
   },
   "native_evidence_gate": {
     "satisfied": false,

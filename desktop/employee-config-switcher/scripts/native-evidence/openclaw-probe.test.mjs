@@ -9,7 +9,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -20,7 +19,6 @@ import {
   captureProbeSnapshot,
   readManifestFromTrustedRoot,
   runEvidenceProcess,
-  runSyntheticEnvironmentHelper,
   validateProbeManifest,
 } from "./openclaw-probe.mjs";
 
@@ -155,22 +153,6 @@ describe("OpenClaw native evidence preflight", () => {
     const poisoned = { ...fixture.manifest, realProfile: fixture.realProfile };
     expect(() => validateProbeManifest(poisoned, options(fixture))).toThrow(/trusted external source/u);
 
-    const cli = spawnSync(
-      process.execPath,
-      [
-        path.resolve(process.cwd(), "scripts/native-evidence/openclaw-probe.mjs"),
-        "--probe-root",
-        fixture.realProfile,
-        "--trusted-real-profile",
-        fixture.evidenceRoot,
-        "--manifest",
-        alternate,
-      ],
-      { encoding: "utf8" },
-    );
-    expect(cli.status).not.toBe(0);
-    expect(cli.stderr).toMatch(/CLI disabled/u);
-    expect(cli.stderr).not.toMatch(/ENOENT/u);
   });
 
   it("rejects evidence roots inside or containing the real OpenClaw state", () => {
@@ -256,28 +238,21 @@ describe("OpenClaw native evidence preflight", () => {
     }
   });
 
-  it("uses a fresh environment for a synthetic helper and drops inherited secrets", () => {
+  it("builds a fresh environment mapping without inherited secrets", () => {
     const fixture = createFixture();
     const manifest = validateProbeManifest(fixture.manifest, options(fixture));
-    const helper = path.join(fixture.evidenceRoot, "synthetic-helper.mjs");
-    writeFileSync(
-      helper,
-      "process.stdout.write(JSON.stringify({home:process.env.HOME,openai:process.env.OPENAI_API_KEY??null,inherited:process.env.CPA_PROBE_SHOULD_NOT_INHERIT??null,noUpdate:process.env.OPENCLAW_NO_AUTO_UPDATE}));\n",
-    );
     const previousKey = process.env.OPENAI_API_KEY;
     const previousSentinel = process.env.CPA_PROBE_SHOULD_NOT_INHERIT;
     process.env.OPENAI_API_KEY = "real-parent-secret";
     process.env.CPA_PROBE_SHOULD_NOT_INHERIT = "real-parent-state";
     try {
-      const result = runSyntheticEnvironmentHelper(manifest, helper);
-      expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual({
-        home: manifest.profileRoot,
-        openai: null,
-        inherited: null,
-        noUpdate: "1",
-      });
-      expect(Object.getPrototypeOf(buildChildEnvironment(manifest))).toBeNull();
+      const child = buildChildEnvironment(manifest);
+      expect(Object.getPrototypeOf(child)).toBeNull();
+      expect(child.HOME).toBe(manifest.profileRoot);
+      expect(child.USERPROFILE).toBe(manifest.profileRoot);
+      expect(child.OPENCLAW_NO_AUTO_UPDATE).toBe("1");
+      expect(child.OPENAI_API_KEY).toBeUndefined();
+      expect(child.CPA_PROBE_SHOULD_NOT_INHERIT).toBeUndefined();
     } finally {
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
@@ -290,6 +265,33 @@ describe("OpenClaw native evidence preflight", () => {
     const fixture = createFixture();
     expect(() => runEvidenceProcess(fixture.manifest, "version", options(fixture))).toThrow(
       /no OS-level egress isolation receipt issuer/u,
+    );
+  });
+
+  it("has an exact non-launcher export surface and only a static CLI-disabled entry", async () => {
+    const sourcePath = path.resolve(process.cwd(), "scripts/native-evidence/openclaw-probe.mjs");
+    const source = readFileSync(sourcePath, "utf8");
+    const module = await import("./openclaw-probe.mjs");
+    expect(Object.keys(module).sort()).toEqual([
+      "EXPECTED_FIXTURE_CONFIG",
+      "FIXED_ARTIFACTS",
+      "buildChildEnvironment",
+      "captureProbeSnapshot",
+      "readManifestFromTrustedRoot",
+      "runEvidenceProcess",
+      "validateProbeManifest",
+    ]);
+    const staticImports = [...source.matchAll(/\bfrom\s+["']([^"']+)["']/gu)]
+      .map((match) => match[1])
+      .sort();
+    expect(staticImports).toEqual(["node:crypto", "node:fs", "node:path", "node:url"]);
+    expect(source.match(/^\s*import\b/gmu)?.length ?? 0).toBe(staticImports.length);
+    expect(source).not.toMatch(/^\s*import\s+["']/mu);
+    expect(source).not.toMatch(
+      /(?:node:)?child_process|\bspawn(?:Sync)?\s*\(|\bexec(?:File)?(?:Sync)?\s*\(|\bfork\s*\(|\bimport\s*\(|\brequire\s*\(|process\.(?:_linkedBinding|binding)\s*\(/u,
+    );
+    expect(source).toMatch(
+      /if \(import\.meta\.url === pathToFileURL\(process\.argv\[1\] \?\? ""\)\.href\) \{\s*throw new Error\(\s*"OpenClaw native probe CLI disabled:/u,
     );
   });
 

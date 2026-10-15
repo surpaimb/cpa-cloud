@@ -395,10 +395,11 @@ root before any JSON is read; the manifest cannot nominate the real profile.
 The preflight rejects real `.openclaw` ancestor/descendant overlap,
 symlink/junction and hardlink aliases, non-exact fixture bytes, and drift in the
 pinned Node, package metadata, OpenClaw entry, or observed dependency-tree
-hashes. It builds a fresh allowlisted environment only for an independently
-authored synthetic helper. OpenClaw itself is blocked before spawn because
-proxy environment variables are advisory and no OS-level egress-isolation
-receipt issuer is available. Consequently there is no accepted post-run file
+hashes. A pure test verifies the fresh allowlisted environment mapping without
+launching any helper, and the production probe module exports no general
+process launcher and imports no child-process module. OpenClaw itself is blocked
+before spawn because proxy environment variables are advisory and no OS-level
+egress-isolation receipt issuer is available. Consequently there is no accepted post-run file
 inventory, client-owned sentinel, parser result, or transport result. A
 discarded `--version`/`--help` probe accidentally resolved the real profile;
 the later metadata audit found no persistent write, but cannot establish that

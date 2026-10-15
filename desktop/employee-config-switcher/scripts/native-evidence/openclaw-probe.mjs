@@ -1,5 +1,4 @@
 // CPA-authored OpenClaw evidence preflight. This file is never used by the app runtime.
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
@@ -337,23 +336,6 @@ export function buildChildEnvironment(manifest) {
     throw new Error("child environment contains case-insensitive duplicate keys");
   }
   return environment;
-}
-
-export function runSyntheticEnvironmentHelper(manifest, helperPath) {
-  const helper = assertAbsolute("synthetic helper", helperPath);
-  assertNoReparseAncestors("synthetic helper", helper);
-  assertSingleLinkRegularFile("synthetic helper", helper);
-  if (!isWithin(realpathSync.native(manifest.evidenceRoot), realpathSync.native(helper))) {
-    throw new Error("synthetic helper escaped the evidence root");
-  }
-  return spawnSync(process.execPath, [helper], {
-    cwd: manifest.workingDirectory,
-    encoding: "utf8",
-    env: buildChildEnvironment(manifest),
-    shell: false,
-    timeout: 10_000,
-    windowsHide: true,
-  });
 }
 
 export function runEvidenceProcess(input, _operation, options = {}) {
