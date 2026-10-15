@@ -161,8 +161,9 @@ mod windows_impl {
     use windows_sys::Win32::Foundation::{
         GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
         ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_DATA, ERROR_INVALID_PARAMETER,
-        ERROR_LOCK_VIOLATION, ERROR_NOT_SUPPORTED, ERROR_PASSWORD_RESTRICTION, ERROR_PATH_NOT_FOUND,
-        ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+        ERROR_LOCK_VIOLATION, ERROR_NOT_SUPPORTED, ERROR_PASSWORD_RESTRICTION,
+        ERROR_PATH_NOT_FOUND, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE,
+        INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW,
@@ -178,9 +179,9 @@ mod windows_impl {
         PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandleEx, FileIdInfo, DELETE, FILE_ID_INFO,
+        CreateFileW, FileIdInfo, GetFileInformationByHandleEx, DELETE,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
@@ -763,8 +764,8 @@ mod windows_impl {
 
     fn file_identity(file: &File, path: &Path) -> Result<FileIdentity, NativeError> {
         let mut information = FILE_ID_INFO::default();
-        let buffer_size = u32::try_from(size_of::<FILE_ID_INFO>())
-            .map_err(|_| NativeError::Unavailable)?;
+        let buffer_size =
+            u32::try_from(size_of::<FILE_ID_INFO>()).map_err(|_| NativeError::Unavailable)?;
         if unsafe {
             GetFileInformationByHandleEx(
                 file.as_raw_handle(),
@@ -1521,19 +1522,11 @@ mod windows_impl {
                 fail_directory_sync: true,
             };
             assert!(matches!(
-                create_with_faults(
-                    &provider.store,
-                    transaction_id,
-                    persistent_flush_failure
-                ),
+                create_with_faults(&provider.store, transaction_id, persistent_flush_failure),
                 RecoveryKeyCreateOutcome::Unavailable
             ));
             assert!(matches!(
-                create_with_faults(
-                    &provider.store,
-                    transaction_id,
-                    persistent_flush_failure
-                ),
+                create_with_faults(&provider.store, transaction_id, persistent_flush_failure),
                 RecoveryKeyCreateOutcome::Unavailable
             ));
 
