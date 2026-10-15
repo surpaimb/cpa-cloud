@@ -325,12 +325,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let roaming = root.path().join("RoamingAppData");
         let local = root.path().join("LocalAppData");
-        fs::create_dir_all(
-            roaming
-                .join("Claude")
-                .join("claude_desktop_config.json"),
-        )
-        .unwrap();
+        fs::create_dir_all(roaming.join("Claude").join("claude_desktop_config.json")).unwrap();
         fs::create_dir_all(local.join("Claude")).unwrap();
         fs::create_dir_all(local.join("Claude-3p")).unwrap();
         let env = fake_env(HashMap::from([
