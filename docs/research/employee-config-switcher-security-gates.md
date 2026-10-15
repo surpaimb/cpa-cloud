@@ -389,6 +389,22 @@ above is implemented and validated against a fixed native client fixture. The
 entry point accepts only canonical `openclaw.json` and
 `cpa-cloud.ownership.json` names in the same parent directory.
 
+The fixed `2026.9.8` native-evidence slice remains preflight-only. Its manifest
+is derived as `guarded-final/manifest.json` beneath an externally trusted probe
+root before any JSON is read; the manifest cannot nominate the real profile.
+The preflight rejects real `.openclaw` ancestor/descendant overlap,
+symlink/junction and hardlink aliases, non-exact fixture bytes, and drift in the
+pinned Node, package metadata, OpenClaw entry, or observed dependency-tree
+hashes. It builds a fresh allowlisted environment only for an independently
+authored synthetic helper. OpenClaw itself is blocked before spawn because
+proxy environment variables are advisory and no OS-level egress-isolation
+receipt issuer is available. Consequently there is no accepted post-run file
+inventory, client-owned sentinel, parser result, or transport result. A
+discarded `--version`/`--help` probe accidentally resolved the real profile;
+the later metadata audit found no persistent write, but cannot establish that
+the real configuration was not read, so read status remains indeterminate and
+the run is excluded from acceptance.
+
 Codex now has a separate synthetic-root create-only projection based on the
 public OpenAI Codex configuration contract and fixed native Codex CLI `0.160.1`
 Windows x86_64 evidence. It creates only canonical same-parent `config.toml` and

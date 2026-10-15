@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "client": "OpenClaw",
+  "version": "2026.9.8",
+  "platform": "windows-x86_64",
+  "source": {
+    "release": "https://github.com/openclaw/openclaw/releases/tag/v2026.9.8",
+    "commit": "fc23bc864e4553c2d215e479eeec47b67a0bf943",
+    "tag_signature": "verified"
+  },
+  "artifacts": {
+    "npm_tarball": {
+      "url": "https://registry.npmjs.org/openclaw/-/openclaw-2026.9.8.tgz",
+      "size": 113916525,
+      "sha256": "317e0a58db32b386e01187fe9c5c4de541f4ce6d815657bf79a102609b81752a",
+      "npm_integrity": "sha512-G+JkNUhtpDE3cXR4AEi2NyyG9fqI/T2WUSl8ZnR8AATH8Dh1kC3qYFL7wwPoZtgHiP/cszA86PEiE0PDysxb9Q=="
+    },
+    "package_json": {
+      "size": 145254,
+      "sha256": "d2e734563bfb126d273beeb1e2cc5d4525b4d59efe00fdfec50a39b427524f56"
+    },
+    "openclaw_entry": {
+      "path": "openclaw.mjs",
+      "size": 24881,
+      "sha256": "aa8606ca0d62ff133ef5b7bd2323ec8ff3f8eb384404399cd5e742918d63b0a1"
+    },
+    "node_zip": {
+      "version": "24.16.0",
+      "size": 36946639,
+      "sha256": "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56"
+    },
+    "node_executable": {
+      "size": 92279112,
+      "sha256": "b3094d0b49f9ad602262a9921551737bb97637c05dd357a06ae98188d7290aa3"
+    },
+    "dependency_tree": {
+      "npm_ls_exit_code": 0,
+      "recursive_nodes": 928,
+      "problems": null,
+      "canonical_output_size": 108488,
+      "sha256": "658764cbd1b9744a1d53a6a060d5c5416c6d3ca72b6f586e46c9aa41cb1f8e2f",
+      "installation_flags": [
+        "--ignore-scripts",
+        "--omit=optional",
+        "--package-lock=false",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "limitation": "Lifecycle scripts and optional dependencies were disabled, so this is not a normal production installation."
+    },
+    "fixture_config": {
+      "path": "native-config.json",
+      "size": 463,
+      "sha256": "2a0ec1ced877f2d4dadd2597be5318b38771e3385562ab6c66a17c7af552f40f"
+    }
+  },
+  "preflight": {
+    "manifest_path": "<trusted-probe-root>/guarded-final/manifest.json",
+    "manifest_is_derived_before_read": true,
+    "manifest_and_fixture_require_single_link_files": true,
+    "real_profile_is_external_to_manifest": true,
+    "cli_issuer": "disabled",
+    "trusted_profile_injection": "pure-validation-api-only",
+    "real_openclaw_state_overlap_is_rejected": true,
+    "artifact_hashes_are_fixed": true,
+    "fresh_environment_is_synthetic_test_only": true
+  },
+  "native_evidence_gate": {
+    "satisfied": false,
+    "execution": "blocked-before-spawn",
+    "reason": "No OS-level egress isolation receipt issuer is available. Proxy environment variables are advisory and are not accepted as a network boundary.",
+    "post_run_identity_check": "not-run",
+    "unexpected_file_inventory": "not-run",
+    "openclaw_owned_sentinel": "not-claimed"
+  },
+  "discarded_nonisolated_probe": {
+    "started_at": "2026-10-16T02:20:11.1913708+08:00",
+    "audited_at": "2026-10-16T02:21:30.1212003+08:00",
+    "argv": [
+      "node.exe <fixed-package>/openclaw.mjs --version",
+      "node.exe <fixed-package>/openclaw.mjs --help"
+    ],
+    "real_state_directory": {
+      "creation_time": "2026-07-05T00:02:57.9220933+08:00",
+      "last_directory_write_time": "2026-08-26T19:51:15.2138058+08:00",
+      "files_created_or_modified_since_probe": 0
+    },
+    "live_openclaw_node_processes_at_audit": 0,
+    "gateway_or_daemon_command": false,
+    "model_request": false,
+    "excluded_from_acceptance": true,
+    "conclusion": "未发现持久写入，但不能证明真实配置未被读取；读取状态 indeterminate."
+  },
+  "other_discarded_runs": {
+    "inherited_then_overwritten_environment": "excluded",
+    "proxy_only_guarded_final": "excluded",
+    "loopback_request_observations": "excluded",
+    "acceptance_credit": false
+  }
+}
