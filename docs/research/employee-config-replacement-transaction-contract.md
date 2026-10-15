@@ -11,6 +11,26 @@ and persists a separate bounded Linux completion tombstone in a synthetic root.
 Publication, rollback, operating-system key custody and integrated
 crash-recoverable tombstone cleanup remain incomplete.
 
+## First-release local threat model
+
+The first release trusts processes running as the same logged-in operating-
+system account. A deliberately malicious same-account process that reads the
+employee Key from a native tool configuration, retains a pre-opened writer,
+ignores advisory locking, restores owner-write permission or actively swaps a
+directory entry is outside this contract. Administrator, root, kernel and OS
+compromise are also outside this contract.
+
+Different-account access, accidental concurrent switcher launches, ordinary
+overlapping edits, stale or replaced filesystem objects, crashes, restart and
+storage failures remain in scope. The transaction must still use private
+permissions or protected DACLs, stable directory handles and identities,
+compare-and-swap checks, compatible locks, atomic replacement, encrypted
+rollback material, durable recovery and a reviewed OS key provider with an
+explicit Key lifecycle. Every tool also needs fixed native acceptance and its
+own path, data-directory and lock semantics before real writes. This scope
+decision does not authorize the Tauri `apply_configuration` command or claim
+that any planned tool is ready for live mutation.
+
 ## Scope and non-goals
 
 The first implementation is deliberately bounded to one canonical root, at
@@ -51,15 +71,19 @@ ensuring that the resulting secret-bearing file remains private.
 
 If a platform or filesystem cannot provide the required primitive, replacement
 returns `unsupported_platform_or_filesystem` before backup or target mutation.
-The unresolved same-user Unix leaf-entry and pre-opened-writer races documented
-in [the write-safety gates](employee-config-switcher-security-gates.md) remain a
-live-write blocker even if this synthetic state machine passes. Linux
+The same-user Unix leaf-entry and pre-opened-writer races documented in
+[the write-safety gates](employee-config-switcher-security-gates.md) remain
+known limitations even if this synthetic state machine passes. Linux
 `unlinkat(..., AT_REMOVEDIR)` still resolves a leaf name at its own operation
 boundary, while `flock` is advisory; extra `fstat`/`openat2` checks or a
 quarantine rename only move, rather than close, the final same-UID exchange
-window. A live implementation therefore needs a separate broker/service UID
-that exclusively owns and writes the transaction namespace, or an equivalent
-mandatory kernel-enforced boundary. Ordinary same-UID DAC remains unsupported.
+window. The first-release threat model explicitly accepts that limitation by
+trusting processes under the same login account; it does not claim that
+ordinary same-UID DAC authenticates one same-account process from another.
+Cross-account protection, accidental-concurrency locking and all identity/CAS
+checks remain mandatory. A later threat model that includes malicious
+same-account processes would require a separately owned broker/service or an
+equivalent mandatory kernel-enforced boundary.
 
 ## Recovery-key custody interface
 
@@ -227,7 +251,8 @@ Review should approve these interfaces before publication code is added:
 2. per-platform atomic replacement and directory-flush primitives;
 3. exact security metadata captured, authenticated and restored;
 4. decision point and roll-forward versus rollback policy;
-5. same-user race assumptions and explicit unsupported filesystems;
+5. the documented same-login-account trust assumption, accidental-concurrency
+   behavior and explicit unsupported filesystems;
 6. the complete fault matrix and evidence-preservation behavior.
 
 ## Current implemented subset
@@ -359,8 +384,10 @@ crash-resumable cross-namespace deletion order, revalidation/locking at the
 mutation boundary, transaction-ID non-reuse, and recovery from every partial
 retirement state. Therefore all 64-entry journal/proof limits still apply.
 The owner-private filesystem boundary is not authentication against another
-process running as the same user; the documented same-user race remains a
-blocker.
+process running as the same user. That deliberate-adversary case is an accepted
+first-release non-goal, not a security property of this implementation.
+Cross-account isolation, accidental-concurrency handling and every other live-
+write gate remain unresolved requirements.
 
 ## Public platform references
 

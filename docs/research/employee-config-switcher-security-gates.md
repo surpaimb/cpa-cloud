@@ -7,6 +7,36 @@ server configuration. `apply_configuration` must continue to fail closed until
 all gates below have implementation and fault-injection evidence on each target
 platform.
 
+## First-release local threat model
+
+The first release treats processes running as the same logged-in operating-
+system account as trusted principals. An intentionally malicious same-account
+process that reads the employee Key from a native tool configuration, retains a
+pre-opened writer, ignores an advisory lock, restores owner-write permission or
+actively races a directory entry is explicitly out of scope. Administrator,
+root, kernel and operating-system compromise are also out of scope.
+
+The following remain in scope and mandatory:
+
+- preventing another OS account from reading or modifying configuration,
+  staging, backup, journal, proof and recovery-key material;
+- coordinating accidental concurrent switcher processes and ordinary
+  overlapping tool edits;
+- detecting stale, changed, renamed or replaced objects with compare-and-swap
+  checks, stable directory handles and file identities;
+- recovering safely from crashes, restart, storage errors and partial durable
+  transitions.
+
+Owner-private permissions are therefore a cross-account boundary, not an
+authentication boundary between processes of the same account. This threat-
+model decision removes resistance to a deliberately hostile same-account
+process as a first-release gate only. It does not relax private permissions or
+DACL/ACL validation, locking for accidental concurrency, atomic replacement,
+encrypted backup and rollback, OS key-provider and Key-lifecycle requirements,
+restart recovery, tool-specific path/lock handling or fixed native-tool
+acceptance. It does not enable `apply_configuration` or establish that any of
+the ten planned tools is ready for real writes.
+
 1. Private staging, backup and final-file permissions. Windows uses a protected
    user-only DACL and preserves the existing target security descriptor when
    replacing a file; new files receive the protected DACL before publication.
@@ -96,7 +126,8 @@ a newly opened append writer is refused on Linux, macOS and Windows before the
 target is created. A writer that already held a Unix descriptor before sealing
 can still ignore the advisory lock; the post-publication snapshot detects that
 mutation, but cannot undo the already-created target. This same-user adversarial
-case therefore remains outside the accepted real-write boundary.
+case is a known limitation accepted under the first-release threat model; the
+post-publication check remains required for accidental interference.
 
 Publication and cleanup now retain a stable directory chain from the configured
 root through every target parent and transaction workspace. Linux and macOS open
@@ -123,7 +154,9 @@ an individual directory entry between the final `fstatat` identity comparison
 and `linkat`/`unlinkat`. POSIX descriptors keep ancestor rename, symlink and
 mount redirection from changing the base directory, but portable Linux/macOS
 APIs cannot unlink a regular file solely by its already-open descriptor. This
-same-user adversarial case remains outside the accepted real-write boundary.
+same-user adversarial case is explicitly outside the first-release threat model.
+Stable handles, identity checks and the transaction lock remain required for
+cross-account isolation and accidental concurrency.
 
 Before scanning recovery state, the engine now requires the transaction root
 and each workspace to retain their stable file identity and private directory
@@ -151,10 +184,10 @@ Native negative recovery tests also reject a macOS workspace ACL and a removed
 macOS lock path. These behaviors must pass native runtime tests, not only
 cross-platform compilation.
 
-This is not clearance for live writes. The same-user Unix entry race described
-above remains open, and replacement of existing files still needs encrypted or
-non-persistent rollback material. Consequently `apply_configuration` remains
-fail-closed.
+This is not clearance for live writes. Although the same-user Unix entry race
+described above is an accepted out-of-scope limitation, replacement of existing
+files still needs encrypted or non-persistent rollback material and every other
+gate in this document. Consequently `apply_configuration` remains fail-closed.
 
 ## Encrypted rollback-material foundation
 
@@ -255,8 +288,9 @@ Restart refuses a pre-publication `.pending` artifact and repairs durability of
 a structurally complete final record before returning it. Windows and macOS
 remain unsupported before namespace creation. No operating-system key provider,
 transaction-content cleanup integration, automatic crash-resume orchestration,
-or real client write is enabled, and a hostile same-user process remains a
-blocker. A separate
+or real client write is enabled. Resistance to a hostile same-user process is
+not claimed under the first-release threat model; cross-account isolation and
+accidental-concurrency checks remain mandatory. A separate
 Linux-only synthetic-root journal now makes the five cleanup phases durable as
 immutable private files, rejects non-contiguous or `.pending` state on restart,
 and reconstructs the exact transaction/provider-bound cleanup sequence. Its
