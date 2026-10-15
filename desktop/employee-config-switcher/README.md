@@ -17,6 +17,8 @@ Linux 合成根目录的 completion tombstone 现在用同一稳定目录句柄�
 
 Windows 合成根目录现在有一个独立的当前用户 DPAPI recovery-key provider。它使用无 UI、非 machine-scope 的 DPAPI，磁盘只保存带应用层完整性 envelope 的受保护 blob，provider reference 绑定 transaction 与 blob 摘要；owner-only protected DACL、稳定目录句柄、跨实例排他锁、create-only 发布、重启 reopen、删除和目录 flush 均失败关闭。Linux/macOS 在构造 provider 时明确返回 `UnsupportedPlatform`，没有环境变量、命令行、数据库、网络或明文文件回退。该 provider 尚未接入真实 replacement transaction，`apply_configuration` 仍保持失败关闭。
 
+macOS 另有一个失败关闭的 Keychain 边界和纯内存 `SecItem` 合同测试：合同固定 Data Protection Keychain、非同步、专用 access group、`WhenUnlockedThisDeviceOnly`、无交互、persistent reference、transaction/current-user/access-group 绑定以及 exact-reference 删除语义。当前应用尚未固定 signing team、entitlement 和 access group，因此生产构造在查询 Keychain 前返回 unavailable；临时 file-based Keychain 不能替代正式 Data Protection Keychain 的重启、锁定、跨用户或持久性证据。此切片不访问真实 Keychain，也不启用真实配置写入。
+
 Grok Build 的真实检测或写入还必须先支持或明确拒绝 `GROK_HOME` 覆盖，证明模型 ID 满足 CPA `validIdentifier` 约束或能安全处理 Grok glob 语义，并增加固定原生客户端夹具；在这些门槛完成前，不声称覆盖 Grok 的内部模型选择路径。
 
 ## 本地验证

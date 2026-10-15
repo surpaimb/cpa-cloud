@@ -284,6 +284,21 @@ creating a namespace; Keychain, Secret Service and all environment/CLI/database/
 plaintext fallbacks remain absent. The provider is synthetic-only and is not
 wired to the durable transaction or real client writes.
 
+The macOS Keychain slice now records a pure, fake-`SecItem` contract without
+touching Security.framework. It fixes Data Protection Keychain selection,
+`synchronizable=false`, a dedicated access group,
+`WhenUnlockedThisDeviceOnly`, no-interaction authentication, persistent-
+reference read-back, transaction/current-user/access-group commitments,
+duplicate-add reuse and exact-reference deletion with post-delete verification.
+Only `interaction-not-allowed`, `interaction-required` and `not-logged-in` map
+to `locked`; broad authentication, entitlement and unknown failures remain
+`unavailable`. Wrong user or transaction is rejected from the reference before
+any backend query. The real constructor remains unavailable on macOS because
+the preview has no fixed signing team/access-group entitlement to verify.
+Temporary file-based Keychains are explicitly not accepted as evidence for
+Data Protection Keychain restart, locked-session, cross-user or durability
+behavior, so native Keychain custody and real writes remain open gates.
+
 A provider-agnostic cleanup sequence gate now also refuses provider deletion
 until a terminal decision, completion tombstone, and workspace removal have
 each been recorded durable in that order. Workspace durability is no longer a

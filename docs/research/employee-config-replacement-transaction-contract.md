@@ -113,7 +113,13 @@ Planned platform providers are gated separately:
   to the same user credentials and normally the same machine.
 - macOS: a non-synchronizing Keychain generic-password item addressed by stable
   service plus transaction attributes. Locked or unavailable Keychain state is
-  a recoverable stop, not a fallback to disk storage.
+  a recoverable stop, not a fallback to disk storage. The application must use
+  the Data Protection Keychain with a fixed dedicated access group and verify
+  its own signing entitlement before the first query; otherwise an unauthorized
+  query could be indistinguishable from a missing item. The reference must bind
+  the transaction, current-user UUID commitment, access-group commitment and
+  exact persistent reference. A temporary file-based Keychain is not evidence
+  for this production contract.
 - Linux desktop: a Secret Service item located by stable lookup attributes.
   Locked collections and prompt requirements are explicit `locked` states.
   Headless Linux has no accepted provider yet and therefore remains unsupported.
@@ -324,8 +330,11 @@ existing value first and flushes its directory. DPAPI plaintext output
 and intermediate key arrays are zeroized, and neither key nor DPAPI blob enters
 the journal, receipt, `Debug`, environment, command line, database or network.
 Linux and macOS return `UnsupportedPlatform` before namespace creation. This
-provider is not wired to a durable replacement transaction or real client write;
-Keychain and Secret Service remain unimplemented.
+provider is not wired to a durable replacement transaction or real client write.
+A separate macOS boundary now keeps production construction unavailable until
+signing/access-group identity can be verified and exercises the intended
+Data-Protection-Keychain request/state contract against an in-memory fake only;
+native Keychain and Secret Service implementations remain unimplemented.
 
 The same module includes a provider-agnostic terminal-cleanup ordering gate. It
 accepts only an already durable `Complete` or `RolledBack` decision, requires
