@@ -8,8 +8,8 @@ or more existing employee-tool configuration files. It does not authorize the
 Tauri command to write a real client directory. The current implementation
 prepares and reloads encrypted rollback material for one existing Linux leaf
 and persists a separate bounded Linux completion tombstone in a synthetic root.
-Publication, rollback, operating-system key custody and tombstone removal remain
-incomplete.
+Publication, rollback, operating-system key custody and integrated
+crash-recoverable tombstone cleanup remain incomplete.
 
 ## Scope and non-goals
 
@@ -285,9 +285,14 @@ partial final tombstone. Restart revalidates and flushes every visible complete
 record plus its directory and root before returning it as durable, binds it to
 the held root identity and exact transaction/provider reference, and
 reconstructs a bounded sorted set. It reopens the named file and directory to
-reject replacement during the operation. This does not implement provider
-deletion, tombstone removal, an operating-system key provider, journal
-integration or real client writes.
+reject replacement during the operation. After the provider-agnostic cleanup
+gate reaches `KeyDeletionConfirmed`, it can issue a non-serializable
+authorization for the Linux store to revalidate the exact
+transaction/reference, unlink that one final tombstone, and flush the namespace
+and root. Only the resulting exact removal receipt can advance the cleanup gate
+to `Complete`; missing or mismatched records fail closed. This does not implement a
+provider deletion backend, durable cleanup journal, workspace removal,
+operating-system key provider, crash-resume orchestration or real client writes.
 The owner-private filesystem boundary is not authentication against another
 process running as the same user; the documented same-user race remains a
 blocker.

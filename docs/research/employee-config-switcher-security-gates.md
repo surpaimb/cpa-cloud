@@ -241,8 +241,14 @@ file/directory/root flushes and root/transaction/provider-reference binding.
 Restart refuses a pre-publication `.pending` artifact and repairs durability of
 a structurally complete final record before returning it. Windows and macOS
 remain unsupported before namespace creation. No operating-system key provider,
-tombstone removal, journal wiring, or real client write is enabled, and
-same-user replacement remains a blocker.
+durable cleanup journal, workspace-removal wiring, crash-resume orchestration,
+or real client write is enabled, and same-user replacement remains a blocker.
+The pure cleanup gate can issue a non-serializable removal authorization only
+after provider deletion is confirmed; the Linux store then revalidates the
+exact transaction/reference before unlinking one final tombstone and flushing
+the namespace and root. Only that operation's exact receipt can advance the
+cleanup gate to `Complete`; missing and mismatched records are not accepted as
+successful removal.
 
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret
