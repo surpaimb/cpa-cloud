@@ -306,7 +306,11 @@ provider-agnostic cleanup phases as immutable, bounded, owner-private event
 files. Every event repeats and validates the root, terminal decision,
 transaction and provider-reference binding; restart requires a contiguous
 phase prefix and reconstructs the exact cleanup sequence. Event publication is
-stage-and-flush followed by no-replace rename and directory/root flush. A
+stage-and-flush followed by no-replace rename and directory/root flush. One
+stable directory descriptor and advisory lock cover namespace enumeration,
+phase-zero duplicate/capacity validation or append-prefix validation, and the
+publication itself; concurrent 63-to-64 creation cannot publish a 65th
+transaction, and concurrent duplicate appends cannot leave a pending record. A
 visible `.pending` event blocks recovery rather than being inferred complete.
 The durable wrapper records provider deletion only after the provider returns
 `deleted` or `missing`, and an append failure rolls the in-memory sequence back

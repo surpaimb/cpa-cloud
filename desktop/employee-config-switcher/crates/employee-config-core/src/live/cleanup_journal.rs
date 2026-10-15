@@ -361,23 +361,17 @@ mod platform {
         path::Component,
     };
 
+    #[derive(Clone, Copy)]
+    enum PublishExpectation {
+        Initial,
+        Advance { expected_previous: u8 },
+    }
+
     pub(super) fn create(
         root: &Path,
         sequence: &RecoveryKeyCleanupSequence,
     ) -> Result<(), CleanupJournalError> {
-        let existing = load(root)?;
-        if existing
-            .iter()
-            .any(|item| item.transaction_id() == sequence.transaction_id())
-        {
-            return Err(CleanupJournalError::AlreadyExists(
-                sequence.transaction_id(),
-            ));
-        }
-        if existing.len() >= MAX_TRANSACTIONS {
-            return Err(CleanupJournalError::TooMany);
-        }
-        publish_event(root, sequence)
+        publish_event(root, sequence, PublishExpectation::Initial)
     }
 
     pub(super) fn append(
@@ -387,36 +381,44 @@ mod platform {
         let expected_previous = phase_index(sequence.phase())
             .checked_sub(1)
             .ok_or(CleanupJournalError::InvalidMetadata)?;
-        let existing = load(root)?;
-        let Some(current) = existing
-            .iter()
-            .find(|item| item.transaction_id() == sequence.transaction_id())
-        else {
-            return Err(CleanupJournalError::Missing(sequence.transaction_id()));
-        };
-        if phase_index(current.phase()) != expected_previous
-            || current.terminal() != sequence.terminal()
-            || current.reference() != sequence.reference()
-        {
-            return Err(CleanupJournalError::RecoveryConflict(
-                root.join(CLEANUP_DIRECTORY),
-            ));
-        }
-        publish_event(root, sequence)
+        publish_event(
+            root,
+            sequence,
+            PublishExpectation::Advance { expected_previous },
+        )
     }
 
     fn publish_event(
         root: &Path,
         sequence: &RecoveryKeyCleanupSequence,
+        expectation: PublishExpectation,
     ) -> Result<(), CleanupJournalError> {
         let root_dir = open_root(root)?;
         let root_identity = identity(&root_dir).map_err(|source| io_error(root, source))?;
         let directory_path = root.join(CLEANUP_DIRECTORY);
-        let (directory, created) = open_or_create_private_directory(
-            root_dir.as_raw_fd(),
-            OsStr::new(CLEANUP_DIRECTORY),
-            &directory_path,
-        )?;
+        let (directory, created) = match expectation {
+            PublishExpectation::Initial => open_or_create_private_directory(
+                root_dir.as_raw_fd(),
+                OsStr::new(CLEANUP_DIRECTORY),
+                &directory_path,
+            )?,
+            PublishExpectation::Advance { .. } => (
+                match open_private_directory_at(
+                    root_dir.as_raw_fd(),
+                    OsStr::new(CLEANUP_DIRECTORY),
+                    &directory_path,
+                ) {
+                    Ok(directory) => directory,
+                    Err(CleanupJournalError::Io { source, .. })
+                        if source.kind() == io::ErrorKind::NotFound =>
+                    {
+                        return Err(CleanupJournalError::Missing(sequence.transaction_id()));
+                    }
+                    Err(error) => return Err(error),
+                },
+                false,
+            ),
+        };
         let directory_identity =
             identity(&directory).map_err(|source| io_error(&directory_path, source))?;
         lock_exclusive(&directory, &directory_path)?;
@@ -424,6 +426,46 @@ mod platform {
             root_dir
                 .sync_all()
                 .map_err(|source| io_error(root, source))?;
+        }
+
+        let existing = load_locked(
+            root,
+            &root_dir,
+            root_identity,
+            &directory_path,
+            &directory,
+            directory_identity,
+        )?;
+        match expectation {
+            PublishExpectation::Initial => {
+                if existing
+                    .iter()
+                    .any(|item| item.transaction_id() == sequence.transaction_id())
+                {
+                    return Err(CleanupJournalError::AlreadyExists(
+                        sequence.transaction_id(),
+                    ));
+                }
+                if existing.len() >= MAX_TRANSACTIONS {
+                    return Err(CleanupJournalError::TooMany);
+                }
+            }
+            PublishExpectation::Advance { expected_previous } => {
+                let Some(current) = existing
+                    .iter()
+                    .find(|item| item.transaction_id() == sequence.transaction_id())
+                else {
+                    return Err(CleanupJournalError::Missing(sequence.transaction_id()));
+                };
+                if phase_index(current.phase()) != expected_previous
+                    || current.terminal() != sequence.terminal()
+                    || current.reference() != sequence.reference()
+                {
+                    return Err(CleanupJournalError::RecoveryConflict(
+                        directory_path.clone(),
+                    ));
+                }
+            }
         }
 
         let event = event_for(sequence, root_identity)?;
@@ -477,7 +519,9 @@ mod platform {
         if identity(&rebound).map_err(|source| io_error(&directory_path, source))?
             != directory_identity
         {
-            return Err(CleanupJournalError::RecoveryConflict(directory_path));
+            return Err(CleanupJournalError::RecoveryConflict(
+                directory_path.to_path_buf(),
+            ));
         }
         Ok(())
     }
@@ -503,6 +547,25 @@ mod platform {
         };
         let directory_identity =
             identity(&directory).map_err(|source| io_error(&directory_path, source))?;
+        lock_shared(&directory, &directory_path)?;
+        load_locked(
+            root,
+            &root_dir,
+            root_identity,
+            &directory_path,
+            &directory,
+            directory_identity,
+        )
+    }
+
+    fn load_locked(
+        root: &Path,
+        root_dir: &File,
+        root_identity: RootIdentity,
+        directory_path: &Path,
+        directory: &File,
+        directory_identity: RootIdentity,
+    ) -> Result<Vec<RecoveryKeyCleanupSequence>, CleanupJournalError> {
         let names_before = read_directory_names(&directory, &directory_path)?;
         let mut grouped: BTreeMap<String, Vec<(u8, CleanupEvent)>> = BTreeMap::new();
 
@@ -596,7 +659,9 @@ mod platform {
             .map_err(|source| io_error(root, source))?;
         let names_after = read_directory_names(&directory, &directory_path)?;
         if names_before != names_after {
-            return Err(CleanupJournalError::RecoveryConflict(directory_path));
+            return Err(CleanupJournalError::RecoveryConflict(
+                directory_path.to_path_buf(),
+            ));
         }
         verify_private_directory(&directory, &directory_path)?;
         let rebound = open_private_directory_at(
@@ -607,7 +672,9 @@ mod platform {
         if identity(&rebound).map_err(|source| io_error(&directory_path, source))?
             != directory_identity
         {
-            return Err(CleanupJournalError::RecoveryConflict(directory_path));
+            return Err(CleanupJournalError::RecoveryConflict(
+                directory_path.to_path_buf(),
+            ));
         }
         Ok(sequences)
     }
@@ -784,7 +851,14 @@ mod platform {
     }
 
     fn lock_exclusive(directory: &File, display: &Path) -> Result<(), CleanupJournalError> {
-        if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(io_error(display, io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    fn lock_shared(directory: &File, display: &Path) -> Result<(), CleanupJournalError> {
+        if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_SH) } != 0 {
             return Err(io_error(display, io::Error::last_os_error()));
         }
         Ok(())
@@ -940,6 +1014,10 @@ mod tests {
     };
     #[cfg(target_os = "linux")]
     use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::sync::{Arc, Barrier};
+    #[cfg(target_os = "linux")]
+    use std::thread;
 
     fn transaction(byte: u8) -> ReplacementTransactionId {
         ReplacementTransactionId::from_bytes([byte; 16]).unwrap()
@@ -1096,6 +1174,100 @@ mod tests {
             Err(CleanupJournalError::Cleanup(_))
         ));
         assert_eq!(journal.phase(), RecoveryKeyCleanupPhase::TerminalRecorded);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_sixty_fourth_create_cannot_overfill_the_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        for byte in 1..MAX_TRANSACTIONS as u8 {
+            create_durable_cleanup_journal(
+                &root_path,
+                ReplacementPhase::Complete,
+                transaction(byte),
+                reference(),
+            )
+            .unwrap();
+        }
+
+        let barrier = Arc::new(Barrier::new(2));
+        let mut workers = Vec::new();
+        for byte in [0x70, 0x71] {
+            let root_path = root_path.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                create_durable_cleanup_journal(
+                    &root_path,
+                    ReplacementPhase::Complete,
+                    transaction(byte),
+                    reference(),
+                )
+            }));
+        }
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(CleanupJournalError::TooMany)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            load_durable_cleanup_journals(&root_path).unwrap().len(),
+            MAX_TRANSACTIONS
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_append_validates_the_prefix_under_the_publication_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(0x72);
+        create_durable_cleanup_journal(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            reference(),
+        )
+        .unwrap();
+        let first = load_durable_cleanup_journals(&root_path).unwrap().remove(0);
+        let second = load_durable_cleanup_journals(&root_path).unwrap().remove(0);
+        let barrier = Arc::new(Barrier::new(2));
+        let mut workers = Vec::new();
+        for mut journal in [first, second] {
+            let barrier = Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                journal.record_completion_tombstone_durable()
+            }));
+        }
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+
+        let loaded = load_durable_cleanup_journals(&root_path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].phase(),
+            RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+        );
+        let names = fs::read_dir(root_path.join(CLEANUP_DIRECTORY))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 2);
+        assert!(names
+            .iter()
+            .all(|name| !name.to_string_lossy().ends_with(PENDING_SUFFIX)));
     }
 
     #[cfg(not(target_os = "linux"))]
