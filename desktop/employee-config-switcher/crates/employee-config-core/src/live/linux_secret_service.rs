@@ -694,22 +694,12 @@ impl ReconciliationLock {
     ) -> Result<Self, LinuxSecretServiceProviderError> {
         let name = CString::new(LOCK_FILE).expect("fixed lock name has no NUL");
         let flags = if approval.allow_initialization {
-            libc::O_RDWR
-                | libc::O_CREAT
-                | libc::O_EXCL
-                | libc::O_CLOEXEC
-                | libc::O_NOFOLLOW
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW
         } else {
             libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW
         };
-        let fd = unsafe {
-            libc::openat(
-                approval.directory.as_raw_fd(),
-                name.as_ptr(),
-                flags,
-                0o600,
-            )
-        };
+        let fd =
+            unsafe { libc::openat(approval.directory.as_raw_fd(), name.as_ptr(), flags, 0o600) };
         if fd < 0 {
             return Err(LinuxSecretServiceProviderError::UnsafeLock(
                 approval.display.join(LOCK_FILE),
@@ -1418,10 +1408,8 @@ mod tests {
             let (root, approval) = fixture();
             let backend = FakeBackend::default();
             backend.fault(Fault::CreatePublishedThenUnavailable);
-            let mut provider = ContractProvider::new(
-                backend.clone(),
-                ReconciliationLock::open(approval).unwrap(),
-            );
+            let mut provider =
+                ContractProvider::new(backend.clone(), ReconciliationLock::open(approval).unwrap());
             assert!(matches!(
                 provider.create(transaction(if truncate { 0x24 } else { 0x23 })),
                 RecoveryKeyCreateOutcome::Unavailable
@@ -1433,8 +1421,7 @@ mod tests {
             } else {
                 fs::remove_file(root.path().join(LOCK_FILE)).unwrap();
             }
-            let restart_approval =
-                SyntheticSecretServiceApproval::for_test(root.path()).unwrap();
+            let restart_approval = SyntheticSecretServiceApproval::for_test(root.path()).unwrap();
             assert!(matches!(
                 ReconciliationLock::open(restart_approval),
                 Err(LinuxSecretServiceProviderError::UnsafeLock(_))
