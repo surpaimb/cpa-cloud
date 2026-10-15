@@ -342,8 +342,9 @@ behavior, so native Keychain custody and real writes remain open gates.
 The Linux Secret Service candidate is also synthetic-only. Its approval has no
 production constructor and holds an already-open owner-private directory used
 for a descriptor-relative, single-link `0600` reconciliation lock. That lock
-file durably holds a random seed combined with UID and the lock device/inode to
-derive the provider-namespace identity; different approved or copied roots
+file durably holds a magic/versioned checksummed record binding a random seed,
+UID and the lock device/inode; the same fields derive the provider-namespace
+identity, while corruption or copying the record to another inode fails closed. Different approved roots
 therefore cannot share one Secret Service search namespace without also
 sharing one lock. Every operation acquires the held inode and then reopens the
 directory entry no-follow to require the same device/inode, private metadata

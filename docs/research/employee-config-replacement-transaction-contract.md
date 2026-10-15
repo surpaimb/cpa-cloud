@@ -126,9 +126,10 @@ Planned platform providers are gated separately:
   non-secret lookup attributes rather than a persisted object path. The current
   Linux-only candidate is synthetic/integration-only: tests alone can approve
   its owner-private reconciliation-lock directory. The private lock file
-  durably stores a random seed; UID plus lock device/inode and that seed derive
+  durably stores a magic/versioned checksummed record binding UID, lock
+  device/inode and a random seed; those same fields derive
   the provider namespace carried by lookup attributes,
-  references and envelopes, so two independently approved or copied roots cannot share a
+  references and envelopes, so corruption or a copied record fails closed and two independently approved roots cannot share a
   search namespace without sharing a lock. It serializes create under the
   namespace's cross-process `flock`, always calls `CreateItem` with
   `replace=false`, returns the same authenticated key/reference on retry, and
