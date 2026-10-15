@@ -270,12 +270,9 @@ mod tests {
             &profile,
         )
         .unwrap();
-        let native_config = include_bytes!(
-            "../tests/fixtures/codex-cli-0.160.1/native-config.toml"
-        );
-        let auth_sentinel = include_bytes!(
-            "../tests/fixtures/codex-cli-0.160.1/native-auth.json"
-        );
+        let native_config =
+            include_bytes!("../tests/fixtures/codex-cli-0.160.1/native-config.toml");
+        let auth_sentinel = include_bytes!("../tests/fixtures/codex-cli-0.160.1/native-auth.json");
         let acceptance: serde_json::Value = serde_json::from_slice(include_bytes!(
             "../tests/fixtures/codex-cli-0.160.1/native-acceptance.json"
         ))
@@ -310,8 +307,14 @@ mod tests {
             acceptance["artifact"]["binary_sha256"],
             "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d"
         );
-        assert_eq!(acceptance["artifact"]["reported_version"], "codex-cli 0.160.1");
-        assert_eq!(acceptance["loopback_observation"]["request_path"], "/v1/responses");
+        assert_eq!(
+            acceptance["artifact"]["reported_version"],
+            "codex-cli 0.160.1"
+        );
+        assert_eq!(
+            acceptance["loopback_observation"]["request_path"],
+            "/v1/responses"
+        );
         assert_eq!(
             acceptance["loopback_observation"]["authorization_matched_synthetic_fixture"],
             true

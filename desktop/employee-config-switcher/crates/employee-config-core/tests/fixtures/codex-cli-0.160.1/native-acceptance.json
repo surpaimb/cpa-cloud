@@ -53,7 +53,7 @@
     "stderr_contained_fixture_token": false
   },
   "planner_fixtures": {
-    "config_sha256": "02a00eb032c4d1e35f985c5a4640d0263b0d1594c491fc57e5f5fe52e307c91b",
+    "config_sha256": "73241aa5346531859c21bd64df0977a92d6b49ebbefcce98d120d493f08871e8",
     "auth_sentinel_sha256": "eb44befd718e75ea032bbc706e42ea3b73b77f4674d79bfed42d438eb4ecad16"
   },
   "loopback_observation": {

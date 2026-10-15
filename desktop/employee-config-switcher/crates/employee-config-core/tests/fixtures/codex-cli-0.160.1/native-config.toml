@@ -1,6 +1,8 @@
 model = "fixture-model"
 model_provider = "cpa_cloud"
 
+[model_providers]
+
 [model_providers.cpa_cloud]
 name = "CPA Cloud"
 base_url = "http://127.0.0.1:46161/v1"
