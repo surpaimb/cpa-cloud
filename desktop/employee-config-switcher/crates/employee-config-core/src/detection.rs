@@ -40,7 +40,7 @@ where
             "Claude Desktop",
             claude_desktop_candidates(home, platform, &env),
         ),
-        ("grok-build", "Grok Build", vec![home.join(".grok")]),
+        ("grok-build", "Grok Build", vec![grok_home(home, &env)]),
         ("opencode", "OpenCode", vec![config.join("opencode")]),
         ("openclaw", "OpenClaw", vec![home.join(".openclaw")]),
         ("hermes", "Hermes", vec![hermes_home(home, platform, &env)]),
@@ -127,8 +127,10 @@ where
 {
     match platform {
         Platform::Windows => {
-            let local = env_path(env, "LOCALAPPDATA", home.join("AppData").join("Local"));
-            vec![local.join("Claude"), local.join("Claude-3p")]
+            let roaming = env_path(env, "APPDATA", home.join("AppData").join("Roaming"));
+            vec![roaming
+                .join("Claude")
+                .join("claude_desktop_config.json")]
         }
         Platform::Macos => {
             let application_support = home.join("Library").join("Application Support");
@@ -142,6 +144,14 @@ where
             vec![config.join("Claude"), config.join("Claude-3p")]
         }
     }
+}
+
+// Mirrors the fixed official resolver: a non-empty GROK_HOME wins verbatim.
+fn grok_home<F>(home: &Path, env: &F) -> PathBuf
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    env_path(env, "GROK_HOME", home.join(".grok"))
 }
 
 fn hermes_home<F>(home: &Path, platform: Platform, env: &F) -> PathBuf
@@ -231,16 +241,61 @@ mod tests {
     }
 
     #[test]
-    fn windows_desktop_uses_local_app_data_and_finds_three_party_layout() {
+    fn windows_desktop_uses_roaming_app_data_and_requires_the_official_config_file() {
         let root = tempfile::tempdir().unwrap();
-        let local = root.path().join("LocalAppData");
-        let three_party = local.join("Claude-3p");
-        fs::create_dir_all(&three_party).unwrap();
-        let env = fake_env(HashMap::from([("LOCALAPPDATA", local)]));
+        let roaming = root.path().join("RoamingAppData");
+        let official = roaming
+            .join("Claude")
+            .join("claude_desktop_config.json");
+        fs::create_dir_all(official.parent().unwrap()).unwrap();
+        fs::write(&official, br#"{"mcpServers":{}}"#).unwrap();
+        let env = fake_env(HashMap::from([("APPDATA", roaming)]));
         let items = detect_clients_with_env(root.path(), Platform::Windows, env);
         let desktop = by_id(&items, "claude-desktop");
         assert!(desktop.detected);
-        assert_eq!(desktop.detail, three_party.display().to_string());
+        assert_eq!(desktop.detail, official.display().to_string());
+    }
+
+    #[test]
+    fn windows_desktop_ignores_local_app_data_and_directory_only_false_positives() {
+        let root = tempfile::tempdir().unwrap();
+        let roaming = root.path().join("RoamingAppData");
+        let local = root.path().join("LocalAppData");
+        fs::create_dir_all(roaming.join("Claude")).unwrap();
+        fs::create_dir_all(local.join("Claude")).unwrap();
+        fs::create_dir_all(local.join("Claude-3p")).unwrap();
+        let env = fake_env(HashMap::from([
+            ("APPDATA", roaming.clone()),
+            ("LOCALAPPDATA", local),
+        ]));
+        let items = detect_clients_with_env(root.path(), Platform::Windows, env);
+        let desktop = by_id(&items, "claude-desktop");
+        assert!(!desktop.detected);
+        assert_eq!(
+            desktop.detail,
+            roaming
+                .join("Claude")
+                .join("claude_desktop_config.json")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn windows_desktop_falls_back_to_the_home_roaming_path() {
+        let root = tempfile::tempdir().unwrap();
+        let official = root
+            .path()
+            .join("AppData")
+            .join("Roaming")
+            .join("Claude")
+            .join("claude_desktop_config.json");
+        fs::create_dir_all(official.parent().unwrap()).unwrap();
+        fs::write(&official, br#"{"mcpServers":{}}"#).unwrap();
+        let items = detect_clients_with_env(root.path(), Platform::Windows, |_| None);
+        let desktop = by_id(&items, "claude-desktop");
+        assert!(desktop.detected);
+        assert_eq!(desktop.detail, official.display().to_string());
     }
 
     #[test]
@@ -284,6 +339,30 @@ mod tests {
         let opencode = by_id(&items, "opencode");
         assert!(opencode.detected);
         assert_eq!(opencode.detail, xdg.join("opencode").display().to_string());
+    }
+
+    #[test]
+    fn grok_build_honors_the_non_empty_grok_home_override_verbatim() {
+        let root = tempfile::tempdir().unwrap();
+        let overridden = root.path().join("custom-grok");
+        fs::create_dir_all(&overridden).unwrap();
+        let env = fake_env(HashMap::from([("GROK_HOME", overridden.clone())]));
+        let items = detect_clients_with_env(root.path(), Platform::Linux, env);
+        let grok = by_id(&items, "grok-build");
+        assert!(grok.detected);
+        assert_eq!(grok.detail, overridden.display().to_string());
+    }
+
+    #[test]
+    fn grok_build_ignores_an_empty_override_and_uses_the_home_default() {
+        let root = tempfile::tempdir().unwrap();
+        let default = root.path().join(".grok");
+        fs::create_dir_all(&default).unwrap();
+        let env = |name: &str| (name == "GROK_HOME").then(OsString::new);
+        let items = detect_clients_with_env(root.path(), Platform::Windows, env);
+        let grok = by_id(&items, "grok-build");
+        assert!(grok.detected);
+        assert_eq!(grok.detail, default.display().to_string());
     }
 
     #[test]

@@ -518,7 +518,14 @@ or loopback Responses transport. Those gates remain false until the exact asset
 passes both size and digest checks and runs only with isolated home, application
 data, XDG, npm, PATH, working-directory and MiniMax data-directory state.
 
-Claude Desktop remains detection-only. CPA now applies the official 32 MiB
+Claude Desktop remains detection-only. On Windows, detection is limited to the
+official `%APPDATA%\Claude\claude_desktop_config.json` file; directory-only
+`%LOCALAPPDATA%\Claude` and `Claude-3p` layouts are not accepted as evidence.
+The public file contract configures local MCP `mcpServers`, while Anthropic's
+remote custom connectors are likewise MCP tool/data integrations. Neither is a
+public custom-model endpoint or employee-key routing contract, so Claude Desktop
+is excluded from the first-release configurable set while the other nine tools
+continue through their separate gates. CPA now applies the official 32 MiB
 request limit to both `/v1/messages` and `/v1/messages/count_tokens`, returns
 Anthropic-shaped 413 `request_too_large` above that boundary, and keeps the
 other model routes at their existing lower limit. Complete fixed-client
@@ -533,3 +540,9 @@ smaller bounded request copy, so no general acceptance guarantee is inferred
 for every otherwise-valid request below 32 MiB. Because body parsing currently
 precedes authentication, production readiness also requires an explicit
 concurrency/memory admission bound for unauthenticated large requests.
+
+Grok Build read-only detection now reproduces the fixed official source rule:
+a non-empty `GROK_HOME` value wins verbatim, otherwise `<home>/.grok` is used.
+This closes only the detector's home-selection gap. Native parsing and transport,
+model-ID/glob safety, configuration locking, replacement recovery, and real
+writes remain blocked.
