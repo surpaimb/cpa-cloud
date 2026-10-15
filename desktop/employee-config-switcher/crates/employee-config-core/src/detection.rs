@@ -190,7 +190,7 @@ mod tests {
         let hermes = root.path().join("custom-hermes");
         let pi = root.path().join("custom-pi");
         for path in [&codex, &gemini, &hermes, &pi] {
-            fs::create_dir(path).unwrap();
+            fs::create_dir_all(path).unwrap();
         }
         let env = fake_env(HashMap::from([
             ("CODEX_HOME", codex.clone()),
