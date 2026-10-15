@@ -55,6 +55,7 @@ const ENVELOPE_MAGIC: &[u8; 16] = b"CPA-SS-KEY-V1\0\0\0";
 const REFERENCE_CONTEXT: &[u8] = b"cpa-cloud/linux-secret-service/reference/v1\0";
 const ENVELOPE_CONTEXT: &[u8] = b"cpa-cloud/linux-secret-service/envelope/v1\0";
 const ATTRIBUTES_CONTEXT: &[u8] = b"cpa-cloud/linux-secret-service/attributes/v1\0";
+const LOCK_NAMESPACE_CONTEXT: &[u8] = b"cpa-cloud/linux-secret-service/lock-namespace/v1\0";
 const REFERENCE_BYTES: usize =
     16 + 16 + 4 + LOCK_NAMESPACE_BYTES + ITEM_ID_BYTES + CHECKSUM_BYTES + CHECKSUM_BYTES;
 const ENVELOPE_BYTES: usize =
@@ -698,7 +699,13 @@ impl ReconciliationLock {
         }
         let mut file = unsafe { File::from_raw_fd(fd) };
         verify_private_regular_file(&file, approval.uid, &approval.display.join(LOCK_FILE))?;
-        let namespace = initialize_lock_namespace(&mut file, &approval.display.join(LOCK_FILE))?;
+        let seed = initialize_lock_namespace(&mut file, &approval.display.join(LOCK_FILE))?;
+        let namespace = derive_lock_namespace(
+            &file,
+            approval.uid,
+            seed,
+            &approval.display.join(LOCK_FILE),
+        )?;
         approval
             .directory
             .sync_all()
@@ -778,7 +785,7 @@ fn verify_current_lock_entry(
             path.to_path_buf(),
         ));
     }
-    let mut namespace = [0_u8; LOCK_NAMESPACE_BYTES];
+    let mut seed = [0_u8; LOCK_NAMESPACE_BYTES];
     if current
         .metadata()
         .map_err(|source| LinuxSecretServiceProviderError::Io {
@@ -793,17 +800,34 @@ fn verify_current_lock_entry(
         ));
     }
     current
-        .read_exact(&mut namespace)
+        .read_exact(&mut seed)
         .map_err(|source| LinuxSecretServiceProviderError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-    if namespace != expected_namespace {
+    let current_namespace = derive_lock_namespace(&current, uid, seed, path)?;
+    if current_namespace != expected_namespace {
         return Err(LinuxSecretServiceProviderError::UnsafeLock(
             path.to_path_buf(),
         ));
     }
     Ok(())
+}
+
+fn derive_lock_namespace(
+    file: &File,
+    uid: u32,
+    seed: [u8; LOCK_NAMESPACE_BYTES],
+    path: &Path,
+) -> Result<[u8; LOCK_NAMESPACE_BYTES], LinuxSecretServiceProviderError> {
+    let metadata = stat(file.as_raw_fd(), path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(LOCK_NAMESPACE_CONTEXT);
+    hasher.update(uid.to_be_bytes());
+    hasher.update((metadata.st_dev as u64).to_be_bytes());
+    hasher.update((metadata.st_ino as u64).to_be_bytes());
+    hasher.update(seed);
+    Ok(hasher.finalize().into())
 }
 
 fn initialize_lock_namespace(
@@ -1572,6 +1596,23 @@ mod tests {
         let (_second_root, second_approval) = fixture();
         let second = ReconciliationLock::open(second_approval).unwrap();
         assert_ne!(second.namespace, first_namespace);
+
+        let copied_root = tempfile::tempdir().unwrap();
+        fs::set_permissions(copied_root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::copy(
+            first_root.path().join(LOCK_FILE),
+            copied_root.path().join(LOCK_FILE),
+        )
+        .unwrap();
+        fs::set_permissions(
+            copied_root.path().join(LOCK_FILE),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let copied_approval =
+            SyntheticSecretServiceApproval::for_test(copied_root.path()).unwrap();
+        let copied = ReconciliationLock::open(copied_approval).unwrap();
+        assert_ne!(copied.namespace, first_namespace);
     }
 
     #[test]
@@ -1748,8 +1789,25 @@ mod tests {
         };
         let attempted = std::env::var_os("CPA_SS_LOCK_CHILD_ATTEMPTED").unwrap();
         let acquired = std::env::var_os("CPA_SS_LOCK_CHILD_ACQUIRED").unwrap();
-        fs::write(attempted, b"attempted").unwrap();
         let approval = SyntheticSecretServiceApproval::for_test(Path::new(&root)).unwrap();
+        let name = CString::new(LOCK_FILE).unwrap();
+        let probe_fd = unsafe {
+            libc::openat(
+                approval.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        assert!(probe_fd >= 0);
+        let probe = unsafe { File::from_raw_fd(probe_fd) };
+        assert_eq!(
+            unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            -1
+        );
+        let contention = io::Error::last_os_error().raw_os_error();
+        assert!(contention == Some(libc::EWOULDBLOCK) || contention == Some(libc::EAGAIN));
+        fs::write(attempted, b"contended").unwrap();
+        drop(probe);
         let lock = ReconciliationLock::open(approval).unwrap();
         let _guard = lock.exclusive().unwrap();
         fs::write(acquired, b"acquired").unwrap();
@@ -1775,7 +1833,7 @@ mod tests {
         while !attempted.exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(fs::read(&attempted).unwrap(), b"attempted");
+        assert_eq!(fs::read(&attempted).unwrap(), b"contended");
         assert!(!acquired.exists());
         drop(guard);
         assert!(child.wait().unwrap().success());
