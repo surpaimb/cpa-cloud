@@ -154,13 +154,7 @@ fn load_encrypted_backup_with_key(
     key: &BackupKey,
 ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
     validate_workspace(workspace)?;
-    platform::load(
-        root,
-        workspace,
-        transaction_id,
-        recovery_key_reference,
-        key,
-    )
+    platform::load(root, workspace, transaction_id, recovery_key_reference, key)
 }
 
 /// Reloads rollback material after opening exactly the recovery key named by
@@ -472,12 +466,7 @@ mod platform {
         recovery_key_reference: &RecoveryKeyReference,
         provider: &mut P,
     ) -> Result<Zeroizing<Vec<u8>>, BackupError> {
-        let validated = validate_for_load(
-            root,
-            workspace,
-            transaction_id,
-            recovery_key_reference,
-        )?;
+        let validated = validate_for_load(root, workspace, transaction_id, recovery_key_reference)?;
         let key = open_existing_recovery_key(provider, transaction_id, recovery_key_reference)?;
         validated.finish(&key)
     }
@@ -504,11 +493,7 @@ mod platform {
         fn finish(self, key: &BackupKey) -> Result<Zeroizing<Vec<u8>>, BackupError> {
             let current_root = open_root(&self.root_path)
                 .map_err(|_| BackupError::RecoveryConflict(self.root_path.clone()))?;
-            require_same_identity(
-                &current_root,
-                &self.root_dir,
-                &self.root_path,
-            )?;
+            require_same_identity(&current_root, &self.root_dir, &self.root_path)?;
             let current_transaction = open_private_dir_at(
                 current_root.as_raw_fd(),
                 OsStr::new(BACKUP_DIRECTORY),
@@ -538,11 +523,7 @@ mod platform {
                 self.manifest_path.clone(),
             )
             .map_err(|_| BackupError::RecoveryConflict(self.manifest_path.clone()))?;
-            require_same_identity(
-                &current_manifest,
-                &self.manifest_file,
-                &self.manifest_path,
-            )?;
+            require_same_identity(&current_manifest, &self.manifest_file, &self.manifest_path)?;
             let current_manifest = read_bounded(
                 &mut current_manifest,
                 MAX_MANIFEST_BYTES,
@@ -640,8 +621,7 @@ mod platform {
             OsStr::new(BACKUP_FILE),
             backup_path.clone(),
         )?;
-        let _ciphertext =
-            read_validated_ciphertext(&mut backup_file, &manifest, &backup_path)?;
+        let _ciphertext = read_validated_ciphertext(&mut backup_file, &manifest, &backup_path)?;
         verify_private_directory(&workspace_dir, &workspace_path)?;
         verify_private_directory(&transaction_dir, &transaction_path)?;
 
@@ -669,8 +649,7 @@ mod platform {
         held: &File,
         display: &Path,
     ) -> Result<(), BackupError> {
-        let current_identity =
-            identity(current).map_err(|source| io_error(display, source))?;
+        let current_identity = identity(current).map_err(|source| io_error(display, source))?;
         let held_identity = identity(held).map_err(|source| io_error(display, source))?;
         if current_identity != held_identity {
             return Err(BackupError::RecoveryConflict(display.to_path_buf()));
@@ -681,9 +660,10 @@ mod platform {
     fn valid_manifest(manifest: &BackupManifest) -> bool {
         manifest.version == FORMAT_VERSION
             && manifest.transaction_id.len() == 32
-            && manifest.transaction_id.bytes().all(|byte| {
-                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-            })
+            && manifest
+                .transaction_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             && !manifest.transaction_id.bytes().all(|byte| byte == b'0')
             && !manifest.recovery_key_provider_kind.is_empty()
             && manifest.recovery_key_provider_kind.len() <= 64
@@ -1528,7 +1508,10 @@ mod tests {
         assert_eq!(provider.create_calls, 0);
         assert_eq!(provider.open_calls, 1);
         assert_eq!(provider.delete_calls, 0);
-        assert_eq!(fs::read(&target).unwrap(), b"external-edit-during-provider-open");
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"external-edit-during-provider-open"
+        );
         assert_eq!(fs::read(&moved).unwrap(), original);
     }
 
@@ -1607,10 +1590,7 @@ mod tests {
         assert_eq!(binding_provider.open_calls, 0);
 
         let ciphertext_root = tempfile::tempdir().unwrap();
-        write_private(
-            &ciphertext_root.path().join("config.json"),
-            b"old-secret",
-        );
+        write_private(&ciphertext_root.path().join("config.json"), b"old-secret");
         let ciphertext_root_path = stable_root(&ciphertext_root);
         let ciphertext_receipt = prepare_encrypted_backup(
             &ciphertext_root_path,
@@ -1627,8 +1607,7 @@ mod tests {
         let mut ciphertext_bytes = fs::read(&ciphertext_path).unwrap();
         ciphertext_bytes[0] ^= 0x80;
         fs::write(&ciphertext_path, ciphertext_bytes).unwrap();
-        let mut ciphertext_provider =
-            RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
+        let mut ciphertext_provider = RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
         assert!(matches!(
             load_encrypted_backup_with_provider(
                 &ciphertext_root_path,
@@ -1693,11 +1672,7 @@ mod tests {
             &fixed_key(0x59),
         )
         .unwrap();
-        fs::rename(
-            &identity_target,
-            identity_root.path().join("original.json"),
-        )
-        .unwrap();
+        fs::rename(&identity_target, identity_root.path().join("original.json")).unwrap();
         write_private(&identity_target, b"external-edit");
         let mut identity_provider = RecordingProvider::new(RecoveryKeyOpenOutcome::Unavailable);
         assert!(matches!(
@@ -1775,8 +1750,7 @@ mod tests {
         write_private(&root.path().join("config.json"), original);
         let root_path = stable_root(&root);
         let receipt =
-            prepare_test_backup(&root_path, Path::new("config.json"), &fixed_key(0x33))
-                .unwrap();
+            prepare_test_backup(&root_path, Path::new("config.json"), &fixed_key(0x33)).unwrap();
         let workspace = receipt.workspace.clone();
         drop(receipt);
 
@@ -1967,9 +1941,7 @@ mod tests {
         let outside = tempfile::NamedTempFile::new().unwrap();
         symlink(outside.path(), root.path().join("config.json")).unwrap();
         let root_path = stable_root(&root);
-        assert!(
-            prepare_test_backup(&root_path, Path::new("config.json"), &fixed_key(4)).is_err()
-        );
+        assert!(prepare_test_backup(&root_path, Path::new("config.json"), &fixed_key(4)).is_err());
     }
 
     #[cfg(target_os = "linux")]
@@ -1987,8 +1959,7 @@ mod tests {
 
         let linked_root = parent_path.join("linked-parent").join("root");
         assert!(
-            prepare_test_backup(&linked_root, Path::new("config.json"), &fixed_key(6))
-                .is_err()
+            prepare_test_backup(&linked_root, Path::new("config.json"), &fixed_key(6)).is_err()
         );
         assert!(!real_root.join(BACKUP_DIRECTORY).exists());
     }
