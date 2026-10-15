@@ -155,6 +155,9 @@ mod windows_impl {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::ptr::{null, null_mut};
     use std::sync::{Mutex, MutexGuard};
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+    };
     use windows_sys::Win32::Foundation::{
         GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
         ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_DATA, ERROR_INVALID_PARAMETER,
@@ -175,11 +178,12 @@ mod windows_impl {
         PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FileRenameInfoEx, GetFileInformationByHandle, SetFileInformationByHandle,
-        BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_REPARSE_POINT,
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
+        FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use zeroize::{Zeroize, Zeroizing};
 
@@ -649,7 +653,7 @@ mod windows_impl {
             .len()
             .checked_mul(size_of::<u16>())
             .ok_or(NativeError::Corrupt)?;
-        let buffer_bytes = offset_of!(FILE_RENAME_INFO, FileName)
+        let buffer_bytes = size_of::<FILE_RENAME_INFORMATION>()
             .checked_add(file_name_bytes)
             .ok_or(NativeError::Corrupt)?;
         let storage_words = buffer_bytes
@@ -660,31 +664,34 @@ mod windows_impl {
             return Err(NativeError::Corrupt);
         }
         let mut storage = vec![0usize; storage_words];
-        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
         unsafe {
-            (*info).Anonymous.Flags = 0;
+            (*info).Anonymous.ReplaceIfExists = false;
             (*info).RootDirectory = null_mut();
             (*info).FileNameLength =
                 u32::try_from(file_name_bytes).map_err(|_| NativeError::Corrupt)?;
             std::ptr::copy_nonoverlapping(
                 encoded.as_ptr(),
-                (*info).FileName.as_mut_ptr(),
+                storage
+                    .as_mut_ptr()
+                    .cast::<u8>()
+                    .add(offset_of!(FILE_RENAME_INFORMATION, FileName))
+                    .cast::<u16>(),
                 encoded.len(),
             );
         }
-        let ok = unsafe {
-            SetFileInformationByHandle(
+        let mut io_status = IO_STATUS_BLOCK::default();
+        let status = unsafe {
+            NtSetInformationFile(
                 stage.as_raw_handle(),
-                FileRenameInfoEx,
+                &mut io_status,
                 info.cast(),
                 u32::try_from(buffer_bytes).map_err(|_| NativeError::Corrupt)?,
+                FileRenameInformation,
             )
         };
-        if ok == 0 {
-            return Err(NativeError::Io(io_error(
-                &final_path,
-                io::Error::last_os_error(),
-            )));
+        if status < 0 {
+            return Err(NativeError::NtStatus);
         }
         Ok(())
     }
@@ -712,10 +719,7 @@ mod windows_impl {
     fn file_identity(file: &File, path: &Path) -> Result<(u32, u64), NativeError> {
         let mut information = BY_HANDLE_FILE_INFORMATION::default();
         if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
-            return Err(NativeError::Io(io_error(
-                path,
-                io::Error::last_os_error(),
-            )));
+            return Err(NativeError::Io(io_error(path, io::Error::last_os_error())));
         }
         Ok((
             information.dwVolumeSerialNumber,
@@ -1024,6 +1028,7 @@ mod windows_impl {
 
     enum NativeError {
         Dpapi(u32),
+        NtStatus,
         Io(WindowsDpapiProviderError),
         Corrupt,
         Unavailable,
@@ -1032,6 +1037,7 @@ mod windows_impl {
     fn native_code(error: &NativeError) -> Option<u32> {
         match error {
             NativeError::Dpapi(code) => Some(*code),
+            NativeError::NtStatus => None,
             NativeError::Io(WindowsDpapiProviderError::Io { source, .. }) => {
                 source.raw_os_error().map(|code| code as u32)
             }
@@ -1047,7 +1053,7 @@ mod windows_impl {
         } else {
             match error {
                 NativeError::Io(error) => error,
-                NativeError::Dpapi(_) | NativeError::Unavailable => {
+                NativeError::Dpapi(_) | NativeError::NtStatus | NativeError::Unavailable => {
                     WindowsDpapiProviderError::Unavailable(path.to_path_buf())
                 }
                 NativeError::Corrupt => WindowsDpapiProviderError::Corrupt(path.to_path_buf()),

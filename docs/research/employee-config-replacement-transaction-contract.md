@@ -302,9 +302,10 @@ reference, owner-only protected DACLs, stable directory handles and a compatible
 exclusive lock. Create is no-replace and read-back verified; open after a fresh
 provider instance never creates or replaces a missing value. Creation writes
 and flushes an owner-private `.pending` blob, performs one same-directory
-`FileRenameInfoEx` operation on that file handle with `RootDirectory` null, a
-fixed simple final leaf and replacement disabled, verifies the staged/final
-volume and file ID plus the retained store-directory identity, flushes
+`NtSetInformationFile(FileRenameInformation)` operation on that file handle
+with `RootDirectory` null, a fixed simple final leaf and replacement disabled,
+verifies the staged/final volume and file ID plus the retained store-directory
+identity, flushes
 the directory, and authenticates the final value. An exact create retry may
 remove only a bounded private unpublished stage when no final exists, or return
 the authenticated already-published value; simultaneous final/stage state is
@@ -415,6 +416,7 @@ write gate remain unresolved requirements.
 
 - [Microsoft `CryptProtectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
 - [Microsoft `SetFileInformationByHandle`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle)
+- [Microsoft `NtSetInformationFile`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile)
 - [Microsoft `FileRenameInformationEx`](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/4217551b-d2c0-42cb-9dc1-69a716cf6d0c)
 - [Apple: Using the keychain to manage user secrets](https://developer.apple.com/documentation/security/using-the-keychain-to-manage-user-secrets)
 - [freedesktop.org Secret Service: collections and items](https://specifications.freedesktop.org/secret-service/latest/ch03.html)
