@@ -352,7 +352,7 @@ mod platform {
             &workspace,
             &workspace_path,
             &JournalEvent::BackedUp {
-                workspace: backup.workspace,
+                workspace: backup.workspace.clone(),
             },
         )?;
         inject(fault, FaultPoint::AfterBackup)?;
