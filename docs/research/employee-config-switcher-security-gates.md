@@ -206,6 +206,15 @@ manifest, a durable decision and publish/verify/rollback journal, recovery-key
 custody, full ACL preservation, and Windows/macOS support remain open. The
 Tauri command and all real client writes therefore remain fail-closed.
 
+A separate pure in-memory replacement sequence gate now exercises the reviewed
+ordering without defining a journal encoding or touching the filesystem. It
+requires every encrypted pre-image before any desired stage, every desired
+stage before `CommitPrepared`, publication before verification, and every
+published target's rollback stage before the first restore. It accepts only a
+sorted unique set of at most 16 UTF-8 leaf names bounded to 4 KiB each and
+refuses events after a terminal state. Identities, digests, security metadata,
+durable I/O, `recovery_blocked`, publication and rollback remain unimplemented.
+
 The same synthetic-root primitive now also has a Pi projection slice adapted
 from the fixed CC Switch MIT schema. It creates `models.json` and a non-secret
 ownership record together only when both are absent. It deliberately leaves

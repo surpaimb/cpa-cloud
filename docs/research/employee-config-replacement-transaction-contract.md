@@ -230,9 +230,11 @@ and target identities, digest and length. Preparation requires owner-read access
 and refuses group/world bits or special permission bits before creating backup
 material. Backup root/workspace directories are set and read back as exact
 owner-only `0700`; ciphertext and manifest files are set and read back as exact
-owner-only, single-link `0600` objects. Reload rejects a target or backup-artifact
-identity, link-count, permission, owner or group change without modifying the
-target. The public receipt exposes no content digest. It still accepts
+owner-only, single-link `0600` objects. Reload rejects a target identity change
+or a backup-artifact type, link-count, permission or owner change without
+modifying the target; backup contents remain authenticated by digest and
+AES-GCM, but artifact inode identities are not persisted. The public receipt
+exposes no content digest. It still accepts
 only one UTF-8 leaf and a caller-supplied in-memory key; it does not implement a
 key provider, desired stage, journal decision, publication, rollback, cleanup or
 Windows/macOS support. macOS returns `UnsupportedPlatform` before creating the
@@ -243,6 +245,16 @@ Version 1 manifests fail closed and have no automatic migration; they contain no
 published target mutation and require operator removal or an explicitly reviewed
 offline inspection path. A future format change must define recovery before any
 new writer is enabled.
+
+`live/replacement.rs` now makes only the redacted event ordering executable in
+memory. It enforces the 16-target sorted unique UTF-8 leaf set with a 4 KiB
+per-name bound, the requirement that all backups precede every desired stage,
+the durable-decision boundary,
+publish-before-verify, every published target's rollback stage before any
+restore, and terminal completion predicates. It is not serializable, carries no
+identities/digests/security metadata, performs no I/O, and does not implement
+the durable journal, recovery-blocked handling, publication, tool-format
+validation, rollback or cleanup.
 
 ## Public platform references
 
