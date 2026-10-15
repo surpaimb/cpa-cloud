@@ -380,8 +380,8 @@ mod platform {
         // Hold both callers after opening the stable directory and immediately
         // before locking it. A pre-lock snapshot implementation therefore lets
         // both callers validate stale state before this deterministic boundary.
-        let barriers = BEFORE_PUBLISH_LOCK_BARRIERS
-            .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+        let barriers =
+            BEFORE_PUBLISH_LOCK_BARRIERS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
         let replaced = barriers.lock().unwrap().insert(
             directory_path,
             BeforePublishLockBarrier {
@@ -389,13 +389,16 @@ mod platform {
                 remaining: 2,
             },
         );
-        assert!(replaced.is_none(), "test publication barrier already installed");
+        assert!(
+            replaced.is_none(),
+            "test publication barrier already installed"
+        );
     }
 
     #[cfg(test)]
     fn wait_before_publish_lock(directory_path: &Path) {
-        let barriers = BEFORE_PUBLISH_LOCK_BARRIERS
-            .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+        let barriers =
+            BEFORE_PUBLISH_LOCK_BARRIERS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
         let barrier = {
             let mut barriers = barriers.lock().unwrap();
             let mut remove = false;
