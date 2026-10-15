@@ -175,9 +175,10 @@ mod windows_impl {
         PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FileRenameInfoEx, SetFileInformationByHandle, DELETE,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FileRenameInfoEx, GetFileInformationByHandle, SetFileInformationByHandle,
+        BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use zeroize::{Zeroize, Zeroizing};
@@ -281,7 +282,7 @@ mod windows_impl {
         };
         let _guard = acquire_provider_lock(&store)
             .map_err(|error| provider_error_for(error, &store.path))?;
-        sync_directory(&store.path).map_err(|source| io_error(&store.path, source))?;
+        sync_store_directory(&store).map_err(|error| provider_error_for(error, &store.path))?;
         Ok(store)
     }
 
@@ -348,13 +349,20 @@ mod windows_impl {
         if interruption == Some(CreateInterruption::AfterStageFlush) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
+        let staged_identity = match file_identity(&file, &stage_path) {
+            Ok(identity) => identity,
+            Err(error) => return create_outcome_for(error),
+        };
         if let Err(error) = publish_stage_no_replace(store, &file, transaction_id) {
             return create_outcome_for(error);
         }
         if interruption == Some(CreateInterruption::AfterPublish) {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
-        if sync_directory(&store.path).is_err() {
+        if let Err(error) = verify_published_stage(store, &file, transaction_id, staged_identity) {
+            return create_outcome_for(error);
+        }
+        if sync_store_directory(store).is_err() {
             return RecoveryKeyCreateOutcome::Unavailable;
         }
         if interruption == Some(CreateInterruption::AfterDirectoryFlush) {
@@ -402,11 +410,9 @@ mod windows_impl {
         match open_locked(store, transaction_id, reference) {
             RecoveryKeyOpenOutcome::Available(_) => {}
             RecoveryKeyOpenOutcome::Missing => {
-                return match sync_directory(&store.path) {
+                return match sync_store_directory(store) {
                     Ok(()) => RecoveryKeyDeleteOutcome::Missing,
-                    Err(source) => {
-                        delete_outcome_for(NativeError::Io(io_error(&store.path, source)))
-                    }
+                    Err(error) => delete_outcome_for(error),
                 }
             }
             RecoveryKeyOpenOutcome::Locked => return RecoveryKeyDeleteOutcome::Locked,
@@ -424,9 +430,9 @@ mod windows_impl {
             }
             Err(source) => return delete_outcome_for(NativeError::Io(io_error(&path, source))),
         }
-        match sync_directory(&store.path) {
+        match sync_store_directory(store) {
             Ok(()) => RecoveryKeyDeleteOutcome::Deleted,
-            Err(source) => delete_outcome_for(NativeError::Io(io_error(&store.path, source))),
+            Err(error) => delete_outcome_for(error),
         }
     }
 
@@ -435,6 +441,9 @@ mod windows_impl {
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
     ) -> RecoveryKeyOpenOutcome {
+        if let Err(error) = verify_store_identity(store) {
+            return open_outcome_for(error);
+        }
         match path_exists(&stage_path(store, transaction_id)) {
             Ok(true) => return RecoveryKeyOpenOutcome::Corrupt,
             Ok(false) => {}
@@ -589,6 +598,7 @@ mod windows_impl {
         store: &StableStore,
         transaction_id: ReplacementTransactionId,
     ) -> Result<Option<CreatedRecoveryKey>, NativeError> {
+        verify_store_identity(store)?;
         let final_path = blob_path(store, transaction_id);
         let stage_path = stage_path(store, transaction_id);
         let final_exists = path_exists(&final_path)?;
@@ -621,8 +631,7 @@ mod windows_impl {
                 drop(file);
                 fs::remove_file(&stage_path)
                     .map_err(|source| NativeError::Io(io_error(&stage_path, source)))?;
-                sync_directory(&store.path)
-                    .map_err(|source| NativeError::Io(io_error(&store.path, source)))?;
+                sync_store_directory(store)?;
                 Ok(None)
             }
             (false, false) => Ok(None),
@@ -635,7 +644,7 @@ mod windows_impl {
         transaction_id: ReplacementTransactionId,
     ) -> Result<(), NativeError> {
         let final_path = blob_path(store, transaction_id);
-        let encoded: Vec<u16> = final_path.as_os_str().encode_wide().collect();
+        let encoded: Vec<u16> = blob_file_name(transaction_id).encode_utf16().collect();
         let file_name_bytes = encoded
             .len()
             .checked_mul(size_of::<u16>())
@@ -678,6 +687,48 @@ mod windows_impl {
             )));
         }
         Ok(())
+    }
+
+    fn verify_published_stage(
+        store: &StableStore,
+        stage: &File,
+        transaction_id: ReplacementTransactionId,
+        staged_identity: (u32, u64),
+    ) -> Result<(), NativeError> {
+        if path_exists(&stage_path(store, transaction_id))? {
+            return Err(NativeError::Corrupt);
+        }
+        let final_path = blob_path(store, transaction_id);
+        let final_file = open_private_file(&final_path)?;
+        if file_identity(stage, &final_path)? != staged_identity
+            || file_identity(&final_file, &final_path)? != staged_identity
+        {
+            return Err(NativeError::Corrupt);
+        }
+        verify_store_identity(store)?;
+        Ok(())
+    }
+
+    fn file_identity(file: &File, path: &Path) -> Result<(u32, u64), NativeError> {
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+            return Err(NativeError::Io(io_error(
+                path,
+                io::Error::last_os_error(),
+            )));
+        }
+        Ok((
+            information.dwVolumeSerialNumber,
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        ))
+    }
+
+    fn verify_store_identity(store: &StableStore) -> Result<(), NativeError> {
+        let named = open_stable_directory(&store.path).map_err(NativeError::Io)?;
+        if file_identity(&named, &store.path)? != file_identity(&store._directory, &store.path)? {
+            return Err(NativeError::Corrupt);
+        }
+        verify_private_permissions(&store.path).map_err(NativeError::Io)
     }
 
     fn acquire_provider_lock(store: &StableStore) -> Result<ProviderGuard, NativeError> {
@@ -764,12 +815,13 @@ mod windows_impl {
         Ok(file)
     }
 
-    fn sync_directory(path: &Path) -> io::Result<()> {
+    fn sync_store_directory(store: &StableStore) -> Result<(), NativeError> {
+        let path = &store.path;
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
-                GENERIC_WRITE,
+                GENERIC_WRITE | FILE_READ_ATTRIBUTES,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 null(),
                 OPEN_EXISTING,
@@ -778,9 +830,20 @@ mod windows_impl {
             )
         };
         if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
+            return Err(NativeError::Io(io_error(path, io::Error::last_os_error())));
         }
-        unsafe { File::from_raw_handle(handle) }.sync_all()
+        let directory = unsafe { File::from_raw_handle(handle) };
+        let metadata = directory
+            .metadata()
+            .map_err(|source| NativeError::Io(io_error(path, source)))?;
+        ensure_not_reparse_native(path, &metadata)?;
+        if file_identity(&directory, path)? != file_identity(&store._directory, path)? {
+            return Err(NativeError::Corrupt);
+        }
+        verify_private_permissions(path).map_err(NativeError::Io)?;
+        directory
+            .sync_all()
+            .map_err(|source| NativeError::Io(io_error(path, source)))
     }
 
     fn enforce_private_permissions(path: &Path) -> Result<(), WindowsDpapiProviderError> {

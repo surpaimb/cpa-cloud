@@ -259,8 +259,9 @@ binds the transaction into optional entropy and a checked plaintext envelope,
 and stores only a bounded protected blob behind owner-only DACLs, stable
 directory handles and an exclusive cross-instance lock. Creation now writes an
 owner-private `.pending` blob, flushes it, calls `FileRenameInfoEx` on that
-handle with a fixed same-directory absolute final path and replacement disabled,
-flushes the directory and reads
+handle with `RootDirectory` null, a fixed simple final leaf and replacement
+disabled, verifies the stage/final volume and file ID plus the retained store
+directory identity, flushes that revalidated directory object, and reads
 the final blob back. On an exact create retry, a bounded private stage is
 removed only when no final exists; a published blob is authenticated and
 returned idempotently, while simultaneous final/stage state is preserved and

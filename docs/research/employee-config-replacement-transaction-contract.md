@@ -302,8 +302,9 @@ reference, owner-only protected DACLs, stable directory handles and a compatible
 exclusive lock. Create is no-replace and read-back verified; open after a fresh
 provider instance never creates or replaces a missing value. Creation writes
 and flushes an owner-private `.pending` blob, performs one same-directory
-`FileRenameInfoEx` operation on that file handle with a fixed absolute final
-path and replacement disabled, flushes
+`FileRenameInfoEx` operation on that file handle with `RootDirectory` null, a
+fixed simple final leaf and replacement disabled, verifies the staged/final
+volume and file ID plus the retained store-directory identity, flushes
 the directory, and authenticates the final value. An exact create retry may
 remove only a bounded private unpublished stage when no final exists, or return
 the authenticated already-published value; simultaneous final/stage state is
