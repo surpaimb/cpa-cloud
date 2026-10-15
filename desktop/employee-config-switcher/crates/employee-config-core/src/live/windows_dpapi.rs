@@ -180,7 +180,7 @@ mod windows_impl {
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
@@ -709,22 +709,15 @@ mod windows_impl {
             return Err(NativeError::Corrupt);
         }
         let final_path = blob_path(store, transaction_id);
-        // The retained stage handle was opened with DELETE access so the NT
-        // rename can operate on that exact object. Windows requires every
-        // concurrent opener to share that access until the retained handle is
-        // closed, including this post-publication identity check.
-        let final_file = open_file_with_delete_share(&final_path)?;
-        if file_identity(&stage, &final_path)? != staged_identity
-            || file_identity(&final_file, &final_path)? != staged_identity
-        {
+        if file_identity(&stage, &final_path)? != staged_identity {
             return Err(NativeError::Corrupt);
         }
-        drop(final_file);
         drop(stage);
 
-        // Path-based security descriptor reads can open their own handle. Do
-        // them only after closing the DELETE-capable stage handle, then prove
-        // the ordinary private-file open still resolves to the staged object.
+        // Windows rejects a second path open while the retained source handle
+        // holds DELETE access. After proving the NT rename removed the old
+        // name and kept the source identity stable, close that handle and
+        // prove an ordinary private-file open resolves to the staged object.
         let final_file = open_private_file(&final_path)?;
         let metadata = final_file
             .metadata()
@@ -818,15 +811,6 @@ mod windows_impl {
             .map_err(|source| NativeError::Io(io_error(path, source)))?;
         verify_private_permissions(path).map_err(NativeError::Io)?;
         Ok(file)
-    }
-
-    fn open_file_with_delete_share(path: &Path) -> Result<File, NativeError> {
-        OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-            .map_err(|source| NativeError::Io(io_error(path, source)))
     }
 
     fn open_stable_directory(path: &Path) -> Result<File, WindowsDpapiProviderError> {
