@@ -158,8 +158,8 @@ mod windows_impl {
     };
     use windows_sys::Win32::Security::{
         EqualSid, GetFileSecurityW, GetSecurityDescriptorOwner, GetTokenInformation,
-        SetFileSecurityW, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        SetFileSecurityW, TokenUser, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
@@ -226,8 +226,7 @@ mod windows_impl {
         if !root.is_absolute() {
             return Err(WindowsDpapiProviderError::InvalidRoot(root.to_path_buf()));
         }
-        let root_metadata = fs::symlink_metadata(root)
-            .map_err(|source| io_error(root, source))?;
+        let root_metadata = fs::symlink_metadata(root).map_err(|source| io_error(root, source))?;
         if !root_metadata.is_dir() {
             return Err(WindowsDpapiProviderError::InvalidRoot(root.to_path_buf()));
         }
@@ -240,8 +239,8 @@ mod windows_impl {
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => false,
             Err(source) => return Err(io_error(&store_path, source)),
         };
-        let store_metadata = fs::symlink_metadata(&store_path)
-            .map_err(|source| io_error(&store_path, source))?;
+        let store_metadata =
+            fs::symlink_metadata(&store_path).map_err(|source| io_error(&store_path, source))?;
         if !store_metadata.is_dir() {
             return Err(WindowsDpapiProviderError::InvalidRoot(store_path));
         }
@@ -351,10 +350,9 @@ mod windows_impl {
             RecoveryKeyOpenOutcome::Missing => {
                 return match sync_directory(&store.path) {
                     Ok(()) => RecoveryKeyDeleteOutcome::Missing,
-                    Err(source) => delete_outcome_for(NativeError::Io(io_error(
-                        &store.path,
-                        source,
-                    ))),
+                    Err(source) => {
+                        delete_outcome_for(NativeError::Io(io_error(&store.path, source)))
+                    }
                 }
             }
             RecoveryKeyOpenOutcome::Locked => return RecoveryKeyDeleteOutcome::Locked,
@@ -374,9 +372,7 @@ mod windows_impl {
         }
         match sync_directory(&store.path) {
             Ok(()) => RecoveryKeyDeleteOutcome::Deleted,
-            Err(source) => {
-                delete_outcome_for(NativeError::Io(io_error(&store.path, source)))
-            }
+            Err(source) => delete_outcome_for(NativeError::Io(io_error(&store.path, source))),
         }
     }
 
@@ -614,9 +610,12 @@ mod windows_impl {
 
     fn enforce_private_permissions(path: &Path) -> Result<(), WindowsDpapiProviderError> {
         let token_info = current_user_token_info(path)?;
-        let token_user = unsafe { std::ptr::read_unaligned(token_info.as_ptr().cast::<TOKEN_USER>()) };
+        let token_user =
+            unsafe { std::ptr::read_unaligned(token_info.as_ptr().cast::<TOKEN_USER>()) };
         if token_user.User.Sid.is_null() {
-            return Err(WindowsDpapiProviderError::UnsafePermissions(path.to_path_buf()));
+            return Err(WindowsDpapiProviderError::UnsafePermissions(
+                path.to_path_buf(),
+            ));
         }
         let mut wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let owner_status = unsafe {
@@ -697,12 +696,17 @@ mod windows_impl {
         } == 0
             || owner.is_null()
         {
-            return Err(WindowsDpapiProviderError::UnsafePermissions(path.to_path_buf()));
+            return Err(WindowsDpapiProviderError::UnsafePermissions(
+                path.to_path_buf(),
+            ));
         }
         let token_info = current_user_token_info(path)?;
-        let token_user = unsafe { std::ptr::read_unaligned(token_info.as_ptr().cast::<TOKEN_USER>()) };
+        let token_user =
+            unsafe { std::ptr::read_unaligned(token_info.as_ptr().cast::<TOKEN_USER>()) };
         if token_user.User.Sid.is_null() || unsafe { EqualSid(owner, token_user.User.Sid) } == 0 {
-            return Err(WindowsDpapiProviderError::UnsafePermissions(path.to_path_buf()));
+            return Err(WindowsDpapiProviderError::UnsafePermissions(
+                path.to_path_buf(),
+            ));
         }
 
         let mut rendered = null_mut();
@@ -724,7 +728,9 @@ mod windows_impl {
         };
         unsafe { LocalFree(rendered.cast()) };
         if actual.trim_end_matches('\0') != "D:P(A;;FA;;;OW)" {
-            return Err(WindowsDpapiProviderError::UnsafePermissions(path.to_path_buf()));
+            return Err(WindowsDpapiProviderError::UnsafePermissions(
+                path.to_path_buf(),
+            ));
         }
         Ok(())
     }
@@ -873,9 +879,7 @@ mod windows_impl {
             ReplacementTransactionId::from_bytes([byte; 16]).unwrap()
         }
 
-        fn created(
-            outcome: RecoveryKeyCreateOutcome,
-        ) -> (RecoveryKeyReference, BackupKey) {
+        fn created(outcome: RecoveryKeyCreateOutcome) -> (RecoveryKeyReference, BackupKey) {
             match outcome {
                 RecoveryKeyCreateOutcome::Created(created) => (created.reference, created.key),
                 other => panic!("unexpected create outcome: {other:?}"),
@@ -886,13 +890,13 @@ mod windows_impl {
         fn current_user_dpapi_reopens_after_provider_restart_and_deletes_idempotently() {
             let root = tempfile::tempdir().unwrap();
             let transaction_id = transaction(0x31);
-            let mut provider = WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path())
-                .unwrap();
+            let mut provider =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
             let (reference, original) = created(provider.create(transaction_id));
             drop(provider);
 
-            let mut restarted = WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path())
-                .unwrap();
+            let mut restarted =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
             let opened = match restarted.open(transaction_id, &reference) {
                 RecoveryKeyOpenOutcome::Available(key) => key,
                 other => panic!("unexpected open outcome: {other:?}"),
@@ -916,8 +920,8 @@ mod windows_impl {
         fn protected_blob_and_reference_do_not_contain_the_plaintext_key() {
             let root = tempfile::tempdir().unwrap();
             let transaction_id = transaction(0x32);
-            let mut provider = WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path())
-                .unwrap();
+            let mut provider =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
             let (reference, key) = created(provider.create(transaction_id));
             let blob = fs::read(blob_path(&provider.store, transaction_id)).unwrap();
             assert!(!blob.windows(32).any(|window| window == key.expose()));
@@ -935,8 +939,8 @@ mod windows_impl {
         fn tampered_blob_and_reference_fail_closed_without_replacement() {
             let root = tempfile::tempdir().unwrap();
             let transaction_id = transaction(0x33);
-            let mut provider = WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path())
-                .unwrap();
+            let mut provider =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
             let (reference, _) = created(provider.create(transaction_id));
             let path = blob_path(&provider.store, transaction_id);
             let mut blob = fs::read(&path).unwrap();
@@ -970,8 +974,8 @@ mod windows_impl {
             let root = tempfile::tempdir().unwrap();
             let transaction_id = transaction(0x34);
             let wrong_transaction = transaction(0x35);
-            let mut provider = WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path())
-                .unwrap();
+            let mut provider =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
             let (reference, _) = created(provider.create(transaction_id));
             assert!(matches!(
                 provider.open(wrong_transaction, &reference),
@@ -987,14 +991,13 @@ mod windows_impl {
 
             let root = tempfile::tempdir().unwrap();
             let transaction_id = transaction(0x36);
-            let provider_a = WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path())
-                .unwrap();
-            let provider_b = WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path())
-                .unwrap();
+            let provider_a =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
+            let provider_b =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
             let barrier = Arc::new(Barrier::new(2));
 
-            let spawn = |mut provider: WindowsDpapiRecoveryKeyProvider,
-                         barrier: Arc<Barrier>| {
+            let spawn = |mut provider: WindowsDpapiRecoveryKeyProvider, barrier: Arc<Barrier>| {
                 thread::spawn(move || {
                     barrier.wait();
                     matches!(
@@ -1021,8 +1024,8 @@ mod windows_impl {
         fn contended_provider_lock_is_classified_as_locked() {
             let root = tempfile::tempdir().unwrap();
             let transaction_id = transaction(0x37);
-            let mut provider = WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path())
-                .unwrap();
+            let mut provider =
+                WindowsDpapiRecoveryKeyProvider::for_synthetic_root(root.path()).unwrap();
             let (reference, _) = created(provider.create(transaction_id));
             let lock = OpenOptions::new()
                 .read(true)

@@ -7,5 +7,5 @@ pub mod patch;
 pub mod recovery_key;
 pub mod replacement;
 pub mod residue;
-pub(crate) mod workspace_removal;
 pub mod windows_dpapi;
+pub(crate) mod workspace_removal;
