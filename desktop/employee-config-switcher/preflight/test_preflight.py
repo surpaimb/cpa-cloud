@@ -26,6 +26,17 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(tree.findall(".//" + forbidden), [])
         self.assertEqual(tree.findtext("auth"), "EXTERNAL")
 
+    def test_bus_member_rules_are_valid_and_do_not_deny_metadata_replies(self):
+        tree = ET.fromstring((HERE / "bus.conf.in").read_text())
+        rules = tree.findall("policy/deny")
+        self.assertTrue(rules)
+        for rule in rules:
+            self.assertEqual(rule.attrib.get("send_type"), "method_call")
+            if "send_member" in rule.attrib and "send_interface" not in rule.attrib:
+                # D-Bus requires either interface or path with a member.
+                # All paths must stay covered, including interface-less calls.
+                self.assertEqual(rule.attrib.get("send_path"), "*")
+
     def test_observer_has_no_secret_or_prompt_calls(self):
         source = (HERE / "libsecret-observer.c").read_text()
         self.assertIn("secret_service_get_sync(SECRET_SERVICE_NONE", source)

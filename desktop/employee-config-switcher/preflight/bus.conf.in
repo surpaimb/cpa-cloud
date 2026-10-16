@@ -10,26 +10,28 @@
     <allow own="*"/>
     <allow send_destination="*"/>
     <allow receive_sender="*"/>
-    <deny send_interface="org.freedesktop.Secret.Service"/>
-    <deny send_interface="org.freedesktop.Secret.Collection"/>
-    <deny send_interface="org.freedesktop.Secret.Item"/>
-    <deny send_interface="org.freedesktop.Secret.Prompt"/>
-    <deny send_interface="org.freedesktop.DBus.Properties" send_member="Set"/>
-    <!-- Method names are also denied when the optional interface is omitted. -->
-    <deny send_member="OpenSession"/>
-    <deny send_member="CreateCollection"/>
-    <deny send_member="SearchItems"/>
-    <deny send_member="GetSecrets"/>
-    <deny send_member="Unlock"/>
-    <deny send_member="Lock"/>
-    <deny send_member="ReadAlias"/>
-    <deny send_member="SetAlias"/>
-    <deny send_member="CreateItem"/>
-    <deny send_member="Delete"/>
-    <deny send_member="GetSecret"/>
-    <deny send_member="SetSecret"/>
-    <deny send_member="Prompt"/>
-    <deny send_member="Dismiss"/>
-    <deny send_member="Set"/>
+    <!-- Restrict calls, not interface-less replies to metadata queries. -->
+    <deny send_type="method_call" send_interface="org.freedesktop.Secret.Service"/>
+    <deny send_type="method_call" send_interface="org.freedesktop.Secret.Collection"/>
+    <deny send_type="method_call" send_interface="org.freedesktop.Secret.Item"/>
+    <deny send_type="method_call" send_interface="org.freedesktop.Secret.Prompt"/>
+    <deny send_type="method_call" send_interface="org.freedesktop.DBus.Properties" send_member="Set"/>
+    <!-- Member rules require an interface or path. A wildcard path also
+         covers calls with the optional interface omitted, at every path. -->
+    <deny send_type="method_call" send_path="*" send_member="OpenSession"/>
+    <deny send_type="method_call" send_path="*" send_member="CreateCollection"/>
+    <deny send_type="method_call" send_path="*" send_member="SearchItems"/>
+    <deny send_type="method_call" send_path="*" send_member="GetSecrets"/>
+    <deny send_type="method_call" send_path="*" send_member="Unlock"/>
+    <deny send_type="method_call" send_path="*" send_member="Lock"/>
+    <deny send_type="method_call" send_path="*" send_member="ReadAlias"/>
+    <deny send_type="method_call" send_path="*" send_member="SetAlias"/>
+    <deny send_type="method_call" send_path="*" send_member="CreateItem"/>
+    <deny send_type="method_call" send_path="*" send_member="Delete"/>
+    <deny send_type="method_call" send_path="*" send_member="GetSecret"/>
+    <deny send_type="method_call" send_path="*" send_member="SetSecret"/>
+    <deny send_type="method_call" send_path="*" send_member="Prompt"/>
+    <deny send_type="method_call" send_path="*" send_member="Dismiss"/>
+    <deny send_type="method_call" send_path="*" send_member="Set"/>
   </policy>
 </busconfig>

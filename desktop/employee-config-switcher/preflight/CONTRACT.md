@@ -35,6 +35,9 @@ not copied into the Rust execution core or shipped application.
 Official references consulted 2026-10-16:
 
 - [D-Bus daemon configuration/policy](https://dbus.freedesktop.org/doc/dbus-daemon.1.html)
+- [D-Bus 1.14.10 official source archive](https://dbus.freedesktop.org/releases/dbus/dbus-1.14.10.tar.xz)
+  was inspected only to identify the policy parser's member/interface/path
+  validation diagnostic; no implementation code was imported or ported.
 - [GNOME Keyring daemon options](https://manpages.debian.org/unstable/gnome-keyring/gnome-keyring-daemon.1.en.html)
 - [libsecret Service initialization flags](https://gnome.pages.gitlab.gnome.org/libsecret/flags.ServiceFlags.html)
 - [libsecret get_sync](https://gnome.pages.gitlab.gnome.org/libsecret/type_func.Service.get_sync.html)
@@ -77,7 +80,10 @@ work directory the only writable location or to prove production hardening.
 The custom bus has no service activation directories or helper. Authentication
 is EXTERNAL for the fixture user. Policy denies all Secret.Service, Collection,
 Item and Prompt interface calls and Properties.Set. The same prohibited method
-names are also denied without an interface field.
+names are also denied without an interface field. Member-only rules include
+`send_path="*"` to meet the daemon's grammar while covering every object path.
+All denials specify `send_type="method_call"`: metadata method-return/error
+messages often have no interface and must not match interface-call denials.
 The harness launches the
 real dbus-daemon and GNOME Keyring in foreground mode with `--components=secrets`,
 without login/unlock/start/replace or passwords. Their processes must remain in
