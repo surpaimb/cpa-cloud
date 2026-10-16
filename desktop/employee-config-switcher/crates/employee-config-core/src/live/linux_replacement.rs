@@ -4209,7 +4209,10 @@ mod tests {
             assert!(!backup_path.exists());
             assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
             boundary += 1;
-            assert!(boundary < 512, "retirement boundary count must remain bounded");
+            assert!(
+                boundary < 512,
+                "retirement boundary count must remain bounded"
+            );
         }
         assert!(boundary > 100, "the matrix must cover every fixed object");
     }

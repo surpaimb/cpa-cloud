@@ -921,13 +921,7 @@ mod platform {
         sync_directory(&workspace, &workspace_path, fault)?;
         sync_directory(&backup_parent, &backup_parent_path, fault)?;
         sync_directory(&retirement_tx, &transaction_path, fault)?;
-        persist_completion(
-            &retirement_tx,
-            &transaction_path,
-            plan,
-            &plan_digest,
-            fault,
-        )?;
+        persist_completion(&retirement_tx, &transaction_path, plan, &plan_digest, fault)?;
         revalidate_namespaces(
             root,
             &root_dir,
