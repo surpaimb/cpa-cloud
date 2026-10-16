@@ -20,8 +20,8 @@ The official [settings documentation](https://code.claude.com/docs/en/settings)
 defines the user `~/.claude/settings.json`, its strict JSON form, the top-level
 `model`, and the separate Claude-owned `~/.claude.json`. The official
 [environment-variable reference](https://code.claude.com/docs/en/env-vars)
-defines `CLAUDE_CONFIG_DIR` as the override for settings, credentials, session
-history, and plugins. The official
+defines `CLAUDE_CONFIG_DIR` as the override for settings, session history, and
+plugins. The official
 [LLM gateway contract](https://code.claude.com/docs/en/llm-gateway-connect)
 maps `ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` to
 `Authorization: Bearer` requests at `/v1/messages`.
