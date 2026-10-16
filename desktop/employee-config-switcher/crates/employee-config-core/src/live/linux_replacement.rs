@@ -4122,21 +4122,80 @@ mod tests {
         ));
         assert!(fs::read(&edited).unwrap().starts_with(b"external-edit"));
         assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+
+        let (_root, _approval, provider, _transaction_id, workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xab);
+        let replaced = workspace_path.join(platform::pending_slot_name(1));
+        let original = fs::read(&replaced).unwrap();
+        let original_inode = fs::metadata(&replaced).unwrap().ino();
+        fs::remove_file(&replaced).unwrap();
+        fs::write(&replaced, &original).unwrap();
+        fs::set_permissions(&replaced, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_ne!(fs::metadata(&replaced).unwrap().ino(), original_inode);
+        assert!(matches!(
+            cleanup.retire_workspace_contents_durable(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(fs::read(&replaced).unwrap(), original);
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn workspace_retirement_preserves_conflicting_pending_evidence() {
+        let (root, _approval, provider, transaction_id, _workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xac);
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        assert!(matches!(
+            cleanup.retire_workspace_contents_with_fault(3),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::InjectedCrash
+            ))
+        ));
+        drop(cleanup);
+        let pending = root_path
+            .join(".cpa-cloud-employee-config-workspace-retirements")
+            .join(transaction_text(transaction_id))
+            .join(".plan.json.pending");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&pending)
+            .unwrap();
+        file.write_all(b"external-edit").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let loaded = load_durable_cleanup_journals(&root_path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(
+            loaded[0].retire_workspace_contents_durable(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(fs::read(&pending).unwrap(), b"external-edit");
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
     fn every_retirement_delete_and_directory_flush_boundary_recovers_uniquely() {
-        // There are 29 fixed objects. Each object has move, source flush,
-        // quarantine flush, delete and post-delete flush boundaries, followed
-        // by three final directory flushes. Representative first-object
-        // boundaries plus every final flush exercise every injected class.
-        for (iteration, boundary) in [1, 2, 3, 4, 5, 146, 147, 148].into_iter().enumerate() {
-            let byte = 0xb0 + iteration as u8;
+        let mut boundary = 1usize;
+        loop {
+            let byte = 0xb0_u8.wrapping_add((boundary % 64) as u8);
             let (root, _approval, provider, _transaction_id, workspace_path, backup_path, cleanup) =
                 cleanup_ready_fixture(byte);
             let root_path = fs::canonicalize(root.path()).unwrap();
+            let result = cleanup.retire_workspace_contents_with_fault(boundary);
+            if result.is_ok() {
+                assert!(workspace_path.is_dir());
+                assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
+                assert!(!backup_path.exists());
+                assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+                break;
+            }
             assert!(matches!(
-                cleanup.retire_workspace_contents_with_fault(boundary),
+                result,
                 Err(CleanupJournalError::WorkspaceRetirement(
                     WorkspaceRetirementError::InjectedCrash
                 ))
@@ -4149,6 +4208,9 @@ mod tests {
             assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
             assert!(!backup_path.exists());
             assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+            boundary += 1;
+            assert!(boundary < 512, "retirement boundary count must remain bounded");
         }
+        assert!(boundary > 100, "the matrix must cover every fixed object");
     }
 }

@@ -800,9 +800,7 @@ mod platform {
             OsStr::new(RETIREMENT_DIRECTORY),
             &retirement_path,
         )?;
-        root_dir
-            .sync_all()
-            .map_err(|source| io_error(root, source))?;
+        sync_directory(&root_dir, root, fault)?;
         lock_exclusive(&retirement_root, &retirement_path)?;
         let transaction_path = retirement_path.join(&plan.transaction_id);
         let retirement_tx = open_or_create_private_directory_at(
@@ -810,7 +808,8 @@ mod platform {
             OsStr::new(&plan.transaction_id),
             &transaction_path,
         )?;
-        persist_exact_plan(&retirement_tx, &transaction_path, plan)?;
+        sync_directory(&retirement_root, &retirement_path, fault)?;
+        persist_exact_plan(&retirement_tx, &transaction_path, plan, fault)?;
         let plan_bytes = serde_json::to_vec(plan).map_err(|_| WorkspaceRetirementError::Corrupt)?;
         let plan_digest = digest(&plan_bytes);
 
@@ -876,6 +875,7 @@ mod platform {
                     artifact,
                     index,
                     &plan_digest,
+                    fault,
                 )?;
                 index += 1;
             }
@@ -918,19 +918,16 @@ mod platform {
             index += 1;
         }
         ensure_empty(&workspace, &workspace_path)?;
-        workspace
-            .sync_all()
-            .map_err(|source| io_error(&workspace_path, source))?;
-        fault.boundary()?;
-        backup_parent
-            .sync_all()
-            .map_err(|source| io_error(&backup_parent_path, source))?;
-        fault.boundary()?;
-        retirement_tx
-            .sync_all()
-            .map_err(|source| io_error(&transaction_path, source))?;
-        fault.boundary()?;
-        persist_completion(&retirement_tx, &transaction_path, plan, &plan_digest)?;
+        sync_directory(&workspace, &workspace_path, fault)?;
+        sync_directory(&backup_parent, &backup_parent_path, fault)?;
+        sync_directory(&retirement_tx, &transaction_path, fault)?;
+        persist_completion(
+            &retirement_tx,
+            &transaction_path,
+            plan,
+            &plan_digest,
+            fault,
+        )?;
         revalidate_namespaces(
             root,
             &root_dir,
@@ -986,14 +983,8 @@ mod platform {
                 &source_path.join(&artifact.name),
             )?;
             fault.boundary()?;
-            source_parent
-                .sync_all()
-                .map_err(|source| io_error(source_path, source))?;
-            fault.boundary()?;
-            retirement_tx
-                .sync_all()
-                .map_err(|source| io_error(transaction_path, source))?;
-            fault.boundary()?;
+            sync_directory(source_parent, source_path, fault)?;
+            sync_directory(retirement_tx, transaction_path, fault)?;
         } else if !quarantine_exists && !marker_exists {
             return Err(WorkspaceRetirementError::RecoveryConflict(
                 source_path.join(&artifact.name),
@@ -1016,6 +1007,7 @@ mod platform {
             artifact,
             index,
             plan_digest,
+            fault,
         )?;
         if entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))? {
             unlink_named(
@@ -1023,13 +1015,10 @@ mod platform {
                 OsStr::new(&quarantine),
                 kind,
                 &transaction_path.join(&quarantine),
+                fault,
             )?;
-            fault.boundary()?;
         }
-        retirement_tx
-            .sync_all()
-            .map_err(|source| io_error(transaction_path, source))?;
-        fault.boundary()?;
+        sync_directory(retirement_tx, transaction_path, fault)?;
         Ok(())
     }
 
@@ -1037,12 +1026,13 @@ mod platform {
         directory: &File,
         path: &Path,
         plan: &WorkspaceRetirementPlan,
+        fault: &mut FaultState,
     ) -> Result<(), WorkspaceRetirementError> {
         let bytes = serde_json::to_vec(plan).map_err(|_| WorkspaceRetirementError::Corrupt)?;
         if bytes.len() > MAX_PLAN_BYTES {
             return Err(WorkspaceRetirementError::Corrupt);
         }
-        persist_exact_file(directory, path, PLAN_FILE, &bytes, MAX_PLAN_BYTES)
+        persist_exact_file(directory, path, PLAN_FILE, &bytes, MAX_PLAN_BYTES, fault)
     }
 
     fn persist_marker(
@@ -1051,6 +1041,7 @@ mod platform {
         artifact: &RetirementArtifact,
         index: usize,
         plan_digest: &str,
+        fault: &mut FaultState,
     ) -> Result<(), WorkspaceRetirementError> {
         let bytes = serde_json::to_vec(&StepMarker {
             version: FORMAT_VERSION,
@@ -1067,6 +1058,7 @@ mod platform {
             &marker_name(index),
             &bytes,
             MAX_MARKER_BYTES,
+            fault,
         )
     }
 
@@ -1075,6 +1067,7 @@ mod platform {
         path: &Path,
         plan: &WorkspaceRetirementPlan,
         plan_digest: &str,
+        fault: &mut FaultState,
     ) -> Result<(), WorkspaceRetirementError> {
         let bytes = serde_json::to_vec(&CompletionRecord {
             version: FORMAT_VERSION,
@@ -1083,7 +1076,14 @@ mod platform {
             workspace_name: &plan.workspace_name,
         })
         .map_err(|_| WorkspaceRetirementError::Corrupt)?;
-        persist_exact_file(directory, path, COMPLETE_FILE, &bytes, MAX_MARKER_BYTES)
+        persist_exact_file(
+            directory,
+            path,
+            COMPLETE_FILE,
+            &bytes,
+            MAX_MARKER_BYTES,
+            fault,
+        )
     }
 
     fn persist_exact_file(
@@ -1092,8 +1092,15 @@ mod platform {
         name: &str,
         bytes: &[u8],
         limit: usize,
+        fault: &mut FaultState,
     ) -> Result<(), WorkspaceRetirementError> {
+        let pending_name = format!(".{name}.pending");
         if entry_exists(directory.as_raw_fd(), OsStr::new(name))? {
+            if entry_exists(directory.as_raw_fd(), OsStr::new(&pending_name))? {
+                return Err(WorkspaceRetirementError::RecoveryConflict(
+                    path.join(pending_name),
+                ));
+            }
             let mut existing =
                 open_private_file_at(directory.as_raw_fd(), OsStr::new(name), &path.join(name))?;
             let current = read_bounded(&mut existing, limit, &path.join(name))?;
@@ -1103,16 +1110,34 @@ mod platform {
             existing
                 .sync_all()
                 .map_err(|source| io_error(path.join(name), source))?;
-            directory
-                .sync_all()
-                .map_err(|source| io_error(path, source))?;
+            sync_directory(directory, path, fault)?;
             return Ok(());
         }
-        let pending_name = format!(".{name}.pending");
         if entry_exists(directory.as_raw_fd(), OsStr::new(&pending_name))? {
-            return Err(WorkspaceRetirementError::IncompleteWrite(
-                path.join(pending_name),
-            ));
+            let mut pending = open_private_file_at(
+                directory.as_raw_fd(),
+                OsStr::new(&pending_name),
+                &path.join(&pending_name),
+            )?;
+            let current = read_bounded(&mut pending, limit, &path.join(&pending_name))?;
+            if current != bytes {
+                return Err(WorkspaceRetirementError::RecoveryConflict(
+                    path.join(pending_name),
+                ));
+            }
+            pending
+                .sync_all()
+                .map_err(|source| io_error(path.join(&pending_name), source))?;
+            sync_directory(directory, path, fault)?;
+            rename_no_replace(
+                directory,
+                OsStr::new(&pending_name),
+                directory,
+                OsStr::new(name),
+                &path.join(name),
+            )?;
+            sync_directory(directory, path, fault)?;
+            return Ok(());
         }
         let mut pending = create_private_file_at(
             directory.as_raw_fd(),
@@ -1125,9 +1150,7 @@ mod platform {
         pending
             .sync_all()
             .map_err(|source| io_error(path.join(&pending_name), source))?;
-        directory
-            .sync_all()
-            .map_err(|source| io_error(path, source))?;
+        sync_directory(directory, path, fault)?;
         rename_no_replace(
             directory,
             OsStr::new(&pending_name),
@@ -1135,9 +1158,7 @@ mod platform {
             OsStr::new(name),
             &path.join(name),
         )?;
-        directory
-            .sync_all()
-            .map_err(|source| io_error(path, source))?;
+        sync_directory(directory, path, fault)?;
         Ok(())
     }
 
@@ -1188,8 +1209,13 @@ mod platform {
             };
             let known = text == PLAN_FILE
                 || text == COMPLETE_FILE
-                || (0..max_steps)
-                    .any(|index| text == marker_name(index) || text == quarantine_name(index));
+                || text == format!(".{COMPLETE_FILE}.pending")
+                || (0..max_steps).any(|index| {
+                    let marker = marker_name(index);
+                    text == marker
+                        || text == format!(".{marker}.pending")
+                        || text == quarantine_name(index)
+                });
             if !known {
                 return Err(WorkspaceRetirementError::RecoveryConflict(path.join(name)));
             }
@@ -1374,6 +1400,7 @@ mod platform {
         name: &OsStr,
         kind: ObjectKind,
         display: &Path,
+        fault: &mut FaultState,
     ) -> Result<(), WorkspaceRetirementError> {
         let name = c_string(name)?;
         let flags = if kind == ObjectKind::Directory {
@@ -1384,7 +1411,18 @@ mod platform {
         if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) } != 0 {
             return Err(io_error(display, io::Error::last_os_error()));
         }
-        Ok(())
+        fault.boundary()
+    }
+
+    fn sync_directory(
+        directory: &File,
+        path: &Path,
+        fault: &mut FaultState,
+    ) -> Result<(), WorkspaceRetirementError> {
+        directory
+            .sync_all()
+            .map_err(|source| io_error(path, source))?;
+        fault.boundary()
     }
 
     fn open_root(path: &Path) -> Result<File, WorkspaceRetirementError> {
