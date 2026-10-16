@@ -17,7 +17,7 @@ use super::{
         CleanupArtifactRetirementAuthorization, CompletionTombstoneRemovalAuthorization,
         RecoveryKeyCleanupError, RecoveryKeyCleanupPhase, RecoveryKeyCleanupSequence,
         RecoveryKeyProvider, RecoveryKeyReference, ReplacementTransactionId,
-        WorkspaceRemovalTarget,
+        WorkspaceRemovalEvidence, WorkspaceRemovalTarget,
     },
     replacement::ReplacementPhase,
     workspace_removal::{remove_workspace, verify_workspace_removal, WorkspaceRemovalError},
@@ -38,7 +38,7 @@ const CLEANUP_DIRECTORY: &str = ".cpa-cloud-employee-config-cleanup";
 pub(crate) struct DurablePhaseEvidence(());
 pub(crate) struct RetirementEvidence(());
 #[cfg(target_os = "linux")]
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 #[cfg(target_os = "linux")]
 const MAX_TRANSACTIONS: usize = 64;
 #[cfg(target_os = "linux")]
@@ -112,7 +112,7 @@ impl DurableCleanupJournal {
         &mut self,
         receipt: &CompletionTombstoneDurableReceipt,
     ) -> Result<(), CleanupJournalError> {
-        let previous = self.phase();
+        let previous = self.sequence.clone();
         self.sequence.record_completion_tombstone_durable(receipt)?;
         self.persist_or_restore(previous)
     }
@@ -123,7 +123,7 @@ impl DurableCleanupJournal {
     ) -> Result<(), CleanupJournalError> {
         let authorization = self.sequence.authorize_workspace_removal(retired)?;
         let verified = remove_workspace(&self.root, &authorization)?;
-        let previous = self.phase();
+        let previous = self.sequence.clone();
         self.sequence
             .record_workspace_removal_durable(verified.receipt())?;
         self.persist_or_restore(previous)
@@ -165,7 +165,7 @@ impl DurableCleanupJournal {
         }
         let authorization = self.sequence.workspace_removal_authorization();
         let _verified = verify_workspace_removal(&self.root, &authorization)?;
-        let previous = self.phase();
+        let previous = self.sequence.clone();
         self.sequence.delete_key(provider)?;
         self.persist_or_restore(previous)
     }
@@ -180,7 +180,7 @@ impl DurableCleanupJournal {
         &mut self,
         receipt: CompletionTombstoneRemovalReceipt,
     ) -> Result<(), CleanupJournalError> {
-        let previous = self.phase();
+        let previous = self.sequence.clone();
         self.sequence
             .record_completion_tombstone_removal_durable(receipt)?;
         self.persist_or_restore(previous)
@@ -203,22 +203,10 @@ impl DurableCleanupJournal {
 
     fn persist_or_restore(
         &mut self,
-        previous: RecoveryKeyCleanupPhase,
+        previous: RecoveryKeyCleanupSequence,
     ) -> Result<(), CleanupJournalError> {
         if let Err(error) = platform::append(&self.root, &self.sequence) {
-            self.sequence = RecoveryKeyCleanupSequence::from_durable_phase(
-                DurablePhaseEvidence(()),
-                previous,
-                self.sequence.terminal(),
-                self.sequence.transaction_id(),
-                self.sequence.reference().clone(),
-                self.sequence.replacement_journal_version(),
-                self.sequence.root_device(),
-                self.sequence.root_inode(),
-                self.sequence.workspace_target().clone(),
-                self.sequence.retirement_plan().cloned(),
-            )
-            .expect("the prior durable cleanup phase remains valid");
+            self.sequence = previous;
             return Err(error);
         }
         Ok(())
@@ -315,6 +303,49 @@ struct RootIdentity {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceRemovalEvidenceRecord {
+    replacement_device: u64,
+    replacement_inode: u64,
+    proof_directory_device: u64,
+    proof_directory_inode: u64,
+    proof_file_device: u64,
+    proof_file_inode: u64,
+    retained_device: u64,
+    retained_inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl WorkspaceRemovalEvidenceRecord {
+    fn from_evidence(evidence: &WorkspaceRemovalEvidence) -> Self {
+        Self {
+            replacement_device: evidence.replacement_device(),
+            replacement_inode: evidence.replacement_inode(),
+            proof_directory_device: evidence.proof_directory_device(),
+            proof_directory_inode: evidence.proof_directory_inode(),
+            proof_file_device: evidence.proof_file_device(),
+            proof_file_inode: evidence.proof_file_inode(),
+            retained_device: evidence.retained_device(),
+            retained_inode: evidence.retained_inode(),
+        }
+    }
+
+    fn into_evidence(self) -> WorkspaceRemovalEvidence {
+        WorkspaceRemovalEvidence::new(
+            self.replacement_device,
+            self.replacement_inode,
+            self.proof_directory_device,
+            self.proof_directory_inode,
+            self.proof_file_device,
+            self.proof_file_inode,
+            self.retained_device,
+            self.retained_inode,
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CleanupEvent {
@@ -331,6 +362,7 @@ struct CleanupEvent {
     workspace_name: String,
     workspace_device: u64,
     workspace_inode: u64,
+    workspace_removal_evidence: Option<WorkspaceRemovalEvidenceRecord>,
     retirement_plan: Option<WorkspaceRetirementPlan>,
 }
 
@@ -444,6 +476,9 @@ fn event_for(
         workspace_name: sequence.workspace_name().to_owned(),
         workspace_device: sequence.workspace_target().device(),
         workspace_inode: sequence.workspace_target().inode(),
+        workspace_removal_evidence: sequence
+            .workspace_removal_evidence()
+            .map(WorkspaceRemovalEvidenceRecord::from_evidence),
         retirement_plan: sequence.retirement_plan().cloned(),
     })
 }
@@ -653,6 +688,15 @@ mod platform {
                 else {
                     return Err(CleanupJournalError::Missing(sequence.transaction_id()));
                 };
+                let evidence_matches = if sequence.phase()
+                    == RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
+                    && current.phase() == RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+                {
+                    current.workspace_removal_evidence().is_none()
+                        && sequence.workspace_removal_evidence().is_some()
+                } else {
+                    current.workspace_removal_evidence() == sequence.workspace_removal_evidence()
+                };
                 if phase_index(current.phase()) != expected_previous
                     || current.terminal() != sequence.terminal()
                     || current.reference() != sequence.reference()
@@ -661,6 +705,7 @@ mod platform {
                     || current.root_device() != sequence.root_device()
                     || current.root_inode() != sequence.root_inode()
                     || current.workspace_target() != sequence.workspace_target()
+                    || !evidence_matches
                     || current.retirement_plan() != sequence.retirement_plan()
                 {
                     return Err(CleanupJournalError::RecoveryConflict(
@@ -805,6 +850,8 @@ mod platform {
                 || event.root_identity != root_identity
                 || event.phase != phase_text(phase_from_index(index).unwrap())
                 || parse_transaction(&event.transaction_id)? != transaction_id
+                || (index < 2 && event.workspace_removal_evidence.is_some())
+                || (index >= 2 && event.workspace_removal_evidence.is_none())
             {
                 return Err(CleanupJournalError::Corrupt);
             }
@@ -834,6 +881,10 @@ mod platform {
             }
             let (_, first) = events.first().ok_or(CleanupJournalError::Corrupt)?;
             let (_, last) = events.last().ok_or(CleanupJournalError::Corrupt)?;
+            let durable_removal_evidence = events
+                .iter()
+                .find(|(index, _)| *index == 2)
+                .and_then(|(_, event)| event.workspace_removal_evidence.clone());
             for (_, event) in &events {
                 if event.terminal != first.terminal
                     || event.replacement_journal_version != first.replacement_journal_version
@@ -844,6 +895,8 @@ mod platform {
                     || event.workspace_device != first.workspace_device
                     || event.workspace_inode != first.workspace_inode
                     || event.retirement_plan != first.retirement_plan
+                    || (event.sequence >= 2
+                        && event.workspace_removal_evidence != durable_removal_evidence)
                 {
                     return Err(CleanupJournalError::Corrupt);
                 }
@@ -871,6 +924,8 @@ mod platform {
                     )
                 })
                 .transpose()?;
+            let workspace_removal_evidence =
+                durable_removal_evidence.map(WorkspaceRemovalEvidenceRecord::into_evidence);
             sequences.push(RecoveryKeyCleanupSequence::from_durable_phase(
                 DurablePhaseEvidence(()),
                 phase,
@@ -881,6 +936,7 @@ mod platform {
                 first.root_identity.device,
                 first.root_identity.inode,
                 workspace_target,
+                workspace_removal_evidence,
                 retirement_plan,
             )?);
         }
@@ -951,6 +1007,7 @@ mod platform {
                 }
             }
         }
+        verify_private_directory(&directory, path)?;
         Ok(directory)
     }
 
@@ -1081,6 +1138,22 @@ mod platform {
         {
             return Err(CleanupJournalError::RecoveryConflict(display.to_path_buf()));
         }
+        require_no_posix_acl(file, display)
+    }
+
+    fn require_no_posix_acl(file: &File, display: &Path) -> Result<(), CleanupJournalError> {
+        for name in [c"system.posix_acl_access", c"system.posix_acl_default"] {
+            let result = unsafe {
+                libc::fgetxattr(file.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0)
+            };
+            if result >= 0 {
+                return Err(CleanupJournalError::RecoveryConflict(display.to_path_buf()));
+            }
+            let source = io::Error::last_os_error();
+            if source.raw_os_error() != Some(libc::ENODATA) {
+                return Err(io_error(display, source));
+            }
+        }
         Ok(())
     }
 
@@ -1109,7 +1182,7 @@ mod platform {
         {
             return Err(CleanupJournalError::RecoveryConflict(display.to_path_buf()));
         }
-        Ok(())
+        require_no_posix_acl(file, display)
     }
 
     fn set_mode(
@@ -1253,6 +1326,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::{
         fs,
+        os::fd::AsRawFd,
         os::unix::fs::{MetadataExt, PermissionsExt},
     };
 
@@ -1320,6 +1394,84 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn journal_at_workspace_removal(
+        byte: u8,
+    ) -> (tempfile::TempDir, PathBuf, DurableCleanupJournal) {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(byte);
+        let reference = reference();
+        let tombstone = persist_completion_tombstone(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            &reference,
+        )
+        .unwrap();
+        let workspace = empty_workspace(&root_path, byte);
+        let target = workspace_target(&workspace);
+        let retired = retired_receipt(
+            ReplacementPhase::Complete,
+            transaction_id,
+            reference.clone(),
+            &target,
+        );
+        let mut journal = create_durable_cleanup_journal_for_test(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            reference,
+            target,
+        )
+        .unwrap();
+        journal
+            .record_completion_tombstone_durable(&tombstone)
+            .unwrap();
+        journal.remove_workspace_durable(&retired).unwrap();
+        (root, root_path, journal)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_restrictive_access_acl(path: &Path) {
+        const ACL_USER_OBJ: u16 = 0x01;
+        const ACL_USER: u16 = 0x02;
+        const ACL_GROUP_OBJ: u16 = 0x04;
+        const ACL_MASK: u16 = 0x10;
+        const ACL_OTHER: u16 = 0x20;
+        const ACL_UNDEFINED_ID: u32 = u32::MAX;
+
+        let mut bytes = Vec::with_capacity(4 + 5 * 8);
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        for (tag, permission, id) in [
+            (ACL_USER_OBJ, 0o7, ACL_UNDEFINED_ID),
+            (ACL_USER, 0, unsafe { libc::geteuid() }.saturating_add(1)),
+            (ACL_GROUP_OBJ, 0, ACL_UNDEFINED_ID),
+            (ACL_MASK, 0, ACL_UNDEFINED_ID),
+            (ACL_OTHER, 0, ACL_UNDEFINED_ID),
+        ] {
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&(permission as u16).to_le_bytes());
+            bytes.extend_from_slice(&id.to_le_bytes());
+        }
+        let file = fs::File::open(path).unwrap();
+        let result = unsafe {
+            libc::fsetxattr(
+                file.as_raw_fd(),
+                c"system.posix_acl_access".as_ptr(),
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                0,
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "failed to install real POSIX ACL: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     struct DeletedProvider {
         delete_calls: usize,
     }
@@ -1349,6 +1501,88 @@ mod tests {
             self.delete_calls += 1;
             RecoveryKeyDeleteOutcome::Deleted
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_acl_mismatch_blocks_provider_delete() {
+        let (_root, root_path, mut journal) = journal_at_workspace_removal(0x73);
+        set_restrictive_access_acl(&root_path);
+        assert_eq!(
+            fs::metadata(&root_path).unwrap().mode() & 0o7777,
+            0o700,
+            "the ACL fixture must not rely on a mode mismatch"
+        );
+        let mut provider = DeletedProvider { delete_calls: 0 };
+        assert!(matches!(
+            journal.delete_key(&mut provider),
+            Err(CleanupJournalError::WorkspaceRemoval(
+                WorkspaceRemovalError::RecoveryConflict(path)
+            )) if path == root_path
+        ));
+        assert_eq!(provider.delete_calls, 0);
+        assert_eq!(
+            journal.phase(),
+            RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proof_inode_replacement_blocks_provider_delete_even_with_identical_bytes() {
+        let (_root, root_path, mut journal) = journal_at_workspace_removal(0x74);
+        let proof_directory = root_path.join(super::super::workspace_removal::PROOF_DIRECTORY);
+        let proof = proof_directory.join(super::super::workspace_removal::final_name(transaction(
+            0x74,
+        )));
+        let saved = root_path.join("saved-removal-proof");
+        let bytes = fs::read(&proof).unwrap();
+        fs::rename(&proof, &saved).unwrap();
+        fs::write(&proof, bytes).unwrap();
+        fs::set_permissions(&proof, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_ne!(
+            fs::metadata(&proof).unwrap().ino(),
+            fs::metadata(&saved).unwrap().ino()
+        );
+
+        let mut provider = DeletedProvider { delete_calls: 0 };
+        assert!(matches!(
+            journal.delete_key(&mut provider),
+            Err(CleanupJournalError::WorkspaceRemoval(
+                WorkspaceRemovalError::RecoveryConflict(path)
+            )) if path == proof
+        ));
+        assert_eq!(provider.delete_calls, 0);
+        assert_eq!(
+            journal.phase(),
+            RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proof_hard_link_blocks_provider_delete() {
+        let (_root, root_path, mut journal) = journal_at_workspace_removal(0x75);
+        let proof = root_path
+            .join(super::super::workspace_removal::PROOF_DIRECTORY)
+            .join(super::super::workspace_removal::final_name(transaction(
+                0x75,
+            )));
+        fs::hard_link(&proof, root_path.join("proof-hard-link")).unwrap();
+        assert_eq!(fs::metadata(&proof).unwrap().nlink(), 2);
+
+        let mut provider = DeletedProvider { delete_calls: 0 };
+        assert!(matches!(
+            journal.delete_key(&mut provider),
+            Err(CleanupJournalError::WorkspaceRemoval(
+                WorkspaceRemovalError::RecoveryConflict(path)
+            )) if path == proof
+        ));
+        assert_eq!(provider.delete_calls, 0);
+        assert_eq!(
+            journal.phase(),
+            RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1615,6 +1849,7 @@ mod tests {
                 1,
                 1,
                 canonical,
+                None,
                 None,
             ),
             Err(RecoveryKeyCleanupError::InvalidTerminal)

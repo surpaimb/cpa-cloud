@@ -376,6 +376,72 @@ pub(crate) struct WorkspaceRemovalTarget {
     inode: u64,
 }
 
+/// Exact Linux filesystem objects that back one durable workspace-removal
+/// proof. The cleanup journal persists this non-secret snapshot at
+/// `WorkspaceRemovalDurable`; every later provider-deletion attempt must
+/// re-open the objects without following links and match these identities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceRemovalEvidence {
+    replacement_device: u64,
+    replacement_inode: u64,
+    proof_directory_device: u64,
+    proof_directory_inode: u64,
+    proof_file_device: u64,
+    proof_file_inode: u64,
+    retained_device: u64,
+    retained_inode: u64,
+}
+
+impl WorkspaceRemovalEvidence {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        replacement_device: u64,
+        replacement_inode: u64,
+        proof_directory_device: u64,
+        proof_directory_inode: u64,
+        proof_file_device: u64,
+        proof_file_inode: u64,
+        retained_device: u64,
+        retained_inode: u64,
+    ) -> Self {
+        Self {
+            replacement_device,
+            replacement_inode,
+            proof_directory_device,
+            proof_directory_inode,
+            proof_file_device,
+            proof_file_inode,
+            retained_device,
+            retained_inode,
+        }
+    }
+
+    pub(crate) fn replacement_device(&self) -> u64 {
+        self.replacement_device
+    }
+    pub(crate) fn replacement_inode(&self) -> u64 {
+        self.replacement_inode
+    }
+    pub(crate) fn proof_directory_device(&self) -> u64 {
+        self.proof_directory_device
+    }
+    pub(crate) fn proof_directory_inode(&self) -> u64 {
+        self.proof_directory_inode
+    }
+    pub(crate) fn proof_file_device(&self) -> u64 {
+        self.proof_file_device
+    }
+    pub(crate) fn proof_file_inode(&self) -> u64 {
+        self.proof_file_inode
+    }
+    pub(crate) fn retained_device(&self) -> u64 {
+        self.retained_device
+    }
+    pub(crate) fn retained_inode(&self) -> u64 {
+        self.retained_inode
+    }
+}
+
 impl WorkspaceRemovalTarget {
     fn from_terminal_handoff(
         handoff: &DurableTerminalHandoff,
@@ -490,6 +556,7 @@ pub struct WorkspaceRemovalAuthorization {
     root_device: u64,
     root_inode: u64,
     target: WorkspaceRemovalTarget,
+    expected_evidence: Option<WorkspaceRemovalEvidence>,
 }
 
 impl WorkspaceRemovalAuthorization {
@@ -516,6 +583,7 @@ impl WorkspaceRemovalAuthorization {
                 device: workspace_device,
                 inode: workspace_inode,
             },
+            expected_evidence: None,
         }
     }
 
@@ -550,6 +618,10 @@ impl WorkspaceRemovalAuthorization {
     pub(crate) fn workspace_inode(&self) -> u64 {
         self.target.inode()
     }
+
+    pub(crate) fn expected_evidence(&self) -> Option<&WorkspaceRemovalEvidence> {
+        self.expected_evidence.as_ref()
+    }
 }
 
 impl std::fmt::Debug for WorkspaceRemovalAuthorization {
@@ -562,6 +634,7 @@ impl std::fmt::Debug for WorkspaceRemovalAuthorization {
             .field("root_device", &self.root_device)
             .field("root_inode", &self.root_inode)
             .field("target", &self.target)
+            .field("expected_evidence", &self.expected_evidence)
             .finish()
     }
 }
@@ -576,7 +649,7 @@ impl std::fmt::Debug for WorkspaceRemovalAuthorization {
 /// workspace removal. Its final
 /// transition requires the exact receipt returned by the tombstone store after
 /// logical removal to an inactive proof and directory/root flush.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RecoveryKeyCleanupSequence {
     phase: RecoveryKeyCleanupPhase,
     terminal: ReplacementPhase,
@@ -586,6 +659,7 @@ pub struct RecoveryKeyCleanupSequence {
     root_device: u64,
     root_inode: u64,
     workspace_target: WorkspaceRemovalTarget,
+    workspace_removal_evidence: Option<WorkspaceRemovalEvidence>,
     retirement_plan: Option<WorkspaceRetirementPlan>,
 }
 
@@ -612,6 +686,7 @@ impl RecoveryKeyCleanupSequence {
             root_device: handoff.root_device(),
             root_inode: handoff.root_inode(),
             workspace_target,
+            workspace_removal_evidence: None,
             retirement_plan,
         })
     }
@@ -640,6 +715,7 @@ impl RecoveryKeyCleanupSequence {
             root_device,
             root_inode,
             workspace_target,
+            workspace_removal_evidence: None,
             retirement_plan: None,
         })
     }
@@ -684,6 +760,10 @@ impl RecoveryKeyCleanupSequence {
         self.retirement_plan.as_ref()
     }
 
+    pub(crate) fn workspace_removal_evidence(&self) -> Option<&WorkspaceRemovalEvidence> {
+        self.workspace_removal_evidence.as_ref()
+    }
+
     pub(crate) fn from_durable_phase(
         _evidence: super::cleanup_journal::DurablePhaseEvidence,
         phase: RecoveryKeyCleanupPhase,
@@ -694,6 +774,7 @@ impl RecoveryKeyCleanupSequence {
         root_device: u64,
         root_inode: u64,
         workspace_target: WorkspaceRemovalTarget,
+        workspace_removal_evidence: Option<WorkspaceRemovalEvidence>,
         retirement_plan: Option<WorkspaceRetirementPlan>,
     ) -> Result<Self, RecoveryKeyCleanupError> {
         if !matches!(
@@ -702,6 +783,15 @@ impl RecoveryKeyCleanupSequence {
         ) || replacement_journal_version != REPLACEMENT_JOURNAL_FORMAT_VERSION
         {
             return Err(RecoveryKeyCleanupError::InvalidTerminal);
+        }
+        let requires_removal_evidence = matches!(
+            phase,
+            RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
+                | RecoveryKeyCleanupPhase::KeyDeletionConfirmed
+                | RecoveryKeyCleanupPhase::Complete
+        );
+        if requires_removal_evidence != workspace_removal_evidence.is_some() {
+            return Err(RecoveryKeyCleanupError::InvalidTransition(phase));
         }
         Ok(Self {
             phase,
@@ -712,6 +802,7 @@ impl RecoveryKeyCleanupSequence {
             root_device,
             root_inode,
             workspace_target,
+            workspace_removal_evidence,
             retirement_plan,
         })
     }
@@ -774,6 +865,7 @@ impl RecoveryKeyCleanupSequence {
             root_device: self.root_device,
             root_inode: self.root_inode,
             target: self.workspace_target.clone(),
+            expected_evidence: self.workspace_removal_evidence.clone(),
         }
     }
 
@@ -791,6 +883,7 @@ impl RecoveryKeyCleanupSequence {
         {
             return Err(RecoveryKeyCleanupError::InvalidTransition(self.phase));
         }
+        self.workspace_removal_evidence = Some(receipt.evidence().clone());
         self.phase = RecoveryKeyCleanupPhase::WorkspaceRemovalDurable;
         Ok(())
     }
