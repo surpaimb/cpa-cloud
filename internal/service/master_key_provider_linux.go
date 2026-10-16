@@ -219,6 +219,8 @@ func linuxFileSystemReadOnly(fd int) (bool, error) {
 }
 
 func linuxMountID(fd int) (uint64, error) {
+	// STATX_MNT_ID is required so a bind-mounted credential leaf cannot borrow
+	// the directory mount's read-only result. Linux exposed it starting in 5.8.
 	var stat unix.Statx_t
 	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_STATX_SYNC_AS_STAT, unix.STATX_MNT_ID, &stat); err != nil || stat.Mask&unix.STATX_MNT_ID == 0 {
 		return 0, errors.New("read credential mount identity")

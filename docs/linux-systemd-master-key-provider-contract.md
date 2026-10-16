@@ -13,7 +13,8 @@ remain separate gates.
 - `--master-key-provider=preview-file-v1` remains the default so existing
   preview data directories and tests retain their current `master.key` behavior.
 - `--master-key-provider=linux-systemd-credential-v1` is explicit and supported
-  only by Linux builds. It reads the fixed credential name
+  only by Linux builds on kernels that expose `statx(STATX_MNT_ID)` (Linux 5.8
+  or newer). It reads the fixed credential name
   `cpa-cloud-master-key` from the absolute directory named by systemd's
   `CREDENTIALS_DIRECTORY` interface.
 - The credential bytes are never accepted from an argument, an environment
@@ -141,6 +142,8 @@ built CLI with a host-key-encrypted synthetic credential through
 `LoadCredentialEncrypted=`. It records only stat/ACL metadata, verifies the
 root-owned exact-ACL layout, initializes and reopens the data directory, rejects
 wrong and missing credentials, and confirms that no `master.key` is created.
+The CI host exposes `STATX_MNT_ID`; absence of that kernel capability is a
+documented compatibility rejection rather than an ownership-only fallback.
 This CI VM evidence does not simulate a whole-machine power loss or establish a
 production machine's host/TPM2 policy, null-key rejection, unit hardening, key
 rotation, historical-version reads, recovery material, or second-machine
