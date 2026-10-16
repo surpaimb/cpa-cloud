@@ -24,6 +24,9 @@ BUS_DIAGNOSTICS = {
     "config-parse": b"parse", "config-attribute": b"attribute", "config-rule": b"rule",
     "apparmor": b"AppArmor", "socket-bind": b"bind", "missing-path": b"No such file",
     "machine-id": b"machine-id", "unsupported": b"not supported",
+    "config-member": b"send_member", "config-interface": b"send_interface", "config-path": b"send_path",
+    "usage": b"Usage", "requires": b"requires", "xml-element": b"Element", "startup-failed": b"Failed",
+    "bus-exit-success": b"", "bus-exit-error": b"", "bus-exit-signal": b"", "bus-log-empty": b"",
 }
 
 
@@ -121,7 +124,7 @@ def inside(metadata_path):
     local.unlink()
     print("ISOLATION_OK", flush=True)
 
-    processes, logs = [], []
+    processes, logs, observed_ok = [], [], False
     try:
         def start(args, environment, name):
             log = (work / (name + ".log")).open("xb")
@@ -132,7 +135,7 @@ def inside(metadata_path):
             return process
 
         environment = dict(os.environ)
-        bus = start(["/usr/bin/dbus-daemon", "--nofork", "--nopidfile", "--config-file=" + metadata["bus_config"]], environment, "bus")
+        bus = start(["/usr/bin/dbus-daemon", "--nofork", "--nopidfile", "--nosyslog", "--config-file=" + metadata["bus_config"]], environment, "bus")
         bus_path = work / "runtime" / "bus"
         deadline = time.monotonic() + 10
         while not bus_path.exists() and time.monotonic() < deadline:
@@ -155,6 +158,7 @@ def inside(metadata_path):
             time.sleep(0.1)
         print("PRIVATE_BUS_SERVICE_UID_PID_OK", flush=True)
         print("LIBSECRET_METADATA_ONLY_OK", flush=True)
+        observed_ok = True
     finally:
         for process in reversed(processes):
             if process.poll() is None:
@@ -166,10 +170,15 @@ def inside(metadata_path):
                     process.wait(timeout=5)
         for log in logs:
             log.close()
-        if processes and processes[0].returncode not in (None, 0, -15):
+        if processes and not observed_ok:
             output = (work / "bus.log").read_bytes()
+            code = processes[0].returncode
+            category = "bus-exit-success" if code == 0 else "bus-exit-signal" if code is not None and code < 0 else "bus-exit-error"
+            print("BUS_DIAGNOSTIC " + category, flush=True)
+            if not output:
+                print("BUS_DIAGNOSTIC bus-log-empty", flush=True)
             for label, fragment in BUS_DIAGNOSTICS.items():
-                if fragment in output:
+                if fragment and fragment.lower() in output.lower():
                     print("BUS_DIAGNOSTIC " + label, flush=True)
     require(all(process.poll() is not None for process in processes), "owned-process-remains")
     print("OWNED_PROCESSES_STOPPED", flush=True)
