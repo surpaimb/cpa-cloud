@@ -4123,12 +4123,13 @@ mod tests {
         assert!(fs::read(&edited).unwrap().starts_with(b"external-edit"));
         assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
 
-        let (_root, _approval, provider, _transaction_id, workspace_path, _backup_path, cleanup) =
+        let (root, _approval, provider, _transaction_id, workspace_path, _backup_path, cleanup) =
             cleanup_ready_fixture(0xab);
         let replaced = workspace_path.join(platform::pending_slot_name(1));
+        let detached = root.path().join("detached-pending-slot");
         let original = fs::read(&replaced).unwrap();
         let original_inode = fs::metadata(&replaced).unwrap().ino();
-        fs::remove_file(&replaced).unwrap();
+        fs::rename(&replaced, &detached).unwrap();
         fs::write(&replaced, &original).unwrap();
         fs::set_permissions(&replaced, fs::Permissions::from_mode(0o600)).unwrap();
         assert_ne!(fs::metadata(&replaced).unwrap().ino(), original_inode);
@@ -4139,6 +4140,7 @@ mod tests {
             ))
         ));
         assert_eq!(fs::read(&replaced).unwrap(), original);
+        assert_eq!(fs::read(&detached).unwrap(), original);
         assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
     }
 
