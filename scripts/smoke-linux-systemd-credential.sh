@@ -80,11 +80,10 @@ run_unit() {
   unit_index=$((unit_index + 1))
   local unit="$unit_prefix-$unit_index.service"
   local -a args=(
-    --wait --collect --quiet
+    --wait --collect --quiet --pipe
     --unit="$unit"
     --property="User=$test_user"
     --property="Group=$test_user"
-    --property=StandardOutput=null
   )
   if [[ -n $credential ]]; then
     args+=(--property="LoadCredentialEncrypted=$credential_name:$credential")
@@ -99,11 +98,11 @@ make_encrypted_credential "$credential"
 make_encrypted_credential "$wrong_credential"
 
 metadata="$test_root/state/activation-metadata.txt"
-run_unit "$credential" \
-  --property=StandardInput=data \
-  --property=StandardInputText=synthetic-admin-password \
-  /bin/bash "$test_root/smoke-linux-systemd-credential.sh" --inside-unit "$metadata" \
-  "$test_root/cpa-cloud" --data-dir "$test_root/state/data" --master-key-provider=linux-systemd-credential-v1 --init
+printf 'synthetic-admin-password\n' |
+  run_unit "$credential" \
+    /bin/bash "$test_root/smoke-linux-systemd-credential.sh" --inside-unit "$metadata" \
+    "$test_root/cpa-cloud" --data-dir "$test_root/state/data" --master-key-provider=linux-systemd-credential-v1 --init \
+    >/dev/null
 
 sudo grep -qx 'directory=0:0:550' "$metadata"
 sudo grep -qx 'file=0:0:440:1' "$metadata"
