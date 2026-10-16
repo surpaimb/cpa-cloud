@@ -1240,7 +1240,8 @@ mod tests {
     fn workspace_target(workspace: &Path) -> WorkspaceRemovalTarget {
         let metadata = fs::metadata(workspace).unwrap();
         let workspace_name = workspace.file_name().unwrap().to_str().unwrap();
-        let transaction_id = parse_transaction(workspace_name.strip_prefix("tx-").unwrap()).unwrap();
+        let transaction_id =
+            parse_transaction(workspace_name.strip_prefix("tx-").unwrap()).unwrap();
         WorkspaceRemovalTarget::from_durable(
             DurablePhaseEvidence(()),
             transaction_id,

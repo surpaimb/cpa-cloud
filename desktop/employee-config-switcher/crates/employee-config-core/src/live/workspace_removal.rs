@@ -734,10 +734,7 @@ mod platform {
         Ok(name)
     }
 
-    fn valid_removal_workspace_name(
-        name: &str,
-        transaction_id: ReplacementTransactionId,
-    ) -> bool {
+    fn valid_removal_workspace_name(name: &str, transaction_id: ReplacementTransactionId) -> bool {
         if valid_workspace_name(name) {
             return true;
         }

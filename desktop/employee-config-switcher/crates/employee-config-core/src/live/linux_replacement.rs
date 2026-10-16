@@ -420,9 +420,7 @@ mod platform {
 
     #[cfg(test)]
     static BEFORE_TERMINAL_HANDOFF_REVALIDATION: std::sync::OnceLock<
-        std::sync::Mutex<
-            std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>,
-        >,
+        std::sync::Mutex<std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>>,
     > = std::sync::OnceLock::new();
 
     #[cfg(test)]
