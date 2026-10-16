@@ -565,8 +565,7 @@ mod platform {
             authorization,
             replacement_id,
         )?;
-        let retained_id =
-            verify_retained(proof_dir, &proof, &proof_path.join(&proof.retained_name))?;
+        verify_retained(proof_dir, &proof, &proof_path.join(&proof.retained_name))?;
         ensure_absent(
             replacement,
             OsStr::new(authorization.workspace_name()),
@@ -643,7 +642,8 @@ mod platform {
             OsStr::new(authorization.workspace_name()),
             &workspace_path,
         )?;
-        verify_retained(proof_dir, &proof, &proof_path.join(&proof.retained_name))?;
+        let retained_id =
+            verify_retained(proof_dir, &proof, &proof_path.join(&proof.retained_name))?;
         replacement
             .sync_all()
             .map_err(|source| io_error(root.join(REPLACEMENT_DIRECTORY), source))?;
