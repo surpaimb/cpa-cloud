@@ -469,28 +469,33 @@ mod platform {
     #[cfg(test)]
     fn install_barrier(
         cell: &'static std::sync::OnceLock<
-            std::sync::Mutex<std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>>,
+            std::sync::Mutex<
+                std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>,
+            >,
         >,
         path: PathBuf,
         barrier: std::sync::Arc<std::sync::Barrier>,
     ) {
-        let barriers = cell.get_or_init(|| {
-            std::sync::Mutex::new(std::collections::BTreeMap::new())
-        });
+        let barriers =
+            cell.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
         let replaced = barriers.lock().unwrap().insert(path, barrier);
-        assert!(replaced.is_none(), "test retirement barrier already installed");
+        assert!(
+            replaced.is_none(),
+            "test retirement barrier already installed"
+        );
     }
 
     #[cfg(test)]
     fn wait_at_barrier(
         cell: &'static std::sync::OnceLock<
-            std::sync::Mutex<std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>>,
+            std::sync::Mutex<
+                std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>,
+            >,
         >,
         path: &Path,
     ) {
-        let barriers = cell.get_or_init(|| {
-            std::sync::Mutex::new(std::collections::BTreeMap::new())
-        });
+        let barriers =
+            cell.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
         let barrier = barriers.lock().unwrap().remove(path);
         if let Some(barrier) = barrier {
             barrier.wait();
@@ -1257,14 +1262,7 @@ mod platform {
                 OsStr::new(name),
                 &path.join(name),
             )?;
-            let published = open_exact_file(
-                directory,
-                path,
-                name,
-                bytes,
-                limit,
-                pending_identity,
-            )?;
+            let published = open_exact_file(directory, path, name, bytes, limit, pending_identity)?;
             require_same_identity(&published, &current_pending, &path.join(name))?;
             sync_directory(directory, path, fault)?;
             return Ok(());
@@ -1302,14 +1300,7 @@ mod platform {
             OsStr::new(name),
             &path.join(name),
         )?;
-        let published = open_exact_file(
-            directory,
-            path,
-            name,
-            bytes,
-            limit,
-            pending_identity,
-        )?;
+        let published = open_exact_file(directory, path, name, bytes, limit, pending_identity)?;
         require_same_identity(&published, &current_pending, &path.join(name))?;
         sync_directory(directory, path, fault)?;
         Ok(())

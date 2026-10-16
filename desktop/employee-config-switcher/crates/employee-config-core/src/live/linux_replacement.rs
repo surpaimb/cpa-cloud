@@ -1183,12 +1183,11 @@ mod platform {
                     workspace,
                     manifest_digest,
                     ciphertext_digest,
-                }
-                    if state.reference.is_some()
-                        && state.backup_workspace.is_none()
-                        && state.backup_manifest_digest.is_none()
-                        && state.backup_ciphertext_digest.is_none()
-                        && state.desired_identity.is_none() =>
+                } if state.reference.is_some()
+                    && state.backup_workspace.is_none()
+                    && state.backup_manifest_digest.is_none()
+                    && state.backup_ciphertext_digest.is_none()
+                    && state.desired_identity.is_none() =>
                 {
                     if digest_text_invalid(manifest_digest)
                         || digest_text_invalid(ciphertext_digest)
@@ -4287,7 +4286,10 @@ mod tests {
                 WorkspaceRetirementError::RecoveryConflict(_)
             ))
         ));
-        assert_eq!(fs::read(retirement_transaction.join("plan.json")).unwrap(), b"external-pending");
+        assert_eq!(
+            fs::read(retirement_transaction.join("plan.json")).unwrap(),
+            b"external-pending"
+        );
         assert!(detached.is_file());
         assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
 
