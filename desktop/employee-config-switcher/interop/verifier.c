@@ -86,7 +86,9 @@ int main(int argc, char **argv) {
             !attr(attrs, "transaction", transaction) || !attr(attrs, "unix-user", uid) ||
             !attr(attrs, "lock-namespace", ns) || !attr(attrs, "item-id", item_id)) return 37;
         SecretValue *value = secret_service_get_secret_for_dbus_path_sync(service, unlocked[0], NULL, NULL);
-        if (!value || g_strcmp0(secret_value_get_content_type(value), "application/octet-stream")) return 38;
+        /* Independent pinned GNOME observation, not CPA's read allowlist.
+         * This MIME label never permits text conversion of the binary value. */
+        if (!value || g_strcmp0(secret_value_get_content_type(value), "text/plain")) return 38;
         gsize size = 0;
         const unsigned char *bytes = (const unsigned char *)secret_value_get(value, &size);
         if (size != 148 || memcmp(bytes, "CPA-SS-KEY-V1\0\0\0", 16) ||
@@ -99,7 +101,7 @@ int main(int argc, char **argv) {
         g_checksum_get_digest(checksum, digest, &digest_size);
         if (digest_size != 32 || memcmp(digest, bytes + 116, 32)) return 40;
         g_checksum_free(checksum);
-        /* This file is an isolated scanner oracle, never provider fallback. */
+        /* Independent repeat-verification sample, not the pre-send scanner oracle. */
         if (!g_file_test("expected.envelope", G_FILE_TEST_EXISTS)) {
             FILE *record = fopen("expected.envelope", "wx");
             if (!record || fwrite(bytes, 1, size, record) != size || fclose(record)) return 41;

@@ -2,6 +2,7 @@
 import ast
 import base64
 import importlib.util
+import re
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -41,6 +42,37 @@ class FixtureTests(unittest.TestCase):
         for forbidden in ("secret_service_unlock", "secret_service_store", "secret_item_set_secret", "secret_item_delete",
                           "secret_password_", "SECRET_SEARCH_UNLOCK"):
             self.assertNotIn(forbidden, source)
+
+    def test_production_read_allowlist_is_exact_and_writes_remain_canonical(self):
+        source = (HERE.parent / "crates/employee-config-core/src/live/linux_secret_service.rs").read_text()
+        self.assertIn('const CONTENT_TYPE: &str = "application/octet-stream";', source)
+        self.assertIn("content_type: CONTENT_TYPE,", source)
+        self.assertIn("request.content_type.to_owned(),", source)
+        start = source.index("fn validate_secret_transfer(")
+        helper = source[start:source.index("\n}\n", start) + 3]
+        # Compare the complete small guard, not just presence of allowed names:
+        # an extra accepted type, normalization or bypass must fail this guard.
+        expected = '''fn validate_secret_transfer(
+            session_matches: bool, parameters: &[u8], content_type: &str,
+            value: Zeroizing<Vec<u8>>,
+        ) -> Result<Zeroizing<Vec<u8>>, BackendError> {
+            if !session_matches || !parameters.is_empty()
+                || !matches!(content_type, CONTENT_TYPE | "text/plain") {
+                return Err(BackendError::Corrupt);
+            }
+            Ok(value)
+        }'''
+        compact = lambda text: re.sub(r"\s+", "", re.sub(r"//[^\n]*", "", text))
+        self.assertEqual(compact(helper), compact(expected))
+
+    def test_independent_verifier_requires_pinned_text_plain_binary_value(self):
+        source = (HERE / "verifier.c").read_text()
+        self.assertIn('if (!value || g_strcmp0(secret_value_get_content_type(value), "text/plain")) return 38;', source)
+        self.assertNotIn("application/octet-stream", source)
+        self.assertNotIn("validate_secret_transfer", source)
+        self.assertIn("secret_value_get(value, &size)", source)
+        self.assertIn("if (size != 148 || memcmp(bytes,", source)
+        self.assertIn("memcmp(bytes + 84, expected, 32)", source)
 
     def test_scan_encodings(self):
         value = bytes(range(32))
@@ -91,7 +123,9 @@ class FixtureTests(unittest.TestCase):
         self.assertLess(source.index("real_fixture::capture_outgoing"), source.index("match backend.create_item(request)"))
         self.assertIn("#[cfg(test)]\n        if !real_fixture::capture_outgoing", source)
         self.assertIn("#[cfg(test)]\n        real_fixture::returned_secret", source)
-        self.assertIn("if session != self.session || !parameters.is_empty() || content_type != CONTENT_TYPE", source)
+        self.assertIn("validate_secret_transfer(session == self.session, &parameters, &content_type, value)", source)
+        get_secret = source[source.index("impl SecretServiceBackend for DbusBackend"):source.index("fn validate_secret_transfer(")]
+        self.assertLess(get_secret.index("let value = Zeroizing::new(value);"), get_secret.index("real_fixture::returned_secret"))
         caller = (HERE.parent / "crates/employee-config-core/src/live/linux_secret_service_fixture.rs").read_text()
         self.assertNotIn("backend.search", caller)
         self.assertNotIn("backend.get_secret", caller)

@@ -1,7 +1,8 @@
 # Real Linux Secret Service: volatile-collection interoperability A
 
-Status: isolated development-preview fixture, based on PR80 exact head
-`b3a4caeb7ee157c0cddcd6b814da0837c5563071`. Not production custody.
+Status: isolated development-preview fixture, restacked onto PR82 exact head
+`c30216cdd7d24c836deb0655e4e56a3da6485fa4`, retaining PR80's isolation
+prerequisites. Not production custody.
 
 This first independent slice deliberately uses GNOME Keyring's volatile session
 collection, explicitly assigned to the default alias in a fresh private bus.
@@ -22,8 +23,8 @@ is permitted. No new production approval constructor or provider API is added.
    synthetic recovery Key and repeats create without replacement. Its test-only
    caller uses the existing private approval constructor; runtime code is unchanged.
 4. Independent C/libsecret verifier searches all fixture CPA recovery items and
-   requires exactly one unlocked item, exact seven identity attributes, binary
-   content type, envelope identity/checksum and the original 32-byte Key. It
+   requires exactly one unlocked item, exact seven identity attributes, exact
+   `text/plain` response MIME, binary envelope identity/checksum and the original 32-byte Key. It
    returns only a fixed boolean result; it never prints an item path or secret.
 5. A separate CPA process opens the durable reference and obtains the same Key.
 6. Wrong transaction, separate lock namespace and valid-but-missing item requests
@@ -64,12 +65,37 @@ includes the original outgoing Key. Only fixed labels leave the fixture; no
 raw MIME, path, parameters, value, digest or D-Bus error text is emitted. The
 previous post-failure SearchItems/GetSecret diagnostic reread is removed.
 
-These hooks neither mutate the response nor change the original production
-rejection conditions. MIME compatibility and production returned-value zeroizing
-are not implemented by this diagnostic change. Owned processes are stopped and
+These hooks neither mutate the response nor change PR82's production rejection
+conditions. MIME compatibility and returned-value zeroizing come exclusively
+from the separately reviewed PR82 base, not this fixture adaptation. The decoded
+value is guarded before the same-response diagnostic hook. Owned processes are stopped and
 their status recorded before scanning, so scanner failure cannot hide a completed
 process cleanup marker. This marker does not by itself certify outer root cleanup.
 The dedicated run may remain FAIL/NO-GO; field classification is not acceptance.
+
+### Narrow fixture adaptation after PR82
+
+Historical PR81 head `1304448c3863d5598552d2751e47fc108421522a` and
+[run 38921390424](https://github.com/surpaimb/cpa-cloud/actions/runs/38921390424)
+remain FAILURE evidence: same-response diagnostics observed exact `text/plain`,
+matching session, empty parameters, 148-byte valid envelope; pre-send secret
+scanning and owned-process stopping passed, but interoperability did not.
+
+The production read contract is now PR82's exact two-value MIME allowlist;
+writes remain exact `application/octet-stream`. A static guard checks that
+complete production predicate, including rejection of all other types, rather
+than deleting the previous single-MIME assertion. PR82's independent Rust
+positive/negative cases remain unchanged.
+
+The separate C/libsecret observer does **not** reuse that two-value predicate.
+For this pinned GNOME Keyring 46.1 fixture it requires precisely `text/plain`,
+the response observed by the historical diagnostic run, and still checks the
+unmodified binary length/magic/identity/checksum/Key and unique item/attributes.
+Even an octet-stream response is not accepted by this pinned observer. There is
+no normalization, text decoding or arbitrary-MIME acceptance. All isolation,
+negative-case, secret-scanning and cleanup checks remain unchanged. Old CI and
+E/F review do not count for the restacked head/base; new ordinary CI and review
+are required. A further dedicated failure remains FAIL and is not auto-retried.
 
 ## Policy and prompt boundary
 
