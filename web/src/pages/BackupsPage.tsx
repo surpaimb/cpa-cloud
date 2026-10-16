@@ -56,6 +56,7 @@ export function BackupsPage({ csrf }: { csrf: string }) {
   const [runningAllowed, setRunningAllowed] = useState(false)
   const [providerReady, setProviderReady] = useState(false)
   const [providerStoreReady, setProviderStoreReady] = useState(false)
+  const [providerStoreKind, setProviderStoreKind] = useState<BackupKeyProvider['kind']>('windows-dpapi-user')
   const [providerReason, setProviderReason] = useState<string | null>(null)
   const [unsupported, setUnsupported] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -87,6 +88,7 @@ export function BackupsPage({ csrf }: { csrf: string }) {
       setProviders(providerPage.items); setPlans(planPage.items); setRuns(runPage.items)
       setProviderReady(providerPage.ready)
       setProviderStoreReady(providerPage.store_ready)
+      setProviderStoreKind(providerPage.configured_kind ?? 'windows-dpapi-user')
       setProviderReason(providerPage.reason_code)
     } catch (caught) {
       if (current !== sequence.current || abort.signal.aborted) return
@@ -135,20 +137,20 @@ export function BackupsPage({ csrf }: { csrf: string }) {
 
   return <>
     <PageHeader title="自动备份" description="创建经过认证加密的本机备份，并可在隔离目录中执行完整恢复演练。">
-      <div className="page-header-buttons"><Button variant="secondary" disabled={!providerStoreReady || loading} onClick={() => setKeyAction('create')}><Icon name="key" />创建密钥</Button><Button disabled={!providerReady || providers.length === 0 || loading} onClick={() => setEditor('create')}><Icon name="plus" />创建计划</Button></div>
+      <div className="page-header-buttons"><Button variant="secondary" disabled={!providerStoreReady || loading} onClick={() => setKeyAction('create')}><Icon name="key" />{providerStoreKind === 'linux-systemd-credential-v1' ? '绑定 systemd 密钥' : '创建密钥'}</Button><Button disabled={!providerReady || providers.length === 0 || loading} onClick={() => setEditor('create')}><Icon name="plus" />创建计划</Button></div>
     </PageHeader>
     <section className={`backup-boundary ${runningAllowed && providerReady ? 'backup-boundary--ready' : ''}`}>
-      <div><strong>{runningAllowed ? '自动执行已启用' : '自动执行默认关闭'}</strong><p>{providerReady ? '备份密钥由当前 Windows 用户的 DPAPI 保护；服务不会在数据库或接口中返回明文密钥。' : reasonLabels[providerReason ?? ''] ?? '当前没有可解析的活动备份密钥。'}</p></div>
+      <div><strong>{runningAllowed ? '自动执行已启用' : '自动执行默认关闭'}</strong><p>{providerReady ? (providerStoreKind === 'linux-systemd-credential-v1' ? '备份 wrapping key 由独立 systemd credential 提供；服务不会把明文密钥写入数据库或接口。' : '备份密钥由当前 Windows 用户的 DPAPI 保护；服务不会在数据库或接口中返回明文密钥。') : reasonLabels[providerReason ?? ''] ?? '当前没有可解析的活动备份密钥。'}</p></div>
       <div className="backup-boundary__states"><span className={`status status--${runningAllowed ? 'active' : 'warning'}`}><i />{runningAllowed ? '调度运行中' : '仅保存配置'}</span><span className={`status status--${providerReady ? 'active' : 'danger'}`}><i />{providerReady ? '密钥就绪' : '密钥不可用'}</span></div>
     </section>
-    <div className="backup-recovery-limit"><strong>异机恢复尚未提供</strong><span>DPAPI 用户范围密钥通常绑定当前 Windows 用户与主机；当前版本没有密钥导出、异机导入或重新封装流程。</span></div>
+    <div className="backup-recovery-limit"><strong>本切片不证明异机恢复</strong><span>{providerStoreKind === 'linux-systemd-credential-v1' ? 'Linux 外部轮换、多版本历史窗口与第二机器恢复尚未交付。' : 'DPAPI 用户范围密钥通常绑定当前 Windows 用户与主机；恢复材料仍需单独运维验收。'}</span></div>
     <PageState loading={loading} error={error} onRetry={() => void reload()} />
     {!loading && unsupported ? <div className="content-panel"><EmptyState title="当前服务不支持自动备份" body="升级服务并启用该能力后，管理员才会看到备份配置。" /></div> : null}
     {!loading && !unsupported && !error ? <>
       <section className="backup-section">
-        <header><div><h2>密钥提供方</h2><p>轮换会创建新版本；已有备份仍使用运行时记录的旧版本。</p></div></header>
+        <header><div><h2>密钥提供方</h2><p>{providerStoreKind === 'linux-systemd-credential-v1' ? 'systemd credential 由服务外部管理；当前切片不提供轮换或历史版本窗口。' : '轮换会创建新版本；已有备份仍使用运行时记录的旧版本。'}</p></div></header>
         <div className="content-panel">
-          {providers.length === 0 ? <EmptyState title="还没有备份密钥" body={providerStoreReady ? '创建第一个由当前 Windows 用户保护的备份密钥。' : '此部署目前不能创建可无人值守使用的系统保护密钥。'} action={providerStoreReady ? <Button onClick={() => setKeyAction('create')}>创建密钥</Button> : undefined} /> : <div className="table-scroll"><table className="backup-table"><thead><tr><th>提供方</th><th>保护范围</th><th>活动版本</th><th>状态</th><th>操作</th></tr></thead><tbody>{providers.map((provider) => <tr key={provider.id}><td><strong>Windows DPAPI</strong><small>{provider.id}</small></td><td><strong>当前服务用户</strong><small>不可跨用户或跨机器直接解封</small></td><td><strong>v{provider.active_version}</strong><small>配置版本 {provider.revision}</small></td><td><span className={`status status--${provider.status === 'ready' ? 'active' : 'danger'}`}><i />{provider.status === 'ready' ? '可用' : reasonLabels[provider.reason_code ?? ''] ?? '不可用'}</span></td><td><button className="link-button" disabled={provider.status !== 'ready'} onClick={() => setKeyAction(provider)}>轮换 / 回退</button></td></tr>)}</tbody></table></div>}
+          {providers.length === 0 ? <EmptyState title="还没有备份密钥" body={providerStoreReady ? (providerStoreKind === 'linux-systemd-credential-v1' ? '绑定当前服务已加载并通过实例隔离检查的 systemd wrapping key。' : '创建第一个由当前 Windows 用户保护的备份密钥。') : '此部署目前不能创建可无人值守使用的系统保护密钥。'} action={providerStoreReady ? <Button onClick={() => setKeyAction('create')}>{providerStoreKind === 'linux-systemd-credential-v1' ? '绑定 systemd 密钥' : '创建密钥'}</Button> : undefined} /> : <div className="table-scroll"><table className="backup-table"><thead><tr><th>提供方</th><th>保护范围</th><th>活动版本</th><th>状态</th><th>操作</th></tr></thead><tbody>{providers.map((provider) => <tr key={provider.id}><td><strong>{provider.kind === 'linux-systemd-credential-v1' ? 'systemd credential' : 'Windows DPAPI'}</strong><small>{provider.id}</small></td><td><strong>{provider.scope === 'systemd-service' ? '固定服务实例' : '当前服务用户'}</strong><small>{provider.instance_id ? `${provider.instance_id} · ${provider.key_id}` : '不可跨用户或跨机器直接解封'}</small></td><td><strong>v{provider.active_version}</strong><small>配置版本 {provider.revision}</small></td><td><span className={`status status--${provider.status === 'ready' ? 'active' : 'danger'}`}><i />{provider.status === 'ready' ? '可用' : reasonLabels[provider.reason_code ?? ''] ?? '不可用'}</span></td><td>{provider.kind === 'linux-systemd-credential-v1' ? '外部管理' : <button className="link-button" disabled={provider.status !== 'ready'} onClick={() => setKeyAction(provider)}>轮换 / 回退</button>}</td></tr>)}</tbody></table></div>}
         </div>
       </section>
       <section className="backup-section">
@@ -164,7 +166,7 @@ export function BackupsPage({ csrf }: { csrf: string }) {
       {actionError ? <div className="inline-error backup-action-error" role="alert">{actionError}<button onClick={() => { setActionError(null); void reload() }}>重新加载</button></div> : null}
     </> : null}
     {editor ? <BackupPlanEditor plan={editor} providers={providers.filter((item) => item.status === 'ready')} csrf={csrf} onClose={() => setEditor(null)} onSaved={() => { setEditor(null); void reload() }} /> : null}
-    {keyAction ? <BackupKeyDialog provider={keyAction} csrf={csrf} onClose={() => setKeyAction(null)} onSaved={() => { setKeyAction(null); void reload() }} /> : null}
+    {keyAction ? <BackupKeyDialog provider={keyAction} createKind={providerStoreKind} csrf={csrf} onClose={() => setKeyAction(null)} onSaved={() => { setKeyAction(null); void reload() }} /> : null}
   </>
 }
 
@@ -192,19 +194,22 @@ function BackupPlanEditor({ plan, providers, csrf, onClose, onSaved }: { plan: B
         onSaved()
       } catch (caught) { setError(actionMessage(caught)); setBusy(false) }
     })}>
-      <div className="form-grid backup-form"><Field label="计划名称"><input value={name} maxLength={120} required autoFocus onChange={(event) => setName(event.target.value)} /></Field><Field label="密钥提供方"><select value={providerID} required onChange={(event) => setProviderID(event.target.value)}>{providers.map((provider) => <option key={provider.id} value={provider.id}>Windows DPAPI · v{provider.active_version}</option>)}</select></Field><Field label="固定间隔（秒）" hint="900–2678400 秒"><input type="number" min="900" max="2678400" step="1" value={interval} onChange={(event) => setInterval(event.target.value)} /></Field><Field label="保留包数量" hint="1–365 个"><input type="number" min="1" max="365" step="1" value={retention} onChange={(event) => setRetention(event.target.value)} /></Field><label className="toggle-field"><input type="checkbox" checked={rehearsal} onChange={(event) => setRehearsal(event.target.checked)} /><span><strong>执行恢复演练</strong><small>在隔离临时目录恢复并打开数据库，然后清理已知文件。</small></span></label><label className="toggle-field"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>启用此计划</strong><small>全局执行开关关闭时仍只保存配置。</small></span></label></div>
+      <div className="form-grid backup-form"><Field label="计划名称"><input value={name} maxLength={120} required autoFocus onChange={(event) => setName(event.target.value)} /></Field><Field label="密钥提供方"><select value={providerID} required onChange={(event) => setProviderID(event.target.value)}>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.kind === 'linux-systemd-credential-v1' ? 'systemd credential' : 'Windows DPAPI'} · v{provider.active_version}</option>)}</select></Field><Field label="固定间隔（秒）" hint="900–2678400 秒"><input type="number" min="900" max="2678400" step="1" value={interval} onChange={(event) => setInterval(event.target.value)} /></Field><Field label="保留包数量" hint="1–365 个"><input type="number" min="1" max="365" step="1" value={retention} onChange={(event) => setRetention(event.target.value)} /></Field><label className="toggle-field"><input type="checkbox" checked={rehearsal} onChange={(event) => setRehearsal(event.target.checked)} /><span><strong>执行恢复演练</strong><small>在隔离临时目录恢复并打开数据库，然后清理已知文件。</small></span></label><label className="toggle-field"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>启用此计划</strong><small>全局执行开关关闭时仍只保存配置。</small></span></label></div>
       <FormError error={error} /><div className="dialog__actions"><Button type="button" variant="secondary" disabled={busy} onClick={onClose}>取消</Button><Button type="submit" disabled={busy || !name.trim() || !providerID}>{busy ? '正在保存…' : '保存计划'}</Button></div>
     </form>
   </Dialog>
 }
 
-function BackupKeyDialog({ provider, csrf, onClose, onSaved }: { provider: BackupKeyProvider | 'create'; csrf: string; onClose: () => void; onSaved: () => void }) {
+function BackupKeyDialog({ provider, createKind, csrf, onClose, onSaved }: { provider: BackupKeyProvider | 'create'; createKind: BackupKeyProvider['kind']; csrf: string; onClose: () => void; onSaved: () => void }) {
   const existing = provider === 'create' ? null : provider
   const [version, setVersion] = useState(existing ? String(existing.active_version) : '1')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  if (!existing) return <Dialog title="创建备份密钥" description="将生成随机包装密钥，并用当前 Windows 服务用户的 DPAPI 保护。明文不会显示。" onClose={onClose} closeDisabled={busy}><div className="backup-key-warning"><strong>恢复边界</strong><p>同一用户配置文件可在服务重启后解封；复制数据库和备份包本身不能绕过 DPAPI 保护。</p></div><FormError error={error} /><div className="dialog__actions"><Button variant="secondary" disabled={busy} onClick={onClose}>取消</Button><Button disabled={busy} onClick={async () => { setBusy(true); setError(null); try { await api.createBackupKeyProvider(csrf); onSaved() } catch (caught) { setError(actionMessage(caught)); setBusy(false) } }}>{busy ? '正在保护密钥…' : '创建受保护密钥'}</Button></div></Dialog>
+  if (!existing) {
+    const systemd = createKind === 'linux-systemd-credential-v1'
+    return <Dialog title={systemd ? '绑定 systemd 备份密钥' : '创建备份密钥'} description={systemd ? '绑定服务已从 systemd credential 安全加载并通过实例隔离检查的备份 wrapping key；接口不会接收或返回明文。' : '将生成随机包装密钥，并用当前 Windows 服务用户的 DPAPI 保护。明文不会显示。'} onClose={onClose} closeDisabled={busy}><div className="backup-key-warning"><strong>恢复边界</strong><p>{systemd ? '本切片只支持当前服务实例的固定外部密钥。轮换、多版本历史窗口和异机恢复尚未交付。' : '同一用户配置文件可在服务重启后解封；复制数据库和备份包本身不能绕过 DPAPI 保护。'}</p></div><FormError error={error} /><div className="dialog__actions"><Button variant="secondary" disabled={busy} onClick={onClose}>取消</Button><Button disabled={busy} onClick={async () => { setBusy(true); setError(null); try { await api.createBackupKeyProvider(csrf, createKind); onSaved() } catch (caught) { setError(actionMessage(caught)); setBusy(false) } }}>{busy ? (systemd ? '正在验证并绑定…' : '正在保护密钥…') : (systemd ? '验证并绑定' : '创建受保护密钥')}</Button></div></Dialog>
+  }
 
   return <Dialog title="轮换或回退密钥" description={`当前活动版本为 v${existing.active_version}；轮换不会删除旧版本。`} onClose={onClose} closeDisabled={busy}><div className="backup-key-actions"><section><h3>轮换到新版本</h3><p>生成新的随机密钥并原子切换活动版本。正在运行的备份继续使用已固定的版本。</p><Button disabled={busy} onClick={async () => { setBusy(true); setError(null); try { await api.rotateBackupKeyProvider(existing.id, existing.revision, csrf); onSaved() } catch (caught) { setError(actionMessage(caught)); setBusy(false) } }}>轮换到 v{existing.active_version + 1}</Button></section><section><h3>激活已有版本</h3><p>仅能激活本机受保护存储中仍可成功解封的版本。</p><Field label="版本号"><input type="number" min="1" max="9007199254740991" step="1" value={version} onChange={(event) => setVersion(event.target.value)} /></Field><Button variant="secondary" disabled={busy || !Number.isSafeInteger(Number(version)) || Number(version) < 1} onClick={async () => { setBusy(true); setError(null); try { await api.activateBackupKeyProviderVersion(existing.id, existing.revision, Number(version), csrf); onSaved() } catch (caught) { setError(actionMessage(caught)); setBusy(false) } }}>激活所选版本</Button></section></div><FormError error={error} /></Dialog>
 }

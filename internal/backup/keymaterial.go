@@ -27,7 +27,8 @@ const (
 	maxProviderKindBytes     = 48
 	maxPublicVersion         = uint64(9007199254740991)
 
-	windowsDPAPIUserKind = "windows-dpapi-user"
+	windowsDPAPIUserKind       = "windows-dpapi-user"
+	linuxSystemdCredentialKind = "linux-systemd-credential-v1"
 )
 
 var keyMaterialInfoPrefix = []byte("cpa-cloud/backup/v2\x00")
@@ -39,6 +40,8 @@ var errKeyMaterialAuthentication = errors.New("backup authentication failed (wro
 type KeyMaterial struct {
 	ProviderID      string
 	ProviderKind    string
+	InstanceID      string
+	KeyID           string
 	ProviderVersion uint64
 	WrappingKey     [keySize]byte
 }
@@ -46,6 +49,9 @@ type KeyMaterial struct {
 // CreateWithKeyMaterial writes a version 2 backup package. output must not
 // already exist. The password-based version 1 format remains a separate API.
 func CreateWithKeyMaterial(ctx context.Context, dataDir, output string, material KeyMaterial, sourceVersion string) (Info, error) {
+	if material.ProviderKind == linuxSystemdCredentialKind {
+		return createWithSystemdKeyMaterial(ctx, dataDir, output, material, sourceVersion)
+	}
 	defer wipe(material.WrappingKey[:])
 	if err := validateKeyMaterial(&material); err != nil {
 		return Info{}, err
@@ -125,6 +131,9 @@ func CreateWithKeyMaterial(ctx context.Context, dataDir, output string, material
 
 // VerifyWithKeyMaterial authenticates and validates a version 2 package.
 func VerifyWithKeyMaterial(ctx context.Context, input string, material KeyMaterial) (Info, error) {
+	if material.ProviderKind == linuxSystemdCredentialKind {
+		return verifyWithSystemdKeyMaterial(ctx, input, material)
+	}
 	defer wipe(material.WrappingKey[:])
 	decoded, cleanup, err := openAndValidateKeyMaterialIn(ctx, input, &material, os.TempDir(), "verify")
 	if cleanup != nil {
@@ -140,6 +149,9 @@ func VerifyWithKeyMaterial(ctx context.Context, input string, material KeyMateri
 // RestoreWithKeyMaterial authenticates a version 2 package and restores it
 // into a new directory using the same safety state transitions as Restore.
 func RestoreWithKeyMaterial(ctx context.Context, input, dataDir string, material KeyMaterial) (Info, error) {
+	if material.ProviderKind == linuxSystemdCredentialKind {
+		return restoreWithSystemdKeyMaterial(ctx, input, dataDir, material)
+	}
 	defer wipe(material.WrappingKey[:])
 	target, parent, err := validateNewRestoreTarget(dataDir)
 	if err != nil {
@@ -349,7 +361,7 @@ func validateKeyMaterial(material *KeyMaterial) error {
 	if !validProviderIdentifier(material.ProviderID, maxProviderIDBytes) {
 		return errors.New("backup key provider id is invalid")
 	}
-	if material.ProviderKind != windowsDPAPIUserKind {
+	if material.ProviderKind != windowsDPAPIUserKind || material.InstanceID != "" || material.KeyID != "" {
 		return errors.New("backup key provider kind is unsupported")
 	}
 	if material.ProviderVersion == 0 || material.ProviderVersion > maxPublicVersion {
@@ -395,5 +407,5 @@ func deriveKeyMaterialKey(material *KeyMaterial, salt []byte) ([]byte, error) {
 }
 
 func (material *KeyMaterial) reference() KeyReference {
-	return KeyReference{ID: material.ProviderID, Kind: material.ProviderKind, Version: material.ProviderVersion}
+	return KeyReference{ID: material.ProviderID, Kind: material.ProviderKind, InstanceID: material.InstanceID, KeyID: material.KeyID, Version: material.ProviderVersion}
 }

@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !linux
 
 package keyprovider
 
@@ -15,9 +15,15 @@ type PreparedVersion struct{}
 
 func Open(string) (*Store, error) { return &Store{}, nil }
 
+func OpenForInstance(string, InstanceBinding) (*Store, error) { return &Store{}, nil }
+
 func OpenExisting(string) (*Store, error) { return &Store{}, nil }
 
 func (s *Store) Ready() (bool, string) { return false, ReasonUnsupported }
+
+func (s *Store) ProviderKind() string { return "" }
+
+func (s *Store) ConfiguredReference() (Reference, bool) { return Reference{}, false }
 
 func (s *Store) PrepareVersion(context.Context, string, uint64) (*PreparedVersion, error) {
 	return nil, ErrUnavailable

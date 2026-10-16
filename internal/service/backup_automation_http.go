@@ -50,7 +50,7 @@ func (api *backupAutomationAPI) listKeyProviders(w http.ResponseWriter, r *http.
 	if !api.available(w) {
 		return
 	}
-	rows, err := api.app.store.db.QueryContext(r.Context(), `SELECT id,kind,scope,status,reason_code,active_version,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at FROM backup_key_providers ORDER BY created_at,id`)
+	rows, err := api.app.store.db.QueryContext(r.Context(), `SELECT id,kind,scope,instance_id,key_id,status,reason_code,active_version,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at FROM backup_key_providers ORDER BY created_at,id`)
 	if err != nil {
 		writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
 		return
@@ -58,7 +58,7 @@ func (api *backupAutomationAPI) listKeyProviders(w http.ResponseWriter, r *http.
 	items := make([]backupKeyProviderView, 0)
 	for rows.Next() {
 		var item backupKeyProviderView
-		if err := rows.Scan(&item.ID, &item.Kind, &item.Scope, &item.Status, &item.ReasonCode, &item.ActiveVersion, &item.Revision, &item.CreatedByAdminID, &item.UpdatedByAdminID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Kind, &item.Scope, &item.InstanceID, &item.KeyID, &item.Status, &item.ReasonCode, &item.ActiveVersion, &item.Revision, &item.CreatedByAdminID, &item.UpdatedByAdminID, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			rows.Close()
 			writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
 			return
@@ -78,11 +78,15 @@ func (api *backupAutomationAPI) listKeyProviders(w http.ResponseWriter, r *http.
 		api.decorateProvider(r.Context(), &items[index])
 	}
 	ready, reason := api.coordinator.keys.Ready()
+	configuredKind := keyprovider.KindWindowsDPAPIUser
+	if kind := api.coordinator.keys.ProviderKind(); kind != "" {
+		configuredKind = kind
+	}
 	var reasonValue *string
 	if !ready {
 		reasonValue = &reason
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "ready": api.coordinator.Ready(), "store_ready": ready, "reason_code": reasonValue})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "ready": api.coordinator.Ready(), "store_ready": ready, "configured_kind": configuredKind, "reason_code": reasonValue})
 }
 
 func (api *backupAutomationAPI) decorateProvider(ctx context.Context, item *backupKeyProviderView) {
@@ -90,9 +94,12 @@ func (api *backupAutomationAPI) decorateProvider(ctx context.Context, item *back
 		return
 	}
 	material, err := api.coordinator.keys.Resolve(ctx, item.ID, uint64(item.ActiveVersion))
-	if err == nil {
+	if err == nil && material.Kind == item.Kind && pointerTextEqual(item.InstanceID, material.InstanceID) && pointerTextEqual(item.KeyID, material.KeyID) {
 		material.Destroy()
 		return
+	}
+	if material != nil {
+		material.Destroy()
 	}
 	reason := "protected_store_invalid"
 	item.Status, item.ReasonCode = "degraded", &reason
@@ -110,12 +117,33 @@ func (api *backupAutomationAPI) createKeyProvider(w http.ResponseWriter, r *http
 		return
 	}
 	kind, ok := object["kind"].(string)
-	if !ok || kind != keyprovider.KindWindowsDPAPIUser {
+	if !ok || (kind != keyprovider.KindWindowsDPAPIUser && kind != keyprovider.KindLinuxSystemdCredentialV1) {
 		writeBackupAutomationError(w, http.StatusBadRequest, "unsupported_key_provider")
 		return
 	}
 	if ready, _ := api.coordinator.keys.Ready(); !ready {
 		writeBackupAutomationError(w, http.StatusConflict, "key_provider_unavailable")
+		return
+	}
+	if kind == keyprovider.KindLinuxSystemdCredentialV1 {
+		reference, ok := api.coordinator.keys.ConfiguredReference()
+		if !ok || reference.Kind != kind {
+			writeBackupAutomationError(w, http.StatusConflict, "key_provider_unavailable")
+			return
+		}
+		stamp := formatAccountPoolTime(api.coordinator.now().UTC())
+		_, err := api.app.store.db.ExecContext(r.Context(), `INSERT INTO backup_key_providers(id,kind,scope,instance_id,key_id,status,reason_code,active_version,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at) VALUES(?,?,'systemd-service',?,?,'ready',NULL,?,1,?,?,?,?)`, reference.ProviderID, reference.Kind, reference.InstanceID, reference.KeyID, reference.Version, session.AdminID, session.AdminID, stamp, stamp)
+		if err != nil {
+			writeBackupAutomationError(w, http.StatusConflict, "key_provider_binding_conflict")
+			return
+		}
+		item, err := loadBackupKeyProvider(r.Context(), api.app.store.db, reference.ProviderID)
+		if err != nil {
+			writeBackupAutomationError(w, http.StatusServiceUnavailable, "storage_unavailable")
+			return
+		}
+		api.coordinator.notify()
+		writeJSON(w, http.StatusCreated, item)
 		return
 	}
 	id, err := newBackupKeyProviderID()
@@ -177,6 +205,13 @@ func newBackupKeyProviderID() (string, error) {
 	return strings.ToLower(id), nil
 }
 
+func pointerTextEqual(value *string, material string) bool {
+	if value == nil {
+		return material == ""
+	}
+	return *value == material
+}
+
 func (api *backupAutomationAPI) rotateKeyProvider(w http.ResponseWriter, r *http.Request, session adminSession) {
 	if !api.available(w) {
 		return
@@ -204,6 +239,10 @@ func (api *backupAutomationAPI) rotateKeyProvider(w http.ResponseWriter, r *http
 	}
 	if current.Revision != expected {
 		writeBackupAutomationError(w, http.StatusConflict, "revision_conflict")
+		return
+	}
+	if current.Kind == keyprovider.KindLinuxSystemdCredentialV1 {
+		writeBackupAutomationError(w, http.StatusConflict, "key_provider_rotation_external")
 		return
 	}
 	if current.ActiveVersion >= backupMaxRevision || current.Revision >= backupMaxRevision {
@@ -291,6 +330,10 @@ func (api *backupAutomationAPI) activateKeyProviderVersion(w http.ResponseWriter
 	}
 	if current.Revision != expected || current.Revision >= backupMaxRevision {
 		writeBackupAutomationError(w, http.StatusConflict, "revision_conflict")
+		return
+	}
+	if current.Kind == keyprovider.KindLinuxSystemdCredentialV1 {
+		writeBackupAutomationError(w, http.StatusConflict, "key_provider_rotation_external")
 		return
 	}
 	material, err := api.coordinator.keys.Resolve(r.Context(), current.ID, uint64(version))
@@ -662,7 +705,7 @@ func (api *backupAutomationAPI) listRuns(w http.ResponseWriter, r *http.Request,
 		writeBackupAutomationError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	query := `SELECT id,plan_id,plan_revision,key_provider_id,key_provider_kind,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at FROM backup_runs WHERE 1=1`
+	query := `SELECT id,plan_id,plan_revision,key_provider_id,key_provider_kind,key_provider_instance_id,key_provider_key_id,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at FROM backup_runs WHERE 1=1`
 	args := []any{}
 	if planID != "" {
 		query += ` AND plan_id=?`
@@ -748,13 +791,13 @@ type backupRunScanner interface{ Scan(...any) error }
 func scanBackupRun(scanner backupRunScanner) (backupRunView, error) {
 	var item backupRunView
 	var retained int
-	err := scanner.Scan(&item.ID, &item.PlanID, &item.PlanRevision, &item.KeyProviderID, &item.KeyProviderKind, &item.KeyProviderVersion, &item.TriggerKind, &item.RequestedByAdminID, &item.ScheduledFor, &item.StartedAt, &item.FinishedAt, &item.Status, &item.PackageName, &item.PackageSize, &retained, &item.PackageDeletedAt, &item.VerifiedAt, &item.RehearsalStatus, &item.RehearsedAt, &item.ErrorCode, &item.CreatedAt)
+	err := scanner.Scan(&item.ID, &item.PlanID, &item.PlanRevision, &item.KeyProviderID, &item.KeyProviderKind, &item.KeyProviderInstanceID, &item.KeyProviderKeyID, &item.KeyProviderVersion, &item.TriggerKind, &item.RequestedByAdminID, &item.ScheduledFor, &item.StartedAt, &item.FinishedAt, &item.Status, &item.PackageName, &item.PackageSize, &retained, &item.PackageDeletedAt, &item.VerifiedAt, &item.RehearsalStatus, &item.RehearsedAt, &item.ErrorCode, &item.CreatedAt)
 	item.PackageRetained = retained == 1
 	return item, err
 }
 
 func latestBackupRun(ctx context.Context, db *sql.DB, planID string) (backupRunView, error) {
-	return scanBackupRun(db.QueryRowContext(ctx, `SELECT id,plan_id,plan_revision,key_provider_id,key_provider_kind,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at FROM backup_runs WHERE plan_id=? ORDER BY started_at DESC,id DESC LIMIT 1`, planID))
+	return scanBackupRun(db.QueryRowContext(ctx, `SELECT id,plan_id,plan_revision,key_provider_id,key_provider_kind,key_provider_instance_id,key_provider_key_id,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at FROM backup_runs WHERE plan_id=? ORDER BY started_at DESC,id DESC LIMIT 1`, planID))
 }
 
 func backupPlanPatchKeys(object map[string]any) bool {

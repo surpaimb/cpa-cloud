@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cpacloud.local/server/internal/keyprovider"
 )
 
 func TestBackupKeyProviderIDUsesProtectedStoreAlphabet(t *testing.T) {
@@ -159,5 +161,33 @@ func TestBackupAutomationNilCoordinatorRegistersFailClosedRoutes(t *testing.T) {
 	if errorObject["code"] != "backup_automation_unavailable" {
 		encoded, _ := json.Marshal(envelope)
 		t.Fatalf("unexpected error envelope: %s", encoded)
+	}
+}
+
+func TestLinuxSystemdBackupProviderBindsConfiguredReferenceAndRejectsRotation(t *testing.T) {
+	fixture := newBackupAutomationFixture(t, true)
+	reference := keyprovider.Reference{ProviderID: "bkp_linux", Kind: keyprovider.KindLinuxSystemdCredentialV1, InstanceID: "01234567-89ab-cdef-0123-456789abcdef", KeyID: "backup-key", Version: 4}
+	fixture.keys.configured = &reference
+	for index := range fixture.keys.configuredKey {
+		fixture.keys.configuredKey[index] = byte(index + 1)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /admin/api/v1/sessions", fixture.app.login)
+	registerBackupAutomationHandlers(fixture.app, fixture.worker, mux)
+	server := httptest.NewServer(requestMiddleware(mux))
+	defer server.Close()
+	cookie, csrf := loginTestAdmin(t, server.URL)
+	response := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/backups/key-providers", `{"kind":"linux-systemd-credential-v1"}`, cookie, csrf, server.URL)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", response.StatusCode, readBody(response))
+	}
+	var provider backupKeyProviderView
+	decodeResponse(t, response, &provider)
+	if provider.ID != reference.ProviderID || provider.Kind != reference.Kind || provider.Scope != keyprovider.ScopeSystemdService || provider.InstanceID == nil || *provider.InstanceID != reference.InstanceID || provider.KeyID == nil || *provider.KeyID != reference.KeyID || provider.ActiveVersion != int64(reference.Version) {
+		t.Fatalf("provider=%+v", provider)
+	}
+	response = requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/backups/key-providers/"+provider.ID+"/rotate", `{"expected_revision":1}`, cookie, csrf, server.URL)
+	if response.StatusCode != http.StatusConflict || !strings.Contains(readBody(response), "key_provider_rotation_external") {
+		t.Fatalf("rotate status=%d", response.StatusCode)
 	}
 }

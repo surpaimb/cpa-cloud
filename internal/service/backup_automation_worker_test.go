@@ -18,9 +18,11 @@ import (
 )
 
 type fakeBackupKeyStore struct {
-	mu       sync.Mutex
-	ready    bool
-	versions map[string]map[uint64][32]byte
+	mu            sync.Mutex
+	ready         bool
+	versions      map[string]map[uint64][32]byte
+	configured    *keyprovider.Reference
+	configuredKey [32]byte
 }
 
 type fakePreparedKey struct {
@@ -42,6 +44,20 @@ func (s *fakeBackupKeyStore) Ready() (bool, string) {
 	return false, keyprovider.ReasonUnsupported
 }
 
+func (s *fakeBackupKeyStore) ProviderKind() string {
+	if s.configured != nil {
+		return s.configured.Kind
+	}
+	return keyprovider.KindWindowsDPAPIUser
+}
+
+func (s *fakeBackupKeyStore) ConfiguredReference() (keyprovider.Reference, bool) {
+	if s.configured != nil {
+		return *s.configured, true
+	}
+	return keyprovider.Reference{}, false
+}
+
 func (s *fakeBackupKeyStore) PrepareVersion(_ context.Context, id string, version uint64) (backupPreparedKeyVersion, error) {
 	if !s.ready {
 		return nil, keyprovider.ErrUnavailable
@@ -56,6 +72,9 @@ func (s *fakeBackupKeyStore) PrepareVersion(_ context.Context, id string, versio
 func (s *fakeBackupKeyStore) Resolve(_ context.Context, id string, version uint64) (*keyprovider.Material, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.configured != nil && s.configured.ProviderID == id && s.configured.Version == version {
+		return &keyprovider.Material{ProviderID: id, Kind: s.configured.Kind, InstanceID: s.configured.InstanceID, KeyID: s.configured.KeyID, Version: version, Key: s.configuredKey}, nil
+	}
 	versions := s.versions[id]
 	key, ok := versions[version]
 	if !ok {

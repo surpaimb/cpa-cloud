@@ -33,6 +33,8 @@ type backupPreparedKeyVersion interface {
 
 type backupKeyStore interface {
 	Ready() (bool, string)
+	ProviderKind() string
+	ConfiguredReference() (keyprovider.Reference, bool)
 	PrepareVersion(context.Context, string, uint64) (backupPreparedKeyVersion, error)
 	Resolve(context.Context, string, uint64) (*keyprovider.Material, error)
 	DiscardVersion(context.Context, string, uint64) error
@@ -41,6 +43,10 @@ type backupKeyStore interface {
 type systemBackupKeyStore struct{ store *keyprovider.Store }
 
 func (s systemBackupKeyStore) Ready() (bool, string) { return s.store.Ready() }
+func (s systemBackupKeyStore) ProviderKind() string  { return s.store.ProviderKind() }
+func (s systemBackupKeyStore) ConfiguredReference() (keyprovider.Reference, bool) {
+	return s.store.ConfiguredReference()
+}
 
 func (s systemBackupKeyStore) PrepareVersion(ctx context.Context, id string, version uint64) (backupPreparedKeyVersion, error) {
 	return s.store.PrepareVersion(ctx, id, version)
@@ -55,19 +61,21 @@ func (s systemBackupKeyStore) DiscardVersion(ctx context.Context, id string, ver
 }
 
 type backupAutomationClaim struct {
-	RunID            string
-	PlanID           string
-	PlanRevision     int64
-	ProviderID       string
-	ProviderKind     string
-	ProviderVersion  int64
-	TriggerKind      string
-	RequestedByAdmin *string
-	RetentionCount   int64
-	RehearsalEnabled bool
-	ScheduledFor     time.Time
-	StartedAt        time.Time
-	PackageName      string
+	RunID              string
+	PlanID             string
+	PlanRevision       int64
+	ProviderID         string
+	ProviderKind       string
+	ProviderInstanceID string
+	ProviderKeyID      string
+	ProviderVersion    int64
+	TriggerKind        string
+	RequestedByAdmin   *string
+	RetentionCount     int64
+	RehearsalEnabled   bool
+	ScheduledFor       time.Time
+	StartedAt          time.Time
+	PackageName        string
 }
 
 type backupAutomationCoordinator struct {
@@ -118,7 +126,11 @@ func newBackupAutomationCoordinator(ctx context.Context, app *App, cfg BackupAut
 	if err != nil {
 		return nil, err
 	}
-	keys, err := keyprovider.Open(providerPath)
+	binding, err := backupKeyProviderInstanceBinding(app.cfg)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := keyprovider.OpenForInstance(providerPath, binding)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +208,7 @@ func (c *backupAutomationCoordinator) recoverKeyProviderOrphansLocked(ctx contex
 	if !ready {
 		return nil
 	}
-	rows, err := c.app.store.db.QueryContext(ctx, `SELECT id,status,reason_code,active_version FROM backup_key_providers WHERE status='degraded' AND reason_code IN ('provisioning_interrupted','rotation_interrupted') ORDER BY id`)
+	rows, err := c.app.store.db.QueryContext(ctx, `SELECT id,status,reason_code,active_version FROM backup_key_providers WHERE kind='windows-dpapi-user' AND status='degraded' AND reason_code IN ('provisioning_interrupted','rotation_interrupted') ORDER BY id`)
 	if err != nil {
 		return err
 	}
@@ -332,21 +344,25 @@ func (c *backupAutomationCoordinator) Ready() bool {
 	if ready, _ := c.keys.Ready(); !ready {
 		return false
 	}
-	rows, err := c.app.store.db.QueryContext(context.Background(), `SELECT id,active_version FROM backup_key_providers WHERE status='ready' ORDER BY id`)
+	rows, err := c.app.store.db.QueryContext(context.Background(), `SELECT id,kind,instance_id,key_id,active_version FROM backup_key_providers WHERE status='ready' ORDER BY id`)
 	if err != nil {
 		return false
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id string
+		var id, kind string
+		var instanceID, keyID sql.NullString
 		var version int64
-		if err := rows.Scan(&id, &version); err != nil {
+		if err := rows.Scan(&id, &kind, &instanceID, &keyID, &version); err != nil {
 			return false
 		}
 		material, err := c.keys.Resolve(context.Background(), id, uint64(version))
-		if err == nil {
+		if err == nil && material.Kind == kind && material.InstanceID == instanceID.String && material.KeyID == keyID.String {
 			material.Destroy()
 			return true
+		}
+		if material != nil {
+			material.Destroy()
 		}
 	}
 	return false
@@ -431,7 +447,7 @@ func (c *backupAutomationCoordinator) claim(ctx context.Context, requestedPlan s
 	var interval int64
 	var rehearsal int
 	var scheduled sql.NullString
-	query := `SELECT p.id,p.revision,p.interval_seconds,p.retention_count,p.rehearsal_enabled,p.next_run_at,k.id,k.kind,k.active_version
+	query := `SELECT p.id,p.revision,p.interval_seconds,p.retention_count,p.rehearsal_enabled,p.next_run_at,k.id,k.kind,COALESCE(k.instance_id,''),COALESCE(k.key_id,''),k.active_version
 		FROM backup_plans p JOIN backup_key_providers k ON k.id=p.key_provider_id
 		WHERE k.status='ready' AND NOT EXISTS(SELECT 1 FROM backup_runs WHERE status='running')`
 	args := []any{}
@@ -443,7 +459,7 @@ func (c *backupAutomationCoordinator) claim(ctx context.Context, requestedPlan s
 		args = append(args, formatAccountPoolTime(now))
 	}
 	query += ` ORDER BY p.next_run_at,p.id LIMIT 1`
-	err = conn.QueryRowContext(ctx, query, args...).Scan(&claim.PlanID, &claim.PlanRevision, &interval, &claim.RetentionCount, &rehearsal, &scheduled, &claim.ProviderID, &claim.ProviderKind, &claim.ProviderVersion)
+	err = conn.QueryRowContext(ctx, query, args...).Scan(&claim.PlanID, &claim.PlanRevision, &interval, &claim.RetentionCount, &rehearsal, &scheduled, &claim.ProviderID, &claim.ProviderKind, &claim.ProviderInstanceID, &claim.ProviderKeyID, &claim.ProviderVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -473,7 +489,7 @@ func (c *backupAutomationCoordinator) claim(ctx context.Context, requestedPlan s
 	}
 	claim.PackageName = fmt.Sprintf("cpa-cloud-%s-%s-%s.cpacb", claim.PlanID, now.Format("20060102T150405Z"), claim.RunID)
 	stamp := formatAccountPoolTime(now)
-	if _, err := conn.ExecContext(ctx, `INSERT INTO backup_runs(id,plan_id,plan_revision,key_provider_id,key_provider_kind,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,'running',?,NULL,0,NULL,NULL,'pending',NULL,NULL,?)`, claim.RunID, claim.PlanID, claim.PlanRevision, claim.ProviderID, claim.ProviderKind, claim.ProviderVersion, claim.TriggerKind, claim.RequestedByAdmin, formatAccountPoolTime(claim.ScheduledFor), stamp, claim.PackageName, stamp); err != nil {
+	if _, err := conn.ExecContext(ctx, `INSERT INTO backup_runs(id,plan_id,plan_revision,key_provider_id,key_provider_kind,key_provider_instance_id,key_provider_key_id,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,'running',?,NULL,0,NULL,NULL,'pending',NULL,NULL,?)`, claim.RunID, claim.PlanID, claim.PlanRevision, claim.ProviderID, claim.ProviderKind, optionalBackupText(claim.ProviderInstanceID), optionalBackupText(claim.ProviderKeyID), claim.ProviderVersion, claim.TriggerKind, claim.RequestedByAdmin, formatAccountPoolTime(claim.ScheduledFor), stamp, claim.PackageName, stamp); err != nil {
 		return nil, err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
@@ -481,6 +497,13 @@ func (c *backupAutomationCoordinator) claim(ctx context.Context, requestedPlan s
 	}
 	committed = true
 	return &claim, nil
+}
+
+func optionalBackupText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func nextBackupOccurrence(scheduled, now time.Time, intervalSeconds int64) time.Time {
@@ -525,7 +548,12 @@ func (c *backupAutomationCoordinator) execute(ctx context.Context, claim backupA
 		c.finishFailure(claim, ctx, "key_provider_unavailable", nil, nil, "failed", nil)
 		return
 	}
-	keyMaterial := backup.KeyMaterial{ProviderID: material.ProviderID, ProviderKind: material.Kind, ProviderVersion: material.Version}
+	if material.ProviderID != claim.ProviderID || material.Kind != claim.ProviderKind || material.InstanceID != claim.ProviderInstanceID || material.KeyID != claim.ProviderKeyID || material.Version != uint64(claim.ProviderVersion) {
+		material.Destroy()
+		c.finishFailure(claim, ctx, "key_provider_unavailable", nil, nil, "failed", nil)
+		return
+	}
+	keyMaterial := backup.KeyMaterial{ProviderID: material.ProviderID, ProviderKind: material.Kind, InstanceID: material.InstanceID, KeyID: material.KeyID, ProviderVersion: material.Version}
 	copy(keyMaterial.WrappingKey[:], material.Key[:])
 	material.Destroy()
 	defer func() {
