@@ -1318,7 +1318,11 @@ mod platform {
             workspace_identity.file,
             backup_workspace,
         )
-        .map_err(|_| SyntheticReplacementError::RecoveryConflict)?;
+        .map_err(|error| {
+            #[cfg(test)]
+            eprintln!("workspace retirement plan capture failed: {error:?}");
+            SyntheticReplacementError::RecoveryConflict
+        })?;
         revalidate_namespace(transaction)?;
         let terminal_handoff = DurableTerminalHandoff {
             journal_version: REPLACEMENT_JOURNAL_FORMAT_VERSION,

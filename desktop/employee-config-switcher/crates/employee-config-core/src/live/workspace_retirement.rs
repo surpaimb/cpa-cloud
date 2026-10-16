@@ -820,6 +820,7 @@ mod platform {
             &workspace_path,
             &plan.workspace_artifacts,
             &retirement_tx,
+            plan.backup_artifacts.len() + 1,
         )?;
         let backup_workspace_path = backup_parent_path.join(&plan.backup_workspace_name);
         let backup_exists = entry_exists(
@@ -842,6 +843,7 @@ mod platform {
                 &backup_workspace_path,
                 &plan.backup_artifacts,
                 &retirement_tx,
+                0,
             )?;
         }
 
@@ -1144,6 +1146,7 @@ mod platform {
         source_path: &Path,
         artifacts: &[RetirementArtifact],
         retirement_tx: &File,
+        start_index: usize,
     ) -> Result<(), WorkspaceRetirementError> {
         let actual = read_directory_names(source, source_path)?;
         for name in actual {
@@ -1158,11 +1161,11 @@ mod platform {
                 ));
             }
         }
-        for (index, artifact) in artifacts.iter().enumerate() {
+        for (offset, artifact) in artifacts.iter().enumerate() {
             let source_exists = entry_exists(source.as_raw_fd(), OsStr::new(&artifact.name))?;
             let quarantine_exists = entry_exists(
                 retirement_tx.as_raw_fd(),
-                OsStr::new(&quarantine_name(index)),
+                OsStr::new(&quarantine_name(start_index + offset)),
             )?;
             if source_exists && quarantine_exists {
                 return Err(WorkspaceRetirementError::RecoveryConflict(
