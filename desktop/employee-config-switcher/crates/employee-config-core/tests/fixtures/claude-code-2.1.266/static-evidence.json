@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "client": {
+    "name": "Claude Code",
+    "version": "2.1.266",
+    "platform": "win32-x64",
+    "executable_size": 218971808,
+    "executable_sha256": "d2c5f7b3b6a12819097ceb6efbce2a390157166003fcaee32dbde0e6d7b45ef7",
+    "file_version": "2.1.266.0",
+    "product_version": "2.1.266.0",
+    "authenticode_status": "Valid",
+    "signer_organization": "Anthropic, PBC"
+  },
+  "official_contract": {
+    "settings": "https://code.claude.com/docs/en/settings",
+    "environment_variables": "https://code.claude.com/docs/en/env-vars",
+    "gateway": "https://code.claude.com/docs/en/llm-gateway-connect",
+    "credential_variable": "ANTHROPIC_AUTH_TOKEN",
+    "credential_header": "Authorization: Bearer",
+    "messages_path": "/v1/messages"
+  },
+  "planner_fixture": {
+    "settings_sha256": "a0091bfb4c7c4b60bfd9c0d6f8ed441a055924cf757294fd93b5ff287ec2d4ff",
+    "model_source": "server_declared_anthropic_messages_default",
+    "employee_key_transport": "bearer"
+  },
+  "native_gate": {
+    "status": "blocked",
+    "executed": false,
+    "reason": "no_proven_os_level_filesystem_and_egress_isolation",
+    "required_boundary": "disposable_guest_with_no_host_user_mounts_and_network_disabled_except_guest_loopback"
+  }
+}

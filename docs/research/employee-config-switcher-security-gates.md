@@ -504,6 +504,18 @@ modification time in tests. Any existing `settings.json` remains a hard
 conflict, and cross-version native fixtures plus the replacement transaction
 contract remain blockers for real writes.
 
+The fixed `2.1.266` planner bytes are now pinned by a separate static evidence
+record and byte-for-byte regression. A new native run was deliberately blocked:
+the current Windows session redirects configuration paths but still uses the
+real user's OS token, has no Windows Sandbox/WSL boundary, and cannot prove
+system-enforced non-loopback egress denial. Environment variables and client
+telemetry switches are not treated as a filesystem or network sandbox. The
+required disposable-guest boundary, fixed binary identity, and exact blocker
+are recorded in
+[`claude-code-2.1.266-native-gate.md`](claude-code-2.1.266-native-gate.md).
+Until that boundary is available, no successful native Messages request,
+employee-Key header observation, or server-default selection is claimed.
+
 Gemini CLI now has a separate synthetic-root create-only projection based on
 the fixed official `v0.62.0` configuration, authentication, and content-generator
 sources. It creates only canonical same-parent `settings.json`, `.env`, and

@@ -11,6 +11,8 @@
 - OpenCode、Claude Code、Gemini CLI、Codex、Grok Build、Hermes、MiniMax Code、OpenClaw 与 Pi 的隔离合成目录 create-only 事务测试；Gemini CLI 使用固定版启动校验接受的 `gemini-api-key` 选择配合自定义网关地址，并已用固定 `@google/gemini-cli@0.62.0` 在隔离 Windows 主目录和合成回环服务上验收规划器原始字节、v1beta 路径及 `x-goog-api-key`；`GEMINI_CLI_HOME` 按用户主目录根处理并追加 `.gemini`。Claude Code、Gemini CLI、Codex、Grok Build、Hermes、MiniMax Code 与 OpenClaw 会选择服务端默认模型；Grok Build 把当前员工 Key 可见的 Responses 模型注册到普通聊天模型选择器，并用 `allowed_models` 限制该选择器，但这不会约束其内部 `web_search`、图像、subagent/fork 或 fleet 模型路径；Hermes 注册固定 `chat_completions` 的具名自定义 provider，关闭运行时 `/models` 探测，并保持 `.env`、`auth.json` 与 `SOUL.md` 不变；MiniMax Code 注册固定 `openai-responses` 的 `custom_provider`，对任何已有或无法安全检查的 `config.yaml.lock` 条目都失败关闭，并保持登录、MCP、提示词与会话状态不变；这仍只是预检，真实写入继续等待兼容的原子锁获取与完整数据目录解析；Claude Code 不改 `~/.claude.json`，Gemini CLI 不改 `trustedFolders.json`，Codex/Grok Build/Pi 不改各自的 `auth.json`，Pi 也不改 `settings.json` 或默认模型；
 - `detect_clients`、`discover_configuration`、`apply_configuration` 三条窄 IPC。
 
+Claude Code `2.1.266` 的当前新增证据仅为固定官方二进制身份、公开 schema/网关合同与规划器 fixture 的静态绑定。当前 Windows 会话不能证明真实用户目录不可达，也没有经授权的 disposable guest 与系统级非回环 egress 阻断，因此没有启动 native Claude Code；不能把环境变量重定向或历史 `claude doctor` 探针写成 native Messages、员工 Key header 或服务端默认模型验收通过。完整阻塞记录见 [`docs/research/claude-code-2.1.266-native-gate.md`](../../docs/research/claude-code-2.1.266-native-gate.md)。
+
 `apply_configuration` 当前故意失败关闭，不写真实配置。现有 create-only 引擎只服务于隔离合成根目录；既有配置替换仍需加密备份、handle-relative 路径约束、逐工具恢复与固定客户端验收后才会启用。
 
 Claude Desktop 在本预览中明确只检测、不可配置。公开的

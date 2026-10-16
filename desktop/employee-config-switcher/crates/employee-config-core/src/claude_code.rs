@@ -233,6 +233,59 @@ mod tests {
     }
 
     #[test]
+    fn fixed_2_1_266_static_fixture_matches_the_planner_and_blocked_native_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut configuration = configuration();
+        configuration.protocols[1].candidates = vec!["claude-synthetic-default".into()];
+        configuration.protocols[1].default_model = "claude-synthetic-default".into();
+        let profile = ClaudeCodeProfile::for_claude_code(
+            "http://127.0.0.1:9/v1",
+            SecretString::new("synthetic-employee-key"),
+            &configuration,
+        )
+        .unwrap();
+        let plan = plan_new_claude_code(
+            &temp.path().join("settings.json"),
+            &temp.path().join("cpa-cloud.ownership.json"),
+            &profile,
+        )
+        .unwrap();
+        let settings = include_bytes!(
+            "../tests/fixtures/claude-code-2.1.266/settings.json"
+        );
+        let evidence: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/claude-code-2.1.266/static-evidence.json"
+        ))
+        .unwrap();
+
+        assert_eq!(plan.settings.desired_bytes.as_slice(), settings);
+        assert_eq!(plan.selected_model, "claude-synthetic-default");
+        assert_eq!(
+            hex::encode(Sha256::digest(settings)),
+            evidence["planner_fixture"]["settings_sha256"]
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(evidence["client"]["version"], "2.1.266");
+        assert_eq!(
+            evidence["client"]["executable_sha256"],
+            "d2c5f7b3b6a12819097ceb6efbce2a390157166003fcaee32dbde0e6d7b45ef7"
+        );
+        assert_eq!(evidence["native_gate"]["status"], "blocked");
+        assert_eq!(evidence["native_gate"]["executed"], false);
+
+        let document: serde_json::Value = serde_json::from_slice(settings).unwrap();
+        assert_eq!(document["model"], "claude-synthetic-default");
+        assert_eq!(document["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:9");
+        assert_eq!(
+            document["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "synthetic-employee-key"
+        );
+        assert_eq!(document["env"].as_object().unwrap().len(), 2);
+        assert_eq!(document.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
     fn create_only_transaction_leaves_claude_login_state_untouched() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join(".claude")).unwrap();
