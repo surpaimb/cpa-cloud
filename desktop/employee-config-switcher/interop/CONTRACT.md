@@ -75,6 +75,29 @@ The dedicated run may remain FAIL/NO-GO; field classification is not acceptance.
 
 ### Narrow fixture adaptation after PR82
 
+The subsequent bounded diagnostic increment leaves interoperability rejection
+unchanged. Historical head `70f10a493abaf3404bc37045c1ccb3ca4460b2ad` passed
+create/retry plus independent libsecret verification but failed reopen with only
+`fixture-check-failed` in [run 38929384937](https://github.com/surpaimb/cpa-cloud/actions/runs/38929384937).
+That single label did not establish the root cause (E's P2 review observation).
+F's P3 ordering observation is addressed by wrapping a successfully decoded
+value in `Zeroizing` immediately, before the fixed `decode-ok` output; only the
+error branch emits `decode-failed`. Static ordering guards cover this boundary.
+
+For the existing reopen invocation only, fixed stage statuses cover UID/root
+metadata/cgroup/HOME/bus, each reference/Key oracle's existing metadata/read and
+kind/owner/mode/link-count/length predicates, lock/session setup, reference
+validation, search/attributes, existing GetSecret fields, envelope/open outcome
+and final constant-time Key comparison. Only `ok`, `failed`, `not-reached` and
+the existing fixed native enums are emitted. Ordinary assertion unwinding dumps
+the final stage map; failed stderr writes during that dump are ignored, not a
+second panic. Abrupt process abort/kill is not claimed to run destructors.
+The parent forwards only a source-defined allowlist. No UID, path, attribute
+value, actual length, Key, envelope, digest, raw MIME or D-Bus error is reported.
+There are no additional service calls, secret-file reads, retries, replacement
+Keys or production decisions. Oracle rejection requirements, scanner, isolation
+and cleanup remain unchanged; a further dedicated failure stops the task.
+
 Historical PR81 head `1304448c3863d5598552d2751e47fc108421522a` and
 [run 38921390424](https://github.com/surpaimb/cpa-cloud/actions/runs/38921390424)
 remain FAILURE evidence: same-response diagnostics observed exact `text/plain`,

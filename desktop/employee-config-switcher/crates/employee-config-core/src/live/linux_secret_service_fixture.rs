@@ -6,12 +6,128 @@ thread_local! {
     // Enabled only after the explicit native test has checked its fixture root,
     // UID, cgroup and private bus address. Normal contract tests have no oracle.
     static DIAGNOSTIC_ROOT: RefCell<Option<File>> = const { RefCell::new(None) };
+    static REOPEN_TRACE: RefCell<Option<BTreeMap<&'static str, &'static str>>> = const { RefCell::new(None) };
+}
+
+const REOPEN_STAGES: &[&str] = &[
+    "uid",
+    "root-path",
+    "root-metadata",
+    "root-kind",
+    "root-owner",
+    "root-mode",
+    "cgroup",
+    "home",
+    "bus-address",
+    "diagnostic-root",
+    "approval",
+    "lock-setup",
+    "bus-connect",
+    "session-open",
+    "session-check",
+    "reference-build",
+    "reference",
+    "lock-open",
+    "search",
+    "search-attributes",
+    "attributes",
+    "get-decode",
+    "get-session",
+    "get-parameters",
+    "get-type",
+    "get-length",
+    "get-envelope",
+    "envelope",
+    "open-outcome",
+    "key-compare",
+    "reference-oracle-metadata",
+    "reference-oracle-kind",
+    "reference-oracle-owner",
+    "reference-oracle-mode",
+    "reference-oracle-links",
+    "reference-oracle-length",
+    "reference-oracle-read",
+    "key-oracle-metadata",
+    "key-oracle-kind",
+    "key-oracle-owner",
+    "key-oracle-mode",
+    "key-oracle-links",
+    "key-oracle-length",
+    "key-oracle-read",
+];
+
+struct ReopenTrace;
+impl ReopenTrace {
+    fn start(enabled: bool) -> Self {
+        REOPEN_TRACE.with(|trace| {
+            *trace.borrow_mut() = enabled.then(|| {
+                REOPEN_STAGES
+                    .iter()
+                    .map(|stage| (*stage, "not-reached"))
+                    .collect()
+            })
+        });
+        Self
+    }
+}
+impl Drop for ReopenTrace {
+    fn drop(&mut self) {
+        // Final fixed statuses survive an ordinary assertion unwind. Ignore
+        // stderr I/O failure instead of panicking again during unwinding.
+        let trace = REOPEN_TRACE.with(|trace| trace.borrow_mut().take());
+        if let Some(trace) = trace {
+            for (stage, status) in trace {
+                let _ = writeln!(io::stderr().lock(), "reopen-{stage}-{status}");
+            }
+        }
+    }
+}
+
+pub(super) fn stage(name: &'static str, ok: bool) {
+    REOPEN_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            if let Some(status) = trace.get_mut(name) {
+                *status = if ok { "ok" } else { "failed" };
+            }
+        }
+    });
+}
+
+fn stage_check(name: &'static str, ok: bool) {
+    stage(name, ok);
+    check(ok);
+}
+
+#[test]
+fn reopen_trace_defaults_to_not_reached_and_uses_only_fixed_statuses() {
+    let trace = ReopenTrace::start(true);
+    REOPEN_TRACE.with(|state| {
+        let state = state.borrow();
+        let state = state.as_ref().unwrap();
+        assert_eq!(state.len(), REOPEN_STAGES.len());
+        assert!(state.values().all(|value| *value == "not-reached"));
+    });
+    stage("reference-oracle-mode", false);
+    stage("root-path", true);
+    stage("not-a-stage", true);
+    REOPEN_TRACE.with(|state| {
+        let state = state.borrow();
+        let state = state.as_ref().unwrap();
+        assert_eq!(state["reference-oracle-mode"], "failed");
+        assert_eq!(state["root-path"], "ok");
+        assert_eq!(state["key-compare"], "not-reached");
+        assert_eq!(state.len(), REOPEN_STAGES.len());
+    });
+    drop(trace);
+    REOPEN_TRACE.with(|state| assert!(state.borrow().is_none()));
 }
 
 fn enable_diagnostics(work: &Path) {
+    stage("diagnostic-root", false);
     let approval =
         open_approved_directory(work, false).unwrap_or_else(|_| panic!("diagnostic-root-failed"));
     DIAGNOSTIC_ROOT.with(|root| *root.borrow_mut() = Some(approval.directory));
+    stage("diagnostic-root", true);
 }
 
 fn write_sample(directory: &File, name: &str, value: &[u8]) -> io::Result<()> {
@@ -214,6 +330,7 @@ fn diagnostic_envelope_categories_use_original_send_not_response_oracle() {
 }
 
 pub(super) fn decoded_result(ok: bool) {
+    stage("get-decode", ok);
     DIAGNOSTIC_ROOT.with(|root| {
         if root.borrow().is_some() {
             eprintln!(
@@ -247,11 +364,17 @@ pub(super) fn returned_secret(
         for category in metadata_categories(session_matches, parameters, content_type, value) {
             eprintln!("{category}");
         }
-        let original = sent_envelope(directory);
-        eprintln!(
-            "{}",
-            envelope_category(value, original.as_deref().map(|bytes| bytes.as_slice()))
+        stage("get-session", session_matches);
+        stage("get-parameters", parameters.is_empty());
+        stage(
+            "get-type",
+            matches!(content_type, CONTENT_TYPE | "text/plain"),
         );
+        stage("get-length", value.len() == ENVELOPE_BYTES);
+        let original = sent_envelope(directory);
+        let category = envelope_category(value, original.as_deref().map(|bytes| bytes.as_slice()));
+        stage("get-envelope", category == "native-envelope-valid");
+        eprintln!("{}", category);
     });
 }
 
@@ -275,41 +398,96 @@ fn check(value: bool) {
     assert!(value, "fixture-check-failed");
 }
 
-fn oracle(path: &Path, length: usize) -> Vec<u8> {
-    let info = fs::symlink_metadata(path).expect("oracle-metadata-failed");
-    check(info.is_file() && info.uid() == unsafe { libc::geteuid() });
+enum OracleRole {
+    Reference,
+    Key,
+}
+
+fn oracle(path: &Path, length: usize, role: OracleRole) -> Vec<u8> {
+    let stages = match role {
+        OracleRole::Reference => [
+            "reference-oracle-metadata",
+            "reference-oracle-kind",
+            "reference-oracle-owner",
+            "reference-oracle-mode",
+            "reference-oracle-links",
+            "reference-oracle-length",
+            "reference-oracle-read",
+        ],
+        OracleRole::Key => [
+            "key-oracle-metadata",
+            "key-oracle-kind",
+            "key-oracle-owner",
+            "key-oracle-mode",
+            "key-oracle-links",
+            "key-oracle-length",
+            "key-oracle-read",
+        ],
+    };
+    let metadata = fs::symlink_metadata(path);
+    stage(stages[0], metadata.is_ok());
+    let info = metadata.unwrap_or_else(|_| panic!("oracle-metadata-failed"));
+    let owner_matches = info.uid() == unsafe { libc::geteuid() };
+    for (name, ok) in stages[1..6].iter().zip([
+        info.is_file(),
+        owner_matches,
+        info.mode() & 0o777 == 0o600,
+        info.nlink() == 1,
+        info.len() == length as u64,
+    ]) {
+        stage(name, ok);
+    }
+    check(info.is_file() && owner_matches);
     check(info.mode() & 0o777 == 0o600 && info.nlink() == 1 && info.len() == length as u64);
-    fs::read(path).expect("oracle-read-failed")
+    let result = fs::read(path);
+    stage(stages[6], result.is_ok());
+    result.unwrap_or_else(|_| panic!("oracle-read-failed"))
 }
 
 #[test]
 #[ignore = "requires the explicitly invoked isolated Linux interop fixture"]
 fn volatile_collection_interop() {
+    let mode = std::env::var("CPA_SS_FIXTURE_MODE").expect("fixture-mode-required");
+    let _trace = ReopenTrace::start(mode == "reopen");
+    stage("root-path", false);
     let work =
         PathBuf::from(std::env::var_os("CPA_SS_FIXTURE_ROOT").expect("fixture-root-required"));
-    let mode = std::env::var("CPA_SS_FIXTURE_MODE").expect("fixture-mode-required");
     let uid = unsafe { libc::geteuid() };
-    check(uid != 0 && work.is_absolute());
-    let info = fs::symlink_metadata(&work).expect("fixture-root-metadata");
+    stage_check("uid", uid != 0);
+    stage_check("root-path", work.is_absolute());
+    let metadata = fs::symlink_metadata(&work);
+    stage("root-metadata", metadata.is_ok());
+    let info = metadata.unwrap_or_else(|_| panic!("fixture-root-metadata"));
+    stage("root-kind", info.is_dir());
+    stage("root-owner", info.uid() == uid);
+    stage("root-mode", info.mode() & 0o777 == 0o700);
     check(info.is_dir() && info.uid() == uid && info.mode() & 0o777 == 0o700);
-    check(
+    stage("cgroup", false);
+    stage_check(
+        "cgroup",
         fs::read_to_string("/proc/self/cgroup")
             .expect("fixture-cgroup")
             .contains("cpa-ss-preflight.service"),
     );
-    check(
+    stage_check(
+        "bus-address",
         std::env::var("DBUS_SESSION_BUS_ADDRESS").ok()
             == Some(format!("unix:path={}", work.join("runtime/bus").display())),
     );
-    check(std::env::var_os("HOME") == Some(work.join("home").into_os_string()));
+    stage_check(
+        "home",
+        std::env::var_os("HOME") == Some(work.join("home").into_os_string()),
+    );
     enable_diagnostics(&work);
     let transaction = ReplacementTransactionId::from_bytes([0x71; 16]).expect("fixed-transaction");
+    stage("approval", false);
     let approval = if mode == "create" {
         SyntheticSecretServiceApproval::for_test_fresh(&work.join("lock"))
     } else {
         SyntheticSecretServiceApproval::for_test(&work.join("lock"))
     }
     .expect("fixture-approval-failed");
+    stage("approval", true);
     let candidate = LinuxSecretServiceRecoveryKeyProvider::for_synthetic_session(approval);
     if mode == "no-service" {
         check(matches!(
@@ -345,18 +523,33 @@ fn volatile_collection_interop() {
         check(again.reference == created.reference);
         check(verify_slices_are_equal(again.key.expose(), created.key.expose()).is_ok());
     } else {
-        let reference = RecoveryKeyReference::new(
-            PROVIDER_KIND,
-            PROVIDER_VERSION,
-            oracle(&work.join("reference.bin"), REFERENCE_BYTES),
-        )
-        .expect("oracle-reference-failed");
+        let reference_bytes = oracle(
+            &work.join("reference.bin"),
+            REFERENCE_BYTES,
+            OracleRole::Reference,
+        );
+        stage("reference-build", false);
+        let reference = RecoveryKeyReference::new(PROVIDER_KIND, PROVIDER_VERSION, reference_bytes)
+            .expect("oracle-reference-failed");
+        stage("reference-build", true);
         match mode.as_str() {
             "reopen" => {
-                let expected = Zeroizing::new(oracle(&work.join("expected.key"), KEY_BYTES));
-                match provider.open(transaction, &reference) {
+                let expected = Zeroizing::new(oracle(
+                    &work.join("expected.key"),
+                    KEY_BYTES,
+                    OracleRole::Key,
+                ));
+                let outcome = provider.open(transaction, &reference);
+                stage(
+                    "open-outcome",
+                    matches!(&outcome, RecoveryKeyOpenOutcome::Available(_)),
+                );
+                match outcome {
                     RecoveryKeyOpenOutcome::Available(key) => {
-                        check(verify_slices_are_equal(key.expose(), &expected).is_ok());
+                        stage_check(
+                            "key-compare",
+                            verify_slices_are_equal(key.expose(), &expected).is_ok(),
+                        );
                     }
                     _ => panic!("fixture-reopen-failed"),
                 }

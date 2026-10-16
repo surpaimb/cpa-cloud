@@ -141,6 +141,35 @@ class FixtureTests(unittest.TestCase):
         self.assertLess(cleanup.index("stop(process)"), cleanup.index('print("OWNED_PROCESSES_STOPPED"'))
         self.assertLess(cleanup.index('print("OWNED_PROCESSES_STOPPED"'), cleanup.index("require(scan(work, outputs)"))
 
+    def test_decode_success_is_guarded_before_any_diagnostic(self):
+        source = (HERE.parent / "crates/employee-config-core/src/live/linux_secret_service.rs").read_text()
+        transport = source[source.index("impl SecretServiceBackend for DbusBackend"):source.index("fn validate_secret_transfer(")]
+        get = transport[transport.index("    fn get_secret("):transport.index("    fn delete_item(")]
+        self.assertNotIn("decoded.is_ok()", get)
+        self.assertIn("decoded.map_err(|error| {", get)
+        self.assertIn("#[cfg(test)]\n            real_fixture::decoded_result(false);", get)
+        guarded = get.index("let value = Zeroizing::new(value);")
+        self.assertLess(guarded, get.index("real_fixture::decoded_result(true)"))
+        self.assertLess(guarded, get.index("real_fixture::returned_secret"))
+        after_decode = get[get.index("Self::classify(&error)"):guarded]
+        self.assertNotIn("real_fixture::", after_decode)
+
+    def test_reopen_trace_is_fixed_complete_and_reads_no_extra_oracles(self):
+        source = (HERE.parent / "crates/employee-config-core/src/live/linux_secret_service_fixture.rs").read_text()
+        stages = source[source.index("const REOPEN_STAGES:"):source.index("struct ReopenTrace;")]
+        self.assertEqual(set(re.findall(r'"([a-z-]+)"', stages)), set(module.REOPEN_STAGES))
+        self.assertIn('(*stage, "not-reached")', source)
+        self.assertIn("impl Drop for ReopenTrace", source)
+        self.assertIn('ReopenTrace::start(mode == "reopen")', source)
+        self.assertEqual(source.count("fs::read(path)"), 1)
+        self.assertEqual(source.count("let original = sent_envelope(directory);"), 1)
+        self.assertNotIn("backend.search", source)
+        self.assertNotIn("backend.get_secret", source)
+        for label in module.REOPEN_LABELS:
+            self.assertEqual(module.diagnostic_labels((label + "\n").encode()), (label,))
+        self.assertEqual(module.diagnostic_labels(b"arbitrary-path uid=123 raw-value unknown-mime"), ())
+        self.assertEqual(module.diagnostic_labels(b"reopen-key-oracle-length-148"), ())
+
 
 if __name__ == "__main__":
     unittest.main()

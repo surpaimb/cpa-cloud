@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -25,6 +26,16 @@ MARKERS = ("ISOLATION_OK", "PRIVATE_BUS_SERVICE_UID_PID_OK", "CREATE_AND_LIBSECR
 FAILURES = ("fixture-binary-path", "fixture-binary-missing", "fixture-bus-exited", "fixture-bus-unavailable",
             "fixture-daemon-exited", "fixture-identity-failed", "fixture-case-failed", "fixture-oracle-invalid",
             "fixture-secret-output", "fixture-child-remains", "fixture-scan-incomplete")
+REOPEN_STAGES = ("uid", "root-path", "root-metadata", "root-kind", "root-owner", "root-mode",
+                 "cgroup", "home", "bus-address", "diagnostic-root", "approval", "lock-setup",
+                 "bus-connect", "session-open", "session-check", "reference-build", "reference",
+                 "lock-open", "search", "search-attributes", "attributes", "get-decode",
+                 "get-session", "get-parameters", "get-type", "get-length", "get-envelope",
+                 "envelope", "open-outcome", "key-compare") + tuple(
+                     role + "-oracle-" + field for role in ("reference", "key")
+                     for field in ("metadata", "kind", "owner", "mode", "links", "length", "read"))
+REOPEN_LABELS = tuple("reopen-" + stage + "-" + status for stage in REOPEN_STAGES
+                      for status in ("ok", "failed", "not-reached"))
 PANICS = ("fixture-check-failed", "fixture-root-required", "fixture-mode-required", "fixture-root-metadata",
           "fixture-cgroup", "fixture-approval-failed", "fixture-provider-failed", "fixture-create-failed",
           "fixture-retry-failed", "oracle-create-failed", "oracle-write-failed", "oracle-flush-failed",
@@ -36,7 +47,13 @@ PANICS = ("fixture-check-failed", "fixture-root-required", "fixture-mode-require
           "native-session-match", "native-session-mismatch", "native-parameters-empty", "native-parameters-nonempty",
           "native-type-octet-stream", "native-type-text-plain", "native-type-empty", "native-type-other",
           "native-length-exact", "native-length-short", "native-length-long", "native-envelope-valid",
-          "native-envelope-identity", "native-envelope-format", "native-envelope-checksum", "native-envelope-not-checked")
+          "native-envelope-identity", "native-envelope-format", "native-envelope-checksum", "native-envelope-not-checked") + REOPEN_LABELS
+
+
+def diagnostic_labels(output):
+    # Return source-owned labels only, never arbitrary child output or values.
+    tokens = set(re.findall(rb"[a-z][a-z-]*", output))
+    return tuple(label for label in PANICS if label.encode() in tokens)
 
 
 def secret_forms(value):
@@ -140,9 +157,8 @@ def inside(metadata_path):
         if result.returncode != 0 or expected not in result.stdout:
             # Both label and exit category are from fixed local source, not output.
             print("CASE_FAILURE " + label, flush=True)
-            for panic in PANICS:
-                if panic.encode() in result.stdout:
-                    print("FIXTURE_DIAGNOSTIC " + panic, flush=True)
+            for panic in diagnostic_labels(result.stdout):
+                print("FIXTURE_DIAGNOSTIC " + panic, flush=True)
             raise base.PreflightFailure("fixture-case-failed")
 
     def stop(process):
