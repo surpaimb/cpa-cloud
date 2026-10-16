@@ -35,7 +35,7 @@ const PENDING_SLOTS_READY_FILE: &str = ".journal-pending-ready";
 const DESIRED_STAGE: &str = "desired.stage";
 const ROLLBACK_STAGE: &str = "rollback.stage";
 const ROLLBACK_STAGE_PENDING: &str = "rollback.stage.pending";
-const FORMAT_VERSION: u32 = 1;
+pub(crate) const REPLACEMENT_JOURNAL_FORMAT_VERSION: u32 = 1;
 const MAX_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_JOURNAL_BYTES: usize = 128 * 1024;
 const MAX_EVENTS: usize = 24;
@@ -141,7 +141,7 @@ impl DurableTerminalHandoff {
         workspace_inode: u64,
     ) -> Self {
         Self {
-            journal_version: FORMAT_VERSION,
+            journal_version: REPLACEMENT_JOURNAL_FORMAT_VERSION,
             outcome,
             transaction_id,
             root_device,
@@ -418,6 +418,35 @@ mod platform {
         state: JournalState,
     }
 
+    #[cfg(test)]
+    static BEFORE_TERMINAL_HANDOFF_REVALIDATION: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>,
+        >,
+    > = std::sync::OnceLock::new();
+
+    #[cfg(test)]
+    pub(super) fn install_before_terminal_handoff_revalidation_barrier(
+        workspace_path: PathBuf,
+        barrier: std::sync::Arc<std::sync::Barrier>,
+    ) {
+        let barriers = BEFORE_TERMINAL_HANDOFF_REVALIDATION
+            .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+        let replaced = barriers.lock().unwrap().insert(workspace_path, barrier);
+        assert!(replaced.is_none(), "test handoff barrier already installed");
+    }
+
+    #[cfg(test)]
+    fn wait_before_terminal_handoff_revalidation(workspace_path: &Path) {
+        let barriers = BEFORE_TERMINAL_HANDOFF_REVALIDATION
+            .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+        let barrier = barriers.lock().unwrap().remove(workspace_path);
+        if let Some(barrier) = barrier {
+            barrier.wait();
+            barrier.wait();
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct RawEntryState {
         device: u64,
@@ -497,7 +526,7 @@ mod platform {
         )?;
         lock_exclusive(&journal, &workspace_path.join(JOURNAL_FILE))?;
         let intent = JournalEvent::KeyCreateIntent {
-            version: FORMAT_VERSION,
+            version: REPLACEMENT_JOURNAL_FORMAT_VERSION,
             transaction_id: transaction_text(transaction_id),
             root_identity: identity(&root, &approval.root)?,
             target: target_name.clone(),
@@ -1091,7 +1120,7 @@ mod platform {
         else {
             return Err(SyntheticReplacementError::CorruptJournal);
         };
-        if *version != FORMAT_VERSION
+        if *version != REPLACEMENT_JOURNAL_FORMAT_VERSION
             || validate_target(Path::new(target)).is_err()
             || *desired_len > MAX_TARGET_BYTES
             || digest_text_invalid(desired_digest)
@@ -1260,13 +1289,16 @@ mod platform {
         {
             return Err(SyntheticReplacementError::CorruptJournal);
         }
+        #[cfg(test)]
+        wait_before_terminal_handoff_revalidation(&transaction.workspace_path);
+        revalidate_namespace(transaction)?;
         let root_identity = identity(&transaction.root, &transaction.root_path)?;
         if root_identity != transaction.state.root_identity {
             return Err(SyntheticReplacementError::RecoveryConflict);
         }
         let workspace_identity = identity(&transaction.workspace, &transaction.workspace_path)?;
         let terminal_handoff = DurableTerminalHandoff {
-            journal_version: FORMAT_VERSION,
+            journal_version: REPLACEMENT_JOURNAL_FORMAT_VERSION,
             outcome,
             transaction_id: transaction.state.transaction_id,
             root_device: root_identity.volume,
@@ -3053,6 +3085,57 @@ mod tests {
     }
 
     #[test]
+    fn terminal_handoff_refuses_a_replaced_canonical_workspace_namespace() {
+        let (root, approval) = fixture();
+        let transaction_id = transaction(0x3f);
+        let mut provider = TestProvider::new(0x3f);
+        assert!(matches!(
+            platform::replace_with_fault(
+                &approval,
+                Path::new("config.json"),
+                b"new-employee-key",
+                transaction_id,
+                &mut provider,
+                SyntheticValidation::Accept,
+                FaultPoint::AfterTerminal,
+            ),
+            Err(SyntheticReplacementError::Injected(
+                FaultPoint::AfterTerminal
+            ))
+        ));
+
+        let workspace_path = workspace(root.path(), transaction_id);
+        let detached_path = root.path().join("detached-terminal-workspace");
+        let barrier = Arc::new(Barrier::new(2));
+        platform::install_before_terminal_handoff_revalidation_barrier(
+            workspace_path.clone(),
+            Arc::clone(&barrier),
+        );
+        let worker = thread::spawn(move || {
+            let mut provider = TestProvider::new(0x3f);
+            recover_existing_synthetic(
+                &approval,
+                transaction_id,
+                &mut provider,
+                SyntheticValidation::Accept,
+            )
+        });
+
+        barrier.wait();
+        fs::rename(&workspace_path, &detached_path).unwrap();
+        fs::create_dir(&workspace_path).unwrap();
+        fs::set_permissions(&workspace_path, fs::Permissions::from_mode(0o700)).unwrap();
+        barrier.wait();
+
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(SyntheticReplacementError::RecoveryConflict)
+        ));
+        assert!(detached_path.is_dir());
+        assert!(workspace_path.is_dir());
+    }
+
+    #[test]
     fn torn_post_mutation_journal_tail_is_repaired_from_durable_pending_event() {
         for (index, validation, fault, event, outcome) in [
             (
@@ -3755,7 +3838,10 @@ mod tests {
         let root_metadata = fs::metadata(&root_path).unwrap();
         let workspace_path = workspace(&root_path, transaction_id);
         let workspace_metadata = fs::metadata(&workspace_path).unwrap();
-        assert_eq!(handoff.journal_version(), FORMAT_VERSION);
+        assert_eq!(
+            handoff.journal_version(),
+            REPLACEMENT_JOURNAL_FORMAT_VERSION
+        );
         assert_eq!(handoff.outcome(), ReplacementOutcome::Complete);
         assert_eq!(handoff.transaction_id(), transaction_id);
         assert_eq!(handoff.root_device(), root_metadata.dev());

@@ -34,9 +34,12 @@ parameters are not an alternative production constructor.
 Cleanup-journal creation consumes the handoff as one capability. Every durable
 cleanup event repeats the replacement-journal version and all existing root,
 terminal, transaction, recovery-reference and workspace bindings. Restart must
-reconstruct the same state and reject a changed prefix, cross-transaction or
-cross-workspace binding, duplicate initial journal, non-contiguous event or
-visible pending event.
+reconstruct the same state, require the currently supported replacement-journal
+version and derive the exact canonical workspace leaf from the transaction. It
+must reject a changed prefix, legacy/generic or cross-transaction workspace,
+unsupported version, duplicate initial journal, non-contiguous event or visible
+pending event. Loose legacy workspace shapes are confined to `cfg(test)`
+fixtures for the older downstream removal foundation.
 
 The completion tombstone store returns a non-serializable durable receipt only
 after the exact active record, its directory and the root have been flushed and

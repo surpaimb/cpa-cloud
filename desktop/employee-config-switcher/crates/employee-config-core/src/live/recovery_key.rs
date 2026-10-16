@@ -8,7 +8,7 @@
 use super::{
     backup::BackupKey,
     completion_tombstone::{CompletionTombstoneDurableReceipt, CompletionTombstoneRemovalReceipt},
-    linux_replacement::DurableTerminalHandoff,
+    linux_replacement::{DurableTerminalHandoff, REPLACEMENT_JOURNAL_FORMAT_VERSION},
     replacement::ReplacementPhase,
     workspace_removal::WorkspaceRemovalReceipt,
 };
@@ -272,7 +272,10 @@ pub(crate) fn valid_workspace_name(name: &str) -> bool {
         && u64::from_str_radix(parts[3], 16).is_ok_and(|value| format!("{value:x}") == parts[3])
 }
 
-fn valid_replacement_workspace_name(name: &str, transaction_id: ReplacementTransactionId) -> bool {
+pub(crate) fn valid_replacement_workspace_name(
+    name: &str,
+    transaction_id: ReplacementTransactionId,
+) -> bool {
     name == format!("tx-{}", hex::encode(transaction_id.as_bytes()))
 }
 
@@ -391,9 +394,7 @@ impl WorkspaceRemovalTarget {
         device: u64,
         inode: u64,
     ) -> Result<Self, RecoveryKeyCleanupError> {
-        if !valid_workspace_name(&workspace_name)
-            && !valid_replacement_workspace_name(&workspace_name, transaction_id)
-        {
+        if !valid_replacement_workspace_name(&workspace_name, transaction_id) {
             return Err(RecoveryKeyCleanupError::InvalidWorkspace);
         }
         Ok(Self {
@@ -554,7 +555,7 @@ impl RecoveryKeyCleanupSequence {
         if !matches!(
             terminal,
             ReplacementPhase::Complete | ReplacementPhase::RolledBack
-        ) || handoff.journal_version() == 0
+        ) || handoff.journal_version() != REPLACEMENT_JOURNAL_FORMAT_VERSION
         {
             return Err(RecoveryKeyCleanupError::InvalidTerminal);
         }
@@ -648,7 +649,7 @@ impl RecoveryKeyCleanupSequence {
         if !matches!(
             terminal,
             ReplacementPhase::Complete | ReplacementPhase::RolledBack
-        ) || replacement_journal_version == 0
+        ) || replacement_journal_version != REPLACEMENT_JOURNAL_FORMAT_VERSION
         {
             return Err(RecoveryKeyCleanupError::InvalidTerminal);
         }

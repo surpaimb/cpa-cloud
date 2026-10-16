@@ -7,7 +7,7 @@
 //! pending proof blocks recovery; absence alone is never treated as success.
 
 #[cfg(test)]
-use super::recovery_key::WorkspaceRemovalTarget;
+use super::recovery_key::{valid_replacement_workspace_name, WorkspaceRemovalTarget};
 use super::{
     recovery_key::{
         valid_workspace_name, RecoveryKeyReference, ReplacementTransactionId,
@@ -259,7 +259,8 @@ mod platform {
     where
         F: FnMut() -> Result<(), WorkspaceRemovalError>,
     {
-        let workspace_name = validate_workspace_path(root, workspace)?;
+        let workspace_name =
+            validate_workspace_path(root, workspace, authorization.transaction_id())?;
         if workspace_name != OsStr::new(authorization.workspace_name()) {
             return Err(WorkspaceRemovalError::InvalidWorkspace(
                 workspace.to_path_buf(),
@@ -653,7 +654,7 @@ mod platform {
             || proof.workspace_identity.device != authorization.workspace_device()
             || proof.workspace_identity.inode != authorization.workspace_inode()
             || proof.workspace_parent_identity != transaction_identity
-            || !valid_workspace_name(&proof.workspace_name)
+            || !valid_removal_workspace_name(&proof.workspace_name, authorization.transaction_id())
         {
             return Err(WorkspaceRemovalError::Corrupt);
         }
@@ -715,6 +716,7 @@ mod platform {
     fn validate_workspace_path<'a>(
         root: &Path,
         workspace: &'a Path,
+        transaction_id: ReplacementTransactionId,
     ) -> Result<&'a OsStr, WorkspaceRemovalError> {
         let name = workspace
             .file_name()
@@ -722,12 +724,32 @@ mod platform {
         let text = name
             .to_str()
             .ok_or_else(|| WorkspaceRemovalError::InvalidWorkspace(workspace.to_path_buf()))?;
-        if workspace != root.join(TRANSACTION_DIRECTORY).join(name) || !valid_workspace_name(text) {
+        if workspace != root.join(TRANSACTION_DIRECTORY).join(name)
+            || !valid_removal_workspace_name(text, transaction_id)
+        {
             return Err(WorkspaceRemovalError::InvalidWorkspace(
                 workspace.to_path_buf(),
             ));
         }
         Ok(name)
+    }
+
+    fn valid_removal_workspace_name(
+        name: &str,
+        transaction_id: ReplacementTransactionId,
+    ) -> bool {
+        if valid_workspace_name(name) {
+            return true;
+        }
+        #[cfg(test)]
+        {
+            valid_replacement_workspace_name(name, transaction_id)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = transaction_id;
+            false
+        }
     }
 
     fn acquire_transaction_lock(

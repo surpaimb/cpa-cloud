@@ -813,22 +813,24 @@ mod platform {
                 }
             }
             let phase = phase_from_index(last.sequence).ok_or(CleanupJournalError::Corrupt)?;
+            let transaction_id = parse_transaction(&transaction_text)?;
+            let workspace_target = WorkspaceRemovalTarget::from_durable(
+                DurablePhaseEvidence(()),
+                transaction_id,
+                first.workspace_name.clone(),
+                first.workspace_device,
+                first.workspace_inode,
+            )?;
             sequences.push(RecoveryKeyCleanupSequence::from_durable_phase(
                 DurablePhaseEvidence(()),
                 phase,
                 terminal_from_text(&first.terminal)?,
-                parse_transaction(&transaction_text)?,
+                transaction_id,
                 parse_reference(first)?,
                 first.replacement_journal_version,
                 first.root_identity.device,
                 first.root_identity.inode,
-                WorkspaceRemovalTarget::from_durable(
-                    DurablePhaseEvidence(()),
-                    parse_transaction(&transaction_text)?,
-                    first.workspace_name.clone(),
-                    first.workspace_device,
-                    first.workspace_inode,
-                )?,
+                workspace_target,
             )?);
         }
 
@@ -1211,8 +1213,9 @@ mod tests {
         RecoveryKeyReference::new("test-provider", 1, b"opaque-cleanup-reference".to_vec()).unwrap()
     }
 
+    #[cfg(target_os = "linux")]
     fn workspace_name(suffix: u8) -> String {
-        format!("tx-1-{:x}-0", suffix as u128 + 1)
+        format!("tx-{}", transaction_hex(transaction(suffix)))
     }
 
     #[cfg(target_os = "linux")]
@@ -1236,11 +1239,16 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn workspace_target(workspace: &Path) -> WorkspaceRemovalTarget {
         let metadata = fs::metadata(workspace).unwrap();
-        WorkspaceRemovalTarget::for_test(
-            workspace.file_name().unwrap().to_str().unwrap(),
+        let workspace_name = workspace.file_name().unwrap().to_str().unwrap();
+        let transaction_id = parse_transaction(workspace_name.strip_prefix("tx-").unwrap()).unwrap();
+        WorkspaceRemovalTarget::from_durable(
+            DurablePhaseEvidence(()),
+            transaction_id,
+            workspace_name.to_owned(),
             metadata.dev(),
             metadata.ino(),
         )
+        .unwrap()
     }
 
     #[cfg(target_os = "linux")]
@@ -1442,6 +1450,109 @@ mod tests {
             Err(CleanupJournalError::Cleanup(_))
         ));
         assert_eq!(journal.phase(), RecoveryKeyCleanupPhase::TerminalRecorded);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn production_reload_binding_refuses_legacy_workspace_and_unknown_version() {
+        let transaction_id = transaction(0x64);
+        assert!(matches!(
+            WorkspaceRemovalTarget::from_durable(
+                DurablePhaseEvidence(()),
+                transaction_id,
+                workspace_name(0x64),
+                1,
+                1,
+            ),
+            Err(RecoveryKeyCleanupError::InvalidWorkspace)
+        ));
+
+        let canonical = WorkspaceRemovalTarget::from_durable(
+            DurablePhaseEvidence(()),
+            transaction_id,
+            format!("tx-{}", transaction_hex(transaction_id)),
+            1,
+            1,
+        )
+        .unwrap();
+        assert!(matches!(
+            RecoveryKeyCleanupSequence::from_durable_phase(
+                DurablePhaseEvidence(()),
+                RecoveryKeyCleanupPhase::TerminalRecorded,
+                ReplacementPhase::Complete,
+                transaction_id,
+                reference(),
+                crate::live::linux_replacement::REPLACEMENT_JOURNAL_FORMAT_VERSION + 1,
+                1,
+                1,
+                canonical,
+            ),
+            Err(RecoveryKeyCleanupError::InvalidTerminal)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restart_refuses_an_unsupported_replacement_journal_version() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(0x65);
+        let workspace = empty_workspace(&root_path, 0x65);
+        create_durable_cleanup_journal_for_test(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            reference(),
+            workspace_target(&workspace),
+        )
+        .unwrap();
+
+        let event_path = root_path
+            .join(CLEANUP_DIRECTORY)
+            .join(event_name(transaction_id, 0));
+        let mut event: CleanupEvent =
+            serde_json::from_slice(&fs::read(&event_path).unwrap()).unwrap();
+        event.replacement_journal_version += 1;
+        fs::write(&event_path, serde_json::to_vec(&event).unwrap()).unwrap();
+
+        assert!(matches!(
+            load_durable_cleanup_journals(&root_path),
+            Err(CleanupJournalError::Cleanup(
+                RecoveryKeyCleanupError::InvalidTerminal
+            ))
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restart_refuses_a_legacy_workspace_shape_not_issued_by_the_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(0x66);
+        let workspace = empty_workspace(&root_path, 0x66);
+        create_durable_cleanup_journal_for_test(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            reference(),
+            workspace_target(&workspace),
+        )
+        .unwrap();
+
+        let event_path = root_path
+            .join(CLEANUP_DIRECTORY)
+            .join(event_name(transaction_id, 0));
+        let mut event: CleanupEvent =
+            serde_json::from_slice(&fs::read(&event_path).unwrap()).unwrap();
+        event.workspace_name = "tx-1-deadbeef-0".to_owned();
+        fs::write(&event_path, serde_json::to_vec(&event).unwrap()).unwrap();
+
+        assert!(matches!(
+            load_durable_cleanup_journals(&root_path),
+            Err(CleanupJournalError::Cleanup(
+                RecoveryKeyCleanupError::InvalidWorkspace
+            ))
+        ));
     }
 
     #[cfg(target_os = "linux")]

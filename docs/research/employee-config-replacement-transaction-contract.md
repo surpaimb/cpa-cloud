@@ -502,11 +502,13 @@ but before proof publication leaves `.pending` and blocks automatic cleanup
 rather than inferring success from absence. Renamed, replaced, non-empty,
 missing, cross-workspace or mismatched state likewise fails closed. The
 authorization, caller path and proof must all match the workspace leaf and
-device/inode already recorded in the durable cleanup journal. This bounded
-slice intentionally has no production constructor for the initial trusted
-workspace-target evidence; until the durable replacement transaction supplies
-that binding, initial cleanup-journal creation remains fail-closed. Synthetic
-tests alone mint target evidence under `cfg(test)`. The store does not delete
+device/inode already recorded in the durable cleanup journal. The synthetic
+Linux replacement journal now supplies the only production constructor input:
+its exact durable terminal handoff. Cleanup restart accepts only the current
+replacement-journal version and the canonical workspace leaf derived from the
+transaction; loose legacy workspace fixtures remain `cfg(test)` only. This path
+is still unavailable to real clients because the synthetic-root approval has
+no production constructor. The store does not delete
 transaction contents; its reviewed slice begins only after another component
 has safely removed every known child and left the exact workspace empty. It
 does not remove completed journals/proofs, authenticate against a hostile
