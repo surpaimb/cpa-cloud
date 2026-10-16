@@ -2,6 +2,7 @@ name: Code validation
 
 on:
   push:
+    # Keep branch CI active while the stream-key policy work is under review.
     branches: [main, codex/ci-stream-key-policy]
     paths-ignore: ['**.md', 'docs/**']
   pull_request:
