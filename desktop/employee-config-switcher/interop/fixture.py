@@ -25,6 +25,12 @@ MARKERS = ("ISOLATION_OK", "PRIVATE_BUS_SERVICE_UID_PID_OK", "CREATE_AND_LIBSECR
 FAILURES = ("fixture-binary-path", "fixture-binary-missing", "fixture-bus-exited", "fixture-bus-unavailable",
             "fixture-daemon-exited", "fixture-identity-failed", "fixture-case-failed", "fixture-oracle-invalid",
             "fixture-secret-output", "fixture-child-remains")
+PANICS = ("fixture-check-failed", "fixture-root-required", "fixture-mode-required", "fixture-root-metadata",
+          "fixture-cgroup", "fixture-approval-failed", "fixture-provider-failed", "fixture-create-failed",
+          "fixture-retry-failed", "oracle-create-failed", "oracle-write-failed", "oracle-flush-failed",
+          "oracle-metadata-failed", "oracle-read-failed", "oracle-reference-failed", "fixture-reopen-failed",
+          "fixture-other-approval-failed", "fixture-other-provider-failed", "fixture-missing-reference-failed",
+          "fixture-mode-invalid")
 
 
 def secret_forms(value):
@@ -65,6 +71,7 @@ def scan(work, outputs):
 class Fixture:
     markers = MARKERS
     failures = FAILURES
+    diagnostics = PANICS
 
     def __init__(self, binary):
         self.binary = Path(binary).resolve(strict=True)
@@ -121,6 +128,9 @@ def inside(metadata_path):
         if result.returncode != 0 or expected not in result.stdout:
             # Both label and exit category are from fixed local source, not output.
             print("CASE_FAILURE " + label, flush=True)
+            for panic in PANICS:
+                if panic.encode() in result.stdout:
+                    print("FIXTURE_DIAGNOSTIC " + panic, flush=True)
             raise base.PreflightFailure("fixture-case-failed")
 
     def stop(process):

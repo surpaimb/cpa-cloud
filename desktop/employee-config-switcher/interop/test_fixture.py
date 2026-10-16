@@ -59,7 +59,7 @@ class FixtureTests(unittest.TestCase):
         for node in ast.walk(ast.parse((HERE / "fixture.py").read_text())):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "require":
                 self.assertIsInstance(node.args[1], ast.Constant)
-        for label in module.FAILURES:
+        for label in module.FAILURES + module.PANICS:
             self.assertRegex(label, r"^[a-z-]+$")
 
 

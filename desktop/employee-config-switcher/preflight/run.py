@@ -298,6 +298,9 @@ def outer(fixture=None):
         # Never relay raw daemon, D-Bus, GLib, journal or child process output.
         if result.returncode != 0:
             if fixture is not None:
+                for label in fixture.diagnostics:
+                    if ("FIXTURE_DIAGNOSTIC " + label + "\n").encode() in result.stdout:
+                        print("FIXTURE_DIAGNOSTIC " + label, flush=True)
                 for label in fixture.failures:
                     if ("FAIL: " + label + "\n").encode() in result.stdout:
                         print("CHECK rejected=" + label, flush=True)
@@ -307,7 +310,7 @@ def outer(fixture=None):
             for label in BUS_DIAGNOSTICS:
                 if ("BUS_DIAGNOSTIC " + label + "\n").encode() in result.stdout:
                     print("BUS_DIAGNOSTIC " + label, flush=True)
-            for marker in MARKERS:
+            for marker in (MARKERS if fixture is None else fixture.markers):
                 print("CHECK " + marker + "=" + str(marker.encode() in result.stdout).lower(), flush=True)
             for label in ("nonroot-required", "proxy-inherited", "session-inherited", "private-directory",
                           "netns-shared", "network-not-loopback-only", "ip-socket-wrong-error", "ip-socket-permitted",
