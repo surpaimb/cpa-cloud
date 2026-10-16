@@ -114,7 +114,11 @@ impl LinuxSecretServiceRecoveryKeyProvider {
     pub(crate) fn for_synthetic_session(
         approval: SyntheticSecretServiceApproval,
     ) -> Result<Self, LinuxSecretServiceProviderError> {
+        #[cfg(test)]
+        real_fixture::stage("lock-setup", false);
         let lock = ReconciliationLock::open(approval)?;
+        #[cfg(test)]
+        real_fixture::stage("lock-setup", true);
         let backend = DbusBackend::connect()?;
         Ok(Self {
             inner: ContractProvider::new(backend, lock),
@@ -245,6 +249,10 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
             content_type: CONTENT_TYPE,
             replace: false,
         };
+        #[cfg(test)]
+        if !real_fixture::capture_outgoing(&key, envelope.as_slice()) {
+            return RecoveryKeyCreateOutcome::Unavailable;
+        }
         match backend.create_item(request) {
             Ok(_) => {}
             Err(BackendError::Locked | BackendError::PromptRequired) => {
@@ -293,18 +301,26 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
     ) -> RecoveryKeyOpenOutcome {
+        #[cfg(test)]
+        real_fixture::stage("reference", false);
         let parsed = match parse_reference(transaction_id, self.uid, self.lock_namespace, reference)
         {
             ParsedReference::Valid { item_id } => item_id,
             ParsedReference::WrongIdentity => return RecoveryKeyOpenOutcome::WrongIdentity,
             ParsedReference::Corrupt => return RecoveryKeyOpenOutcome::Corrupt,
         };
+        #[cfg(test)]
+        real_fixture::stage("reference", true);
         let lock = &self.lock;
         let backend = &mut self.backend;
+        #[cfg(test)]
+        real_fixture::stage("lock-open", false);
         let _guard = match lock.exclusive() {
             Ok(guard) => guard,
             Err(_) => return RecoveryKeyOpenOutcome::Unavailable,
         };
+        #[cfg(test)]
+        real_fixture::stage("lock-open", true);
         let item = match find_one(backend, transaction_id, self.uid, self.lock_namespace) {
             Ok(Some(item)) => item,
             Ok(None) => return RecoveryKeyOpenOutcome::Missing,
@@ -462,6 +478,8 @@ fn verify_item<B: SecretServiceBackend>(
     item: &ServiceItem,
     expected_item_id: Option<[u8; ITEM_ID_BYTES]>,
 ) -> VerifiedItem {
+    #[cfg(test)]
+    real_fixture::stage("attributes", false);
     let Some(item_id_text) = item.attributes.get("item-id") else {
         return VerifiedItem::Corrupt;
     };
@@ -477,14 +495,22 @@ fn verify_item<B: SecretServiceBackend>(
     if item.attributes != full_attributes(transaction_id, uid, lock_namespace, item_id) {
         return VerifiedItem::Corrupt;
     }
+    #[cfg(test)]
+    real_fixture::stage("attributes", true);
     let secret = match backend.get_secret(&item.handle) {
         Ok(secret) => secret,
         Err(BackendError::Locked | BackendError::PromptRequired) => return VerifiedItem::Locked,
         Err(BackendError::Corrupt) => return VerifiedItem::Corrupt,
         Err(_) => return VerifiedItem::Unavailable,
     };
+    #[cfg(test)]
+    real_fixture::stage("envelope", false);
     match decode_envelope(transaction_id, uid, lock_namespace, item_id, &secret) {
-        Envelope::Available(key) => VerifiedItem::Available { item_id, key },
+        Envelope::Available(key) => {
+            #[cfg(test)]
+            real_fixture::stage("envelope", true);
+            VerifiedItem::Available { item_id, key }
+        }
         Envelope::WrongIdentity => VerifiedItem::WrongIdentity,
         Envelope::Corrupt => VerifiedItem::Corrupt,
     }
@@ -1032,16 +1058,28 @@ struct DbusBackend {
 impl DbusBackend {
     fn connect() -> Result<Self, LinuxSecretServiceProviderError> {
         use dbus::arg::Variant;
+        #[cfg(test)]
+        real_fixture::stage("bus-connect", false);
         let connection = dbus::blocking::Connection::new_session()
             .map_err(|_| LinuxSecretServiceProviderError::SessionUnavailable)?;
+        #[cfg(test)]
+        real_fixture::stage("bus-connect", true);
         let proxy = connection.with_proxy(SERVICE_NAME, SERVICE_PATH, DBUS_TIMEOUT);
         let input = Variant(String::new());
+        #[cfg(test)]
+        real_fixture::stage("session-open", false);
         let (Variant(output), session): (Variant<String>, dbus::Path<'static>) = proxy
             .method_call(SERVICE_INTERFACE, "OpenSession", ("plain", input))
             .map_err(|_| LinuxSecretServiceProviderError::SessionUnavailable)?;
+        #[cfg(test)]
+        real_fixture::stage("session-open", true);
+        #[cfg(test)]
+        real_fixture::stage("session-check", false);
         if !valid_plain_session(&output, &session.to_string()) {
             return Err(LinuxSecretServiceProviderError::SessionUnavailable);
         }
+        #[cfg(test)]
+        real_fixture::stage("session-check", true);
         Ok(Self {
             connection,
             session,
@@ -1049,6 +1087,8 @@ impl DbusBackend {
     }
 
     fn classify(error: &dbus::Error) -> BackendError {
+        #[cfg(test)]
+        real_fixture::backend_error(error);
         match error.name() {
             Some("org.freedesktop.Secret.Error.IsLocked") => BackendError::Locked,
             Some("org.freedesktop.Secret.Error.NoSuchObject") => BackendError::Missing,
@@ -1059,12 +1099,16 @@ impl DbusBackend {
 
     fn exact_attributes(&self, handle: &str) -> Result<Attributes, BackendError> {
         use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
+        #[cfg(test)]
+        real_fixture::stage("search-attributes", false);
         let proxy = self
             .connection
             .with_proxy(SERVICE_NAME, handle, DBUS_TIMEOUT);
         let attributes: HashMap<String, String> = proxy
             .get(ITEM_INTERFACE, "Attributes")
             .map_err(|error| Self::classify(&error))?;
+        #[cfg(test)]
+        real_fixture::stage("search-attributes", true);
         Ok(attributes.into_iter().collect())
     }
 }
@@ -1075,6 +1119,8 @@ fn valid_plain_session(output: &str, session_path: &str) -> bool {
 
 impl SecretServiceBackend for DbusBackend {
     fn search(&mut self, attributes: &Attributes) -> Result<Vec<ServiceItem>, BackendError> {
+        #[cfg(test)]
+        real_fixture::stage("search", false);
         let query: HashMap<&str, &str> = attributes
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
@@ -1085,6 +1131,8 @@ impl SecretServiceBackend for DbusBackend {
         let (unlocked, locked): (Vec<dbus::Path<'static>>, Vec<dbus::Path<'static>>) = proxy
             .method_call(SERVICE_INTERFACE, "SearchItems", (query,))
             .map_err(|error| Self::classify(&error))?;
+        #[cfg(test)]
+        real_fixture::stage("search", true);
         let mut items = Vec::with_capacity(unlocked.len() + locked.len());
         for (paths, is_locked) in [(unlocked, false), (locked, true)] {
             for path in paths {
@@ -1141,17 +1189,20 @@ impl SecretServiceBackend for DbusBackend {
         let proxy = self
             .connection
             .with_proxy(SERVICE_NAME, handle, DBUS_TIMEOUT);
-        let ((session, parameters, value, content_type),): ((
-            dbus::Path<'static>,
-            Vec<u8>,
-            Vec<u8>,
-            String,
-        ),) = proxy
-            .method_call(ITEM_INTERFACE, "GetSecret", (self.session.clone(),))
-            .map_err(|error| Self::classify(&error))?;
+        let decoded: Result<((dbus::Path<'static>, Vec<u8>, Vec<u8>, String),), dbus::Error> =
+            proxy.method_call(ITEM_INTERFACE, "GetSecret", (self.session.clone(),));
+        let ((session, parameters, value, content_type),) = decoded.map_err(|error| {
+            #[cfg(test)]
+            real_fixture::decoded_result(false);
+            Self::classify(&error)
+        })?;
         // Own the decoded allocation before any metadata rejection. The guard
         // also stays alive through the caller's envelope and identity checks.
         let value = Zeroizing::new(value);
+        #[cfg(test)]
+        real_fixture::decoded_result(true);
+        #[cfg(test)]
+        real_fixture::returned_secret(session == self.session, &parameters, &content_type, &value);
         validate_secret_transfer(session == self.session, &parameters, &content_type, value)
     }
 
@@ -1185,6 +1236,10 @@ fn validate_secret_transfer(
     }
     Ok(value)
 }
+
+#[cfg(test)]
+#[path = "linux_secret_service_fixture.rs"]
+mod real_fixture;
 
 #[cfg(test)]
 mod tests {

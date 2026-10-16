@@ -9,6 +9,13 @@ the test-only approval constructor, starts an official client, or enables
 `apply_configuration` / UI writes. There is no Key creation, read, deletion,
 collection unlock, password input, recovery envelope, or persistent item test.
 
+The no-argument `run.py` entry point and this workflow remain metadata-only.
+The separately invoked [volatile interop fixture](../interop/CONTRACT.md) reuses
+the extracted isolation assertions and root harness through an explicit Python
+extension argument; it has its own policy, entry point and required markers.
+It is not invoked by this no-key workflow and does not turn its result into
+secret-bearing acceptance.
+
 ## Fixed real components and provenance
 
 [components.json](components.json) pins Ubuntu package versions and official
