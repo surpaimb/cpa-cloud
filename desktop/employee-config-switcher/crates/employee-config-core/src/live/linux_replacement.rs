@@ -4179,6 +4179,20 @@ mod tests {
         assert!(workspace_path.is_dir());
         assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
         assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+
+        let retained_backup = retirement_transaction.join("quarantine-00");
+        fs::write(&retained_backup, b"externally-restored-sensitive-content").unwrap();
+        assert!(matches!(
+            loaded[0].retire_workspace_contents_durable(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(
+            fs::read(&retained_backup).unwrap(),
+            b"externally-restored-sensitive-content"
+        );
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
     }
 
     #[test]

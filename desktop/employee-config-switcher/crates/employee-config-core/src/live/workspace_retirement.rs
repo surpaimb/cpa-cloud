@@ -965,11 +965,12 @@ mod platform {
             }
         } else {
             for artifact in &plan.backup_artifacts {
-                persist_marker(
+                verify_retained_step(
                     &retirement_tx,
                     &transaction_path,
                     artifact,
                     index,
+                    ObjectKind::File,
                     &plan_digest,
                     fault,
                 )?;
@@ -1127,6 +1128,48 @@ mod platform {
         )?;
         sync_directory(retirement_tx, transaction_path, fault)?;
         Ok(())
+    }
+
+    fn verify_retained_step(
+        retirement_tx: &File,
+        transaction_path: &Path,
+        artifact: &RetirementArtifact,
+        index: usize,
+        kind: ObjectKind,
+        plan_digest: &str,
+        fault: &mut FaultState,
+    ) -> Result<(), WorkspaceRetirementError> {
+        let quarantine = quarantine_name(index);
+        let marker = marker_name(index);
+        if !entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))?
+            || !entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&marker))?
+        {
+            return Err(WorkspaceRetirementError::RecoveryConflict(
+                transaction_path.join(quarantine),
+            ));
+        }
+        persist_marker(
+            retirement_tx,
+            transaction_path,
+            artifact,
+            index,
+            plan_digest,
+            fault,
+        )?;
+        let quarantine_artifact = RetirementArtifact {
+            name: quarantine.clone(),
+            ..artifact.clone()
+        };
+        let retained =
+            verify_retired_artifact(retirement_tx, transaction_path, &quarantine_artifact, kind)?;
+        let reopened =
+            verify_retired_artifact(retirement_tx, transaction_path, &quarantine_artifact, kind)?;
+        require_same_identity(
+            &retained,
+            &reopened,
+            &transaction_path.join(quarantine),
+        )?;
+        sync_directory(retirement_tx, transaction_path, fault)
     }
 
     fn persist_exact_plan(

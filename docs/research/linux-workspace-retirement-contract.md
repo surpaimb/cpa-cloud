@@ -76,7 +76,9 @@ bytes or simultaneous names are preserved and rejected. Test-only race
 barriers replace pending and quarantine entries in those windows and require
 preservation plus failure. Test-only injection can interrupt after every
 destructive truncation and every directory flush. A fresh restart must either
-resume the same plan to the single completed state or fail closed.
+resume the same plan to the single completed state or fail closed. Re-entry
+after completion revalidates every retained quarantine identity and empty
+state, including both backup artifacts after their source directory is absent.
 
 Completion requires the backup workspace to be absent and the original
 replacement workspace descriptor to remain present and empty. The completion
@@ -100,8 +102,8 @@ has `executed=false`.
 Automated Linux evidence covers exact retirement and idempotent restart,
 unknown-name and edited-object preservation, every injected
 content-erasure/directory-flush boundary, an empty retained workspace, absent
-backup workspace, unchanged cleanup phase and zero provider deletions. Results
-from GitHub Actions must be
+backup workspace, completed-state evidence tampering, unchanged cleanup phase
+and zero provider deletions. Results from GitHub Actions must be
 reported as tested behavior; workspace-directory removal, key deletion and real
 client integration remain planned behavior only.
 
