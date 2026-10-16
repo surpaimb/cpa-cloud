@@ -1,0 +1,25 @@
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "cpa-cloud": {
+        "baseUrl": "http://127.0.0.1:46261/v1",
+        "apiKey": "employee-fixture-secret",
+        "api": "openai-responses",
+        "models": [
+          {
+            "id": "fixture-model",
+            "name": "fixture-model"
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "cpa-cloud/fixture-model"
+      }
+    }
+  }
+}

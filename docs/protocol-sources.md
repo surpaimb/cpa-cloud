@@ -8,7 +8,8 @@
 | https://developers.openai.com/api/reference/resources/embeddings/methods/create | Embeddings 创建端点、请求/响应字段与 usage | 2026-09-29 已核实；首段只实现文本/string batch、float、非流式子集 |
 | https://developers.openai.com/api/docs/guides/embeddings | Embeddings 使用与向量语义 | 2026-09-29 已核实用于首段范围；不据此推断 tokenizer 上界或第三方兼容 |
 | https://platform.openai.com/docs/api-reference/responses | Responses 协议入口 | 本轮工具读取因页面过大失败，不视为协议已核实 |
-| https://platform.claude.com/docs/en/api/overview | Messages 与 Token Counting 端点 | 2026-09-23 已核实 `POST /v1/messages` 和 `POST /v1/messages/count_tokens` |
+| https://platform.claude.com/docs/en/api/overview | Messages 与 Token Counting 端点及请求大小 | 2026-10-14 已核实 `POST /v1/messages`、`POST /v1/messages/count_tokens`、两者 32 MiB 请求上限及超限 413 `request_too_large` |
+| https://platform.claude.com/docs/en/api/errors | Anthropic 错误形状与请求大小错误 | 2026-10-14 已核实顶层 `type=error`、嵌套 error type、`request_id`，以及 Messages/Token Counting 超过 32 MiB 时的 413 `request_too_large` |
 | https://platform.claude.com/docs/en/manage-claude/authentication | Anthropic API Key 认证 | 2026-09-23 已核实 Bearer 为当前推荐，`x-api-key` 为兼容方式 |
 | https://platform.claude.com/docs/en/build-with-claude/streaming | Messages SSE 事件 | 2026-09-23 已核实事件序列、工具 JSON 增量、思考/签名增量、error 与 `message_stop` |
 | https://platform.claude.com/docs/en/api/messages/count_tokens | Token Counting 请求与响应 | 2026-09-23 已核实独立端点及对 messages/tools/images/documents 的计数用途 |

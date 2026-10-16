@@ -1,0 +1,14 @@
+model = "fixture-model"
+model_provider = "cpa_cloud"
+
+[model_providers]
+
+[model_providers.cpa_cloud]
+name = "CPA Cloud"
+base_url = "http://127.0.0.1:46161/v1"
+experimental_bearer_token = "employee-fixture-secret"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0

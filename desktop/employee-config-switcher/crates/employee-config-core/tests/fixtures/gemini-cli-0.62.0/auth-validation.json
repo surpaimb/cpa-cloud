@@ -1,0 +1,10 @@
+{
+  "source": "https://github.com/google-gemini/gemini-cli/blob/v0.62.0/packages/cli/src/config/auth.ts",
+  "accepted_startup_auth_types": [
+    "oauth-personal",
+    "compute-default-credentials",
+    "gemini-api-key",
+    "vertex-ai"
+  ],
+  "rejected_startup_auth_types": ["gateway"]
+}
