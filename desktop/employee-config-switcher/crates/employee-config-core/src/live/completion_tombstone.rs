@@ -60,6 +60,13 @@ impl CompletionTerminal {
             _ => Err(CompletionTombstoneError::InvalidTerminal),
         }
     }
+
+    fn as_phase(self) -> ReplacementPhase {
+        match self {
+            Self::Complete => ReplacementPhase::Complete,
+            Self::RolledBack => ReplacementPhase::RolledBack,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -90,6 +97,76 @@ impl std::fmt::Debug for CompletionTombstone {
             .field("transaction_id", &self.transaction_id)
             .field("terminal", &self.terminal)
             .field("reference", &self.reference)
+            .finish()
+    }
+}
+
+/// Exact receipt issued only after the active completion tombstone and its
+/// containing namespace have been flushed beneath one stable synthetic root.
+///
+/// The receipt is intentionally not serializable. Cleanup must compare every
+/// bound field before advancing to `CompletionTombstoneDurable`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CompletionTombstoneDurableReceipt {
+    tombstone: CompletionTombstone,
+    root_device: u64,
+    root_inode: u64,
+}
+
+impl CompletionTombstoneDurableReceipt {
+    pub(crate) fn terminal(&self) -> ReplacementPhase {
+        self.tombstone.terminal.as_phase()
+    }
+
+    pub(crate) fn transaction_id(&self) -> ReplacementTransactionId {
+        self.tombstone.transaction_id
+    }
+
+    pub(crate) fn reference(&self) -> &RecoveryKeyReference {
+        &self.tombstone.reference
+    }
+
+    pub(crate) fn root_device(&self) -> u64 {
+        self.root_device
+    }
+
+    pub(crate) fn root_inode(&self) -> u64 {
+        self.root_inode
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        terminal: ReplacementPhase,
+        transaction_id: ReplacementTransactionId,
+        reference: RecoveryKeyReference,
+        root_device: u64,
+        root_inode: u64,
+    ) -> Self {
+        Self {
+            tombstone: CompletionTombstone {
+                transaction_id,
+                terminal: CompletionTerminal::from_phase(terminal)
+                    .expect("test receipt requires a terminal phase"),
+                reference,
+            },
+            root_device,
+            root_inode,
+        }
+    }
+
+    #[cfg(test)]
+    fn tombstone(&self) -> &CompletionTombstone {
+        &self.tombstone
+    }
+}
+
+impl std::fmt::Debug for CompletionTombstoneDurableReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompletionTombstoneDurableReceipt")
+            .field("tombstone", &self.tombstone)
+            .field("root_device", &self.root_device)
+            .field("root_inode", &self.root_inode)
             .finish()
     }
 }
@@ -185,7 +262,7 @@ pub fn persist_completion_tombstone(
     terminal: ReplacementPhase,
     transaction_id: ReplacementTransactionId,
     reference: &RecoveryKeyReference,
-) -> Result<CompletionTombstone, CompletionTombstoneError> {
+) -> Result<CompletionTombstoneDurableReceipt, CompletionTombstoneError> {
     let terminal = CompletionTerminal::from_phase(terminal)?;
     platform::persist(root, terminal, transaction_id, reference)
 }
@@ -394,7 +471,7 @@ mod platform {
         terminal: CompletionTerminal,
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
-    ) -> Result<CompletionTombstone, CompletionTombstoneError> {
+    ) -> Result<CompletionTombstoneDurableReceipt, CompletionTombstoneError> {
         persist_inner(
             root,
             terminal,
@@ -411,7 +488,7 @@ mod platform {
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
         fault: PersistFault,
-    ) -> Result<CompletionTombstone, CompletionTombstoneError> {
+    ) -> Result<CompletionTombstoneDurableReceipt, CompletionTombstoneError> {
         persist_inner(root, terminal, transaction_id, reference, fault)
     }
 
@@ -421,7 +498,7 @@ mod platform {
         transaction_id: ReplacementTransactionId,
         reference: &RecoveryKeyReference,
         fault: PersistFault,
-    ) -> Result<CompletionTombstone, CompletionTombstoneError> {
+    ) -> Result<CompletionTombstoneDurableReceipt, CompletionTombstoneError> {
         let root_dir = open_root(root)?;
         let root_identity = identity(&root_dir).map_err(|source| io_error(root, source))?;
         let directory_path = root.join(TOMBSTONE_DIRECTORY);
@@ -450,8 +527,24 @@ mod platform {
             directory_identity,
             None,
         )?;
-        if existing
+        if let Some(tombstone) = existing
             .tombstones
+            .iter()
+            .find(|tombstone| tombstone.transaction_id == transaction_id)
+        {
+            if tombstone.terminal == terminal && &tombstone.reference == reference {
+                return Ok(CompletionTombstoneDurableReceipt {
+                    tombstone: tombstone.clone(),
+                    root_device: root_identity.device,
+                    root_inode: root_identity.inode,
+                });
+            }
+            return Err(CompletionTombstoneError::RecoveryConflict(
+                directory_path.join(tombstone_name(transaction_id)),
+            ));
+        }
+        if existing
+            .deleting
             .iter()
             .chain(existing.removed.iter())
             .any(|tombstone| tombstone.transaction_id == transaction_id)
@@ -526,10 +619,14 @@ mod platform {
             return Err(CompletionTombstoneError::RecoveryConflict(directory_path));
         }
 
-        Ok(CompletionTombstone {
-            transaction_id,
-            terminal,
-            reference: reference.clone(),
+        Ok(CompletionTombstoneDurableReceipt {
+            tombstone: CompletionTombstone {
+                transaction_id,
+                terminal,
+                reference: reference.clone(),
+            },
+            root_device: root_identity.device,
+            root_inode: root_identity.inode,
         })
     }
 
@@ -1334,7 +1431,7 @@ mod platform {
         _terminal: CompletionTerminal,
         _transaction_id: ReplacementTransactionId,
         _reference: &RecoveryKeyReference,
-    ) -> Result<CompletionTombstone, CompletionTombstoneError> {
+    ) -> Result<CompletionTombstoneDurableReceipt, CompletionTombstoneError> {
         Err(CompletionTombstoneError::UnsupportedPlatform)
     }
 
@@ -1362,6 +1459,8 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::live::linux_replacement::{DurableTerminalHandoff, ReplacementOutcome};
     #[cfg(target_os = "linux")]
     use crate::live::recovery_key::{
         RecoveryKeyCleanupPhase, RecoveryKeyCleanupSequence, RecoveryKeyCreateOutcome,
@@ -1419,14 +1518,26 @@ mod tests {
         RecoveryKeyCleanupSequence,
         CompletionTombstoneRemovalAuthorization,
     ) {
-        let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(
+        let handoff = DurableTerminalHandoff::for_test(
+            ReplacementOutcome::Complete,
+            transaction_id,
+            reference.clone(),
+            1,
+            1,
+            1,
+            1,
+        );
+        let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(handoff).unwrap();
+        let receipt = CompletionTombstoneDurableReceipt::for_test(
             ReplacementPhase::Complete,
             transaction_id,
             reference,
-            crate::live::recovery_key::WorkspaceRemovalTarget::for_test("tx-1-1-0", 1, 1),
-        )
-        .unwrap();
-        cleanup.record_completion_tombstone_durable().unwrap();
+            1,
+            1,
+        );
+        cleanup
+            .record_completion_tombstone_durable(&receipt)
+            .unwrap();
         let workspace_authorization = cleanup.authorize_workspace_removal().unwrap();
         let workspace_receipt = crate::live::workspace_removal::WorkspaceRemovalReceipt::for_test(
             &workspace_authorization,
@@ -1481,7 +1592,7 @@ mod tests {
         );
 
         let loaded = load_completion_tombstones(&root_path).unwrap();
-        assert_eq!(loaded, vec![expected]);
+        assert_eq!(loaded, vec![expected.tombstone().clone()]);
         assert_eq!(loaded[0].terminal(), CompletionTerminal::Complete);
         assert_eq!(loaded[0].transaction_id(), transaction(0x11));
         assert_eq!(loaded[0].reference().provider_kind(), "test-provider");
@@ -1935,10 +2046,12 @@ mod tests {
         let remove =
             thread::spawn(move || remove_completion_tombstone(&remove_root, &authorization));
 
-        assert!(matches!(
-            persist.join().unwrap(),
-            Err(CompletionTombstoneError::RecoveryConflict(_))
-        ));
+        let persist_result = persist.join().unwrap();
+        assert!(persist_result.is_ok()
+            || matches!(
+                persist_result,
+                Err(CompletionTombstoneError::RecoveryConflict(_))
+            ));
         assert_eq!(
             remove.join().unwrap().unwrap().transaction_id(),
             transaction_id
@@ -1951,25 +2064,38 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn absent_namespace_is_an_empty_restart_set_and_duplicates_do_not_overwrite() {
+    fn absent_namespace_is_empty_and_exact_duplicates_are_idempotent() {
         let root = tempfile::tempdir().unwrap();
         let root_path = fs::canonicalize(root.path()).unwrap();
         assert!(load_completion_tombstones(&root_path).unwrap().is_empty());
 
-        persist_completion_tombstone(
+        let first = persist_completion_tombstone(
             &root_path,
             ReplacementPhase::Complete,
             transaction(0x44),
             &reference(),
         )
         .unwrap();
-        assert!(persist_completion_tombstone(
+        let duplicate = persist_completion_tombstone(
             &root_path,
             ReplacementPhase::Complete,
             transaction(0x44),
             &reference(),
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(duplicate, first);
+        let conflicting_reference =
+            RecoveryKeyReference::new("test-provider", 1, b"conflicting-reference".to_vec())
+                .unwrap();
+        assert!(matches!(
+            persist_completion_tombstone(
+                &root_path,
+                ReplacementPhase::Complete,
+                transaction(0x44),
+                &conflicting_reference,
+            ),
+            Err(CompletionTombstoneError::RecoveryConflict(_))
+        ));
         assert_eq!(load_completion_tombstones(&root_path).unwrap().len(), 1);
     }
 

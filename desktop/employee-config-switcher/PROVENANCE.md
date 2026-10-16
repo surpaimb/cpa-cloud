@@ -81,6 +81,21 @@ and brand assets are excluded. In particular, the upstream transaction engine
 is not adopted because its Windows ACL and recovery boundaries do not satisfy
 the CPA write-safety contract.
 
+### Durable terminal handoff slice (2026-10-16)
+
+The changes to `live/linux_replacement.rs`, `live/cleanup_journal.rs`,
+`live/completion_tombstone.rs`, `live/recovery_key.rs` and their tests are newly
+authored CPA code implementing the fixed
+[durable terminal handoff contract](../../docs/research/durable-terminal-handoff-contract.md).
+They use only the existing synthetic-root state machines and the public Linux
+filesystem contracts already cited below. The replacement journal alone may
+issue the crate-private, non-serializable exact terminal handoff; cleanup
+creation consumes it, and the `CompletionTombstoneDurable` transition consumes
+the tombstone store's exact durable receipt. The slice deliberately stops
+there with the workspace non-empty and zero provider deletion calls. It adds no
+dependency, SDK, copied source, asset or license, and it does not execute the
+separate GitHub-hosted Windows Claude native proposal.
+
 ## Public protocol sources
 
 - Windows security-descriptor ownership and access-token APIs: Microsoft Learn documentation for [`SetNamedSecurityInfoW`](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow), [`GetSecurityDescriptorOwner`](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getsecuritydescriptorowner), [`OpenProcessToken`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken), and [`GetTokenInformation`](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation) (accessed 2026-10-15). Creation sets the owner to the current process-token user SID; recovery compares the file owner with that SID in addition to verifying the protected owner-rights DACL.

@@ -15,6 +15,7 @@ use super::{
         RecoveryKeyCreateOutcome, RecoveryKeyProvider, RecoveryKeyReference,
         ReplacementTransactionId,
     },
+    replacement::ReplacementPhase,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -65,10 +66,126 @@ pub(crate) enum ReplacementOutcome {
     RolledBack,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Opaque capability issued only after the Linux replacement journal's exact
+/// terminal event has been flushed and the terminal target has been verified.
+///
+/// The value is crate-private, has no serialization implementation, and binds
+/// the cleanup consumer to the complete recovery-key reference plus the root
+/// and canonical replacement-workspace identities observed through held file
+/// descriptors.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct DurableTerminalHandoff {
+    journal_version: u32,
+    outcome: ReplacementOutcome,
+    transaction_id: ReplacementTransactionId,
+    root_device: u64,
+    root_inode: u64,
+    workspace_name: String,
+    workspace_device: u64,
+    workspace_inode: u64,
+    reference: RecoveryKeyReference,
+}
+
+impl DurableTerminalHandoff {
+    pub(crate) fn journal_version(&self) -> u32 {
+        self.journal_version
+    }
+
+    pub(crate) fn outcome(&self) -> ReplacementOutcome {
+        self.outcome
+    }
+
+    pub(crate) fn terminal(&self) -> ReplacementPhase {
+        match self.outcome {
+            ReplacementOutcome::Complete => ReplacementPhase::Complete,
+            ReplacementOutcome::RolledBack => ReplacementPhase::RolledBack,
+        }
+    }
+
+    pub(crate) fn transaction_id(&self) -> ReplacementTransactionId {
+        self.transaction_id
+    }
+
+    pub(crate) fn root_device(&self) -> u64 {
+        self.root_device
+    }
+
+    pub(crate) fn root_inode(&self) -> u64 {
+        self.root_inode
+    }
+
+    pub(crate) fn workspace_name(&self) -> &str {
+        &self.workspace_name
+    }
+
+    pub(crate) fn workspace_device(&self) -> u64 {
+        self.workspace_device
+    }
+
+    pub(crate) fn workspace_inode(&self) -> u64 {
+        self.workspace_inode
+    }
+
+    pub(crate) fn reference(&self) -> &RecoveryKeyReference {
+        &self.reference
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        outcome: ReplacementOutcome,
+        transaction_id: ReplacementTransactionId,
+        reference: RecoveryKeyReference,
+        root_device: u64,
+        root_inode: u64,
+        workspace_device: u64,
+        workspace_inode: u64,
+    ) -> Self {
+        Self {
+            journal_version: FORMAT_VERSION,
+            outcome,
+            transaction_id,
+            root_device,
+            root_inode,
+            workspace_name: format!("tx-{}", transaction_text(transaction_id)),
+            workspace_device,
+            workspace_inode,
+            reference,
+        }
+    }
+}
+
+impl std::fmt::Debug for DurableTerminalHandoff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DurableTerminalHandoff")
+            .field("journal_version", &self.journal_version)
+            .field("outcome", &self.outcome)
+            .field("transaction_id", &self.transaction_id)
+            .field("root_device", &self.root_device)
+            .field("root_inode", &self.root_inode)
+            .field("workspace_name", &self.workspace_name)
+            .field("workspace_device", &self.workspace_device)
+            .field("workspace_inode", &self.workspace_inode)
+            .field("reference", &self.reference)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReplacementReceipt {
     pub transaction_id: ReplacementTransactionId,
     pub outcome: ReplacementOutcome,
+    terminal_handoff: DurableTerminalHandoff,
+}
+
+impl ReplacementReceipt {
+    pub(crate) fn terminal_handoff(&self) -> &DurableTerminalHandoff {
+        &self.terminal_handoff
+    }
+
+    pub(crate) fn into_terminal_handoff(self) -> DurableTerminalHandoff {
+        self.terminal_handoff
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,10 +656,7 @@ mod platform {
         }
         if let Some(outcome) = transaction.state.terminal {
             verify_terminal_target(transaction, outcome)?;
-            return Ok(ReplacementReceipt {
-                transaction_id: transaction.state.transaction_id,
-                outcome,
-            });
+            return issue_terminal_receipt(transaction, outcome);
         }
         if !transaction.state.commit_prepared {
             return Err(SyntheticReplacementError::Uncommitted);
@@ -713,10 +827,7 @@ mod platform {
             transaction.state.terminal = Some(ReplacementOutcome::Complete);
             inject(fault, FaultPoint::AfterTerminal)?;
             verify_terminal_target(transaction, ReplacementOutcome::Complete)?;
-            return Ok(ReplacementReceipt {
-                transaction_id: transaction.state.transaction_id,
-                outcome: ReplacementOutcome::Complete,
-            });
+            return issue_terminal_receipt(transaction, ReplacementOutcome::Complete);
         }
 
         if !transaction.state.rollback_prepared {
@@ -871,10 +982,7 @@ mod platform {
         transaction.state.terminal = Some(ReplacementOutcome::RolledBack);
         inject(fault, FaultPoint::AfterTerminal)?;
         verify_terminal_target(transaction, ReplacementOutcome::RolledBack)?;
-        Ok(ReplacementReceipt {
-            transaction_id: transaction.state.transaction_id,
-            outcome: ReplacementOutcome::RolledBack,
-        })
+        issue_terminal_receipt(transaction, ReplacementOutcome::RolledBack)
     }
 
     fn open_transaction(
@@ -1116,6 +1224,65 @@ mod platform {
             &transaction.root_path.join(&transaction.state.target),
             &expected,
         )
+    }
+
+    fn issue_terminal_receipt(
+        transaction: &mut OpenTransaction,
+        outcome: ReplacementOutcome,
+    ) -> Result<ReplacementReceipt, SyntheticReplacementError> {
+        if transaction.state.terminal != Some(outcome) {
+            return Err(SyntheticReplacementError::CorruptJournal);
+        }
+        let reference = transaction
+            .state
+            .reference
+            .clone()
+            .ok_or(SyntheticReplacementError::CorruptJournal)?;
+        let expected_workspace = format!(
+            "tx-{}",
+            transaction_text(transaction.state.transaction_id)
+        );
+        if transaction
+            .workspace_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(expected_workspace.as_str())
+        {
+            return Err(SyntheticReplacementError::RecoveryConflict);
+        }
+        transaction
+            .journal
+            .sync_all()
+            .map_err(|source| io_error(transaction.workspace_path.join(JOURNAL_FILE), source))?;
+        let journal_state = read_journal(&mut transaction.journal)?;
+        if journal_state.terminal != Some(outcome)
+            || journal_state.transaction_id != transaction.state.transaction_id
+            || journal_state.root_identity != transaction.state.root_identity
+            || journal_state.reference.as_ref() != Some(&reference)
+        {
+            return Err(SyntheticReplacementError::CorruptJournal);
+        }
+        let root_identity = identity(&transaction.root, &transaction.root_path)?;
+        if root_identity != transaction.state.root_identity {
+            return Err(SyntheticReplacementError::RecoveryConflict);
+        }
+        let workspace_identity = identity(&transaction.workspace, &transaction.workspace_path)?;
+        let terminal_handoff = DurableTerminalHandoff {
+            journal_version: FORMAT_VERSION,
+            outcome,
+            transaction_id: transaction.state.transaction_id,
+            root_device: root_identity.volume,
+            root_inode: root_identity.file,
+            workspace_name: expected_workspace,
+            workspace_device: workspace_identity.volume,
+            workspace_inode: workspace_identity.file,
+            reference,
+        };
+        Ok(ReplacementReceipt {
+            transaction_id: transaction.state.transaction_id,
+            outcome,
+            terminal_handoff,
+        })
     }
 
     fn append_event(
@@ -2663,7 +2830,14 @@ mod tests {
     use super::*;
     use crate::live::{
         backup::BackupKey,
-        recovery_key::{CreatedRecoveryKey, RecoveryKeyDeleteOutcome, RecoveryKeyOpenOutcome},
+        cleanup_journal::{
+            create_durable_cleanup_journal, load_durable_cleanup_journals, CleanupJournalError,
+        },
+        completion_tombstone::persist_completion_tombstone,
+        recovery_key::{
+            CreatedRecoveryKey, RecoveryKeyCleanupPhase, RecoveryKeyDeleteOutcome,
+            RecoveryKeyOpenOutcome,
+        },
     };
     use std::{
         fs::{self, File, OpenOptions},
@@ -2683,6 +2857,7 @@ mod tests {
         idempotent: bool,
         creates: AtomicUsize,
         opens: AtomicUsize,
+        deletes: AtomicUsize,
     }
 
     impl TestProvider {
@@ -2692,6 +2867,7 @@ mod tests {
                 idempotent: true,
                 creates: AtomicUsize::new(0),
                 opens: AtomicUsize::new(0),
+                deletes: AtomicUsize::new(0),
             }
         }
 
@@ -2741,6 +2917,7 @@ mod tests {
             _transaction_id: ReplacementTransactionId,
             _reference: &RecoveryKeyReference,
         ) -> RecoveryKeyDeleteOutcome {
+            self.deletes.fetch_add(1, Ordering::SeqCst);
             RecoveryKeyDeleteOutcome::Unavailable
         }
     }
@@ -3558,5 +3735,91 @@ mod tests {
                 assert!(!bytes.windows(32).any(|window| window == recovery_key));
             }
         }
+    }
+
+    #[test]
+    fn durable_terminal_handoff_survives_restart_and_stops_before_cleanup_side_effects() {
+        let (root, approval) = fixture();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(0xa6);
+        let mut provider = TestProvider::new(0xa6);
+        let receipt = replace_existing_synthetic(
+            &approval,
+            Path::new("config.json"),
+            b"new-employee-key",
+            transaction_id,
+            &mut provider,
+            SyntheticValidation::Accept,
+        )
+        .unwrap();
+
+        let handoff = receipt.terminal_handoff();
+        let root_metadata = fs::metadata(&root_path).unwrap();
+        let workspace_path = workspace(&root_path, transaction_id);
+        let workspace_metadata = fs::metadata(&workspace_path).unwrap();
+        assert_eq!(handoff.journal_version(), FORMAT_VERSION);
+        assert_eq!(handoff.outcome(), ReplacementOutcome::Complete);
+        assert_eq!(handoff.transaction_id(), transaction_id);
+        assert_eq!(handoff.root_device(), root_metadata.dev());
+        assert_eq!(handoff.root_inode(), root_metadata.ino());
+        assert_eq!(handoff.workspace_device(), workspace_metadata.dev());
+        assert_eq!(handoff.workspace_inode(), workspace_metadata.ino());
+        assert_eq!(
+            handoff.workspace_name(),
+            format!("tx-{}", transaction_text(transaction_id))
+        );
+        let reference = handoff.reference().clone();
+        let rendered_receipt = format!("{receipt:?}");
+        assert!(!rendered_receipt.contains("opaque-reference"));
+        assert!(!rendered_receipt.contains("new-employee-key"));
+
+        let tombstone_receipt = persist_completion_tombstone(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            &reference,
+        )
+        .unwrap();
+        assert!(!format!("{tombstone_receipt:?}").contains("opaque-reference"));
+
+        let mut cleanup =
+            create_durable_cleanup_journal(&root_path, receipt.into_terminal_handoff()).unwrap();
+        assert_eq!(cleanup.phase(), RecoveryKeyCleanupPhase::TerminalRecorded);
+        cleanup
+            .record_completion_tombstone_durable(&tombstone_receipt)
+            .unwrap();
+        assert_eq!(
+            cleanup.phase(),
+            RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+        );
+        drop(cleanup);
+
+        assert!(workspace_path.is_dir());
+        assert!(fs::read_dir(&workspace_path).unwrap().next().is_some());
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+
+        let reissued = recover_existing_synthetic(
+            &approval,
+            transaction_id,
+            &mut provider,
+            SyntheticValidation::Accept,
+        )
+        .unwrap()
+        .into_terminal_handoff();
+        let loaded = load_durable_cleanup_journals(&root_path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].phase(),
+            RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+        );
+        assert_eq!(loaded[0].transaction_id(), transaction_id);
+        assert_eq!(loaded[0].reference(), &reference);
+        assert!(matches!(
+            create_durable_cleanup_journal(&root_path, reissued),
+            Err(CleanupJournalError::AlreadyExists(existing)) if existing == transaction_id
+        ));
+        assert!(workspace_path.is_dir());
+        assert!(fs::read_dir(&workspace_path).unwrap().next().is_some());
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
     }
 }

@@ -6,8 +6,13 @@
 //! gated before any real replacement transaction can use this interface.
 
 use super::{
-    backup::BackupKey, completion_tombstone::CompletionTombstoneRemovalReceipt,
-    replacement::ReplacementPhase, workspace_removal::WorkspaceRemovalReceipt,
+    backup::BackupKey,
+    completion_tombstone::{
+        CompletionTombstoneDurableReceipt, CompletionTombstoneRemovalReceipt,
+    },
+    linux_replacement::DurableTerminalHandoff,
+    replacement::ReplacementPhase,
+    workspace_removal::WorkspaceRemovalReceipt,
 };
 
 const TRANSACTION_ID_BYTES: usize = 16;
@@ -269,6 +274,13 @@ pub(crate) fn valid_workspace_name(name: &str) -> bool {
         && u64::from_str_radix(parts[3], 16).is_ok_and(|value| format!("{value:x}") == parts[3])
 }
 
+fn valid_replacement_workspace_name(
+    name: &str,
+    transaction_id: ReplacementTransactionId,
+) -> bool {
+    name == format!("tx-{}", hex::encode(transaction_id.as_bytes()))
+}
+
 /// Proof that the provider has confirmed deletion for one exact transaction
 /// and recovery-key reference.
 ///
@@ -364,13 +376,29 @@ pub(crate) struct WorkspaceRemovalTarget {
 }
 
 impl WorkspaceRemovalTarget {
+    fn from_terminal_handoff(
+        handoff: &DurableTerminalHandoff,
+    ) -> Result<Self, RecoveryKeyCleanupError> {
+        if !valid_replacement_workspace_name(handoff.workspace_name(), handoff.transaction_id()) {
+            return Err(RecoveryKeyCleanupError::InvalidWorkspace);
+        }
+        Ok(Self {
+            workspace_name: handoff.workspace_name().to_owned(),
+            device: handoff.workspace_device(),
+            inode: handoff.workspace_inode(),
+        })
+    }
+
     pub(crate) fn from_durable(
         _evidence: super::cleanup_journal::DurablePhaseEvidence,
+        transaction_id: ReplacementTransactionId,
         workspace_name: String,
         device: u64,
         inode: u64,
     ) -> Result<Self, RecoveryKeyCleanupError> {
-        if !valid_workspace_name(&workspace_name) {
+        if !valid_workspace_name(&workspace_name)
+            && !valid_replacement_workspace_name(&workspace_name, transaction_id)
+        {
             return Err(RecoveryKeyCleanupError::InvalidWorkspace);
         }
         Ok(Self {
@@ -517,14 +545,44 @@ pub struct RecoveryKeyCleanupSequence {
     terminal: ReplacementPhase,
     transaction_id: ReplacementTransactionId,
     reference: RecoveryKeyReference,
+    replacement_journal_version: u32,
+    root_device: u64,
+    root_inode: u64,
     workspace_target: WorkspaceRemovalTarget,
 }
 
 impl RecoveryKeyCleanupSequence {
     pub(crate) fn after_durable_terminal(
+        handoff: DurableTerminalHandoff,
+    ) -> Result<Self, RecoveryKeyCleanupError> {
+        let terminal = handoff.terminal();
+        if !matches!(
+            terminal,
+            ReplacementPhase::Complete | ReplacementPhase::RolledBack
+        ) || handoff.journal_version() == 0
+        {
+            return Err(RecoveryKeyCleanupError::InvalidTerminal);
+        }
+        let workspace_target = WorkspaceRemovalTarget::from_terminal_handoff(&handoff)?;
+        Ok(Self {
+            phase: RecoveryKeyCleanupPhase::TerminalRecorded,
+            terminal,
+            transaction_id: handoff.transaction_id(),
+            reference: handoff.reference().clone(),
+            replacement_journal_version: handoff.journal_version(),
+            root_device: handoff.root_device(),
+            root_inode: handoff.root_inode(),
+            workspace_target,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
         terminal: ReplacementPhase,
         transaction_id: ReplacementTransactionId,
         reference: RecoveryKeyReference,
+        root_device: u64,
+        root_inode: u64,
         workspace_target: WorkspaceRemovalTarget,
     ) -> Result<Self, RecoveryKeyCleanupError> {
         if !matches!(
@@ -538,6 +596,9 @@ impl RecoveryKeyCleanupSequence {
             terminal,
             transaction_id,
             reference,
+            replacement_journal_version: 1,
+            root_device,
+            root_inode,
             workspace_target,
         })
     }
@@ -558,6 +619,18 @@ impl RecoveryKeyCleanupSequence {
         &self.reference
     }
 
+    pub(crate) fn replacement_journal_version(&self) -> u32 {
+        self.replacement_journal_version
+    }
+
+    pub(crate) fn root_device(&self) -> u64 {
+        self.root_device
+    }
+
+    pub(crate) fn root_inode(&self) -> u64 {
+        self.root_inode
+    }
+
     pub(crate) fn workspace_name(&self) -> &str {
         self.workspace_target.workspace_name()
     }
@@ -572,12 +645,16 @@ impl RecoveryKeyCleanupSequence {
         terminal: ReplacementPhase,
         transaction_id: ReplacementTransactionId,
         reference: RecoveryKeyReference,
+        replacement_journal_version: u32,
+        root_device: u64,
+        root_inode: u64,
         workspace_target: WorkspaceRemovalTarget,
     ) -> Result<Self, RecoveryKeyCleanupError> {
         if !matches!(
             terminal,
             ReplacementPhase::Complete | ReplacementPhase::RolledBack
-        ) {
+        ) || replacement_journal_version == 0
+        {
             return Err(RecoveryKeyCleanupError::InvalidTerminal);
         }
         Ok(Self {
@@ -585,12 +662,26 @@ impl RecoveryKeyCleanupSequence {
             terminal,
             transaction_id,
             reference,
+            replacement_journal_version,
+            root_device,
+            root_inode,
             workspace_target,
         })
     }
 
-    pub fn record_completion_tombstone_durable(&mut self) -> Result<(), RecoveryKeyCleanupError> {
+    pub fn record_completion_tombstone_durable(
+        &mut self,
+        receipt: &CompletionTombstoneDurableReceipt,
+    ) -> Result<(), RecoveryKeyCleanupError> {
         self.require_phase(RecoveryKeyCleanupPhase::TerminalRecorded)?;
+        if receipt.terminal() != self.terminal
+            || receipt.transaction_id() != self.transaction_id
+            || receipt.reference() != &self.reference
+            || receipt.root_device() != self.root_device
+            || receipt.root_inode() != self.root_inode
+        {
+            return Err(RecoveryKeyCleanupError::InvalidTransition(self.phase));
+        }
         self.phase = RecoveryKeyCleanupPhase::CompletionTombstoneDurable;
         Ok(())
     }
@@ -723,6 +814,7 @@ impl RecoveryKeyCleanupSequence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::live::linux_replacement::ReplacementOutcome;
 
     struct FakeProvider {
         create_calls: usize,
@@ -790,15 +882,38 @@ mod tests {
         RecoveryKeyReference::new("test-provider", 1, b"opaque-sentinel".to_vec()).unwrap()
     }
 
-    fn cleanup_ready_for_key_deletion() -> RecoveryKeyCleanupSequence {
-        let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(
-            ReplacementPhase::RolledBack,
+    fn handoff(outcome: ReplacementOutcome) -> DurableTerminalHandoff {
+        DurableTerminalHandoff::for_test(
+            outcome,
             transaction_id(),
             reference(),
-            WorkspaceRemovalTarget::for_test("tx-1-1-0", 1, 1),
+            1,
+            1,
+            1,
+            1,
         )
+    }
+
+    fn tombstone_receipt(terminal: ReplacementPhase) -> CompletionTombstoneDurableReceipt {
+        CompletionTombstoneDurableReceipt::for_test(
+            terminal,
+            transaction_id(),
+            reference(),
+            1,
+            1,
+        )
+    }
+
+    fn cleanup_ready_for_key_deletion() -> RecoveryKeyCleanupSequence {
+        let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(handoff(
+            ReplacementOutcome::RolledBack,
+        ))
         .unwrap();
-        cleanup.record_completion_tombstone_durable().unwrap();
+        cleanup
+            .record_completion_tombstone_durable(&tombstone_receipt(
+                ReplacementPhase::RolledBack,
+            ))
+            .unwrap();
         let authorization = cleanup.authorize_workspace_removal().unwrap();
         let receipt = WorkspaceRemovalReceipt::for_test(&authorization);
         cleanup.record_workspace_removal_durable(&receipt).unwrap();
@@ -909,22 +1024,9 @@ mod tests {
 
     #[test]
     fn cleanup_never_deletes_a_key_before_tombstone_and_workspace_durability() {
-        assert!(matches!(
-            RecoveryKeyCleanupSequence::after_durable_terminal(
-                ReplacementPhase::CommitPrepared,
-                transaction_id(),
-                reference(),
-                WorkspaceRemovalTarget::for_test("tx-1-1-0", 1, 1),
-            ),
-            Err(RecoveryKeyCleanupError::InvalidTerminal)
-        ));
-
-        let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(
-            ReplacementPhase::Complete,
-            transaction_id(),
-            reference(),
-            WorkspaceRemovalTarget::for_test("tx-1-1-0", 1, 1),
-        )
+        let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(handoff(
+            ReplacementOutcome::Complete,
+        ))
         .unwrap();
         let mut provider = FakeProvider::deleting(RecoveryKeyDeleteOutcome::Deleted);
 
@@ -942,7 +1044,11 @@ mod tests {
         ));
         assert_eq!(provider.delete_calls, 0);
 
-        cleanup.record_completion_tombstone_durable().unwrap();
+        cleanup
+            .record_completion_tombstone_durable(&tombstone_receipt(
+                ReplacementPhase::Complete,
+            ))
+            .unwrap();
         assert!(matches!(
             cleanup.delete_key(&mut provider),
             Err(RecoveryKeyCleanupError::InvalidTransition(
@@ -977,6 +1083,59 @@ mod tests {
             cleanup.phase(),
             RecoveryKeyCleanupPhase::KeyDeletionConfirmed
         );
+    }
+
+    #[test]
+    fn cleanup_rejects_cross_bound_tombstone_receipts_without_advancing() {
+        let cases = [
+            CompletionTombstoneDurableReceipt::for_test(
+                ReplacementPhase::RolledBack,
+                transaction_id(),
+                reference(),
+                1,
+                1,
+            ),
+            CompletionTombstoneDurableReceipt::for_test(
+                ReplacementPhase::Complete,
+                ReplacementTransactionId::from_bytes([0x6d; 16]).unwrap(),
+                reference(),
+                1,
+                1,
+            ),
+            CompletionTombstoneDurableReceipt::for_test(
+                ReplacementPhase::Complete,
+                transaction_id(),
+                RecoveryKeyReference::new(
+                    "test-provider",
+                    1,
+                    b"other-opaque-reference".to_vec(),
+                )
+                .unwrap(),
+                1,
+                1,
+            ),
+            CompletionTombstoneDurableReceipt::for_test(
+                ReplacementPhase::Complete,
+                transaction_id(),
+                reference(),
+                2,
+                1,
+            ),
+        ];
+
+        for receipt in cases {
+            let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(handoff(
+                ReplacementOutcome::Complete,
+            ))
+            .unwrap();
+            assert!(matches!(
+                cleanup.record_completion_tombstone_durable(&receipt),
+                Err(RecoveryKeyCleanupError::InvalidTransition(
+                    RecoveryKeyCleanupPhase::TerminalRecorded
+                ))
+            ));
+            assert_eq!(cleanup.phase(), RecoveryKeyCleanupPhase::TerminalRecorded);
+        }
     }
 
     #[test]

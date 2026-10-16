@@ -1099,7 +1099,10 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::recovery_key::RecoveryKeyCleanupSequence;
+    use crate::live::{
+        completion_tombstone::CompletionTombstoneDurableReceipt,
+        recovery_key::RecoveryKeyCleanupSequence,
+    };
     #[cfg(target_os = "linux")]
     use std::{
         fs,
@@ -1116,14 +1119,25 @@ mod tests {
     }
 
     fn authorization(byte: u8, target: WorkspaceRemovalTarget) -> WorkspaceRemovalAuthorization {
-        let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(
+        let mut cleanup = RecoveryKeyCleanupSequence::for_test(
             ReplacementPhase::Complete,
             transaction(byte),
             reference(),
+            1,
+            1,
             target,
         )
         .unwrap();
-        cleanup.record_completion_tombstone_durable().unwrap();
+        let receipt = CompletionTombstoneDurableReceipt::for_test(
+            ReplacementPhase::Complete,
+            transaction(byte),
+            reference(),
+            1,
+            1,
+        );
+        cleanup
+            .record_completion_tombstone_durable(&receipt)
+            .unwrap();
         cleanup.authorize_workspace_removal().unwrap()
     }
 

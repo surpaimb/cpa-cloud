@@ -431,9 +431,10 @@ the completion tombstone before workspace removal, refuses to call provider
 deletion before both are recorded durable, and permits tombstone removal only
 after deletion is confirmed as `deleted` or already `missing`. Locked,
 wrong-identity, corrupt or unavailable deletion leaves the tombstone phase
-retryable. The completion-tombstone transition remains a caller assertion at
-this pure layer; the workspace transition now requires the concrete removal
-receipt described below. A
+retryable. The pure gate now accepts only the exact durable tombstone receipt
+bound to its terminal, transaction, complete recovery-key reference and root
+identity; the workspace transition requires the concrete removal receipt
+described below. A
 separate Linux-only synthetic-root module now stages a versioned non-secret
 completion tombstone as an owner-private single-link file, flushes it, and
 publishes it under the final name with no-replace `renameat2`. A crash before
@@ -477,8 +478,18 @@ transaction, and concurrent duplicate appends cannot leave a pending record. A
 visible `.pending` event blocks recovery rather than being inferred complete.
 The durable wrapper records provider deletion only after the provider returns
 `deleted` or `missing`, and an append failure rolls the in-memory sequence back
-to its preceding durable phase so a restart can retry. The completion-tombstone
-transition remains a caller assertion. The workspace transition no longer is:
+to its preceding durable phase so a restart can retry. The replacement journal
+now issues the cleanup journal's only production input: a crate-private,
+non-serializable `DurableTerminalHandoff` created only after the exact terminal
+event is flushed, replayed and matched to revalidated root/workspace
+descriptors. It binds journal version, outcome, transaction, root identity,
+canonical workspace identity and complete recovery-key reference. The
+completion-tombstone transition requires the store's exact non-serializable
+durable receipt; cross-bound receipts fail without advancing. This integration
+is fixed by the [durable terminal handoff contract](durable-terminal-handoff-contract.md)
+and deliberately stops at `CompletionTombstoneDurable`, with the replacement
+workspace still non-empty and provider deletion uncalled. The later workspace
+transition is also no longer a caller assertion:
 a separate Linux-only synthetic-root store accepts only one exact empty `0700`
 transaction workspace while holding the existing transaction lock, flushes a
 private pending proof before descriptor-relative removal, flushes the
