@@ -106,8 +106,11 @@ rejected. A syntactically complete JSON value is never replaced: it is published
 only when its strict schema, exact credential metadata, and canary validate, and
 otherwise fails closed without mutation. A final binding encountered by `--init`
 is revalidated and both file- and directory-synced again before SQLite is opened.
-Thus the same credential can recover the bounded interrupted states, while a
-different key or metadata cannot adopt a partial or existing installation.
+Empty or explicitly EOF-truncated staging is uncommitted scratch state: because
+the directory is otherwise empty, initialization may discard it and restart with
+the currently supplied credential. Once staging is syntactically complete, or a
+final binding or any database state exists, a different key or metadata cannot
+adopt that committed or existing installation.
 
 ## Tested and untested boundary
 
