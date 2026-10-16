@@ -1,0 +1,22 @@
+{
+  "dbus-daemon": {
+    "version": "1.14.10-4ubuntu4.1",
+    "source": "https://packages.ubuntu.com/noble-updates/dbus-daemon",
+    "license": "AFL-2.1 OR GPL-2.0-or-later; per-file notices retained by Ubuntu package"
+  },
+  "gnome-keyring": {
+    "version": "46.1-2ubuntu0.2",
+    "source": "https://packages.ubuntu.com/noble-updates/gnome-keyring",
+    "license": "GPL-2.0-or-later / LGPL-2.1-or-later; per-file notices retained by Ubuntu package"
+  },
+  "libsecret-1-0": {
+    "version": "0.21.4-1build3",
+    "source": "https://packages.ubuntu.com/noble/libsecret-1-0",
+    "license": "LGPL-2.1-or-later; per-file notices retained by Ubuntu package"
+  },
+  "libsecret-1-dev": {
+    "version": "0.21.4-1build3",
+    "source": "https://packages.ubuntu.com/noble/libsecret-1-dev",
+    "license": "LGPL-2.1-or-later; per-file notices retained by Ubuntu package"
+  }
+}
