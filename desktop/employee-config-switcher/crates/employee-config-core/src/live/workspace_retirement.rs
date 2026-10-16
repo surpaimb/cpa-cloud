@@ -1240,12 +1240,12 @@ mod platform {
         let before = file
             .metadata()
             .map_err(|source| io_error(display, source))?;
-        let identity = identity(&file, display)?;
+        let captured_identity = identity(&file, display)?;
         let bytes = read_bounded(&mut file, limit, display)?;
         let after = file
             .metadata()
             .map_err(|source| io_error(display, source))?;
-        if identity(&file, display)? != identity
+        if identity(&file, display)? != captured_identity
             || before.len() != after.len()
             || before.mode() != after.mode()
             || before.uid() != after.uid()
@@ -1258,7 +1258,7 @@ mod platform {
         }
         Ok(RetirementArtifact {
             name: name.to_owned(),
-            identity,
+            identity: captured_identity,
             len: before.len(),
             mode: before.mode() & 0o7777,
             uid: before.uid(),
