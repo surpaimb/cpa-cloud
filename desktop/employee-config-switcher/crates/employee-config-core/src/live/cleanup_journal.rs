@@ -1461,7 +1461,7 @@ mod tests {
             WorkspaceRemovalTarget::from_durable(
                 DurablePhaseEvidence(()),
                 transaction_id,
-                workspace_name(0x64),
+                "tx-1-deadbeef-0".to_owned(),
                 1,
                 1,
             ),
@@ -1514,7 +1514,9 @@ mod tests {
         let mut event: CleanupEvent =
             serde_json::from_slice(&fs::read(&event_path).unwrap()).unwrap();
         event.replacement_journal_version += 1;
-        fs::write(&event_path, serde_json::to_vec(&event).unwrap()).unwrap();
+        let mut encoded = serde_json::to_vec(&event).unwrap();
+        encoded.push(b'\n');
+        fs::write(&event_path, encoded).unwrap();
 
         assert!(matches!(
             load_durable_cleanup_journals(&root_path),
@@ -1546,7 +1548,9 @@ mod tests {
         let mut event: CleanupEvent =
             serde_json::from_slice(&fs::read(&event_path).unwrap()).unwrap();
         event.workspace_name = "tx-1-deadbeef-0".to_owned();
-        fs::write(&event_path, serde_json::to_vec(&event).unwrap()).unwrap();
+        let mut encoded = serde_json::to_vec(&event).unwrap();
+        encoded.push(b'\n');
+        fs::write(&event_path, encoded).unwrap();
 
         assert!(matches!(
             load_durable_cleanup_journals(&root_path),
