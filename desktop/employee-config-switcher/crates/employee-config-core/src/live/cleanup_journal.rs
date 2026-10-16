@@ -9,8 +9,8 @@
 
 use super::{
     completion_tombstone::{
-        verify_removed_completion_tombstone, CompletionTombstoneError,
-        CompletionTombstoneDurableReceipt, CompletionTombstoneRemovalReceipt,
+        verify_removed_completion_tombstone, CompletionTombstoneDurableReceipt,
+        CompletionTombstoneError, CompletionTombstoneRemovalReceipt,
     },
     linux_replacement::DurableTerminalHandoff,
     recovery_key::{
@@ -107,8 +107,7 @@ impl DurableCleanupJournal {
         receipt: &CompletionTombstoneDurableReceipt,
     ) -> Result<(), CleanupJournalError> {
         let previous = self.phase();
-        self.sequence
-            .record_completion_tombstone_durable(receipt)?;
+        self.sequence.record_completion_tombstone_durable(receipt)?;
         self.persist_or_restore(previous)
     }
 
@@ -802,8 +801,7 @@ mod platform {
             let (_, last) = events.last().ok_or(CleanupJournalError::Corrupt)?;
             for (_, event) in &events {
                 if event.terminal != first.terminal
-                    || event.replacement_journal_version
-                        != first.replacement_journal_version
+                    || event.replacement_journal_version != first.replacement_journal_version
                     || event.provider_kind != first.provider_kind
                     || event.provider_version != first.provider_version
                     || event.opaque_reference != first.opaque_reference

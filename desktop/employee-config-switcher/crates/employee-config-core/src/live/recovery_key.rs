@@ -7,9 +7,7 @@
 
 use super::{
     backup::BackupKey,
-    completion_tombstone::{
-        CompletionTombstoneDurableReceipt, CompletionTombstoneRemovalReceipt,
-    },
+    completion_tombstone::{CompletionTombstoneDurableReceipt, CompletionTombstoneRemovalReceipt},
     linux_replacement::DurableTerminalHandoff,
     replacement::ReplacementPhase,
     workspace_removal::WorkspaceRemovalReceipt,
@@ -274,10 +272,7 @@ pub(crate) fn valid_workspace_name(name: &str) -> bool {
         && u64::from_str_radix(parts[3], 16).is_ok_and(|value| format!("{value:x}") == parts[3])
 }
 
-fn valid_replacement_workspace_name(
-    name: &str,
-    transaction_id: ReplacementTransactionId,
-) -> bool {
+fn valid_replacement_workspace_name(name: &str, transaction_id: ReplacementTransactionId) -> bool {
     name == format!("tx-{}", hex::encode(transaction_id.as_bytes()))
 }
 
@@ -883,25 +878,11 @@ mod tests {
     }
 
     fn handoff(outcome: ReplacementOutcome) -> DurableTerminalHandoff {
-        DurableTerminalHandoff::for_test(
-            outcome,
-            transaction_id(),
-            reference(),
-            1,
-            1,
-            1,
-            1,
-        )
+        DurableTerminalHandoff::for_test(outcome, transaction_id(), reference(), 1, 1, 1, 1)
     }
 
     fn tombstone_receipt(terminal: ReplacementPhase) -> CompletionTombstoneDurableReceipt {
-        CompletionTombstoneDurableReceipt::for_test(
-            terminal,
-            transaction_id(),
-            reference(),
-            1,
-            1,
-        )
+        CompletionTombstoneDurableReceipt::for_test(terminal, transaction_id(), reference(), 1, 1)
     }
 
     fn cleanup_ready_for_key_deletion() -> RecoveryKeyCleanupSequence {
@@ -910,9 +891,7 @@ mod tests {
         ))
         .unwrap();
         cleanup
-            .record_completion_tombstone_durable(&tombstone_receipt(
-                ReplacementPhase::RolledBack,
-            ))
+            .record_completion_tombstone_durable(&tombstone_receipt(ReplacementPhase::RolledBack))
             .unwrap();
         let authorization = cleanup.authorize_workspace_removal().unwrap();
         let receipt = WorkspaceRemovalReceipt::for_test(&authorization);
@@ -1045,9 +1024,7 @@ mod tests {
         assert_eq!(provider.delete_calls, 0);
 
         cleanup
-            .record_completion_tombstone_durable(&tombstone_receipt(
-                ReplacementPhase::Complete,
-            ))
+            .record_completion_tombstone_durable(&tombstone_receipt(ReplacementPhase::Complete))
             .unwrap();
         assert!(matches!(
             cleanup.delete_key(&mut provider),
@@ -1105,12 +1082,8 @@ mod tests {
             CompletionTombstoneDurableReceipt::for_test(
                 ReplacementPhase::Complete,
                 transaction_id(),
-                RecoveryKeyReference::new(
-                    "test-provider",
-                    1,
-                    b"other-opaque-reference".to_vec(),
-                )
-                .unwrap(),
+                RecoveryKeyReference::new("test-provider", 1, b"other-opaque-reference".to_vec())
+                    .unwrap(),
                 1,
                 1,
             ),

@@ -1238,10 +1238,8 @@ mod platform {
             .reference
             .clone()
             .ok_or(SyntheticReplacementError::CorruptJournal)?;
-        let expected_workspace = format!(
-            "tx-{}",
-            transaction_text(transaction.state.transaction_id)
-        );
+        let expected_workspace =
+            format!("tx-{}", transaction_text(transaction.state.transaction_id));
         if transaction
             .workspace_path
             .file_name()

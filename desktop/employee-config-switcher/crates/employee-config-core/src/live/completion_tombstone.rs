@@ -2047,11 +2047,13 @@ mod tests {
             thread::spawn(move || remove_completion_tombstone(&remove_root, &authorization));
 
         let persist_result = persist.join().unwrap();
-        assert!(persist_result.is_ok()
-            || matches!(
-                persist_result,
-                Err(CompletionTombstoneError::RecoveryConflict(_))
-            ));
+        assert!(
+            persist_result.is_ok()
+                || matches!(
+                    persist_result,
+                    Err(CompletionTombstoneError::RecoveryConflict(_))
+                )
+        );
         assert_eq!(
             remove.join().unwrap().unwrap().transaction_id(),
             transaction_id
