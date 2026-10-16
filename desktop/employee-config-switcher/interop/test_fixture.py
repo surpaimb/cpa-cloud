@@ -170,6 +170,28 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(module.diagnostic_labels(b"arbitrary-path uid=123 raw-value unknown-mime"), ())
         self.assertEqual(module.diagnostic_labels(b"reopen-key-oracle-length-148"), ())
 
+    def test_handoff_oracles_require_safe_creation_before_secret_write(self):
+        source = (HERE.parent / "crates/employee-config-core/src/live/linux_secret_service_fixture.rs").read_text()
+        writer = source[source.index("fn write_handoff_oracle("):source.index("fn write_handoff_oracles(")]
+        self.assertIn("libc::O_EXCL", writer)
+        self.assertIn("libc::O_NOFOLLOW", writer)
+        self.assertIn("0o600", writer)
+        self.assertIn("checked_oracle_metadata(&file, uid, 0)", writer)
+        self.assertLess(writer.index("trace.check(2, before.is_some())?"), writer.index("file.write_all(bytes)"))
+        self.assertLess(writer.index("file.sync_all()"), writer.index("let after = checked_oracle_metadata"))
+        self.assertIn("libc::AT_SYMLINK_NOFOLLOW", writer)
+        self.assertRegex(writer, r"entry\.st_dev == before\.dev\(\)\s*&& entry\.st_ino == before\.ino\(\)")
+        self.assertNotIn("fs::read", writer)
+        self.assertNotIn("set_permissions", writer)
+        self.assertNotIn("libc::chmod", writer)
+        caller = source[source.index("fn volatile_collection_interop() {"):]
+        self.assertIn("write_handoff_oracles(&created)", caller)
+        self.assertNotIn("OpenOptions", caller)
+        stages = source[source.index("const ORACLE_WRITE_STAGES:"):source.index("struct OracleWriteTrace")]
+        self.assertEqual(set(re.findall(r'"([a-z-]+)"', stages)), set(module.ORACLE_WRITE_STAGES))
+        for label in module.ORACLE_WRITE_LABELS:
+            self.assertEqual(module.diagnostic_labels((label + "\n").encode()), (label,))
+
 
 if __name__ == "__main__":
     unittest.main()

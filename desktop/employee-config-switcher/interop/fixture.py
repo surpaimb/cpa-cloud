@@ -36,6 +36,10 @@ REOPEN_STAGES = ("uid", "root-path", "root-metadata", "root-kind", "root-owner",
                      for field in ("metadata", "kind", "owner", "mode", "links", "length", "read"))
 REOPEN_LABELS = tuple("reopen-" + stage + "-" + status for stage in REOPEN_STAGES
                       for status in ("ok", "failed", "not-reached"))
+ORACLE_WRITE_STAGES = ("directory", "create", "prewrite", "write", "sync", "postwrite", "directory-sync", "handoff")
+ORACLE_WRITE_LABELS = tuple("oracle-write-" + role + "-" + stage + "-" + status
+                           for role in ("reference", "key") for stage in ORACLE_WRITE_STAGES
+                           for status in ("ok", "failed", "not-reached"))
 PANICS = ("fixture-check-failed", "fixture-root-required", "fixture-mode-required", "fixture-root-metadata",
           "fixture-cgroup", "fixture-approval-failed", "fixture-provider-failed", "fixture-create-failed",
           "fixture-retry-failed", "oracle-create-failed", "oracle-write-failed", "oracle-flush-failed",
@@ -47,7 +51,7 @@ PANICS = ("fixture-check-failed", "fixture-root-required", "fixture-mode-require
           "native-session-match", "native-session-mismatch", "native-parameters-empty", "native-parameters-nonempty",
           "native-type-octet-stream", "native-type-text-plain", "native-type-empty", "native-type-other",
           "native-length-exact", "native-length-short", "native-length-long", "native-envelope-valid",
-          "native-envelope-identity", "native-envelope-format", "native-envelope-checksum", "native-envelope-not-checked") + REOPEN_LABELS
+          "native-envelope-identity", "native-envelope-format", "native-envelope-checksum", "native-envelope-not-checked") + REOPEN_LABELS + ORACLE_WRITE_LABELS
 
 
 def diagnostic_labels(output):

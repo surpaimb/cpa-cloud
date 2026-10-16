@@ -398,9 +398,264 @@ fn check(value: bool) {
     assert!(value, "fixture-check-failed");
 }
 
+#[derive(Clone, Copy)]
 enum OracleRole {
     Reference,
     Key,
+}
+
+impl OracleRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Key => "key",
+        }
+    }
+    fn filename(self) -> &'static str {
+        match self {
+            Self::Reference => "reference.bin",
+            Self::Key => "expected.key",
+        }
+    }
+}
+
+const ORACLE_WRITE_STAGES: [&str; 8] = [
+    "directory",
+    "create",
+    "prewrite",
+    "write",
+    "sync",
+    "postwrite",
+    "directory-sync",
+    "handoff",
+];
+struct OracleWriteTrace {
+    role: OracleRole,
+    states: [&'static str; 8],
+}
+impl OracleWriteTrace {
+    fn new(role: OracleRole) -> Self {
+        Self {
+            role,
+            states: ["not-reached"; 8],
+        }
+    }
+    fn check(&mut self, index: usize, ok: bool) -> Result<(), ()> {
+        self.states[index] = if ok { "ok" } else { "failed" };
+        if ok {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+}
+impl Drop for OracleWriteTrace {
+    fn drop(&mut self) {
+        for (phase, status) in ORACLE_WRITE_STAGES.iter().zip(self.states) {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "oracle-write-{}-{phase}-{status}",
+                self.role.label()
+            );
+        }
+    }
+}
+
+fn private_oracle_metadata(
+    mode: u32,
+    uid: u32,
+    links: u64,
+    length: u64,
+    expected_uid: u32,
+    expected_length: u64,
+) -> bool {
+    mode & libc::S_IFMT == libc::S_IFREG
+        && mode & 0o7777 == 0o600
+        && uid == expected_uid
+        && links == 1
+        && length == expected_length
+}
+
+fn checked_oracle_metadata(file: &File, uid: u32, length: u64) -> Option<fs::Metadata> {
+    file.metadata().ok().filter(|info| {
+        private_oracle_metadata(
+            info.mode(),
+            info.uid(),
+            info.nlink(),
+            info.len(),
+            uid,
+            length,
+        )
+    })
+}
+
+fn write_handoff_oracle(
+    directory: &File,
+    trace: &mut OracleWriteTrace,
+    bytes: &[u8],
+) -> Result<(), ()> {
+    let uid = unsafe { libc::geteuid() };
+    let safe_directory = directory
+        .metadata()
+        .is_ok_and(|info| info.is_dir() && info.uid() == uid && info.mode() & 0o7777 == 0o700);
+    trace.check(0, safe_directory)?;
+    let name = CString::new(trace.role.filename()).map_err(|_| ())?;
+    // Explicit creation mode, exclusive/no-follow, anchored to the approved fd.
+    // Never open an existing file for writing or repair it with chmod.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    trace.check(1, fd >= 0)?;
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let before = checked_oracle_metadata(&file, uid, 0);
+    trace.check(2, before.is_some())?;
+    let before = before.ok_or(())?;
+    // No Key/reference byte may be written before all prewrite predicates pass.
+    trace.check(3, file.write_all(bytes).is_ok())?;
+    trace.check(4, file.sync_all().is_ok())?;
+    let after = checked_oracle_metadata(&file, uid, bytes.len() as u64);
+    trace.check(
+        5,
+        after.is_some_and(|info| info.dev() == before.dev() && info.ino() == before.ino()),
+    )?;
+    trace.check(6, directory.sync_all().is_ok())?;
+    // Metadata-only handoff check; no reopen/read of the secret or pathname output.
+    let mut entry = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let found = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            entry.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0;
+    let matches = if found {
+        let entry = unsafe { entry.assume_init() };
+        entry.st_dev == before.dev()
+            && entry.st_ino == before.ino()
+            && private_oracle_metadata(
+                entry.st_mode,
+                entry.st_uid,
+                entry.st_nlink,
+                entry.st_size as u64,
+                uid,
+                bytes.len() as u64,
+            )
+    } else {
+        false
+    };
+    trace.check(7, matches)
+}
+
+fn write_handoff_oracles(created: &CreatedRecoveryKey) -> Result<(), ()> {
+    // Both roles are initialized before any attempt, so a failed first role
+    // leaves the unattempted second role explicitly not-reached.
+    let mut traces = [
+        OracleWriteTrace::new(OracleRole::Key),
+        OracleWriteTrace::new(OracleRole::Reference),
+    ];
+    DIAGNOSTIC_ROOT.with(|root| {
+        let root = root.borrow();
+        let directory = root.as_ref().ok_or(())?;
+        for (trace, bytes) in traces.iter_mut().zip([
+            created.key.expose().as_slice(),
+            created.reference.opaque_reference(),
+        ]) {
+            write_handoff_oracle(directory, trace, bytes)?;
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn handoff_metadata_rejects_each_unsafe_prewrite_property() {
+    let mode = libc::S_IFREG | 0o600;
+    assert!(private_oracle_metadata(mode, 1001, 1, 0, 1001, 0));
+    for changed in [
+        libc::S_IFDIR | 0o600,
+        libc::S_IFLNK | 0o600,
+        libc::S_IFREG | 0o644,
+        libc::S_IFREG | 0o400,
+        libc::S_IFREG | 0o4600,
+    ] {
+        assert!(!private_oracle_metadata(changed, 1001, 1, 0, 1001, 0));
+    }
+    assert!(!private_oracle_metadata(mode, 1002, 1, 0, 1001, 0));
+    assert!(!private_oracle_metadata(mode, 1001, 2, 0, 1001, 0));
+    assert!(!private_oracle_metadata(mode, 1001, 1, 1, 1001, 0));
+    assert!(private_oracle_metadata(mode, 1001, 1, 32, 1001, 32));
+    assert!(!private_oracle_metadata(mode, 1001, 1, 31, 1001, 32));
+    let mut trace = OracleWriteTrace::new(OracleRole::Key);
+    assert!(trace.check(2, false).is_err());
+    assert_eq!(trace.states[2], "failed");
+    assert!(trace.states[3..]
+        .iter()
+        .all(|status| *status == "not-reached"));
+}
+
+#[test]
+fn handoff_writer_creates_private_files_and_refuses_existing_or_symlink_entries() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    for role in [OracleRole::Key, OracleRole::Reference] {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = File::open(root.path()).unwrap();
+        let public_sample = [0x51; 32]; // Public dummy bytes, not a generated Key.
+        let mut trace = OracleWriteTrace::new(role);
+        assert!(write_handoff_oracle(&directory, &mut trace, &public_sample).is_ok());
+        assert!(trace.states.iter().all(|status| *status == "ok"));
+        let info = fs::symlink_metadata(root.path().join(role.filename())).unwrap();
+        assert!(private_oracle_metadata(
+            info.mode(),
+            info.uid(),
+            info.nlink(),
+            info.len(),
+            unsafe { libc::geteuid() },
+            32
+        ));
+        let mut duplicate = OracleWriteTrace::new(role);
+        assert!(write_handoff_oracle(&directory, &mut duplicate, b"must-not-write").is_err());
+        assert_eq!(duplicate.states[1], "failed");
+        assert!(duplicate.states[2..]
+            .iter()
+            .all(|status| *status == "not-reached"));
+        assert_eq!(
+            fs::symlink_metadata(root.path().join(role.filename()))
+                .unwrap()
+                .len(),
+            32
+        );
+
+        let other = tempfile::tempdir().unwrap();
+        fs::set_permissions(other.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(
+            root.path().join(role.filename()),
+            other.path().join(role.filename()),
+        )
+        .unwrap();
+        let mut alias = OracleWriteTrace::new(role);
+        assert!(write_handoff_oracle(
+            &File::open(other.path()).unwrap(),
+            &mut alias,
+            b"must-not-write"
+        )
+        .is_err());
+        assert_eq!(alias.states[1], "failed");
+        assert!(alias.states[2..]
+            .iter()
+            .all(|status| *status == "not-reached"));
+        assert_eq!(
+            fs::symlink_metadata(root.path().join(role.filename()))
+                .unwrap()
+                .len(),
+            32
+        );
+    }
 }
 
 fn oracle(path: &Path, length: usize, role: OracleRole) -> Vec<u8> {
@@ -503,19 +758,7 @@ fn volatile_collection_interop() {
             RecoveryKeyCreateOutcome::Created(value) => value,
             _ => panic!("fixture-create-failed"),
         };
-        // Exclusive fixture oracles, not provider storage or a fallback path.
-        for (name, bytes) in [
-            ("expected.key", created.key.expose().as_slice()),
-            ("reference.bin", created.reference.opaque_reference()),
-        ] {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(work.join(name))
-                .expect("oracle-create-failed");
-            file.write_all(bytes).expect("oracle-write-failed");
-            file.sync_all().expect("oracle-flush-failed");
-        }
+        write_handoff_oracles(&created).unwrap_or_else(|_| panic!("oracle-create-failed"));
         let again = match provider.create(transaction) {
             RecoveryKeyCreateOutcome::Created(value) => value,
             _ => panic!("fixture-retry-failed"),

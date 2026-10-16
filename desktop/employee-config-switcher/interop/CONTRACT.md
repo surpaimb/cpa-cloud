@@ -75,6 +75,26 @@ The dedicated run may remain FAIL/NO-GO; field classification is not acceptance.
 
 ### Narrow fixture adaptation after PR82
 
+The next test-only creation-contract correction addresses both handoff oracles
+(`expected.key` and `reference.bin`) through one descriptor-relative writer.
+It explicitly requests 0600 with exclusive/no-follow creation beneath the
+already approved private directory fd. Before writing any bytes, the same new
+fd must be regular, owned by the fixture UID, exactly mode 0600 (no special bits),
+single-linked and empty. After write and sync, the same fd must still satisfy
+those predicates with the expected length and original identity. Directory sync
+and a no-follow fstatat metadata comparison confirm the same directory entry
+before handoff. Only fixed role/phase ok/failed/not-reached labels leave the
+fixture; no actual modes, UID, paths, inode values or secret bytes are emitted.
+
+Failure stops immediately: no readback, chmod repair, overwrite, recreation,
+substitute Key or retry. Reader predicates/ACLs and pre-send scanner samples are
+unchanged. Unit negatives use public dummy bytes/metadata, never a real service.
+The correction does not establish why historical head
+`a41f08008fb2e65acdcafbf798619735b09628eb` failed its reference-oracle mode
+predicate in [run 38932593272](https://github.com/surpaimb/cpa-cloud/actions/runs/38932593272),
+nor establish its creation-time mode or the unvisited Key oracle state. Original
+E/F narrow diagnostic GO at that head is historical, not acceptance of this one.
+
 The subsequent bounded diagnostic increment leaves interoperability rejection
 unchanged. Historical head `70f10a493abaf3404bc37045c1ccb3ca4460b2ad` passed
 create/retry plus independent libsecret verification but failed reopen with only
