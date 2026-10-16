@@ -242,6 +242,10 @@ approval constructor, production apply/UI connection or new dependency is added.
 Slice A covers volatile-session interoperability only; persistent collection
 restart, lock/corruption/duplicate cases, concurrent create and exact deletion
 remain explicitly unimplemented, not silently skipped or claimed as accepted.
+Its diagnostic extension is independently authored from CPA's existing envelope
+format: test-only pre-send private scanner samples and fixed classifications of
+the original GetSecret response. It does not reread the service after failure,
+change random generation, relax MIME acceptance, or alter production rejection.
 
 ## Rust dependency resolution
 

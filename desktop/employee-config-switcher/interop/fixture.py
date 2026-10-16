@@ -32,10 +32,11 @@ PANICS = ("fixture-check-failed", "fixture-root-required", "fixture-mode-require
           "fixture-other-approval-failed", "fixture-other-provider-failed", "fixture-missing-reference-failed",
           "fixture-mode-invalid", "native-access-denied", "native-unknown-method", "native-unknown-object",
           "native-invalid-args", "native-locked", "native-missing", "native-no-session", "native-other-error",
-          "native-create-no-item", "native-create-one-item", "native-create-multiple-items", "native-search-failed",
-          "native-item-locked", "native-attribute-count", "native-extra-schema", "native-attribute-mismatch",
-          "native-envelope-valid", "native-envelope-identity", "native-envelope-corrupt", "native-transfer-metadata",
-          "native-secret-unavailable", "native-item-id-invalid")
+          "diagnostic-root-failed", "pre-send-oracle-failed", "native-decode-ok", "native-decode-failed",
+          "native-session-match", "native-session-mismatch", "native-parameters-empty", "native-parameters-nonempty",
+          "native-type-octet-stream", "native-type-text-plain", "native-type-empty", "native-type-other",
+          "native-length-exact", "native-length-short", "native-length-long", "native-envelope-valid",
+          "native-envelope-identity", "native-envelope-format", "native-envelope-checksum", "native-envelope-not-checked")
 
 
 def secret_forms(value):
@@ -52,24 +53,29 @@ def reject_secret_output(secrets, outputs):
             require(all(form not in output for form in secret_forms(value)), "fixture-secret-output")
 
 
-def scan(work, outputs):
-    secrets = []
-    for name, length in (("expected.key", 32), ("expected.envelope", 148)):
-        path = work / name
-        if not path.exists():
-            continue  # Failure before create is not converted into a pass.
-        info = path.lstat()
+def read_sample(path, length):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as sample:
+        info = os.fstat(sample.fileno())
         require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
                 stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1 and info.st_size == length,
                 "fixture-oracle-invalid")
-        secrets.append(path.read_bytes())
-    # If verification failed before writing its envelope oracle, reconstruct the
-    # canonical fixture format from the original reference + Key for log scanning.
-    if len(secrets) == 1 and (work / "reference.bin").is_file():
-        reference = (work / "reference.bin").read_bytes()
-        if len(reference) == 148:
-            body = b"CPA-SS-KEY-V1\0\0\0" + reference[16:84] + secrets[0]
-            secrets.append(body + hashlib.sha256(b"cpa-cloud/linux-secret-service/envelope/v1\0" + body).digest())
+        value = sample.read(length + 1)
+        require(len(value) == length, "fixture-oracle-invalid")
+        return value
+
+
+def scan(work, outputs):
+    # Only actual outgoing samples, captured before CreateItem. No accepted or
+    # rejected response and no reconstruction may supply a scanner oracle.
+    secrets = []
+    for name, length in (("sent.key", 32), ("sent.envelope", 148)):
+        value = read_sample(work / name, length)
+        if value is not None:
+            secrets.append(value)
     reject_secret_output(secrets, outputs)
     return len(secrets) == 2
 
@@ -198,12 +204,12 @@ def inside(metadata_path):
         for handle in handles:
             handle.close()
         require(all(process.poll() is not None for process in processes), "fixture-child-remains")
+        print("OWNED_PROCESSES_STOPPED", flush=True)
         for name in ("bus.log", "keyring.log"):
             if (work / name).is_file():
                 outputs.append((work / name).read_bytes())
         require(scan(work, outputs), "fixture-scan-incomplete")
         print("SECRET_LOG_SCAN_OK", flush=True)
-        print("OWNED_PROCESSES_STOPPED", flush=True)
 
 
 if __name__ == "__main__":

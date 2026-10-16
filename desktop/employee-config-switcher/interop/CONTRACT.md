@@ -44,6 +44,33 @@ Raw daemon, libsecret, Rust-test and D-Bus diagnostics remain private; only fixe
 labels and non-secret source/executable digests reach CI. No secret digest is
 published. A scanner failure is a failure even though raw output is withheld.
 
+### Diagnostic-only failure evidence
+
+Before the first CreateItem sends any synthetic secret, a `cfg(test)` hook saves
+the actual randomly generated Key and actual encoded envelope as `sent.key` and
+`sent.envelope`. Exclusive descriptor-relative creation uses the approved private
+directory, no-follow and mode 0600; write/sync failure prevents sending. The
+production RNG is unchanged. Both success and failure output scans use only these
+pre-send samples, never accepted/rejected response bytes or reconstruction from
+a reference. Missing samples fail scanner completeness. The post-acceptance
+`expected.*` and reference files remain independent verifier inputs, not scanner
+inputs. No sample, secret digest or raw child output is uploaded or printed.
+
+At the original GetSecret call, test-only diagnostics classify the same typed
+response: decode success/failure; matching/mismatching session; empty/nonempty
+parameters; octet-stream/text-plain/empty/other content type; exactly 148/short/long
+value; and envelope valid/format/checksum/identity/not-checked. Envelope identity
+includes the original outgoing Key. Only fixed labels leave the fixture; no
+raw MIME, path, parameters, value, digest or D-Bus error text is emitted. The
+previous post-failure SearchItems/GetSecret diagnostic reread is removed.
+
+These hooks neither mutate the response nor change the original production
+rejection conditions. MIME compatibility and production returned-value zeroizing
+are not implemented by this diagnostic change. Owned processes are stopped and
+their status recorded before scanning, so scanner failure cannot hide a completed
+process cleanup marker. This marker does not by itself certify outer root cleanup.
+The dedicated run may remain FAIL/NO-GO; field classification is not acceptance.
+
 ## Policy and prompt boundary
 
 The separate fixture bus policy permits only the service calls required here,

@@ -1,6 +1,259 @@
 //! Independent test-only entry point for interop/CONTRACT.md, never a production API.
 use super::*;
-use std::{fs, os::unix::fs::MetadataExt};
+use std::{cell::RefCell, fs, os::unix::fs::MetadataExt};
+
+thread_local! {
+    // Enabled only after the explicit native test has checked its fixture root,
+    // UID, cgroup and private bus address. Normal contract tests have no oracle.
+    static DIAGNOSTIC_ROOT: RefCell<Option<File>> = const { RefCell::new(None) };
+}
+
+fn enable_diagnostics(work: &Path) {
+    let approval =
+        open_approved_directory(work, false).unwrap_or_else(|_| panic!("diagnostic-root-failed"));
+    DIAGNOSTIC_ROOT.with(|root| *root.borrow_mut() = Some(approval.directory));
+}
+
+fn write_sample(directory: &File, name: &str, value: &[u8]) -> io::Result<()> {
+    let name = CString::new(name).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(value)?;
+    file.sync_all()
+}
+
+/// Capture the actual original random Key and envelope before the first secret
+/// is sent. Failure prevents sending. Never derive an oracle from a response.
+pub(super) fn capture_outgoing(key: &BackupKey, envelope: &[u8]) -> bool {
+    DIAGNOSTIC_ROOT.with(|root| {
+        let root = root.borrow();
+        let Some(directory) = root.as_ref() else {
+            return true;
+        };
+        let result = (|| {
+            if envelope.len() != ENVELOPE_BYTES {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            write_sample(directory, "sent.key", key.expose())?;
+            write_sample(directory, "sent.envelope", envelope)?;
+            directory.sync_all()
+        })();
+        if result.is_err() {
+            eprintln!("pre-send-oracle-failed");
+        }
+        result.is_ok()
+    })
+}
+
+fn sent_envelope(directory: &File) -> Option<Zeroizing<Vec<u8>>> {
+    let name = CString::new("sent.envelope").ok()?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let info = file.metadata().ok()?;
+    if !info.is_file()
+        || info.uid() != unsafe { libc::geteuid() }
+        || info.mode() & 0o777 != 0o600
+        || info.nlink() != 1
+        || info.len() != ENVELOPE_BYTES as u64
+    {
+        return None;
+    }
+    let mut bytes = Zeroizing::new(vec![0; ENVELOPE_BYTES]);
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+fn metadata_categories(
+    session_matches: bool,
+    parameters: &[u8],
+    content_type: &str,
+    value: &[u8],
+) -> [&'static str; 4] {
+    [
+        if session_matches {
+            "native-session-match"
+        } else {
+            "native-session-mismatch"
+        },
+        if parameters.is_empty() {
+            "native-parameters-empty"
+        } else {
+            "native-parameters-nonempty"
+        },
+        match content_type {
+            "application/octet-stream" => "native-type-octet-stream",
+            "text/plain" => "native-type-text-plain",
+            "" => "native-type-empty",
+            _ => "native-type-other",
+        },
+        match value.len().cmp(&ENVELOPE_BYTES) {
+            std::cmp::Ordering::Equal => "native-length-exact",
+            std::cmp::Ordering::Less => "native-length-short",
+            std::cmp::Ordering::Greater => "native-length-long",
+        },
+    ]
+}
+
+fn envelope_category(value: &[u8], original: Option<&[u8]>) -> &'static str {
+    let Some(original) = original.filter(|bytes| bytes.len() == ENVELOPE_BYTES) else {
+        return "native-envelope-not-checked";
+    };
+    if value.len() != ENVELOPE_BYTES || &value[..16] != ENVELOPE_MAGIC {
+        return "native-envelope-format";
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(ENVELOPE_CONTEXT);
+    hasher.update(&value[..116]);
+    if verify_slices_are_equal(&hasher.finalize(), &value[116..]).is_err() {
+        return "native-envelope-checksum";
+    }
+    // Identity includes the original Key bytes, not merely public identity fields.
+    if verify_slices_are_equal(&value[16..116], &original[16..116]).is_err() {
+        return "native-envelope-identity";
+    }
+    "native-envelope-valid"
+}
+
+#[test]
+fn diagnostic_metadata_categories_are_fixed() {
+    assert_eq!(
+        metadata_categories(true, &[], CONTENT_TYPE, &[0; ENVELOPE_BYTES]),
+        [
+            "native-session-match",
+            "native-parameters-empty",
+            "native-type-octet-stream",
+            "native-length-exact"
+        ]
+    );
+    assert_eq!(
+        metadata_categories(false, &[1], "text/plain", &[]),
+        [
+            "native-session-mismatch",
+            "native-parameters-nonempty",
+            "native-type-text-plain",
+            "native-length-short"
+        ]
+    );
+    assert_eq!(
+        metadata_categories(true, &[], "", &[0; ENVELOPE_BYTES + 1])[2..],
+        ["native-type-empty", "native-length-long"]
+    );
+    assert_eq!(
+        metadata_categories(true, &[], "arbitrary-private-value", &[])[2],
+        "native-type-other"
+    );
+}
+
+#[test]
+fn diagnostic_envelope_categories_use_original_send_not_response_oracle() {
+    fn checksum(bytes: &mut [u8]) {
+        let mut hasher = Sha256::new();
+        hasher.update(ENVELOPE_CONTEXT);
+        hasher.update(&bytes[..116]);
+        bytes[116..].copy_from_slice(&hasher.finalize());
+    }
+    let mut original = [0x51; ENVELOPE_BYTES];
+    original[..16].copy_from_slice(ENVELOPE_MAGIC);
+    checksum(&mut original);
+    assert_eq!(
+        envelope_category(&original, None),
+        "native-envelope-not-checked"
+    );
+    assert_eq!(
+        envelope_category(&original, Some(&[])),
+        "native-envelope-not-checked"
+    );
+    assert_eq!(
+        envelope_category(&original, Some(&original)),
+        "native-envelope-valid"
+    );
+    assert_eq!(
+        envelope_category(&[], Some(&original)),
+        "native-envelope-format"
+    );
+    let mut altered = original;
+    altered[0] ^= 1;
+    assert_eq!(
+        envelope_category(&altered, Some(&original)),
+        "native-envelope-format"
+    );
+    altered = original;
+    altered[116] ^= 1;
+    assert_eq!(
+        envelope_category(&altered, Some(&original)),
+        "native-envelope-checksum"
+    );
+    for offset in [16, 32, 36, 68, 84] {
+        altered = original;
+        altered[offset] ^= 1;
+        checksum(&mut altered);
+        assert_eq!(
+            envelope_category(&altered, Some(&original)),
+            "native-envelope-identity"
+        );
+    }
+}
+
+pub(super) fn decoded_result(ok: bool) {
+    DIAGNOSTIC_ROOT.with(|root| {
+        if root.borrow().is_some() {
+            eprintln!(
+                "{}",
+                if ok {
+                    "native-decode-ok"
+                } else {
+                    "native-decode-failed"
+                }
+            );
+            if !ok {
+                eprintln!("native-envelope-not-checked");
+            }
+        }
+    });
+}
+
+/// Called once on the original typed response before the unchanged rejection.
+/// No service query, response mutation, raw output or acceptance decision here.
+pub(super) fn returned_secret(
+    session_matches: bool,
+    parameters: &[u8],
+    content_type: &str,
+    value: &[u8],
+) {
+    DIAGNOSTIC_ROOT.with(|root| {
+        let root = root.borrow();
+        let Some(directory) = root.as_ref() else {
+            return;
+        };
+        for category in metadata_categories(session_matches, parameters, content_type, value) {
+            eprintln!("{category}");
+        }
+        let original = sent_envelope(directory);
+        eprintln!(
+            "{}",
+            envelope_category(value, original.as_deref().map(|bytes| bytes.as_slice()))
+        );
+    });
+}
 
 pub(super) fn backend_error(error: &dbus::Error) {
     // Never print the daemon's error message or arbitrary error name.
@@ -49,6 +302,7 @@ fn volatile_collection_interop() {
             == Some(format!("unix:path={}", work.join("runtime/bus").display())),
     );
     check(std::env::var_os("HOME") == Some(work.join("home").into_os_string()));
+    enable_diagnostics(&work);
     let transaction = ReplacementTransactionId::from_bytes([0x71; 16]).expect("fixed-transaction");
     let approval = if mode == "create" {
         SyntheticSecretServiceApproval::for_test_fresh(&work.join("lock"))
@@ -69,70 +323,7 @@ fn volatile_collection_interop() {
     if mode == "create" {
         let created = match provider.create(transaction) {
             RecoveryKeyCreateOutcome::Created(value) => value,
-            _ => {
-                // Read-only failure diagnosis. Never retry CreateItem or replace.
-                let attributes = base_attributes(transaction, uid, provider.inner.lock_namespace);
-                match provider.inner.backend.search(&attributes) {
-                    Ok(items) if items.is_empty() => eprintln!("native-create-no-item"),
-                    Ok(items) if items.len() == 1 => {
-                        eprintln!("native-create-one-item");
-                        let item = &items[0];
-                        if item.locked {
-                            eprintln!("native-item-locked");
-                        }
-                        if item.attributes.len() != 7 {
-                            eprintln!("native-attribute-count");
-                        }
-                        if item.attributes.contains_key("xdg:schema") {
-                            eprintln!("native-extra-schema");
-                        }
-                        let item_id = item
-                            .attributes
-                            .get("item-id")
-                            .and_then(|value| hex::decode(value).ok())
-                            .and_then(|bytes| <[u8; 16]>::try_from(bytes.as_slice()).ok());
-                        if let Some(item_id) = item_id {
-                            if item.attributes
-                                != full_attributes(
-                                    transaction,
-                                    uid,
-                                    provider.inner.lock_namespace,
-                                    item_id,
-                                )
-                            {
-                                eprintln!("native-attribute-mismatch");
-                            }
-                            match provider.inner.backend.get_secret(&item.handle) {
-                                Ok(bytes) => {
-                                    let bytes = Zeroizing::new(bytes);
-                                    match decode_envelope(
-                                        transaction,
-                                        uid,
-                                        provider.inner.lock_namespace,
-                                        item_id,
-                                        &bytes,
-                                    ) {
-                                        Envelope::Available(_) => {
-                                            eprintln!("native-envelope-valid")
-                                        }
-                                        Envelope::WrongIdentity => {
-                                            eprintln!("native-envelope-identity")
-                                        }
-                                        Envelope::Corrupt => eprintln!("native-envelope-corrupt"),
-                                    }
-                                }
-                                Err(BackendError::Corrupt) => eprintln!("native-transfer-metadata"),
-                                Err(_) => eprintln!("native-secret-unavailable"),
-                            }
-                        } else {
-                            eprintln!("native-item-id-invalid");
-                        }
-                    }
-                    Ok(_) => eprintln!("native-create-multiple-items"),
-                    Err(_) => eprintln!("native-search-failed"),
-                }
-                panic!("fixture-create-failed");
-            }
+            _ => panic!("fixture-create-failed"),
         };
         // Exclusive fixture oracles, not provider storage or a fallback path.
         for (name, bytes) in [

@@ -245,6 +245,10 @@ impl<B: SecretServiceBackend> ContractProvider<B> {
             content_type: CONTENT_TYPE,
             replace: false,
         };
+        #[cfg(test)]
+        if !real_fixture::capture_outgoing(&key, envelope.as_slice()) {
+            return RecoveryKeyCreateOutcome::Unavailable;
+        }
         match backend.create_item(request) {
             Ok(_) => {}
             Err(BackendError::Locked | BackendError::PromptRequired) => {
@@ -1143,17 +1147,17 @@ impl SecretServiceBackend for DbusBackend {
         let proxy = self
             .connection
             .with_proxy(SERVICE_NAME, handle, DBUS_TIMEOUT);
-        let ((session, parameters, value, content_type),): ((
-            dbus::Path<'static>,
-            Vec<u8>,
-            Vec<u8>,
-            String,
-        ),) = proxy
-            .method_call(ITEM_INTERFACE, "GetSecret", (self.session.clone(),))
-            .map_err(|error| Self::classify(&error))?;
+        let decoded: Result<((dbus::Path<'static>, Vec<u8>, Vec<u8>, String),), dbus::Error> =
+            proxy.method_call(ITEM_INTERFACE, "GetSecret", (self.session.clone(),));
+        #[cfg(test)]
+        real_fixture::decoded_result(decoded.is_ok());
+        let ((session, parameters, value, content_type),) =
+            decoded.map_err(|error| Self::classify(&error))?;
         // Own the decoded allocation before any metadata rejection. The guard
         // also stays alive through the caller's envelope and identity checks.
         let value = Zeroizing::new(value);
+        #[cfg(test)]
+        real_fixture::returned_secret(session == self.session, &parameters, &content_type, &value);
         validate_secret_transfer(session == self.session, &parameters, &content_type, value)
     }
 

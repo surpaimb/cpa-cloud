@@ -4,6 +4,7 @@ import base64
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 HERE = Path(__file__).resolve().parent
@@ -61,6 +62,50 @@ class FixtureTests(unittest.TestCase):
                 self.assertIsInstance(node.args[1], ast.Constant)
         for label in module.FAILURES + module.PANICS:
             self.assertRegex(label, r"^[a-z-]+$")
+
+    def test_scanner_uses_only_presend_samples_on_success_and_failure(self):
+        key, envelope = bytes(range(32)), bytes(range(148))
+        for output in (b"CPA_FIXTURE_OK\n", b"fixture-create-failed\n"):
+            with patch.object(module, "read_sample", side_effect=[key, envelope]) as reader:
+                self.assertTrue(module.scan(Path("isolated"), [output]))
+                self.assertEqual(reader.call_args_list[0].args, (Path("isolated/sent.key"), 32))
+                self.assertEqual(reader.call_args_list[1].args, (Path("isolated/sent.envelope"), 148))
+        for value in (key, envelope):
+            for form in module.secret_forms(value):
+                with patch.object(module, "read_sample", side_effect=[key, envelope]):
+                    with self.assertRaisesRegex(module.base.PreflightFailure, "^fixture-secret-output$"):
+                        module.scan(Path("isolated"), [b"fixture-create-failed\n" + form])
+
+    def test_missing_samples_cannot_pass_even_with_response_oracle(self):
+        for samples in ([None, None], [bytes(range(32)), None], [None, bytes(range(148))]):
+            with patch.object(module, "read_sample", side_effect=samples):
+                self.assertFalse(module.scan(Path("isolated"), [b"fixture-create-failed\n"]))
+        source = (HERE / "fixture.py").read_text()
+        scanner = source[source.index("def scan("):source.index("class Fixture:")]
+        self.assertNotIn("expected.", scanner)
+        self.assertNotIn("reference.bin", scanner)
+        self.assertNotIn("hashlib", scanner)
+
+    def test_same_response_diagnostics_and_presend_order(self):
+        source = (HERE.parent / "crates/employee-config-core/src/live/linux_secret_service.rs").read_text()
+        self.assertLess(source.index("real_fixture::capture_outgoing"), source.index("match backend.create_item(request)"))
+        self.assertIn("#[cfg(test)]\n        if !real_fixture::capture_outgoing", source)
+        self.assertIn("#[cfg(test)]\n        real_fixture::returned_secret", source)
+        self.assertIn("if session != self.session || !parameters.is_empty() || content_type != CONTENT_TYPE", source)
+        caller = (HERE.parent / "crates/employee-config-core/src/live/linux_secret_service_fixture.rs").read_text()
+        self.assertNotIn("backend.search", caller)
+        self.assertNotIn("backend.get_secret", caller)
+        self.assertIn("libc::O_EXCL", caller)
+        self.assertIn("libc::O_NOFOLLOW", caller)
+        for label in module.PANICS:
+            if label.startswith("native-"):
+                self.assertIn('"' + label + '"', caller)
+
+    def test_cleanup_is_recorded_before_scan_failure(self):
+        source = (HERE / "fixture.py").read_text()
+        cleanup = source[source.index("    finally:"):]
+        self.assertLess(cleanup.index("stop(process)"), cleanup.index('print("OWNED_PROCESSES_STOPPED"'))
+        self.assertLess(cleanup.index('print("OWNED_PROCESSES_STOPPED"'), cleanup.index("require(scan(work, outputs)"))
 
 
 if __name__ == "__main__":
