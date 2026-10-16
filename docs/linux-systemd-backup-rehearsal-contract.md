@@ -49,11 +49,17 @@ mistaken for successful rejection.
 - `PrivateNetwork=yes` plus `RestrictAddressFamilies=AF_UNIX`; test checks a
   distinct network namespace and denial of IPv4/IPv6 socket creation. No listener
   is started, and port 8787, real providers and existing services are untouched.
+  These assertions cover direct IP sockets, not all host IPC; AF_UNIX remains
+  allowed and filesystem-path Unix sockets are not generally isolated here.
 - Rehearsal configuration disables network workers and the backup coordinator.
   This exercises actual provider/binding/codec/service Open/Close, not autonomous
   scheduler dispatch, retention or the full management API.
 - `ProtectSystem=strict`, `ProtectHome=yes`, `NoNewPrivileges=yes`, core dumps
-  disabled, bounded runtime, and only the test work directory writable.
+  disabled, and bounded runtime. `ReadWritePaths` explicitly exempts the per-case
+  work directory from the read-only mount policy. This does not establish that
+  it is the only writable location: `ProtectSystem=strict` excludes `/dev`,
+  `/proc` and `/sys`, and this harness does not establish that shared `/dev/shm`
+  is unwritable or isolated. No whole-host filesystem or IPC isolation is claimed.
   `PrivateTmp` is intentionally absent because the test root is under `/var/tmp`;
   `TMPDIR` instead points to a private per-case writable directory.
 - Stdout/stderr and the exact unit journals are screened for synthetic secrets

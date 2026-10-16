@@ -152,7 +152,9 @@ def main(binary):
                           "RuntimeMaxSec=120", "TimeoutStopSec=10", "KillMode=control-group",
                           "WorkingDirectory=" + str(work)]
             # PrivateTmp is intentionally not enabled: work is in /var/tmp.
-            # ProtectSystem=strict plus ReadWritePaths bounds writable storage.
+            # ReadWritePaths exempts this work directory from ProtectSystem's
+            # read-only policy, not from a whole-host write/IPC sandbox. /dev,
+            # /proc and /sys are excluded; shared /dev/shm is not isolated here.
             for name, variant in ((MASTER, master), (BACKUP, backup)):
                 if variant:
                     properties.append("LoadCredentialEncrypted=" + name + ":" + str(encrypted / variant))
