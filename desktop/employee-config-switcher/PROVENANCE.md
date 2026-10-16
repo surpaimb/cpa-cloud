@@ -130,6 +130,25 @@ stops after the exact removal receipt is durably journaled as
 WorkspaceRemovalDurable, with provider deletion, production apply, UI write,
 real directories, port 8787, deployment and packaging all unexecuted.
 
+### Linux synthetic key-deletion preflight hardening (2026-10-16)
+
+The cleanup journal now persists the exact replacement-directory,
+workspace-removal proof-directory, final-proof-file, and retained-workspace
+device/inode identities when `WorkspaceRemovalDurable` becomes durable. Every
+later provider-deletion attempt reopens those objects descriptor-relatively
+with no-follow semantics and refuses identity replacement, extra file links,
+owner/mode drift, non-empty retained evidence, or a reintroduced workspace.
+Root, directory, and proof-file descriptors also reject both POSIX access and
+default ACL xattrs through `fgetxattr`; inability to prove ACL absence fails
+closed. The journal format bump prevents older events without the identity
+snapshot from authorizing deletion. Synthetic tests install a real Linux ACL,
+replace a proof inode with byte-identical content, add a hard link, and assert
+the provider delete count remains zero. A subprocess test exits at every
+workspace-removal rename/flush checkpoint and verifies restart convergence.
+No real Secret Service, production key deletion, client write, package, or
+deployment is enabled. The implementation contract is
+[Linux synthetic key-deletion preflight](../../docs/research/linux-key-deletion-preflight-contract.md).
+
 ## Public protocol sources
 
 - Linux durable empty-workspace removal uses the Linux man-pages for
@@ -140,6 +159,15 @@ real directories, port 8787, deployment and packaging all unexecuted.
   2026-10-16). These document descriptor-relative/no-follow opening,
   no-replace rename, advisory locking, and the need to flush containing
   directories for durable namespace changes.
+
+- Linux key-deletion preflight hardening additionally uses
+  [fgetxattr(2)](https://man7.org/linux/man-pages/man2/fgetxattr.2.html),
+  [xattr(7)](https://man7.org/linux/man-pages/man7/xattr.7.html), and
+  [acl(5)](https://man7.org/linux/man-pages/man5/acl.5.html) from Linux
+  man-pages 6.19 (accessed 2026-10-16). These document fd-bound xattr reads,
+  the `system.posix_acl_access` namespace, and default directory ACLs. No
+  dependency was added; the existing pinned `libc` crate retains its recorded
+  license.
 
 - Windows security-descriptor ownership and access-token APIs: Microsoft Learn documentation for [`SetNamedSecurityInfoW`](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow), [`GetSecurityDescriptorOwner`](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getsecuritydescriptorowner), [`OpenProcessToken`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken), and [`GetTokenInformation`](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation) (accessed 2026-10-15). Creation sets the owner to the current process-token user SID; recovery compares the file owner with that SID in addition to verifying the protected owner-rights DACL.
 - macOS extended ACL enumeration: Apple `acl_get_fd_np(3)` and `acl_get_entry(3)` manual pages (accessed 2026-10-15). The private-directory boundary queries the already-open object, rejects any extended ACL entry rather than relying only on BSD owner/mode metadata, and separately confirms that a lock path still names the locked inode.
