@@ -38,6 +38,30 @@ jobs:
         run: python3 scripts/ci-plan.py --base "$BASE"
       - run: python3 scripts/test-ci-plan.py
 
+  systemd-backup:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact source commit
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Compile dedicated real-systemd acceptance
+        run: go test -c -tags cpacloud_systemd_acceptance -o "$RUNNER_TEMP/systemd-backup.test" ./internal/service
+      - name: Check synthetic fixture and log-screening invariants
+        run: python3 -B scripts/smoke-linux-systemd-backup-test.py
+      - name: Rehearse dual encrypted credentials across two synthetic fixed users
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS python3 scripts/smoke-linux-systemd-backup.py "$RUNNER_TEMP/systemd-backup.test"
+
   core:
     needs: changes
     if: needs.changes.outputs.core == 'true'
