@@ -441,6 +441,7 @@ When enabled, the proxy must remove client-supplied forwarding headers and write
 | Flag | Default / purpose |
 | --- | --- |
 | `--data-dir` | `cpa-cloud` under the system user's configuration directory; explicitly specifying an absolute path is recommended |
+| `--master-key-provider` | Latest-source default is `preview-file-v1`; Linux headless services may explicitly select the first-slice `linux-systemd-credential-v1` mode described below |
 | `--listen` | `127.0.0.1:8787` |
 | `--web-dir` | Empty; the web console is unavailable when this flag is not set |
 | `--init` | Initialize from stdin and then exit |
@@ -455,7 +456,9 @@ Run `cpa-cloud --help` to see the binary flags.
 
 The trusted set is canonicalized and frozen at process startup; changing the flags requires a restart. A background task created under an older trust revision but not yet dispatched is interrupted with zero upstream requests instead of silently reinterpreting its stored source under the new rules.
 
-The data directory contains `cpa-cloud.db`, possible WAL/SHM files, and **`master.key`**. Employee keys are stored as keyed digests, and upstream credentials are encrypted. The host administrator can still access secrets used by the running service. Losing or replacing `master.key` makes existing encrypted credentials unusable.
+In the default preview mode, the data directory contains `cpa-cloud.db`, possible WAL/SHM files, and **`master.key`**. Employee keys are stored as keyed digests, and upstream credentials are encrypted. The host administrator can still access secrets used by the running service. Losing or replacing `master.key` makes existing encrypted credentials unusable.
+
+The latest source also has a first Linux headless service key-custody gate. When `--master-key-provider=linux-systemd-credential-v1` is explicitly selected, the service reads the root key only from systemd's fixed `cpa-cloud-master-key` credential and checks permissions, instance/key-id/version metadata, and an AEAD canary before SQLite migration, listeners, or workers. It rejects and never falls back to `master.key`. This does not yet prove a real `LoadCredentialEncrypted=` activation, TPM/host policy, rotation, or second-environment recovery, and it does not complete SEC-01. See the [first-slice Linux systemd master-key contract](docs/linux-systemd-master-key-provider-contract.md) for the format, fixed-service-UID assumption, and tested/untested boundary.
 
 The latest source includes the separate encrypted `cpa-cloud-backup create|verify|restore` CLI. It takes a consistent snapshot of a live WAL database and restores only into a nonexistent new directory; see the [encrypted backup guide](docs/backup-restore.md) for usage, security boundaries, and the first-preview 128 MiB limit. It does not provide scheduled backups, retention, remote upload, or in-place rollback. Keep the matching old executable and web files for upgrades, validate restores in isolation, and never copy only the main database file from a running instance.
 
