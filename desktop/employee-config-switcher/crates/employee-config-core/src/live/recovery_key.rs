@@ -11,6 +11,7 @@ use super::{
     linux_replacement::{DurableTerminalHandoff, REPLACEMENT_JOURNAL_FORMAT_VERSION},
     replacement::ReplacementPhase,
     workspace_removal::WorkspaceRemovalReceipt,
+    workspace_retirement::{WorkspaceRetirementAuthorization, WorkspaceRetirementPlan},
 };
 
 const TRANSACTION_ID_BYTES: usize = 16;
@@ -545,6 +546,7 @@ pub struct RecoveryKeyCleanupSequence {
     root_device: u64,
     root_inode: u64,
     workspace_target: WorkspaceRemovalTarget,
+    retirement_plan: Option<WorkspaceRetirementPlan>,
 }
 
 impl RecoveryKeyCleanupSequence {
@@ -560,6 +562,7 @@ impl RecoveryKeyCleanupSequence {
             return Err(RecoveryKeyCleanupError::InvalidTerminal);
         }
         let workspace_target = WorkspaceRemovalTarget::from_terminal_handoff(&handoff)?;
+        let retirement_plan = handoff.retirement_plan().cloned();
         Ok(Self {
             phase: RecoveryKeyCleanupPhase::TerminalRecorded,
             terminal,
@@ -569,6 +572,7 @@ impl RecoveryKeyCleanupSequence {
             root_device: handoff.root_device(),
             root_inode: handoff.root_inode(),
             workspace_target,
+            retirement_plan,
         })
     }
 
@@ -596,6 +600,7 @@ impl RecoveryKeyCleanupSequence {
             root_device,
             root_inode,
             workspace_target,
+            retirement_plan: None,
         })
     }
 
@@ -635,6 +640,10 @@ impl RecoveryKeyCleanupSequence {
         &self.workspace_target
     }
 
+    pub(crate) fn retirement_plan(&self) -> Option<&WorkspaceRetirementPlan> {
+        self.retirement_plan.as_ref()
+    }
+
     pub(crate) fn from_durable_phase(
         _evidence: super::cleanup_journal::DurablePhaseEvidence,
         phase: RecoveryKeyCleanupPhase,
@@ -645,6 +654,7 @@ impl RecoveryKeyCleanupSequence {
         root_device: u64,
         root_inode: u64,
         workspace_target: WorkspaceRemovalTarget,
+        retirement_plan: Option<WorkspaceRetirementPlan>,
     ) -> Result<Self, RecoveryKeyCleanupError> {
         if !matches!(
             terminal,
@@ -662,6 +672,7 @@ impl RecoveryKeyCleanupSequence {
             root_device,
             root_inode,
             workspace_target,
+            retirement_plan,
         })
     }
 
@@ -687,6 +698,22 @@ impl RecoveryKeyCleanupSequence {
     ) -> Result<WorkspaceRemovalAuthorization, RecoveryKeyCleanupError> {
         self.require_phase(RecoveryKeyCleanupPhase::CompletionTombstoneDurable)?;
         Ok(self.workspace_removal_authorization())
+    }
+
+    pub(crate) fn authorize_workspace_retirement(
+        &self,
+    ) -> Result<WorkspaceRetirementAuthorization, RecoveryKeyCleanupError> {
+        self.require_phase(RecoveryKeyCleanupPhase::CompletionTombstoneDurable)?;
+        let plan = self
+            .retirement_plan
+            .clone()
+            .ok_or(RecoveryKeyCleanupError::InvalidTransition(self.phase))?;
+        Ok(WorkspaceRetirementAuthorization::new(
+            self.terminal,
+            self.transaction_id,
+            self.reference.clone(),
+            plan,
+        ))
     }
 
     pub(crate) fn workspace_removal_authorization(&self) -> WorkspaceRemovalAuthorization {

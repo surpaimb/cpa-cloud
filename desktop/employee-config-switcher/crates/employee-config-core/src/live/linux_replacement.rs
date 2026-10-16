@@ -16,6 +16,7 @@ use super::{
         ReplacementTransactionId,
     },
     replacement::ReplacementPhase,
+    workspace_retirement::{capture_terminal_plan, WorkspaceRetirementPlan},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -84,6 +85,7 @@ pub(crate) struct DurableTerminalHandoff {
     workspace_device: u64,
     workspace_inode: u64,
     reference: RecoveryKeyReference,
+    retirement_plan: Option<WorkspaceRetirementPlan>,
 }
 
 impl DurableTerminalHandoff {
@@ -130,6 +132,10 @@ impl DurableTerminalHandoff {
         &self.reference
     }
 
+    pub(crate) fn retirement_plan(&self) -> Option<&WorkspaceRetirementPlan> {
+        self.retirement_plan.as_ref()
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(
         outcome: ReplacementOutcome,
@@ -150,8 +156,10 @@ impl DurableTerminalHandoff {
             workspace_device,
             workspace_inode,
             reference,
+            retirement_plan: None,
         }
     }
+
 }
 
 impl std::fmt::Debug for DurableTerminalHandoff {
@@ -167,6 +175,7 @@ impl std::fmt::Debug for DurableTerminalHandoff {
             .field("workspace_device", &self.workspace_device)
             .field("workspace_inode", &self.workspace_inode)
             .field("reference", &self.reference)
+            .field("retirement_plan", &self.retirement_plan)
             .finish()
     }
 }
@@ -1295,6 +1304,23 @@ mod platform {
             return Err(SyntheticReplacementError::RecoveryConflict);
         }
         let workspace_identity = identity(&transaction.workspace, &transaction.workspace_path)?;
+        let backup_workspace = journal_state
+            .backup_workspace
+            .as_deref()
+            .ok_or(SyntheticReplacementError::CorruptJournal)?;
+        let retirement_plan = capture_terminal_plan(
+            &transaction.root_path,
+            transaction.state.transaction_id,
+            &reference,
+            root_identity.volume,
+            root_identity.file,
+            &expected_workspace,
+            workspace_identity.volume,
+            workspace_identity.file,
+            backup_workspace,
+        )
+        .map_err(|_| SyntheticReplacementError::RecoveryConflict)?;
+        revalidate_namespace(transaction)?;
         let terminal_handoff = DurableTerminalHandoff {
             journal_version: REPLACEMENT_JOURNAL_FORMAT_VERSION,
             outcome,
@@ -1305,6 +1331,7 @@ mod platform {
             workspace_device: workspace_identity.volume,
             workspace_inode: workspace_identity.file,
             reference,
+            retirement_plan: Some(retirement_plan),
         };
         Ok(ReplacementReceipt {
             transaction_id: transaction.state.transaction_id,
@@ -2866,6 +2893,7 @@ mod tests {
             CreatedRecoveryKey, RecoveryKeyCleanupPhase, RecoveryKeyDeleteOutcome,
             RecoveryKeyOpenOutcome,
         },
+        workspace_retirement::{BACKUP_DIRECTORY, WorkspaceRetirementError},
     };
     use std::{
         fs::{self, File, OpenOptions},
@@ -3903,5 +3931,156 @@ mod tests {
         assert!(workspace_path.is_dir());
         assert!(fs::read_dir(&workspace_path).unwrap().next().is_some());
         assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    fn cleanup_ready_fixture(
+        byte: u8,
+    ) -> (
+        TempDir,
+        SyntheticRootApproval,
+        TestProvider,
+        ReplacementTransactionId,
+        PathBuf,
+        PathBuf,
+        crate::live::cleanup_journal::DurableCleanupJournal,
+    ) {
+        let (root, approval) = fixture();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(byte);
+        let mut provider = TestProvider::new(byte);
+        let receipt = replace_existing_synthetic(
+            &approval,
+            Path::new("config.json"),
+            b"new-employee-key",
+            transaction_id,
+            &mut provider,
+            SyntheticValidation::Accept,
+        )
+        .unwrap();
+        let handoff = receipt.terminal_handoff();
+        let backup_workspace = handoff
+            .retirement_plan()
+            .unwrap()
+            .backup_workspace_name()
+            .to_owned();
+        let reference = handoff.reference().clone();
+        let tombstone = persist_completion_tombstone(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            &reference,
+        )
+        .unwrap();
+        let mut cleanup =
+            create_durable_cleanup_journal(&root_path, receipt.into_terminal_handoff()).unwrap();
+        cleanup
+            .record_completion_tombstone_durable(&tombstone)
+            .unwrap();
+        let workspace_path = workspace(&root_path, transaction_id);
+        let backup_path = root_path.join(BACKUP_DIRECTORY).join(backup_workspace);
+        (
+            root,
+            approval,
+            provider,
+            transaction_id,
+            workspace_path,
+            backup_path,
+            cleanup,
+        )
+    }
+
+    #[test]
+    fn terminal_handoff_retires_only_exact_contents_and_stops_before_workspace_receipt() {
+        let (root, _approval, provider, transaction_id, workspace_path, backup_path, cleanup) =
+            cleanup_ready_fixture(0xa8);
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let receipt = cleanup.retire_workspace_contents_durable().unwrap();
+        assert_eq!(
+            receipt.workspace_name(),
+            format!("tx-{}", transaction_text(transaction_id))
+        );
+        assert!(workspace_path.is_dir());
+        assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
+        assert!(!backup_path.exists());
+        assert_eq!(cleanup.phase(), RecoveryKeyCleanupPhase::CompletionTombstoneDurable);
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+
+        drop(cleanup);
+        let loaded = load_durable_cleanup_journals(&root_path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].phase(),
+            RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+        );
+        loaded[0].retire_workspace_contents_durable().unwrap();
+        assert!(workspace_path.is_dir());
+        assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn workspace_retirement_preserves_unknown_and_edited_entries() {
+        let (root, _approval, provider, _transaction_id, workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xa9);
+        let unexpected = workspace_path.join("unexpected");
+        fs::write(&unexpected, b"external").unwrap();
+        fs::set_permissions(&unexpected, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            cleanup.retire_workspace_contents_durable(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(fs::read(&unexpected).unwrap(), b"external");
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+        drop(cleanup);
+        drop(root);
+
+        let (_root, _approval, provider, _transaction_id, workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xaa);
+        let edited = workspace_path.join(platform::pending_slot_name(0));
+        let mut file = OpenOptions::new().write(true).open(&edited).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(b"external-edit").unwrap();
+        file.sync_all().unwrap();
+        assert!(matches!(
+            cleanup.retire_workspace_contents_durable(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert!(fs::read(&edited).unwrap().starts_with(b"external-edit"));
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn every_retirement_delete_and_directory_flush_boundary_recovers_uniquely() {
+        // There are 29 fixed objects. Each object has move, source flush,
+        // quarantine flush, delete and post-delete flush boundaries, followed
+        // by three final directory flushes. Representative first-object
+        // boundaries plus every final flush exercise every injected class.
+        for (iteration, boundary) in [1, 2, 3, 4, 5, 146, 147, 148]
+            .into_iter()
+            .enumerate()
+        {
+            let byte = 0xb0 + iteration as u8;
+            let (root, _approval, provider, _transaction_id, workspace_path, backup_path, cleanup) =
+                cleanup_ready_fixture(byte);
+            let root_path = fs::canonicalize(root.path()).unwrap();
+            assert!(matches!(
+                cleanup.retire_workspace_contents_with_fault(boundary),
+                Err(CleanupJournalError::WorkspaceRetirement(
+                    WorkspaceRetirementError::InjectedCrash
+                ))
+            ));
+            drop(cleanup);
+            let loaded = load_durable_cleanup_journals(&root_path).unwrap();
+            assert_eq!(loaded.len(), 1);
+            loaded[0].retire_workspace_contents_durable().unwrap();
+            assert!(workspace_path.is_dir());
+            assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
+            assert!(!backup_path.exists());
+            assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+        }
     }
 }
