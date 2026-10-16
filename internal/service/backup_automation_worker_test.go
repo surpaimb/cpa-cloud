@@ -227,6 +227,46 @@ func TestBackupAutomationManualRunVerifyRehearsalAndRetention(t *testing.T) {
 	}
 }
 
+func TestBackupRehearsalCleanupIncludesBindingAndPreservesUnknownFiles(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		parent := filepath.Join(t.TempDir(), "rehearsal")
+		target := filepath.Join(parent, "restored")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"cpa-cloud.db", masterKeyBindingFilename} {
+			if err := os.WriteFile(filepath.Join(target, name), []byte("synthetic"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if unknown {
+			if err := os.WriteFile(filepath.Join(target, "unrecognized"), []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := removeBackupRehearsal(parent, target)
+		if !unknown {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(parent); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rehearsal remains: %v", err)
+			}
+		} else {
+			if err == nil {
+				t.Fatal("unknown file silently removed")
+			}
+			contents, err := os.ReadFile(filepath.Join(target, "unrecognized"))
+			if err != nil || string(contents) != "keep" {
+				t.Fatalf("unknown file changed: %v", err)
+			}
+		}
+		if _, err := os.Lstat(filepath.Join(target, masterKeyBindingFilename)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("binding remains: %v", err)
+		}
+	}
+}
+
 func TestBackupAutomationMutualExclusionCancellationAndNoSecondClaim(t *testing.T) {
 	fixture := newBackupAutomationFixture(t, true)
 	_, planID := fixture.seedProviderAndPlan(t, 2, false)

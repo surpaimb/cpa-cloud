@@ -125,6 +125,10 @@ func (api *backupAutomationAPI) createKeyProvider(w http.ResponseWriter, r *http
 		writeBackupAutomationError(w, http.StatusConflict, "key_provider_unavailable")
 		return
 	}
+	if kind != api.coordinator.keys.ProviderKind() {
+		writeBackupAutomationError(w, http.StatusConflict, "key_provider_unavailable")
+		return
+	}
 	if kind == keyprovider.KindLinuxSystemdCredentialV1 {
 		reference, ok := api.coordinator.keys.ConfiguredReference()
 		if !ok || reference.Kind != kind {

@@ -31,7 +31,7 @@ The service first authenticates the installation credential against
 lower-cased instance UUID, a different key ID, and a wrapping key whose
 SHA-256 digest differs in constant time from the installation key digest.
 The systemd credential reader retains the fixed-user `LoadCredentialEncrypted=`
-rules from ADR 0003: non-root execution, no-follow descriptor-relative open,
+rules from the [Linux master-key provider contract](../linux-systemd-master-key-provider-contract.md): non-root execution, no-follow descriptor-relative open,
 bounded regular file, exact root-owned ACL or independently read-only
 service-owned fallback, same device and `STATX_MNT_ID`, and before/after
 identity, ACL, mount and size checks.
@@ -56,11 +56,21 @@ The two fixed records are:
 2. `master-key-binding.json`
 
 `master.key` is rejected on this path and is never copied into the package.
-Create validates the authenticated installation binding before the SQLite
-snapshot and rechecks its bytes afterward. Verify/restore authenticate the v3
-header and ciphertext, require the same reference in encrypted metadata, then
-validate the restored binding. Restore publishes only a new directory; it
-retains the existing session/OAuth sanitization and zero-network rehearsal.
+The coordinator pins the SHA-256 digest of the exact installation-binding
+bytes it authenticated at startup. The v3 codec requires a service-supplied
+validator: it checks that digest and freshly loads the installation credential
+to authenticate the canary on the actual bytes being packed or restored.
+The validator retains no installation secret and there is no optional bypass.
+Create validates before the SQLite snapshot, rechecks the source bytes after
+the snapshot, and authenticates again before publishing the package.
+Verify/restore authenticate the v3 header and ciphertext, require the same
+reference in encrypted metadata, then authenticate the restored binding.
+Restore reauthenticates immediately before publishing a new target directory,
+after session/OAuth sanitization and SQLite checks. A missing, changed, or
+wrong installation credential fails even when rehearsal is disabled.
+Rehearsal opens/closes the real service without network workers and removes
+the database, its known sidecars, and the v3 binding from its private directory
+before retention. Unknown files are not recursively deleted.
 
 Durable provider/run metadata freezes the provider kind, provider ID,
 instance ID, key ID and version. This is recoverability evidence for the exact
@@ -74,6 +84,8 @@ off-host copy, another service account, or another machine can recover it.
   or changed credential makes the provider unavailable. There is no fallback.
 - Existing Windows rows migrate with null instance/key fields; schema changes
   are transactional and exact legacy DDL is required.
+- Provider creation rejects a kind that differs from the active store before
+  inserting any row; failed cross-platform requests leave no provisioning rows.
 - The feature remains behind the existing default-off automated-backup switch.
 - This slice does not provide external rotation, old-version retention after
   credential replacement, Linux key export/import, second-machine restore,

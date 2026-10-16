@@ -117,6 +117,9 @@ func createWithSystemdKeyMaterial(ctx context.Context, dataDir, output string, m
 	if int64(len(encoded)) > maxPackageBytes {
 		return Info{}, errors.New("backup package exceeds the supported size limit")
 	}
+	if err := validateSystemdBinding(bindingBefore, &material); err != nil {
+		return Info{}, err
+	}
 	if err := writeNewSyncedFile(output, encoded); err != nil {
 		return Info{}, fmt.Errorf("write backup package: %w", err)
 	}
@@ -184,6 +187,9 @@ func restoreWithSystemdKeyMaterial(ctx context.Context, input, dataDir string, m
 	if _, err := os.Lstat(target); err == nil {
 		return Info{}, errors.New("restore target already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return Info{}, err
+	}
+	if err := validateSystemdBinding(decoded.rootKey, &material); err != nil {
 		return Info{}, err
 	}
 	if err := publishRestoreDirectoryFiles(stage, target, databaseFilename, systemdBindingFilename); err != nil {
@@ -399,7 +405,7 @@ func decodeSystemdPayload(plaintext []byte, material *KeyMaterial) (*decodedPack
 }
 
 func validateSystemdKeyMaterial(material *KeyMaterial) error {
-	if material == nil || !validProviderIdentifier(material.ProviderID, maxProviderIDBytes) || material.ProviderKind != linuxSystemdCredentialKind || !validUUID(material.InstanceID) || !validKeyIdentifier(material.KeyID) || material.ProviderVersion == 0 || material.ProviderVersion > maxPublicVersion {
+	if material == nil || material.ValidateInstallationBinding == nil || !validProviderIdentifier(material.ProviderID, maxProviderIDBytes) || material.ProviderKind != linuxSystemdCredentialKind || !validUUID(material.InstanceID) || !validKeyIdentifier(material.KeyID) || material.ProviderVersion == 0 || material.ProviderVersion > maxPublicVersion {
 		return errors.New("backup key material reference is invalid")
 	}
 	var nonzero byte
@@ -425,6 +431,9 @@ func validateSystemdBinding(encoded []byte, material *KeyMaterial) error {
 	defer wipe(ciphertext)
 	if nonceErr != nil || cipherErr != nil || len(nonce) != nonceSize || len(ciphertext) < tagSize {
 		return errors.New("systemd master-key binding is invalid")
+	}
+	if material.ValidateInstallationBinding == nil || material.ValidateInstallationBinding(encoded) != nil {
+		return errors.New("systemd master-key binding authentication failed")
 	}
 	return nil
 }

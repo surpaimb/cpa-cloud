@@ -177,6 +177,19 @@ func TestLinuxSystemdBackupProviderBindsConfiguredReferenceAndRejectsRotation(t 
 	server := httptest.NewServer(requestMiddleware(mux))
 	defer server.Close()
 	cookie, csrf := loginTestAdmin(t, server.URL)
+
+	// Reject a mismatched platform kind before inserting a provisioning row.
+	for attempt := 0; attempt < 2; attempt++ {
+		rejected := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/backups/key-providers", `{"kind":"windows-dpapi-user"}`, cookie, csrf, server.URL)
+		if rejected.StatusCode != http.StatusConflict {
+			t.Fatalf("wrong kind status=%d", rejected.StatusCode)
+		}
+		rejected.Body.Close()
+	}
+	var count int
+	if err := fixture.app.store.db.QueryRow(`SELECT COUNT(*) FROM backup_key_providers`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("wrong kind changed providers: count=%d err=%v", count, err)
+	}
 	response := requestJSON(t, http.MethodPost, server.URL+"/admin/api/v1/backups/key-providers", `{"kind":"linux-systemd-credential-v1"}`, cookie, csrf, server.URL)
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("create status=%d body=%s", response.StatusCode, readBody(response))

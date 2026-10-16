@@ -4,6 +4,6 @@ package service
 
 import "cpacloud.local/server/internal/keyprovider"
 
-func backupKeyProviderInstanceBinding(Config) (keyprovider.InstanceBinding, error) {
-	return keyprovider.InstanceBinding{}, nil
+func backupKeyProviderInstanceBinding(Config) (keyprovider.InstanceBinding, func([]byte) error, error) {
+	return keyprovider.InstanceBinding{}, nil, nil
 }

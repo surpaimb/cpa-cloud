@@ -44,6 +44,10 @@ type KeyMaterial struct {
 	KeyID           string
 	ProviderVersion uint64
 	WrappingKey     [keySize]byte
+	// ValidateInstallationBinding is required for Linux v3. The service pins
+	// its authenticated startup binding and verifies its canary with the current
+	// installation credential. Installation secrets never enter backup material.
+	ValidateInstallationBinding func([]byte) error
 }
 
 // CreateWithKeyMaterial writes a version 2 backup package. output must not

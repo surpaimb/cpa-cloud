@@ -95,11 +95,12 @@ type backupAutomationCoordinator struct {
 	activeEnd  context.CancelFunc
 	wg         sync.WaitGroup
 
-	create    func(context.Context, string, string, backup.KeyMaterial, string) (backup.Info, error)
-	verify    func(context.Context, string, backup.KeyMaterial) (backup.Info, error)
-	restore   func(context.Context, string, string, backup.KeyMaterial) (backup.Info, error)
-	rehearse  func(context.Context, string) error
-	commitRun func(*sql.Tx) error
+	create                      func(context.Context, string, string, backup.KeyMaterial, string) (backup.Info, error)
+	verify                      func(context.Context, string, backup.KeyMaterial) (backup.Info, error)
+	restore                     func(context.Context, string, string, backup.KeyMaterial) (backup.Info, error)
+	rehearse                    func(context.Context, string) error
+	commitRun                   func(*sql.Tx) error
+	validateInstallationBinding func([]byte) error
 }
 
 func newBackupAutomationCoordinator(ctx context.Context, app *App, cfg BackupAutomationConfig) (*backupAutomationCoordinator, error) {
@@ -126,7 +127,7 @@ func newBackupAutomationCoordinator(ctx context.Context, app *App, cfg BackupAut
 	if err != nil {
 		return nil, err
 	}
-	binding, err := backupKeyProviderInstanceBinding(app.cfg)
+	binding, validateBinding, err := backupKeyProviderInstanceBinding(app.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +140,8 @@ func newBackupAutomationCoordinator(ctx context.Context, app *App, cfg BackupAut
 		app: app, cfg: cfg, output: output, keys: systemBackupKeyStore{store: keys}, ctx: workerCtx, cancel: cancel,
 		now: time.Now, wake: make(chan struct{}, 1),
 		create: backup.CreateWithKeyMaterial, verify: backup.VerifyWithKeyMaterial, restore: backup.RestoreWithKeyMaterial,
-		commitRun: func(tx *sql.Tx) error { return tx.Commit() },
+		commitRun:                   func(tx *sql.Tx) error { return tx.Commit() },
+		validateInstallationBinding: validateBinding,
 	}
 	c.rehearse = func(rehearsalCtx context.Context, restoredDataDir string) error {
 		return validateBackupRehearsal(rehearsalCtx, app.cfg, restoredDataDir, cfg.PrepareRehearsalConfig)
@@ -553,7 +555,7 @@ func (c *backupAutomationCoordinator) execute(ctx context.Context, claim backupA
 		c.finishFailure(claim, ctx, "key_provider_unavailable", nil, nil, "failed", nil)
 		return
 	}
-	keyMaterial := backup.KeyMaterial{ProviderID: material.ProviderID, ProviderKind: material.Kind, InstanceID: material.InstanceID, KeyID: material.KeyID, ProviderVersion: material.Version}
+	keyMaterial := backup.KeyMaterial{ProviderID: material.ProviderID, ProviderKind: material.Kind, InstanceID: material.InstanceID, KeyID: material.KeyID, ProviderVersion: material.Version, ValidateInstallationBinding: c.validateInstallationBinding}
 	copy(keyMaterial.WrappingKey[:], material.Key[:])
 	material.Destroy()
 	defer func() {
@@ -744,7 +746,7 @@ func prepareBackupRehearsalConfig(cfg *Config) {
 }
 
 func removeBackupRehearsal(parent, target string) error {
-	known := []string{"cpa-cloud.db-wal", "cpa-cloud.db-shm", "cpa-cloud.db-journal", "cpa-cloud.db", "master.key"}
+	known := []string{"cpa-cloud.db-wal", "cpa-cloud.db-shm", "cpa-cloud.db-journal", "cpa-cloud.db", "master.key", masterKeyBindingFilename}
 	for _, name := range known {
 		path := filepath.Join(target, name)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
