@@ -733,7 +733,7 @@ impl RecoveryKeyCleanupSequence {
         Ok(())
     }
 
-    pub fn authorize_workspace_removal(
+    pub(crate) fn authorize_workspace_removal(
         &self,
         retired: &WorkspaceContentsRetiredReceipt,
     ) -> Result<WorkspaceRemovalAuthorization, RecoveryKeyCleanupError> {
