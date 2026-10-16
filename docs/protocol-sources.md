@@ -33,7 +33,9 @@
 
 - systemd 服务凭据概念、`CREDENTIALS_DIRECTORY` 与加密凭据：<https://systemd.io/CREDENTIALS/>
 - `LoadCredentialEncrypted=` 与运行时 credential directory：<https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html>
+- systemd v258 credential 文件/目录 ACL 与 ownership fallback 实现：<https://github.com/systemd/systemd/blob/v258/src/core/exec-credential.c>
 - `systemd-creds` 加密、null-key 风险与 0400 安全状态：<https://www.freedesktop.org/software/systemd/man/latest/systemd-creds.html>
+- Linux POSIX ACL xattr v2 格式：<https://github.com/torvalds/linux/blob/master/include/uapi/linux/posix_acl_xattr.h>
 - AES-GCM：<https://csrc.nist.gov/pubs/sp/800/38/d/final>
 
 应用在激活后只能读取 systemd 提供的明文运行时文件，不能由该文件反推 unit 使用了哪种加载指令或

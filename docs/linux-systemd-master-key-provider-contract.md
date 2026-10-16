@@ -29,9 +29,10 @@ After activation systemd intentionally exposes the decrypted credential through
 the same runtime file interface, so this first application slice cannot attest
 which unit directive or encryption policy produced it. Unit-file inspection and
 real-host activation evidence are therefore still required before production.
-This first slice assumes a fixed, dedicated, no-login `User=cpa-cloud` service
-identity and does not support `DynamicUser=yes`: dynamic-user credentials may be
-root-owned 0440 files with a service-user ACL instead of owner-0400 files.
+This first slice assumes a fixed, dedicated, non-root, no-login
+`User=cpa-cloud` service identity and does not support `DynamicUser=yes`.
+For a fixed non-root user, systemd normally retains root ownership and grants
+the service UID access with a POSIX ACL; that shape is admitted explicitly.
 
 ## Credential and binding
 
@@ -65,19 +66,28 @@ digests, upstream-credential AEAD, or Responses state keys.
 
 ## Linux filesystem admission
 
-The credential directory is opened with `O_DIRECTORY|O_NOFOLLOW` and must be
-owned by the effective service UID with mode 0700. The fixed credential file is
-opened descriptor-relatively with `O_NOFOLLOW`; it must be a regular, single-link
-file owned by the same UID with mode 0400. The binding is read through an
-equivalent descriptor-relative path under an owner-0700 data directory and must
-be a regular, single-link owner-0600 file. Device/inode, size, mode, owner, and
-directory identity are rechecked after reading. Any mismatch fails closed.
+The credential directory is opened with `O_DIRECTORY|O_NOFOLLOW`; the fixed
+credential file is opened descriptor-relatively with `O_NOFOLLOW` and must be a
+regular, single-link file. The provider accepts only the two layouts produced by
+systemd's credential setup for a fixed non-root service user:
 
-This slice does not inspect POSIX ACL extended attributes. The real-host gate
-must verify that the fixed service UID is the only identity granted credential
-and data-directory access. This is deliberately not inferred from a synthetic
-filesystem, and it avoids rejecting systemd credential mounts whose filesystem
-does not implement the relevant xattr queries.
+- On an ACL-capable credential filesystem, the directory is root:root 0550
+  with exactly owner `r-x`, the effective service UID `r-x`, group none, mask
+  `r-x`, and other none. The file is root:root 0440 with the corresponding
+  exact read-only ACL. Extra named users/groups, write grants, malformed or
+  duplicate entries, and a directory default ACL are rejected.
+- When ACLs are unavailable and systemd uses its ownership fallback, the
+  directory is service-UID/service-GID 0500 and the file is 0400 with no
+  extended ACL. This layout is accepted only when `fstatfs` confirms that the
+  credential filesystem is read-only, matching systemd's safety condition for
+  the fallback.
+
+The binding remains separate: it is read descriptor-relatively under an
+effective-UID-owned 0700 application data directory and must be a regular,
+single-link, effective-UID-owned 0600 file. Credential and binding device/inode,
+size, mode, owner, and directory identity are rechecked after reading. The
+credential access/default ACL bytes and read-only filesystem state are also
+rechecked. Any mismatch fails closed. Running this provider as root is rejected.
 
 ## Startup ordering and failure behavior
 
@@ -119,15 +129,20 @@ tampering, missing credential, unsafe modes, no `master.key` fallback, refusal t
 rebind an existing database after binding loss, partial and complete staging
 recovery, rejection of a complete staging object made by a different key,
 fail-closed handling of wrong-mode, hardlinked, symlinked, and oversized staging,
-directory-sync failure and retry, read-only startup failure, and a real CLI
-failure before listener/worker startup. Linux tests use only synthetic temporary
-roots and credentials; they do not simulate a whole-machine power loss.
+directory-sync failure and retry, rejected startup leaving the data directory
+unchanged, and a real CLI failure before listener/worker startup. Pure Linux
+tests cover exact ACL parsing and both admitted ownership layouts.
 
-This slice does not prove a real `LoadCredentialEncrypted=` activation, host or
-TPM2 binding, null-key rejection, fixed service UID isolation, ACL behavior, key
-rotation, historical-version reads, recovery material, second-machine restore,
-or production systemd hardening. SEC-01 remains incomplete until those gates are
-implemented and rehearsed.
+Ordinary Linux CI also creates a disposable fixed system user and activates the
+built CLI with a host-key-encrypted synthetic credential through
+`LoadCredentialEncrypted=`. It records only stat/ACL metadata, verifies the
+root-owned exact-ACL layout, initializes and reopens the data directory, rejects
+wrong and missing credentials, and confirms that no `master.key` is created.
+This CI VM evidence does not simulate a whole-machine power loss or establish a
+production machine's host/TPM2 policy, null-key rejection, unit hardening, key
+rotation, historical-version reads, recovery material, or second-machine
+restore. SEC-01 remains incomplete until those gates are implemented and
+rehearsed on the intended deployment host.
 
 ## Independent sources and licenses
 
@@ -138,8 +153,12 @@ following public primary sources, reviewed 2026-10-16:
   <https://systemd.io/CREDENTIALS/>
 - `systemd.exec` credential-directory and `LoadCredentialEncrypted=` behavior:
   <https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html>
+- systemd's credential file and directory ACL/ownership fallback implementation:
+  <https://github.com/systemd/systemd/blob/v258/src/core/exec-credential.c>
 - `systemd-creds` security-state and encryption behavior:
   <https://www.freedesktop.org/software/systemd/man/latest/systemd-creds.html>
+- Linux POSIX ACL xattr v2 wire format:
+  <https://github.com/torvalds/linux/blob/master/include/uapi/linux/posix_acl_xattr.h>
 - NIST SP 800-38D for AES-GCM:
   <https://csrc.nist.gov/pubs/sp/800/38/d/final>
 - Go `crypto/aes`, `cipher.AEAD`, and `crypto/rand`:

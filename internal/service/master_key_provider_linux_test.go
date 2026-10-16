@@ -6,12 +6,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestLinuxSystemdMasterKeyProviderInitializesAndReopensWithoutLegacyKey(t *testing.T) {
@@ -413,6 +416,70 @@ func TestTruncatedMasterKeyBindingJSONClassification(t *testing.T) {
 	}
 }
 
+func TestLinuxSystemdCredentialACLAdmissionIsExact(t *testing.T) {
+	euid := uint32(os.Geteuid())
+	valid := testLinuxSystemdACL(euid, linuxACLRead)
+	if !validLinuxSystemdCredentialACL(valid, euid, linuxACLRead) {
+		t.Fatal("exact systemd file ACL rejected")
+	}
+
+	tests := []struct {
+		name   string
+		mutate func([]byte) []byte
+	}{
+		{"malformed", func(value []byte) []byte { return value[:len(value)-1] }},
+		{"wrong version", func(value []byte) []byte { binary.LittleEndian.PutUint32(value[:4], 3); return value }},
+		{"extra named user", func(value []byte) []byte { return append(value, value[12:20]...) }},
+		{"named group", func(value []byte) []byte { binary.LittleEndian.PutUint16(value[12:14], 0x08); return value }},
+		{"write grant", func(value []byte) []byte {
+			binary.LittleEndian.PutUint16(value[14:16], linuxACLRead|0x02)
+			return value
+		}},
+		{"wrong user", func(value []byte) []byte { binary.LittleEndian.PutUint32(value[16:20], euid+1); return value }},
+		{"group access", func(value []byte) []byte { binary.LittleEndian.PutUint16(value[22:24], linuxACLRead); return value }},
+		{"other access", func(value []byte) []byte { binary.LittleEndian.PutUint16(value[38:40], linuxACLRead); return value }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := test.mutate(append([]byte(nil), valid...))
+			if validLinuxSystemdCredentialACL(candidate, euid, linuxACLRead) {
+				t.Fatal("unsafe ACL accepted")
+			}
+		})
+	}
+}
+
+func TestLinuxSystemdCredentialLayoutAdmission(t *testing.T) {
+	euid, egid := uint32(os.Geteuid()), uint32(os.Getegid())
+	rootDirectory := unix.Stat_t{Mode: unix.S_IFDIR | 0o550, Uid: 0, Gid: 0, Nlink: 2}
+	rootFile := unix.Stat_t{Mode: unix.S_IFREG | 0o440, Uid: 0, Gid: 0, Nlink: 1}
+	if got := classifyLinuxSystemdCredentialObject(&rootDirectory, testLinuxSystemdACL(euid, linuxACLRead|linuxACLExecute), true, true); got != linuxSystemdCredentialLayoutACL {
+		t.Fatalf("root ACL directory layout=%v", got)
+	}
+	if got := classifyLinuxSystemdCredentialObject(&rootFile, testLinuxSystemdACL(euid, linuxACLRead), false, true); got != linuxSystemdCredentialLayoutACL {
+		t.Fatalf("root ACL file layout=%v", got)
+	}
+
+	ownedDirectory := unix.Stat_t{Mode: unix.S_IFDIR | 0o500, Uid: euid, Gid: egid, Nlink: 2}
+	ownedFile := unix.Stat_t{Mode: unix.S_IFREG | 0o400, Uid: euid, Gid: egid, Nlink: 1}
+	if got := classifyLinuxSystemdCredentialObject(&ownedDirectory, nil, true, true); got != linuxSystemdCredentialLayoutOwnedReadOnly {
+		t.Fatalf("read-only owner fallback directory layout=%v", got)
+	}
+	if got := classifyLinuxSystemdCredentialObject(&ownedFile, nil, false, true); got != linuxSystemdCredentialLayoutOwnedReadOnly {
+		t.Fatalf("read-only owner fallback file layout=%v", got)
+	}
+	if got := classifyLinuxSystemdCredentialObject(&ownedDirectory, nil, true, false); got != linuxSystemdCredentialLayoutInvalid {
+		t.Fatalf("writable owner fallback layout=%v", got)
+	}
+	if got := classifyLinuxSystemdCredentialObject(&ownedFile, testLinuxSystemdACL(euid, linuxACLRead), false, true); got != linuxSystemdCredentialLayoutInvalid {
+		t.Fatalf("owner fallback with extended ACL layout=%v", got)
+	}
+	rootFile.Mode = unix.S_IFREG | 0o400
+	if got := classifyLinuxSystemdCredentialObject(&rootFile, testLinuxSystemdACL(euid, linuxACLRead), false, true); got != linuxSystemdCredentialLayoutInvalid {
+		t.Fatalf("root ACL file with mismatched mode layout=%v", got)
+	}
+}
+
 func TestLinuxSystemdMasterKeyProviderRetriesDirectorySyncAfterPublish(t *testing.T) {
 	credentialDirectory := t.TempDir()
 	material := testMasterKeyMaterial(0x86)
@@ -442,6 +509,11 @@ func TestLinuxSystemdMasterKeyProviderRetriesDirectorySyncAfterPublish(t *testin
 
 func writeLinuxSystemdCredential(t *testing.T, directory string, material masterKeyMaterial) {
 	t.Helper()
+	originalReader := linuxReadSystemdCredential
+	linuxReadSystemdCredential = func(directory, name string, maxBytes int) ([]byte, error) {
+		return readLinuxPrivateFile(directory, name, maxBytes, 0o700, 0o400)
+	}
+	t.Cleanup(func() { linuxReadSystemdCredential = originalReader })
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -455,6 +527,29 @@ func writeLinuxSystemdCredential(t *testing.T, directory string, material master
 	if err := os.Chmod(path, 0o400); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func testLinuxSystemdACL(euid uint32, permission uint16) []byte {
+	entries := []struct {
+		tag  uint16
+		perm uint16
+		id   uint32
+	}{
+		{linuxACLUserObj, permission, linuxACLUndefinedID},
+		{linuxACLUser, permission, euid},
+		{linuxACLGroupObj, 0, linuxACLUndefinedID},
+		{linuxACLMask, permission, linuxACLUndefinedID},
+		{linuxACLOther, 0, linuxACLUndefinedID},
+	}
+	encoded := make([]byte, 4+len(entries)*8)
+	binary.LittleEndian.PutUint32(encoded[:4], linuxACLXattrVersion)
+	for index, entry := range entries {
+		offset := 4 + index*8
+		binary.LittleEndian.PutUint16(encoded[offset:offset+2], entry.tag)
+		binary.LittleEndian.PutUint16(encoded[offset+2:offset+4], entry.perm)
+		binary.LittleEndian.PutUint32(encoded[offset+4:offset+8], entry.id)
+	}
+	return encoded
 }
 
 type masterKeyProviderSnapshot struct {

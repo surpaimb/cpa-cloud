@@ -4,6 +4,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,28 @@ import (
 
 var linuxSyncDirectory = unix.Fsync
 
+var linuxReadSystemdCredential = readLinuxSystemdCredential
+
+const (
+	linuxACLXattrVersion = 0x0002
+	linuxACLUserObj      = 0x01
+	linuxACLUser         = 0x02
+	linuxACLGroupObj     = 0x04
+	linuxACLMask         = 0x10
+	linuxACLOther        = 0x20
+	linuxACLUndefinedID  = ^uint32(0)
+	linuxACLRead         = 0x04
+	linuxACLExecute      = 0x01
+)
+
+type linuxSystemdCredentialLayout uint8
+
+const (
+	linuxSystemdCredentialLayoutInvalid linuxSystemdCredentialLayout = iota
+	linuxSystemdCredentialLayoutACL
+	linuxSystemdCredentialLayoutOwnedReadOnly
+)
+
 func linuxSystemdMasterKeyProviderSupported() bool { return true }
 
 func loadLinuxSystemdMasterKeyCredential() (masterKeyMaterial, error) {
@@ -22,12 +45,163 @@ func loadLinuxSystemdMasterKeyCredential() (masterKeyMaterial, error) {
 	if directory == "" || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
 		return masterKeyMaterial{}, errMasterKeyProviderRejected
 	}
-	encoded, err := readLinuxPrivateFile(directory, masterKeyCredentialName, masterKeyCredentialMaxBytes, 0o700, 0o400)
+	encoded, err := linuxReadSystemdCredential(directory, masterKeyCredentialName, masterKeyCredentialMaxBytes)
 	if err != nil {
 		return masterKeyMaterial{}, errMasterKeyProviderRejected
 	}
 	defer clearBytes(encoded)
 	return parseSystemdMasterKeyCredential(encoded)
+}
+
+func readLinuxSystemdCredential(directory, name string, maxBytes int) ([]byte, error) {
+	if os.Geteuid() == 0 {
+		return nil, errors.New("systemd credential provider requires a non-root service user")
+	}
+	directoryFD, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(directoryFD)
+
+	var directoryStat unix.Stat_t
+	if err := unix.Fstat(directoryFD, &directoryStat); err != nil || uint32(directoryStat.Mode)&unix.S_IFMT != unix.S_IFDIR {
+		return nil, errors.New("invalid credential directory")
+	}
+	directoryACL, err := readLinuxACLXattr(directoryFD, "system.posix_acl_access")
+	if err != nil {
+		return nil, err
+	}
+	defaultACL, err := readLinuxACLXattr(directoryFD, "system.posix_acl_default")
+	if err != nil || defaultACL != nil {
+		return nil, errors.New("invalid credential directory ACL")
+	}
+	readOnly, err := linuxFileSystemReadOnly(directoryFD)
+	if err != nil {
+		return nil, err
+	}
+	layout := classifyLinuxSystemdCredentialObject(&directoryStat, directoryACL, true, readOnly)
+	if layout == linuxSystemdCredentialLayoutInvalid {
+		return nil, errors.New("invalid credential directory")
+	}
+
+	fileFD, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fileFD), name)
+	if file == nil {
+		unix.Close(fileFD)
+		return nil, errors.New("open credential")
+	}
+	defer file.Close()
+
+	var first unix.Stat_t
+	if err := unix.Fstat(fileFD, &first); err != nil || first.Size <= 0 || first.Size > int64(maxBytes) || first.Nlink != 1 {
+		return nil, errors.New("invalid credential")
+	}
+	fileACL, err := readLinuxACLXattr(fileFD, "system.posix_acl_access")
+	if err != nil || classifyLinuxSystemdCredentialObject(&first, fileACL, false, readOnly) != layout {
+		return nil, errors.New("invalid credential ACL")
+	}
+	encoded, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
+	if err != nil || len(encoded) == 0 || len(encoded) > maxBytes {
+		clearBytes(encoded)
+		return nil, errors.New("read credential")
+	}
+
+	var second, named, currentDirectory unix.Stat_t
+	secondFileACL, fileACLErr := readLinuxACLXattr(fileFD, "system.posix_acl_access")
+	secondDirectoryACL, directoryACLErr := readLinuxACLXattr(directoryFD, "system.posix_acl_access")
+	secondDefaultACL, defaultACLErr := readLinuxACLXattr(directoryFD, "system.posix_acl_default")
+	secondReadOnly, readOnlyErr := linuxFileSystemReadOnly(directoryFD)
+	if err := unix.Fstat(fileFD, &second); err != nil ||
+		unix.Fstatat(directoryFD, name, &named, unix.AT_SYMLINK_NOFOLLOW) != nil ||
+		unix.Fstat(directoryFD, &currentDirectory) != nil ||
+		fileACLErr != nil || directoryACLErr != nil || defaultACLErr != nil || readOnlyErr != nil ||
+		!sameLinuxCredentialObject(&first, &second) || !sameLinuxCredentialObject(&first, &named) ||
+		!sameLinuxCredentialObject(&directoryStat, &currentDirectory) || int64(len(encoded)) != second.Size ||
+		!bytes.Equal(fileACL, secondFileACL) || !bytes.Equal(directoryACL, secondDirectoryACL) ||
+		secondDefaultACL != nil || readOnly != secondReadOnly ||
+		classifyLinuxSystemdCredentialObject(&second, secondFileACL, false, secondReadOnly) != layout ||
+		classifyLinuxSystemdCredentialObject(&currentDirectory, secondDirectoryACL, true, secondReadOnly) != layout {
+		clearBytes(encoded)
+		return nil, errors.New("credential changed")
+	}
+	return encoded, nil
+}
+
+func classifyLinuxSystemdCredentialObject(stat *unix.Stat_t, acl []byte, directory, readOnly bool) linuxSystemdCredentialLayout {
+	if stat == nil || !directory && stat.Nlink != 1 || directory && uint32(stat.Mode)&unix.S_IFMT != unix.S_IFDIR || !directory && uint32(stat.Mode)&unix.S_IFMT != unix.S_IFREG {
+		return linuxSystemdCredentialLayoutInvalid
+	}
+	euid, egid := uint32(os.Geteuid()), uint32(os.Getegid())
+	mode, permission := uint32(stat.Mode)&0o7777, uint16(linuxACLRead)
+	aclMode, ownedMode := uint32(0o440), uint32(0o400)
+	if directory {
+		permission = linuxACLRead | linuxACLExecute
+		aclMode, ownedMode = 0o550, 0o500
+	}
+	if stat.Uid == 0 && stat.Gid == 0 && mode == aclMode && validLinuxSystemdCredentialACL(acl, euid, permission) {
+		return linuxSystemdCredentialLayoutACL
+	}
+	if stat.Uid == euid && stat.Gid == egid && mode == ownedMode && acl == nil && readOnly {
+		return linuxSystemdCredentialLayoutOwnedReadOnly
+	}
+	return linuxSystemdCredentialLayoutInvalid
+}
+
+func validLinuxSystemdCredentialACL(encoded []byte, euid uint32, permission uint16) bool {
+	if len(encoded) != 4+5*8 || binary.LittleEndian.Uint32(encoded[:4]) != linuxACLXattrVersion {
+		return false
+	}
+	expected := []struct {
+		tag  uint16
+		perm uint16
+		id   uint32
+	}{
+		{linuxACLUserObj, permission, linuxACLUndefinedID},
+		{linuxACLUser, permission, euid},
+		{linuxACLGroupObj, 0, linuxACLUndefinedID},
+		{linuxACLMask, permission, linuxACLUndefinedID},
+		{linuxACLOther, 0, linuxACLUndefinedID},
+	}
+	for index, entry := range expected {
+		offset := 4 + index*8
+		if binary.LittleEndian.Uint16(encoded[offset:offset+2]) != entry.tag ||
+			binary.LittleEndian.Uint16(encoded[offset+2:offset+4]) != entry.perm ||
+			binary.LittleEndian.Uint32(encoded[offset+4:offset+8]) != entry.id {
+			return false
+		}
+	}
+	return true
+}
+
+func readLinuxACLXattr(fd int, name string) ([]byte, error) {
+	size, err := unix.Fgetxattr(fd, name, nil)
+	if errors.Is(err, unix.ENODATA) || errors.Is(err, unix.ENOTSUP) {
+		return nil, nil
+	}
+	if err != nil || size <= 0 || size > 4096 {
+		return nil, errors.New("read credential ACL")
+	}
+	encoded := make([]byte, size)
+	read, err := unix.Fgetxattr(fd, name, encoded)
+	if err != nil || read != size {
+		return nil, errors.New("read credential ACL")
+	}
+	return encoded, nil
+}
+
+func linuxFileSystemReadOnly(fd int) (bool, error) {
+	var stat unix.Statfs_t
+	if err := unix.Fstatfs(fd, &stat); err != nil {
+		return false, err
+	}
+	return stat.Flags&unix.ST_RDONLY != 0, nil
+}
+
+func sameLinuxCredentialObject(left, right *unix.Stat_t) bool {
+	return sameLinuxIdentity(left, right) && left.Mode == right.Mode && left.Uid == right.Uid && left.Gid == right.Gid && left.Nlink == right.Nlink && left.Size == right.Size
 }
 
 func readLinuxMasterKeyBinding(dataDir, name string, maxBytes int) ([]byte, error) {
