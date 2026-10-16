@@ -145,11 +145,13 @@ impl DurableCleanupJournal {
         boundary: usize,
     ) -> Result<WorkspaceContentsRetiredReceipt, CleanupJournalError> {
         let authorization = self.sequence.authorize_workspace_retirement()?;
-        Ok(super::workspace_retirement::retire_workspace_contents_with_fault(
-            &self.root,
-            &authorization,
-            boundary,
-        )?)
+        Ok(
+            super::workspace_retirement::retire_workspace_contents_with_fault(
+                &self.root,
+                &authorization,
+                boundary,
+            )?,
+        )
     }
 
     pub fn delete_key<P: RecoveryKeyProvider + ?Sized>(

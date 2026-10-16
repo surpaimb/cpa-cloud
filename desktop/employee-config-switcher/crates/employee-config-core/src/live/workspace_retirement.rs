@@ -13,10 +13,12 @@ use super::{
     replacement::ReplacementPhase,
 };
 use serde::{Deserialize, Serialize};
-use std::{io, path::{Path, PathBuf}};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
-pub(crate) const REPLACEMENT_DIRECTORY: &str =
-    ".cpa-cloud-employee-config-replacements";
+pub(crate) const REPLACEMENT_DIRECTORY: &str = ".cpa-cloud-employee-config-replacements";
 pub(crate) const BACKUP_DIRECTORY: &str = ".cpa-cloud-employee-config-backups";
 const RETIREMENT_DIRECTORY: &str = ".cpa-cloud-employee-config-workspace-retirements";
 const TARGET_LOCK_FILE: &str = "single-target.lock";
@@ -150,8 +152,7 @@ impl WorkspaceRetirementPlan {
             || self.transaction_id != expected_transaction
             || self.root_identity != RetirementIdentity::new(root_device, root_inode)
             || self.workspace_name != workspace_name
-            || self.workspace_identity
-                != RetirementIdentity::new(workspace_device, workspace_inode)
+            || self.workspace_identity != RetirementIdentity::new(workspace_device, workspace_inode)
             || !valid_workspace_name(&self.workspace_name, &expected_transaction)
             || !valid_backup_workspace_name(&self.backup_workspace_name)
             || self.replacement_parent_identity.device == 0
@@ -176,7 +177,10 @@ impl std::fmt::Debug for WorkspaceRetirementPlan {
             .field("version", &self.version)
             .field("transaction_id", &self.transaction_id)
             .field("root_identity", &self.root_identity)
-            .field("replacement_parent_identity", &self.replacement_parent_identity)
+            .field(
+                "replacement_parent_identity",
+                &self.replacement_parent_identity,
+            )
             .field("workspace_name", &self.workspace_name)
             .field("workspace_identity", &self.workspace_identity)
             .field("workspace_artifacts", &self.workspace_artifacts)
@@ -202,7 +206,12 @@ impl WorkspaceRetirementAuthorization {
         reference: RecoveryKeyReference,
         plan: WorkspaceRetirementPlan,
     ) -> Self {
-        Self { terminal, transaction_id, reference, plan }
+        Self {
+            terminal,
+            transaction_id,
+            reference,
+            plan,
+        }
     }
 
     pub(crate) fn plan(&self) -> &WorkspaceRetirementPlan {
@@ -344,7 +353,9 @@ fn valid_artifact_name(value: &str) -> bool {
         || value == MANIFEST_FILE
         || value
             .strip_prefix(PENDING_SLOT_PREFIX)
-            .is_some_and(|index| index.len() == 2 && index.bytes().all(|byte| byte.is_ascii_digit()))
+            .is_some_and(|index| {
+                index.len() == 2 && index.bytes().all(|byte| byte.is_ascii_digit())
+            })
 }
 
 fn expected_workspace_names() -> Vec<String> {
@@ -366,7 +377,10 @@ fn valid_workspace_artifacts(artifacts: &[RetirementArtifact]) -> bool {
                 artifact.len == MAX_PENDING_BYTES as u64
             }
         })
-        && artifacts.iter().map(|artifact| artifact.name.clone()).collect::<Vec<_>>()
+        && artifacts
+            .iter()
+            .map(|artifact| artifact.name.clone())
+            .collect::<Vec<_>>()
             == expected_workspace_names()
 }
 
@@ -380,7 +394,10 @@ fn valid_backup_artifacts(artifacts: &[RetirementArtifact]) -> bool {
                 artifact.len > 0 && artifact.len <= MAX_MANIFEST_BYTES as u64
             }
         })
-        && artifacts.iter().map(|artifact| artifact.name.as_str()).collect::<Vec<_>>()
+        && artifacts
+            .iter()
+            .map(|artifact| artifact.name.as_str())
+            .collect::<Vec<_>>()
             == vec![BACKUP_FILE, MANIFEST_FILE]
 }
 
@@ -395,7 +412,10 @@ mod platform {
         io::{Read, Seek, SeekFrom, Write},
         os::{
             fd::{AsRawFd, FromRawFd, RawFd},
-            unix::{ffi::{OsStrExt, OsStringExt}, fs::MetadataExt},
+            unix::{
+                ffi::{OsStrExt, OsStringExt},
+                fs::MetadataExt,
+            },
         },
         path::Component,
     };
@@ -510,7 +530,9 @@ mod platform {
         let root_dir = open_root(root)?;
         let root_identity = identity(&root_dir, root)?;
         if root_identity != RetirementIdentity::new(root_device, root_inode) {
-            return Err(WorkspaceRetirementError::RecoveryConflict(root.to_path_buf()));
+            return Err(WorkspaceRetirementError::RecoveryConflict(
+                root.to_path_buf(),
+            ));
         }
         let replacement_path = root.join(REPLACEMENT_DIRECTORY);
         let replacement_parent = open_private_directory_at(
@@ -532,8 +554,17 @@ mod platform {
         require_exact_names(&workspace, &workspace_path, &expected_workspace_names())?;
         let mut workspace_artifacts = Vec::with_capacity(PENDING_SLOT_COUNT + 2);
         for name in expected_workspace_names() {
-            let max = if name == JOURNAL_FILE { MAX_JOURNAL_BYTES } else { MAX_PENDING_BYTES };
-            workspace_artifacts.push(capture_file(&workspace, &name, &workspace_path.join(&name), max)?);
+            let max = if name == JOURNAL_FILE {
+                MAX_JOURNAL_BYTES
+            } else {
+                MAX_PENDING_BYTES
+            };
+            workspace_artifacts.push(capture_file(
+                &workspace,
+                &name,
+                &workspace_path.join(&name),
+                max,
+            )?);
         }
 
         let backup_parent_path = root.join(BACKUP_DIRECTORY);
@@ -597,7 +628,11 @@ mod platform {
             OsStr::new(REPLACEMENT_DIRECTORY),
             &replacement_path,
         )?;
-        require_same_identity(&reopened_replacement, &replacement_parent, &replacement_path)?;
+        require_same_identity(
+            &reopened_replacement,
+            &replacement_parent,
+            &replacement_path,
+        )?;
         let reopened_workspace = open_private_directory_at(
             reopened_replacement.as_raw_fd(),
             OsStr::new(workspace_name),
@@ -644,9 +679,12 @@ mod platform {
             OsStr::new(MANIFEST_FILE),
             &workspace_path.join(MANIFEST_FILE),
         )?;
-        let bytes = read_bounded(&mut manifest, MAX_MANIFEST_BYTES, &workspace_path.join(MANIFEST_FILE))?;
-        if identity(&manifest, &workspace_path.join(MANIFEST_FILE))?
-            != manifest_artifact.identity
+        let bytes = read_bounded(
+            &mut manifest,
+            MAX_MANIFEST_BYTES,
+            &workspace_path.join(MANIFEST_FILE),
+        )?;
+        if identity(&manifest, &workspace_path.join(MANIFEST_FILE))? != manifest_artifact.identity
             || bytes.len() as u64 != manifest_artifact.len
             || digest(&bytes) != manifest_artifact.digest
         {
@@ -663,7 +701,10 @@ mod platform {
             || manifest.recovery_key_provider_version != reference.provider_version()
             || manifest.recovery_key_reference_digest != reference_digest
             || manifest.root_identity
-                != (ManifestIdentity { volume: root_identity.device, file: root_identity.inode })
+                != (ManifestIdentity {
+                    volume: root_identity.device,
+                    file: root_identity.inode,
+                })
             || manifest.ciphertext_digest != backup_artifact.digest
             || !valid_digest(&manifest.original_digest)
             || manifest.original_len > 4 * 1024 * 1024
@@ -672,7 +713,10 @@ mod platform {
             || manifest.original_mode & 0o7000 != 0
             || manifest.original_uid != unsafe { libc::geteuid() }
             || manifest.nonce.len() != 24
-            || !manifest.nonce.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !manifest
+                .nonce
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             || manifest.target.is_empty()
             || manifest.target_identity.volume == 0
             || manifest.target_identity.file == 0
@@ -695,7 +739,13 @@ mod platform {
         authorization: &WorkspaceRetirementAuthorization,
         schedule: FaultSchedule,
     ) -> Result<WorkspaceContentsRetiredReceipt, WorkspaceRetirementError> {
-        retire_inner(root, authorization, &mut FaultState { schedule: Some(schedule) })
+        retire_inner(
+            root,
+            authorization,
+            &mut FaultState {
+                schedule: Some(schedule),
+            },
+        )
     }
 
     fn retire_inner(
@@ -708,9 +758,15 @@ mod platform {
         require_identity(&root_dir, plan.root_identity, root)?;
         let replacement_path = root.join(REPLACEMENT_DIRECTORY);
         let replacement_parent = open_private_directory_at(
-            root_dir.as_raw_fd(), OsStr::new(REPLACEMENT_DIRECTORY), &replacement_path,
+            root_dir.as_raw_fd(),
+            OsStr::new(REPLACEMENT_DIRECTORY),
+            &replacement_path,
         )?;
-        require_identity(&replacement_parent, plan.replacement_parent_identity, &replacement_path)?;
+        require_identity(
+            &replacement_parent,
+            plan.replacement_parent_identity,
+            &replacement_path,
+        )?;
         let target_lock_path = replacement_path.join(TARGET_LOCK_FILE);
         let target_lock = open_private_file_at(
             replacement_parent.as_raw_fd(),
@@ -720,46 +776,81 @@ mod platform {
         lock_exclusive(&target_lock, &target_lock_path)?;
         let workspace_path = replacement_path.join(&plan.workspace_name);
         let workspace = open_private_directory_at(
-            replacement_parent.as_raw_fd(), OsStr::new(&plan.workspace_name), &workspace_path,
+            replacement_parent.as_raw_fd(),
+            OsStr::new(&plan.workspace_name),
+            &workspace_path,
         )?;
         require_identity(&workspace, plan.workspace_identity, &workspace_path)?;
 
         let backup_parent_path = root.join(BACKUP_DIRECTORY);
         let backup_parent = open_private_directory_at(
-            root_dir.as_raw_fd(), OsStr::new(BACKUP_DIRECTORY), &backup_parent_path,
+            root_dir.as_raw_fd(),
+            OsStr::new(BACKUP_DIRECTORY),
+            &backup_parent_path,
         )?;
-        require_identity(&backup_parent, plan.backup_parent_identity, &backup_parent_path)?;
+        require_identity(
+            &backup_parent,
+            plan.backup_parent_identity,
+            &backup_parent_path,
+        )?;
 
         let retirement_path = root.join(RETIREMENT_DIRECTORY);
         let retirement_root = open_or_create_private_directory_at(
-            root_dir.as_raw_fd(), OsStr::new(RETIREMENT_DIRECTORY), &retirement_path,
+            root_dir.as_raw_fd(),
+            OsStr::new(RETIREMENT_DIRECTORY),
+            &retirement_path,
         )?;
-        root_dir.sync_all().map_err(|source| io_error(root, source))?;
+        root_dir
+            .sync_all()
+            .map_err(|source| io_error(root, source))?;
         lock_exclusive(&retirement_root, &retirement_path)?;
         let transaction_path = retirement_path.join(&plan.transaction_id);
         let retirement_tx = open_or_create_private_directory_at(
-            retirement_root.as_raw_fd(), OsStr::new(&plan.transaction_id), &transaction_path,
+            retirement_root.as_raw_fd(),
+            OsStr::new(&plan.transaction_id),
+            &transaction_path,
         )?;
         persist_exact_plan(&retirement_tx, &transaction_path, plan)?;
         let plan_bytes = serde_json::to_vec(plan).map_err(|_| WorkspaceRetirementError::Corrupt)?;
         let plan_digest = digest(&plan_bytes);
 
         validate_retirement_namespace(&retirement_tx, &transaction_path, plan)?;
-        validate_source_names(&workspace, &workspace_path, &plan.workspace_artifacts, &retirement_tx)?;
+        validate_source_names(
+            &workspace,
+            &workspace_path,
+            &plan.workspace_artifacts,
+            &retirement_tx,
+        )?;
         let backup_workspace_path = backup_parent_path.join(&plan.backup_workspace_name);
-        let backup_exists = entry_exists(backup_parent.as_raw_fd(), OsStr::new(&plan.backup_workspace_name))?;
+        let backup_exists = entry_exists(
+            backup_parent.as_raw_fd(),
+            OsStr::new(&plan.backup_workspace_name),
+        )?;
         if backup_exists {
             let backup_workspace = open_private_directory_at(
-                backup_parent.as_raw_fd(), OsStr::new(&plan.backup_workspace_name), &backup_workspace_path,
+                backup_parent.as_raw_fd(),
+                OsStr::new(&plan.backup_workspace_name),
+                &backup_workspace_path,
             )?;
-            require_identity(&backup_workspace, plan.backup_workspace_identity, &backup_workspace_path)?;
-            validate_source_names(&backup_workspace, &backup_workspace_path, &plan.backup_artifacts, &retirement_tx)?;
+            require_identity(
+                &backup_workspace,
+                plan.backup_workspace_identity,
+                &backup_workspace_path,
+            )?;
+            validate_source_names(
+                &backup_workspace,
+                &backup_workspace_path,
+                &plan.backup_artifacts,
+                &retirement_tx,
+            )?;
         }
 
         let mut index = 0usize;
         if backup_exists {
             let backup_workspace = open_private_directory_at(
-                backup_parent.as_raw_fd(), OsStr::new(&plan.backup_workspace_name), &backup_workspace_path,
+                backup_parent.as_raw_fd(),
+                OsStr::new(&plan.backup_workspace_name),
+                &backup_workspace_path,
             )?;
             for artifact in &plan.backup_artifacts {
                 retire_one(
@@ -825,14 +916,27 @@ mod platform {
             index += 1;
         }
         ensure_empty(&workspace, &workspace_path)?;
-        workspace.sync_all().map_err(|source| io_error(&workspace_path, source))?;
+        workspace
+            .sync_all()
+            .map_err(|source| io_error(&workspace_path, source))?;
         fault.boundary()?;
-        backup_parent.sync_all().map_err(|source| io_error(&backup_parent_path, source))?;
+        backup_parent
+            .sync_all()
+            .map_err(|source| io_error(&backup_parent_path, source))?;
         fault.boundary()?;
-        retirement_tx.sync_all().map_err(|source| io_error(&transaction_path, source))?;
+        retirement_tx
+            .sync_all()
+            .map_err(|source| io_error(&transaction_path, source))?;
         fault.boundary()?;
         persist_completion(&retirement_tx, &transaction_path, plan, &plan_digest)?;
-        revalidate_namespaces(root, &root_dir, plan, &replacement_parent, &workspace, &backup_parent)?;
+        revalidate_namespaces(
+            root,
+            &root_dir,
+            plan,
+            &replacement_parent,
+            &workspace,
+            &backup_parent,
+        )?;
         drop(target_lock);
         Ok(WorkspaceContentsRetiredReceipt {
             terminal: authorization.terminal,
@@ -861,12 +965,16 @@ mod platform {
         let quarantine_exists = entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))?;
         let marker_exists = entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&marker))?;
         if source_exists && quarantine_exists {
-            return Err(WorkspaceRetirementError::RecoveryConflict(source_path.join(&artifact.name)));
+            return Err(WorkspaceRetirementError::RecoveryConflict(
+                source_path.join(&artifact.name),
+            ));
         }
         if source_exists {
             verify_artifact(source_parent, source_path, artifact, kind)?;
             if marker_exists {
-                return Err(WorkspaceRetirementError::RecoveryConflict(source_path.join(&artifact.name)));
+                return Err(WorkspaceRetirementError::RecoveryConflict(
+                    source_path.join(&artifact.name),
+                ));
             }
             rename_no_replace(
                 source_parent,
@@ -876,25 +984,49 @@ mod platform {
                 &source_path.join(&artifact.name),
             )?;
             fault.boundary()?;
-            source_parent.sync_all().map_err(|source| io_error(source_path, source))?;
+            source_parent
+                .sync_all()
+                .map_err(|source| io_error(source_path, source))?;
             fault.boundary()?;
-            retirement_tx.sync_all().map_err(|source| io_error(transaction_path, source))?;
+            retirement_tx
+                .sync_all()
+                .map_err(|source| io_error(transaction_path, source))?;
             fault.boundary()?;
         } else if !quarantine_exists && !marker_exists {
-            return Err(WorkspaceRetirementError::RecoveryConflict(source_path.join(&artifact.name)));
+            return Err(WorkspaceRetirementError::RecoveryConflict(
+                source_path.join(&artifact.name),
+            ));
         }
         if entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))? {
-            verify_artifact(retirement_tx, transaction_path, &RetirementArtifact {
-                name: quarantine.clone(),
-                ..artifact.clone()
-            }, kind)?;
+            verify_artifact(
+                retirement_tx,
+                transaction_path,
+                &RetirementArtifact {
+                    name: quarantine.clone(),
+                    ..artifact.clone()
+                },
+                kind,
+            )?;
         }
-        persist_marker(retirement_tx, transaction_path, artifact, index, plan_digest)?;
+        persist_marker(
+            retirement_tx,
+            transaction_path,
+            artifact,
+            index,
+            plan_digest,
+        )?;
         if entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))? {
-            unlink_named(retirement_tx, OsStr::new(&quarantine), kind, &transaction_path.join(&quarantine))?;
+            unlink_named(
+                retirement_tx,
+                OsStr::new(&quarantine),
+                kind,
+                &transaction_path.join(&quarantine),
+            )?;
             fault.boundary()?;
         }
-        retirement_tx.sync_all().map_err(|source| io_error(transaction_path, source))?;
+        retirement_tx
+            .sync_all()
+            .map_err(|source| io_error(transaction_path, source))?;
         fault.boundary()?;
         Ok(())
     }
@@ -925,8 +1057,15 @@ mod platform {
             name: &artifact.name,
             device: artifact.identity.device,
             inode: artifact.identity.inode,
-        }).map_err(|_| WorkspaceRetirementError::Corrupt)?;
-        persist_exact_file(directory, path, &marker_name(index), &bytes, MAX_MARKER_BYTES)
+        })
+        .map_err(|_| WorkspaceRetirementError::Corrupt)?;
+        persist_exact_file(
+            directory,
+            path,
+            &marker_name(index),
+            &bytes,
+            MAX_MARKER_BYTES,
+        )
     }
 
     fn persist_completion(
@@ -940,7 +1079,8 @@ mod platform {
             plan_digest,
             transaction_id: &plan.transaction_id,
             workspace_name: &plan.workspace_name,
-        }).map_err(|_| WorkspaceRetirementError::Corrupt)?;
+        })
+        .map_err(|_| WorkspaceRetirementError::Corrupt)?;
         persist_exact_file(directory, path, COMPLETE_FILE, &bytes, MAX_MARKER_BYTES)
     }
 
@@ -952,25 +1092,50 @@ mod platform {
         limit: usize,
     ) -> Result<(), WorkspaceRetirementError> {
         if entry_exists(directory.as_raw_fd(), OsStr::new(name))? {
-            let mut existing = open_private_file_at(directory.as_raw_fd(), OsStr::new(name), &path.join(name))?;
+            let mut existing =
+                open_private_file_at(directory.as_raw_fd(), OsStr::new(name), &path.join(name))?;
             let current = read_bounded(&mut existing, limit, &path.join(name))?;
             if current != bytes {
                 return Err(WorkspaceRetirementError::RecoveryConflict(path.join(name)));
             }
-            existing.sync_all().map_err(|source| io_error(path.join(name), source))?;
-            directory.sync_all().map_err(|source| io_error(path, source))?;
+            existing
+                .sync_all()
+                .map_err(|source| io_error(path.join(name), source))?;
+            directory
+                .sync_all()
+                .map_err(|source| io_error(path, source))?;
             return Ok(());
         }
         let pending_name = format!(".{name}.pending");
         if entry_exists(directory.as_raw_fd(), OsStr::new(&pending_name))? {
-            return Err(WorkspaceRetirementError::IncompleteWrite(path.join(pending_name)));
+            return Err(WorkspaceRetirementError::IncompleteWrite(
+                path.join(pending_name),
+            ));
         }
-        let mut pending = create_private_file_at(directory.as_raw_fd(), OsStr::new(&pending_name), &path.join(&pending_name))?;
-        pending.write_all(bytes).map_err(|source| io_error(path.join(&pending_name), source))?;
-        pending.sync_all().map_err(|source| io_error(path.join(&pending_name), source))?;
-        directory.sync_all().map_err(|source| io_error(path, source))?;
-        rename_no_replace(directory, OsStr::new(&pending_name), directory, OsStr::new(name), &path.join(name))?;
-        directory.sync_all().map_err(|source| io_error(path, source))?;
+        let mut pending = create_private_file_at(
+            directory.as_raw_fd(),
+            OsStr::new(&pending_name),
+            &path.join(&pending_name),
+        )?;
+        pending
+            .write_all(bytes)
+            .map_err(|source| io_error(path.join(&pending_name), source))?;
+        pending
+            .sync_all()
+            .map_err(|source| io_error(path.join(&pending_name), source))?;
+        directory
+            .sync_all()
+            .map_err(|source| io_error(path, source))?;
+        rename_no_replace(
+            directory,
+            OsStr::new(&pending_name),
+            directory,
+            OsStr::new(name),
+            &path.join(name),
+        )?;
+        directory
+            .sync_all()
+            .map_err(|source| io_error(path, source))?;
         Ok(())
     }
 
@@ -983,17 +1148,26 @@ mod platform {
         let actual = read_directory_names(source, source_path)?;
         for name in actual {
             let Some(text) = name.to_str() else {
-                return Err(WorkspaceRetirementError::RecoveryConflict(source_path.join(name)));
+                return Err(WorkspaceRetirementError::RecoveryConflict(
+                    source_path.join(name),
+                ));
             };
             if !artifacts.iter().any(|artifact| artifact.name == text) {
-                return Err(WorkspaceRetirementError::RecoveryConflict(source_path.join(name)));
+                return Err(WorkspaceRetirementError::RecoveryConflict(
+                    source_path.join(name),
+                ));
             }
         }
         for (index, artifact) in artifacts.iter().enumerate() {
             let source_exists = entry_exists(source.as_raw_fd(), OsStr::new(&artifact.name))?;
-            let quarantine_exists = entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine_name(index)))?;
+            let quarantine_exists = entry_exists(
+                retirement_tx.as_raw_fd(),
+                OsStr::new(&quarantine_name(index)),
+            )?;
             if source_exists && quarantine_exists {
-                return Err(WorkspaceRetirementError::RecoveryConflict(source_path.join(&artifact.name)));
+                return Err(WorkspaceRetirementError::RecoveryConflict(
+                    source_path.join(&artifact.name),
+                ));
             }
         }
         Ok(())
@@ -1011,7 +1185,8 @@ mod platform {
             };
             let known = text == PLAN_FILE
                 || text == COMPLETE_FILE
-                || (0..max_steps).any(|index| text == marker_name(index) || text == quarantine_name(index));
+                || (0..max_steps)
+                    .any(|index| text == marker_name(index) || text == quarantine_name(index));
             if !known {
                 return Err(WorkspaceRetirementError::RecoveryConflict(path.join(name)));
             }
@@ -1032,17 +1207,23 @@ mod platform {
         require_identity(root_dir, plan.root_identity, root)?;
         let replacement_path = root.join(REPLACEMENT_DIRECTORY);
         let reopened_replacement = open_private_directory_at(
-            reopened_root.as_raw_fd(), OsStr::new(REPLACEMENT_DIRECTORY), &replacement_path,
+            reopened_root.as_raw_fd(),
+            OsStr::new(REPLACEMENT_DIRECTORY),
+            &replacement_path,
         )?;
         require_same_identity(&reopened_replacement, replacement_parent, &replacement_path)?;
         let workspace_path = replacement_path.join(&plan.workspace_name);
         let reopened_workspace = open_private_directory_at(
-            reopened_replacement.as_raw_fd(), OsStr::new(&plan.workspace_name), &workspace_path,
+            reopened_replacement.as_raw_fd(),
+            OsStr::new(&plan.workspace_name),
+            &workspace_path,
         )?;
         require_same_identity(&reopened_workspace, workspace, &workspace_path)?;
         let backup_path = root.join(BACKUP_DIRECTORY);
         let reopened_backup = open_private_directory_at(
-            reopened_root.as_raw_fd(), OsStr::new(BACKUP_DIRECTORY), &backup_path,
+            reopened_root.as_raw_fd(),
+            OsStr::new(BACKUP_DIRECTORY),
+            &backup_path,
         )?;
         require_same_identity(&reopened_backup, backup_parent, &backup_path)?;
         ensure_child_absent(&reopened_backup, &plan.backup_workspace_name, &backup_path)?;
@@ -1056,10 +1237,14 @@ mod platform {
         limit: usize,
     ) -> Result<RetirementArtifact, WorkspaceRetirementError> {
         let mut file = open_private_file_at(parent.as_raw_fd(), OsStr::new(name), display)?;
-        let before = file.metadata().map_err(|source| io_error(display, source))?;
+        let before = file
+            .metadata()
+            .map_err(|source| io_error(display, source))?;
         let identity = identity(&file, display)?;
         let bytes = read_bounded(&mut file, limit, display)?;
-        let after = file.metadata().map_err(|source| io_error(display, source))?;
+        let after = file
+            .metadata()
+            .map_err(|source| io_error(display, source))?;
         if identity(&file, display)? != identity
             || before.len() != after.len()
             || before.mode() != after.mode()
@@ -1067,7 +1252,9 @@ mod platform {
             || before.gid() != after.gid()
             || before.nlink() != 1
         {
-            return Err(WorkspaceRetirementError::RecoveryConflict(display.to_path_buf()));
+            return Err(WorkspaceRetirementError::RecoveryConflict(
+                display.to_path_buf(),
+            ));
         }
         Ok(RetirementArtifact {
             name: name.to_owned(),
@@ -1089,13 +1276,18 @@ mod platform {
         let display = parent_path.join(&artifact.name);
         match kind {
             ObjectKind::File => {
-                let current = capture_file(parent, &artifact.name, &display, artifact.len as usize)?;
+                let current =
+                    capture_file(parent, &artifact.name, &display, artifact.len as usize)?;
                 if current != *artifact {
                     return Err(WorkspaceRetirementError::RecoveryConflict(display));
                 }
             }
             ObjectKind::Directory => {
-                let directory = open_private_directory_at(parent.as_raw_fd(), OsStr::new(&artifact.name), &display)?;
+                let directory = open_private_directory_at(
+                    parent.as_raw_fd(),
+                    OsStr::new(&artifact.name),
+                    &display,
+                )?;
                 if identity(&directory, &display)? != artifact.identity {
                     return Err(WorkspaceRetirementError::RecoveryConflict(display));
                 }
@@ -1113,7 +1305,9 @@ mod platform {
         let actual = read_directory_names(directory, path)?;
         let expected = expected.iter().map(OsString::from).collect::<Vec<_>>();
         if actual != expected {
-            return Err(WorkspaceRetirementError::RecoveryConflict(path.to_path_buf()));
+            return Err(WorkspaceRetirementError::RecoveryConflict(
+                path.to_path_buf(),
+            ));
         }
         Ok(())
     }
@@ -1122,11 +1316,17 @@ mod platform {
         if read_directory_names(directory, path)?.is_empty() {
             Ok(())
         } else {
-            Err(WorkspaceRetirementError::RecoveryConflict(path.to_path_buf()))
+            Err(WorkspaceRetirementError::RecoveryConflict(
+                path.to_path_buf(),
+            ))
         }
     }
 
-    fn ensure_child_absent(parent: &File, name: &str, path: &Path) -> Result<(), WorkspaceRetirementError> {
+    fn ensure_child_absent(
+        parent: &File,
+        name: &str,
+        path: &Path,
+    ) -> Result<(), WorkspaceRetirementError> {
         if entry_exists(parent.as_raw_fd(), OsStr::new(name))? {
             Err(WorkspaceRetirementError::RecoveryConflict(path.join(name)))
         } else {
@@ -1153,9 +1353,14 @@ mod platform {
         let to = c_string(to)?;
         if unsafe {
             libc::renameat2(
-                from_parent.as_raw_fd(), from.as_ptr(), to_parent.as_raw_fd(), to.as_ptr(), libc::RENAME_NOREPLACE,
+                from_parent.as_raw_fd(),
+                from.as_ptr(),
+                to_parent.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
             )
-        } != 0 {
+        } != 0
+        {
             return Err(io_error(display, io::Error::last_os_error()));
         }
         Ok(())
@@ -1168,7 +1373,11 @@ mod platform {
         display: &Path,
     ) -> Result<(), WorkspaceRetirementError> {
         let name = c_string(name)?;
-        let flags = if kind == ObjectKind::Directory { libc::AT_REMOVEDIR } else { 0 };
+        let flags = if kind == ObjectKind::Directory {
+            libc::AT_REMOVEDIR
+        } else {
+            0
+        };
         if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) } != 0 {
             return Err(io_error(display, io::Error::last_os_error()));
         }
@@ -1177,13 +1386,24 @@ mod platform {
 
     fn open_root(path: &Path) -> Result<File, WorkspaceRetirementError> {
         if path.as_os_str().is_empty()
-            || path.components().any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
         {
             return Err(WorkspaceRetirementError::InvalidRoot(path.to_path_buf()));
         }
-        let anchor = if path.is_absolute() { Path::new("/") } else { Path::new(".") };
+        let anchor = if path.is_absolute() {
+            Path::new("/")
+        } else {
+            Path::new(".")
+        };
         let anchor_name = CString::new(anchor.as_os_str().as_bytes()).expect("fixed anchor");
-        let fd = unsafe { libc::open(anchor_name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+        let fd = unsafe {
+            libc::open(
+                anchor_name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
         if fd < 0 {
             return Err(io_error(anchor, io::Error::last_os_error()));
         }
@@ -1196,7 +1416,9 @@ mod platform {
                     display.push(name);
                     directory = open_directory_at(directory.as_raw_fd(), name, &display)?;
                 }
-                Component::ParentDir | Component::Prefix(_) => return Err(WorkspaceRetirementError::InvalidRoot(path.to_path_buf())),
+                Component::ParentDir | Component::Prefix(_) => {
+                    return Err(WorkspaceRetirementError::InvalidRoot(path.to_path_buf()))
+                }
             }
         }
         verify_private_directory(&directory, path)?;
@@ -1216,24 +1438,50 @@ mod platform {
         open_private_directory_at(parent, name, display)
     }
 
-    fn open_private_directory_at(parent: RawFd, name: &OsStr, display: &Path) -> Result<File, WorkspaceRetirementError> {
+    fn open_private_directory_at(
+        parent: RawFd,
+        name: &OsStr,
+        display: &Path,
+    ) -> Result<File, WorkspaceRetirementError> {
         let directory = open_directory_at(parent, name, display)?;
         verify_private_directory(&directory, display)?;
         Ok(directory)
     }
 
-    fn open_directory_at(parent: RawFd, name: &OsStr, display: &Path) -> Result<File, WorkspaceRetirementError> {
+    fn open_directory_at(
+        parent: RawFd,
+        name: &OsStr,
+        display: &Path,
+    ) -> Result<File, WorkspaceRetirementError> {
         let c_name = c_string(name)?;
-        let fd = unsafe { libc::openat(parent, c_name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW, 0) };
+        let fd = unsafe {
+            libc::openat(
+                parent,
+                c_name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0,
+            )
+        };
         if fd < 0 {
             return Err(io_error(display, io::Error::last_os_error()));
         }
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    fn create_private_file_at(parent: RawFd, name: &OsStr, display: &Path) -> Result<File, WorkspaceRetirementError> {
+    fn create_private_file_at(
+        parent: RawFd,
+        name: &OsStr,
+        display: &Path,
+    ) -> Result<File, WorkspaceRetirementError> {
         let c_name = c_string(name)?;
-        let fd = unsafe { libc::openat(parent, c_name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW, 0o600) };
+        let fd = unsafe {
+            libc::openat(
+                parent,
+                c_name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
+            )
+        };
         if fd < 0 {
             return Err(io_error(display, io::Error::last_os_error()));
         }
@@ -1242,9 +1490,20 @@ mod platform {
         Ok(file)
     }
 
-    fn open_private_file_at(parent: RawFd, name: &OsStr, display: &Path) -> Result<File, WorkspaceRetirementError> {
+    fn open_private_file_at(
+        parent: RawFd,
+        name: &OsStr,
+        display: &Path,
+    ) -> Result<File, WorkspaceRetirementError> {
         let c_name = c_string(name)?;
-        let fd = unsafe { libc::openat(parent, c_name.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW, 0) };
+        let fd = unsafe {
+            libc::openat(
+                parent,
+                c_name.as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0,
+            )
+        };
         if fd < 0 {
             return Err(io_error(display, io::Error::last_os_error()));
         }
@@ -1253,33 +1512,61 @@ mod platform {
         Ok(file)
     }
 
-    fn verify_private_directory(file: &File, display: &Path) -> Result<(), WorkspaceRetirementError> {
-        let metadata = file.metadata().map_err(|source| io_error(display, source))?;
-        if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o7777 != 0o700 {
-            return Err(WorkspaceRetirementError::RecoveryConflict(display.to_path_buf()));
+    fn verify_private_directory(
+        file: &File,
+        display: &Path,
+    ) -> Result<(), WorkspaceRetirementError> {
+        let metadata = file
+            .metadata()
+            .map_err(|source| io_error(display, source))?;
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != 0o700
+        {
+            return Err(WorkspaceRetirementError::RecoveryConflict(
+                display.to_path_buf(),
+            ));
         }
         Ok(())
     }
 
     fn verify_private_file(file: &File, display: &Path) -> Result<(), WorkspaceRetirementError> {
-        let metadata = file.metadata().map_err(|source| io_error(display, source))?;
-        if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o7777 != 0o600 {
-            return Err(WorkspaceRetirementError::RecoveryConflict(display.to_path_buf()));
+        let metadata = file
+            .metadata()
+            .map_err(|source| io_error(display, source))?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != 0o600
+        {
+            return Err(WorkspaceRetirementError::RecoveryConflict(
+                display.to_path_buf(),
+            ));
         }
         Ok(())
     }
 
-    fn read_bounded(file: &mut File, limit: usize, display: &Path) -> Result<Vec<u8>, WorkspaceRetirementError> {
-        file.seek(SeekFrom::Start(0)).map_err(|source| io_error(display, source))?;
+    fn read_bounded(
+        file: &mut File,
+        limit: usize,
+        display: &Path,
+    ) -> Result<Vec<u8>, WorkspaceRetirementError> {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| io_error(display, source))?;
         let mut bytes = Vec::new();
-        file.take((limit + 1) as u64).read_to_end(&mut bytes).map_err(|source| io_error(display, source))?;
+        file.take((limit + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|source| io_error(display, source))?;
         if bytes.len() > limit {
             return Err(WorkspaceRetirementError::Corrupt);
         }
         Ok(bytes)
     }
 
-    fn read_directory_names(directory: &File, display: &Path) -> Result<Vec<OsString>, WorkspaceRetirementError> {
+    fn read_directory_names(
+        directory: &File,
+        display: &Path,
+    ) -> Result<Vec<OsString>, WorkspaceRetirementError> {
         let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
         if duplicate < 0 {
             return Err(io_error(display, io::Error::last_os_error()));
@@ -1287,13 +1574,17 @@ mod platform {
         let raw = unsafe { libc::fdopendir(duplicate) };
         if raw.is_null() {
             let error = io::Error::last_os_error();
-            unsafe { libc::close(duplicate); }
+            unsafe {
+                libc::close(duplicate);
+            }
             return Err(io_error(display, error));
         }
         let stream = DirectoryStream(raw);
         let mut names = Vec::new();
         loop {
-            unsafe { *libc::__errno_location() = 0; }
+            unsafe {
+                *libc::__errno_location() = 0;
+            }
             let entry = unsafe { libc::readdir(stream.0) };
             if entry.is_null() {
                 let errno = unsafe { *libc::__errno_location() };
@@ -1316,28 +1607,70 @@ mod platform {
 
     struct DirectoryStream(*mut libc::DIR);
     impl Drop for DirectoryStream {
-        fn drop(&mut self) { unsafe { libc::closedir(self.0); } }
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
     }
 
     fn entry_exists(parent: RawFd, name: &OsStr) -> Result<bool, WorkspaceRetirementError> {
         let c_name = c_string(name)?;
-        let result = unsafe { libc::faccessat(parent, c_name.as_ptr(), libc::F_OK, libc::AT_SYMLINK_NOFOLLOW) };
-        if result == 0 { return Ok(true); }
+        let result = unsafe {
+            libc::faccessat(
+                parent,
+                c_name.as_ptr(),
+                libc::F_OK,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result == 0 {
+            return Ok(true);
+        }
         let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::NotFound { Ok(false) } else { Err(io_error(PathBuf::from(name), error)) }
+        if error.kind() == io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(io_error(PathBuf::from(name), error))
+        }
     }
 
-    fn identity(file: &File, display: &Path) -> Result<RetirementIdentity, WorkspaceRetirementError> {
-        let metadata = file.metadata().map_err(|source| io_error(display, source))?;
+    fn identity(
+        file: &File,
+        display: &Path,
+    ) -> Result<RetirementIdentity, WorkspaceRetirementError> {
+        let metadata = file
+            .metadata()
+            .map_err(|source| io_error(display, source))?;
         Ok(RetirementIdentity::new(metadata.dev(), metadata.ino()))
     }
 
-    fn require_identity(file: &File, expected: RetirementIdentity, display: &Path) -> Result<(), WorkspaceRetirementError> {
-        if identity(file, display)? == expected { Ok(()) } else { Err(WorkspaceRetirementError::RecoveryConflict(display.to_path_buf())) }
+    fn require_identity(
+        file: &File,
+        expected: RetirementIdentity,
+        display: &Path,
+    ) -> Result<(), WorkspaceRetirementError> {
+        if identity(file, display)? == expected {
+            Ok(())
+        } else {
+            Err(WorkspaceRetirementError::RecoveryConflict(
+                display.to_path_buf(),
+            ))
+        }
     }
 
-    fn require_same_identity(left: &File, right: &File, display: &Path) -> Result<(), WorkspaceRetirementError> {
-        if identity(left, display)? == identity(right, display)? { Ok(()) } else { Err(WorkspaceRetirementError::RecoveryConflict(display.to_path_buf())) }
+    fn require_same_identity(
+        left: &File,
+        right: &File,
+        display: &Path,
+    ) -> Result<(), WorkspaceRetirementError> {
+        if identity(left, display)? == identity(right, display)? {
+            Ok(())
+        } else {
+            Err(WorkspaceRetirementError::RecoveryConflict(
+                display.to_path_buf(),
+            ))
+        }
     }
 
     fn c_string(name: &OsStr) -> Result<CString, WorkspaceRetirementError> {
@@ -1351,10 +1684,15 @@ mod platform {
         Ok(())
     }
 
-    fn digest(bytes: &[u8]) -> String { hex::encode(Sha256::digest(bytes)) }
+    fn digest(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
 
     fn io_error(path: impl Into<PathBuf>, source: io::Error) -> WorkspaceRetirementError {
-        WorkspaceRetirementError::Io { path: path.into(), source }
+        WorkspaceRetirementError::Io {
+            path: path.into(),
+            source,
+        }
     }
 }
 

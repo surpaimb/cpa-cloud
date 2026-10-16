@@ -159,7 +159,6 @@ impl DurableTerminalHandoff {
             retirement_plan: None,
         }
     }
-
 }
 
 impl std::fmt::Debug for DurableTerminalHandoff {
@@ -2893,7 +2892,7 @@ mod tests {
             CreatedRecoveryKey, RecoveryKeyCleanupPhase, RecoveryKeyDeleteOutcome,
             RecoveryKeyOpenOutcome,
         },
-        workspace_retirement::{BACKUP_DIRECTORY, WorkspaceRetirementError},
+        workspace_retirement::{WorkspaceRetirementError, BACKUP_DIRECTORY},
     };
     use std::{
         fs::{self, File, OpenOptions},
@@ -4002,7 +4001,10 @@ mod tests {
         assert!(workspace_path.is_dir());
         assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
         assert!(!backup_path.exists());
-        assert_eq!(cleanup.phase(), RecoveryKeyCleanupPhase::CompletionTombstoneDurable);
+        assert_eq!(
+            cleanup.phase(),
+            RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+        );
         assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
 
         drop(cleanup);
@@ -4059,10 +4061,7 @@ mod tests {
         // quarantine flush, delete and post-delete flush boundaries, followed
         // by three final directory flushes. Representative first-object
         // boundaries plus every final flush exercise every injected class.
-        for (iteration, boundary) in [1, 2, 3, 4, 5, 146, 147, 148]
-            .into_iter()
-            .enumerate()
-        {
+        for (iteration, boundary) in [1, 2, 3, 4, 5, 146, 147, 148].into_iter().enumerate() {
             let byte = 0xb0 + iteration as u8;
             let (root, _approval, provider, _transaction_id, workspace_path, backup_path, cleanup) =
                 cleanup_ready_fixture(byte);
