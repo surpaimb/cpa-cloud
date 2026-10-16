@@ -26,6 +26,21 @@
 核心设计中的 API 路径和支持批次是产品目标，不代表所有官方接口字段已经验证。
 后续新增来源应记录具体章节、版本/日期、支持子集与独立测试证据；不抄录大段原文。
 
+## Linux 服务端主密钥托管
+
+查阅日期：2026-10-16。首个实现切片与未验证边界见
+[Linux systemd installation master-key provider](linux-systemd-master-key-provider-contract.md)。
+
+- systemd 服务凭据概念、`CREDENTIALS_DIRECTORY` 与加密凭据：<https://systemd.io/CREDENTIALS/>
+- `LoadCredentialEncrypted=` 与运行时 credential directory：<https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html>
+- systemd v258 credential 文件/目录 ACL 与 ownership fallback 实现：<https://github.com/systemd/systemd/blob/v258/src/core/exec-credential.c>
+- `systemd-creds` 加密、null-key 风险与 0400 安全状态：<https://www.freedesktop.org/software/systemd/man/latest/systemd-creds.html>
+- Linux POSIX ACL xattr v2 格式：<https://github.com/torvalds/linux/blob/master/include/uapi/linux/posix_acl_xattr.h>
+- AES-GCM：<https://csrc.nist.gov/pubs/sp/800/38/d/final>
+
+应用在激活后只能读取 systemd 提供的明文运行时文件，不能由该文件反推 unit 使用了哪种加载指令或
+host/TPM/null-key 策略；真实 unit 与主机策略核验仍是独立生产门禁。
+
 ## 跨协议转换、Responses 状态与工具
 
 查阅日期：2026-09-24。支持矩阵见 [跨协议转换能力契约](protocol-conversion-contract.md)，状态/后台/

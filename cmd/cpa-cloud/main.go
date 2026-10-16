@@ -52,6 +52,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	flags := flag.NewFlagSet("cpa-cloud", flag.ContinueOnError)
 	flags.SetOutput(stdout)
 	flags.StringVar(&cfg.DataDir, "data-dir", defaultDataDir, "persistent data directory")
+	flags.StringVar(&cfg.MasterKeyProvider, "master-key-provider", "preview-file-v1", "master key provider: preview-file-v1 or linux-systemd-credential-v1")
 	flags.StringVar(&cfg.Listen, "listen", "127.0.0.1:8787", "HTTP(S) listen address")
 	flags.StringVar(&cfg.WebDir, "web-dir", "", "directory containing the web console build")
 	flags.StringVar(&cfg.TLSCert, "tls-cert", "", "TLS certificate file")
@@ -102,6 +103,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	if flags.NArg() != 0 {
 		return 1, errors.New("unexpected positional arguments")
+	}
+	if cfg.MasterKeyProvider != "preview-file-v1" && cfg.MasterKeyProvider != "linux-systemd-credential-v1" {
+		return 1, errors.New("--master-key-provider must be preview-file-v1 or linux-systemd-credential-v1")
 	}
 	selectedModes := 0
 	if initialize {
@@ -182,7 +186,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	}
 	cfg.DataDir = absDataDir
 	if checkInitialized {
-		initialized, err := service.CheckInitialized(context.Background(), cfg.DataDir)
+		initialized, err := service.CheckInitializedWithConfig(context.Background(), cfg)
 		if err != nil {
 			return 1, fmt.Errorf("check initialization: %w", err)
 		}
@@ -192,7 +196,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 		return 0, nil
 	}
 	if initialize {
-		if err := service.Initialize(context.Background(), cfg.DataDir, stdin); err != nil {
+		if err := service.InitializeWithConfig(context.Background(), cfg, stdin); err != nil {
 			return 1, fmt.Errorf("initialize: %w", err)
 		}
 		fmt.Fprintln(stdout, "Initialized administrator admin.")

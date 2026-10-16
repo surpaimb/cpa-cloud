@@ -19,6 +19,7 @@ import (
 
 type Config struct {
 	DataDir                                         string
+	MasterKeyProvider                               string
 	Listen                                          string
 	WebDir                                          string
 	TLSCert                                         string
@@ -69,19 +70,22 @@ const (
 )
 
 func Initialize(ctx context.Context, dataDir string, passwordReader io.Reader) error {
+	return InitializeWithConfig(ctx, Config{DataDir: dataDir}, passwordReader)
+}
+
+func InitializeWithConfig(ctx context.Context, cfg Config, passwordReader io.Reader) error {
+	dataDir := cfg.DataDir
 	if strings.TrimSpace(dataDir) == "" {
 		return errors.New("data directory is required")
+	}
+	if err := validateMasterKeyProviderKind(cfg.MasterKeyProvider); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
-	rootPath := dataDir + string(os.PathSeparator) + rootKeyFilename
-	if _, err := os.Stat(rootPath); errors.Is(err, os.ErrNotExist) {
-		if err := createRootKey(dataDir); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return fmt.Errorf("inspect root key: %w", err)
+	if err := initializeMasterKeyProvider(cfg); err != nil {
+		return err
 	}
 	s, err := openStore(dataDir)
 	if err != nil {
@@ -131,8 +135,16 @@ func validateAdminPassword(password string) error {
 // CheckInitialized inspects an existing data directory without creating files,
 // applying schema statements, or otherwise mutating persistent state.
 func CheckInitialized(ctx context.Context, dataDir string) (bool, error) {
+	return CheckInitializedWithConfig(ctx, Config{DataDir: dataDir})
+}
+
+func CheckInitializedWithConfig(ctx context.Context, cfg Config) (bool, error) {
+	dataDir := cfg.DataDir
 	if strings.TrimSpace(dataDir) == "" {
 		return false, errors.New("data directory is required")
+	}
+	if err := validateMasterKeyProviderKind(cfg.MasterKeyProvider); err != nil {
+		return false, err
 	}
 	info, err := os.Stat(dataDir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -177,7 +189,7 @@ func CheckInitialized(ctx context.Context, dataDir string) (bool, error) {
 	if adminCount != 1 {
 		return false, errors.New("administrator initialization is inconsistent")
 	}
-	if _, err := loadSecrets(dataDir); err != nil {
+	if _, err := loadSecretsForConfig(cfg); err != nil {
 		return false, errors.New("initialization key material is unavailable or invalid")
 	}
 	return true, nil

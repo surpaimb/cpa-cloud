@@ -65,6 +65,8 @@ jobs:
       - run: go vet ./...
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud" ./cmd/cpa-cloud
       - run: go build -trimpath -o "$RUNNER_TEMP/cpa-cloud-backup" ./cmd/cpa-cloud-backup
+      - name: Test fixed-user systemd encrypted-credential activation
+        run: bash scripts/smoke-linux-systemd-credential.sh "$RUNNER_TEMP/cpa-cloud"
       - name: Test manual monthly renewal against an isolated process
         run: node scripts/smoke-subscription-renewal.mjs "$RUNNER_TEMP/cpa-cloud"
       - name: Test opt-in employee wallet balance against an isolated process

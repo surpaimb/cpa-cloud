@@ -54,8 +54,17 @@ func loadSecrets(dataDir string) (*secrets, error) {
 	if err != nil || len(root) != 32 {
 		return nil, errors.New("root key is invalid")
 	}
+	defer clearBytes(root)
+	return newSecrets(root)
+}
+
+func newSecrets(root []byte) (*secrets, error) {
+	if len(root) != 32 {
+		return nil, errors.New("root key is invalid")
+	}
 	digestKey := deriveKey(root, "cpacloud/employee-and-session-digests/v1")
 	encryptionKey := deriveKey(root, "cpacloud/upstream-credentials/v1")
+	defer clearBytes(encryptionKey)
 	block, err := aes.NewCipher(encryptionKey)
 	if err != nil {
 		return nil, fmt.Errorf("initialize encryption: %w", err)
@@ -65,6 +74,7 @@ func loadSecrets(dataDir string) (*secrets, error) {
 		return nil, fmt.Errorf("initialize encryption: %w", err)
 	}
 	responseWrapKey := deriveKey(root, "cpacloud/response-state-wrap/v1")
+	defer clearBytes(responseWrapKey)
 	responseWrapBlock, err := aes.NewCipher(responseWrapKey)
 	if err != nil {
 		return nil, fmt.Errorf("initialize response state encryption: %w", err)
@@ -78,6 +88,12 @@ func loadSecrets(dataDir string) (*secrets, error) {
 		digestKey: digestKey, aead: aead, responseWrapAEAD: responseWrapAEAD,
 		responseFingerprintKey: responseFingerprintKey,
 	}, nil
+}
+
+func clearBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }
 
 func deriveKey(root []byte, purpose string) []byte {

@@ -216,7 +216,10 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err := ValidateCodexOAuthConfig(cfg); err != nil {
 		return nil, err
 	}
-	sec, err := loadSecrets(cfg.DataDir)
+	if err := validateMasterKeyProviderKind(cfg.MasterKeyProvider); err != nil {
+		return nil, err
+	}
+	sec, err := loadSecretsForConfig(cfg)
 	if err != nil {
 		return nil, err
 	}

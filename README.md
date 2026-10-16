@@ -470,6 +470,7 @@ unset CPA_EMPLOYEE_KEY
 | 参数 | 默认 / 用途 |
 | --- | --- |
 | `--data-dir` | 系统用户配置目录下的 `cpa-cloud`；建议显式指定绝对路径 |
+| `--master-key-provider` | 最新源码默认 `preview-file-v1`；Linux 无头服务可显式选择 `linux-systemd-credential-v1`，首片边界见下文 |
 | `--listen` | `127.0.0.1:8787` |
 | `--web-dir` | 空；不设置则没有网页 |
 | `--init` | 读取 stdin 初始化，然后退出 |
@@ -489,7 +490,9 @@ unset CPA_EMPLOYEE_KEY
 
 可信代理集合在进程启动时规范化并冻结；修改参数后须重启。可信集合改变后，按旧信任 revision 创建但尚未派发的后台任务会在零上游请求下中断，而不会用新规则静默重解释原来源。
 
-数据目录包含 `cpa-cloud.db`、可能存在的 WAL/SHM 文件和 **`master.key`**。员工 Key 保存为带密钥摘要，上游凭据加密保存；主机管理员仍能访问运行中的秘密。丢失或替换 `master.key` 会破坏已有凭据的可用性。
+默认预览模式的数据目录包含 `cpa-cloud.db`、可能存在的 WAL/SHM 文件和 **`master.key`**。员工 Key 保存为带密钥摘要，上游凭据加密保存；主机管理员仍能访问运行中的秘密。丢失或替换 `master.key` 会破坏已有凭据的可用性。
+
+最新源码另有首个 Linux 无头服务密钥门禁：显式使用 `--master-key-provider=linux-systemd-credential-v1` 时，只从 systemd 的固定 `cpa-cloud-master-key` credential 读取根密钥，并在 SQLite 迁移、监听和 worker 前核对精确 ACL/所有权形态、instance/key-id/version 及 AEAD canary；该模式拒绝并且不会回退到 `master.key`。普通 CI 使用一次性固定系统用户和 host-key 加密的合成 credential 验证真实 `LoadCredentialEncrypted=` 激活、初始化、重开及错误/缺失拒绝，但仍不证明目标生产主机的 TPM/host policy、unit hardening、轮换或异机恢复，不能据此解除 SEC-01。格式、unit 约束与已测边界见 [Linux systemd 主密钥首片契约](docs/linux-systemd-master-key-provider-contract.md)。
 
 最新源码提供独立的 `cpa-cloud-backup create|verify|restore` 加密备份命令，可从活动 WAL 数据库取得一致快照，并只恢复到不存在的新目录；用法、安全边界和 128 MiB 首批上限见[加密备份文档](docs/backup-restore.md)。它不包含自动计划、保留、远程上传或原地回退。升级前仍应保留匹配的旧程序和网页，并先在隔离环境验证恢复结果；不要仅复制运行中的主数据库文件。
 
