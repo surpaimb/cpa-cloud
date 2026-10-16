@@ -60,6 +60,12 @@ class PreflightTests(unittest.TestCase):
         self.assertIn('["/usr/sbin/runuser", "-u", USER', source)
         self.assertNotIn('["runuser",', source)
 
+    def test_diagnostics_emit_only_fixed_categories(self):
+        for label, fragment in module.BUS_DIAGNOSTICS.items():
+            self.assertRegex(label, r"^[a-z-]+$")
+            self.assertIsInstance(fragment, bytes)
+            self.assertNotIn("/", label)
+
 
 if __name__ == "__main__":
     unittest.main()

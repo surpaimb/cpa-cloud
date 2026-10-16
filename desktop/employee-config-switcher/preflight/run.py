@@ -18,6 +18,13 @@ USER = "cpa-ss-preflight"
 UNIT = "cpa-ss-preflight.service"
 SAFE_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
 MARKERS = ("ISOLATION_OK", "PRIVATE_BUS_SERVICE_UID_PID_OK", "LIBSECRET_METADATA_ONLY_OK", "OWNED_PROCESSES_STOPPED")
+BUS_DIAGNOSTICS = {
+    "permission": b"Permission denied", "operation-not-permitted": b"Operation not permitted",
+    "address-family": b"Address family", "read-only": b"Read-only file system",
+    "config-parse": b"parse", "config-attribute": b"attribute", "config-rule": b"rule",
+    "apparmor": b"AppArmor", "socket-bind": b"bind", "missing-path": b"No such file",
+    "machine-id": b"machine-id", "unsupported": b"not supported",
+}
 
 
 class PreflightFailure(Exception):
@@ -159,6 +166,11 @@ def inside(metadata_path):
                     process.wait(timeout=5)
         for log in logs:
             log.close()
+        if processes and processes[0].returncode not in (None, 0, -15):
+            output = (work / "bus.log").read_bytes()
+            for label, fragment in BUS_DIAGNOSTICS.items():
+                if fragment in output:
+                    print("BUS_DIAGNOSTIC " + label, flush=True)
     require(all(process.poll() is not None for process in processes), "owned-process-remains")
     print("OWNED_PROCESSES_STOPPED", flush=True)
 
@@ -266,6 +278,9 @@ def outer():
         result = run(args, timeout=110, check=False)
         # Never relay raw daemon, D-Bus, GLib, journal or child process output.
         if result.returncode != 0:
+            for label in BUS_DIAGNOSTICS:
+                if ("BUS_DIAGNOSTIC " + label + "\n").encode() in result.stdout:
+                    print("BUS_DIAGNOSTIC " + label, flush=True)
             for marker in MARKERS:
                 print("CHECK " + marker + "=" + str(marker.encode() in result.stdout).lower(), flush=True)
             for label in ("nonroot-required", "proxy-inherited", "session-inherited", "private-directory",
