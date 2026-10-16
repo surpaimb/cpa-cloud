@@ -3,6 +3,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -316,6 +317,100 @@ func TestLinuxSystemdMasterKeyProviderRecoversInterruptedStaging(t *testing.T) {
 			t.Fatalf("final binding was published for wrong credential: %v", err)
 		}
 	})
+
+	wrong := material
+	wrong.Key[0] ^= 0xff
+	wrongBinding, err := createMasterKeyBinding(&wrong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearBytes(wrongBinding)
+	unsafeCases := []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{"wrong mode", func(t *testing.T, stagingPath string) {
+			if err := os.Chmod(stagingPath, 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"hardlink", func(t *testing.T, stagingPath string) {
+			if err := os.Link(stagingPath, filepath.Join(t.TempDir(), "staging-alias")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symlink", func(t *testing.T, stagingPath string) {
+			target := filepath.Join(t.TempDir(), "staging-target")
+			if err := os.WriteFile(target, wrongBinding, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(stagingPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, stagingPath); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"oversized", func(t *testing.T, stagingPath string) {
+			oversized := append(append([]byte(nil), wrongBinding...), bytes.Repeat([]byte(" "), masterKeyBindingMaxBytes)...)
+			defer clearBytes(oversized)
+			if err := os.WriteFile(stagingPath, oversized, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range unsafeCases {
+		t.Run("unsafe complete staging fails closed: "+test.name, func(t *testing.T) {
+			dataDir := filepath.Join(t.TempDir(), "data")
+			if err := os.Mkdir(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			stagingPath := filepath.Join(dataDir, masterKeyBindingStagingFilename)
+			if err := os.WriteFile(stagingPath, wrongBinding, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, stagingPath)
+			before := snapshotMasterKeyProviderDirectory(t, dataDir)
+			cfg := Config{DataDir: dataDir, Listen: "127.0.0.1:0", Version: "test", MasterKeyProvider: masterKeyProviderLinuxSystemdCredentialV1}
+			if err := InitializeWithConfig(context.Background(), cfg, strings.NewReader("synthetic-admin-password\n")); !errors.Is(err, errMasterKeyProviderRejected) {
+				t.Fatalf("unsafe staging accepted: %v", err)
+			}
+			if after := snapshotMasterKeyProviderDirectory(t, dataDir); !reflect.DeepEqual(before, after) {
+				t.Fatalf("rejected unsafe staging mutated data directory\nbefore=%v\nafter=%v", before, after)
+			}
+			if _, err := os.Lstat(stagingPath); err != nil {
+				t.Fatalf("rejected staging was removed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, masterKeyBindingFilename)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("final binding was published for unsafe staging: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "cpa-cloud.db")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("database opened for unsafe staging: %v", err)
+			}
+		})
+	}
+}
+
+func TestTruncatedMasterKeyBindingJSONClassification(t *testing.T) {
+	tests := []struct {
+		name      string
+		encoded   string
+		truncated bool
+	}{
+		{"empty", "", true},
+		{"open object", "{", true},
+		{"missing value", `{"format_version":`, true},
+		{"malformed value", `{"format_version":]}`, false},
+		{"complete object", `{}`, false},
+		{"complete non-object", `"value"`, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := truncatedMasterKeyBindingJSON([]byte(test.encoded)); got != test.truncated {
+				t.Fatalf("truncated=%v want=%v", got, test.truncated)
+			}
+		})
+	}
 }
 
 func TestLinuxSystemdMasterKeyProviderRetriesDirectorySyncAfterPublish(t *testing.T) {

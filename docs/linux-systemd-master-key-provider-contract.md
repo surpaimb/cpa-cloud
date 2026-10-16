@@ -97,14 +97,17 @@ loss cannot turn `--init` into a re-key operation. It refuses a legacy
 
 The binding is written to the fixed staging name, file-synced, revalidated, then
 published with `renameat2(RENAME_NOREPLACE)` and followed by a directory fsync.
-An incomplete staging file that cannot form a complete JSON object can be
-discarded only in an otherwise fresh directory. A complete staging object is
-never replaced: it is published only when its exact credential metadata and
-canary validate, and otherwise fails closed without mutation. A final binding
-encountered by `--init` is revalidated and both file- and directory-synced again
-before SQLite is opened. Thus the same credential can recover the bounded
-interrupted states, while a different key or metadata cannot adopt a partial or
-existing installation.
+A staging file first has to pass the same no-follow, owner, mode, single-link,
+size, and stable-identity admission as the final binding. Any admission or I/O
+failure leaves it untouched and fails closed. Only safely read empty content or
+a JSON object with an explicit end-of-input truncation can be discarded, and
+only in an otherwise fresh directory. Other malformed JSON is retained and
+rejected. A syntactically complete JSON value is never replaced: it is published
+only when its strict schema, exact credential metadata, and canary validate, and
+otherwise fails closed without mutation. A final binding encountered by `--init`
+is revalidated and both file- and directory-synced again before SQLite is opened.
+Thus the same credential can recover the bounded interrupted states, while a
+different key or metadata cannot adopt a partial or existing installation.
 
 ## Tested and untested boundary
 
@@ -112,6 +115,7 @@ Automated tests cover strict parsing, wrong key/instance/key-id/version, canary
 tampering, missing credential, unsafe modes, no `master.key` fallback, refusal to
 rebind an existing database after binding loss, partial and complete staging
 recovery, rejection of a complete staging object made by a different key,
+fail-closed handling of wrong-mode, hardlinked, symlinked, and oversized staging,
 directory-sync failure and retry, read-only startup failure, and a real CLI
 failure before listener/worker startup. Linux tests use only synthetic temporary
 roots and credentials; they do not simulate a whole-machine power loss.

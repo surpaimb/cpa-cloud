@@ -3,6 +3,8 @@
 package service
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -46,29 +48,37 @@ func createLinuxMasterKeyBinding(dataDir, name, stagingName string, encoded []by
 		return errors.New("data directory is not fresh")
 	}
 	if len(entries) == 1 {
-		staged, readErr := readLinuxPrivateFileAt(directoryFD, directoryStat, stagingName, masterKeyBindingMaxBytes, 0o600)
-		var stagedBinding masterKeyBinding
-		complete := readErr == nil && decodeStrictJSON(staged, &stagedBinding) == nil
-		valid := complete && verifyMasterKeyBinding(staged, material) == nil
-		clearBytes(staged)
-		if valid {
+		staged, readErr := readLinuxStagedBindingAt(directoryFD, directoryStat, stagingName, masterKeyBindingMaxBytes)
+		if readErr != nil {
+			return readErr
+		}
+		if !json.Valid(staged) {
+			truncated := truncatedMasterKeyBindingJSON(staged)
+			clearBytes(staged)
+			if !truncated {
+				return errors.New("malformed staged binding")
+			}
+			if err := unix.Unlinkat(directoryFD, stagingName, 0); err != nil {
+				return err
+			}
+			if err := linuxSyncDirectory(directoryFD); err != nil {
+				return err
+			}
+			entries, err = linuxDirectoryEntryNames(directoryFD)
+			if err != nil || len(entries) != 0 {
+				return errors.New("data directory changed")
+			}
+		} else {
+			var stagedBinding masterKeyBinding
+			if decodeStrictJSON(staged, &stagedBinding) != nil || verifyMasterKeyBinding(staged, material) != nil {
+				clearBytes(staged)
+				return errors.New("staged binding does not match credential")
+			}
+			clearBytes(staged)
 			if err := syncLinuxPrivateFileAt(directoryFD, directoryStat, stagingName, 0o600); err != nil {
 				return err
 			}
 			return publishLinuxMasterKeyBinding(directoryFD, stagingName, name)
-		}
-		if complete {
-			return errors.New("staged binding does not match credential")
-		}
-		if err := unix.Unlinkat(directoryFD, stagingName, 0); err != nil {
-			return err
-		}
-		if err := linuxSyncDirectory(directoryFD); err != nil {
-			return err
-		}
-		entries, err = linuxDirectoryEntryNames(directoryFD)
-		if err != nil || len(entries) != 0 {
-			return errors.New("data directory changed")
 		}
 	}
 	if err := writeLinuxStagedBinding(directoryFD, stagingName, encoded); err != nil {
@@ -178,6 +188,14 @@ func readLinuxPrivateFile(directory, name string, maxBytes int, directoryMode, f
 }
 
 func readLinuxPrivateFileAt(directoryFD int, directoryStat unix.Stat_t, name string, maxBytes int, fileMode uint32) ([]byte, error) {
+	return readLinuxPrivateFileAtOptions(directoryFD, directoryStat, name, maxBytes, fileMode, false)
+}
+
+func readLinuxStagedBindingAt(directoryFD int, directoryStat unix.Stat_t, name string, maxBytes int) ([]byte, error) {
+	return readLinuxPrivateFileAtOptions(directoryFD, directoryStat, name, maxBytes, 0o600, true)
+}
+
+func readLinuxPrivateFileAtOptions(directoryFD int, directoryStat unix.Stat_t, name string, maxBytes int, fileMode uint32, allowEmpty bool) ([]byte, error) {
 	fileFD, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
@@ -189,11 +207,11 @@ func readLinuxPrivateFileAt(directoryFD int, directoryStat unix.Stat_t, name str
 	}
 	defer file.Close()
 	var first unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &first); err != nil || !validLinuxPrivateFile(&first, fileMode) || first.Size <= 0 || first.Size > int64(maxBytes) {
+	if err := unix.Fstat(int(file.Fd()), &first); err != nil || !validLinuxPrivateFile(&first, fileMode) || first.Size < 0 || first.Size > int64(maxBytes) || !allowEmpty && first.Size == 0 {
 		return nil, errors.New("invalid private file")
 	}
 	encoded, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
-	if err != nil || len(encoded) == 0 || len(encoded) > maxBytes {
+	if err != nil || len(encoded) > maxBytes || !allowEmpty && len(encoded) == 0 {
 		clearBytes(encoded)
 		return nil, errors.New("read private file")
 	}
@@ -208,6 +226,17 @@ func readLinuxPrivateFileAt(directoryFD int, directoryStat unix.Stat_t, name str
 		return nil, errors.New("private file changed")
 	}
 	return encoded, nil
+}
+
+func truncatedMasterKeyBindingJSON(encoded []byte) bool {
+	trimmed := bytes.TrimSpace(encoded)
+	if len(trimmed) == 0 {
+		return true
+	}
+	var value any
+	err := json.Unmarshal(trimmed, &value)
+	var syntaxError *json.SyntaxError
+	return errors.As(err, &syntaxError) && syntaxError.Offset == int64(len(trimmed)) && syntaxError.Error() == "unexpected end of JSON input"
 }
 
 func linuxDirectoryEntryNames(directoryFD int) ([]string, error) {
