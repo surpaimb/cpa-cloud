@@ -22,6 +22,7 @@ const (
 	masterKeyProviderLinuxSystemdCredentialV1        = "linux-systemd-credential-v1"
 	masterKeyCredentialName                          = "cpa-cloud-master-key"
 	masterKeyBindingFilename                         = "master-key-binding.json"
+	masterKeyBindingStagingFilename                  = ".master-key-binding.json.staging"
 	masterKeyCredentialMaxBytes                      = 4096
 	masterKeyBindingMaxBytes                         = 4096
 	maxJSONSafeInteger                        uint64 = 9007199254740991
@@ -125,9 +126,15 @@ func initializeMasterKeyProvider(cfg Config) error {
 		}
 		bindingPath := filepath.Join(cfg.DataDir, masterKeyBindingFilename)
 		if _, err := os.Lstat(bindingPath); err == nil {
+			if _, stagingErr := os.Lstat(filepath.Join(cfg.DataDir, masterKeyBindingStagingFilename)); !errors.Is(stagingErr, os.ErrNotExist) {
+				return errMasterKeyProviderRejected
+			}
 			bindingBytes, readErr := readLinuxMasterKeyBinding(cfg.DataDir, masterKeyBindingFilename, masterKeyBindingMaxBytes)
 			defer clearBytes(bindingBytes)
 			if readErr != nil || verifyMasterKeyBinding(bindingBytes, &material) != nil {
+				return errMasterKeyProviderRejected
+			}
+			if syncLinuxMasterKeyBinding(cfg.DataDir, masterKeyBindingFilename) != nil {
 				return errMasterKeyProviderRejected
 			}
 			return nil
@@ -139,7 +146,7 @@ func initializeMasterKeyProvider(cfg Config) error {
 			return errMasterKeyProviderRejected
 		}
 		defer clearBytes(bindingBytes)
-		if err := createLinuxMasterKeyBinding(cfg.DataDir, masterKeyBindingFilename, bindingBytes); err != nil {
+		if err := createLinuxMasterKeyBinding(cfg.DataDir, masterKeyBindingFilename, masterKeyBindingStagingFilename, bindingBytes, &material); err != nil {
 			return errMasterKeyProviderRejected
 		}
 		return nil

@@ -54,9 +54,11 @@ fields:
 `key_version` is in `1..9007199254740991`. The root key is exactly 32 bytes from
 an OS CSPRNG; this code does not generate or rotate it in systemd mode.
 
-Initialization writes only `master-key-binding.json` beside the database. The
+Initialization persists only `master-key-binding.json` beside the database. The
 0600, owner-only file contains the exact provider/instance/key/version metadata,
-a random nonce, and an AES-256-GCM canary. It does not contain the root key.
+a random nonce, and an AES-256-GCM canary. It does not contain the root key. A
+same-directory `.master-key-binding.json.staging` file may exist transiently or
+after an interrupted first initialization.
 The metadata is authenticated as AAD. A restart must match every metadata field
 and decrypt the fixed canary before the root key may derive employee/session
 digests, upstream-credential AEAD, or Responses state keys.
@@ -87,17 +89,29 @@ workers. Errors use a fixed non-secret provider rejection and never include key
 bytes or credential contents.
 
 `--init` can create a new systemd-backed data directory while running inside an
-appropriate systemd credential context. It refuses a legacy `master.key`, writes
-and syncs the binding before database initialization, and supports exact retry
-with the same credential after an interrupted initialization. A different key or
-metadata cannot adopt the partial directory.
+appropriate systemd credential context. A missing final binding is accepted only
+when the data directory is empty or contains only the fixed staging file; an
+existing database, WAL/SHM/journal, or any other entry is rejected, so binding
+loss cannot turn `--init` into a re-key operation. It refuses a legacy
+`master.key`.
+
+The binding is written to the fixed staging name, file-synced, revalidated, then
+published with `renameat2(RENAME_NOREPLACE)` and followed by a directory fsync.
+An incomplete staging file can be discarded only in an otherwise fresh
+directory. A complete staging file with the exact credential metadata and canary
+can be published on retry. A final binding encountered by `--init` is revalidated
+and both file- and directory-synced again before SQLite is opened. Thus the same
+credential can recover the bounded interrupted states, while a different key or
+metadata cannot adopt a partial or existing installation.
 
 ## Tested and untested boundary
 
 Automated tests cover strict parsing, wrong key/instance/key-id/version, canary
-tampering, missing credential, unsafe modes, no `master.key` fallback, read-only
-startup failure, and a real CLI failure before listener/worker startup. Linux
-tests use only synthetic temporary roots and credentials.
+tampering, missing credential, unsafe modes, no `master.key` fallback, refusal to
+rebind an existing database after binding loss, partial and complete staging
+recovery, directory-sync failure and retry, read-only startup failure, and a real
+CLI failure before listener/worker startup. Linux tests use only synthetic
+temporary roots and credentials; they do not simulate a whole-machine power loss.
 
 This slice does not prove a real `LoadCredentialEncrypted=` activation, host or
 TPM2 binding, null-key rejection, fixed service UID isolation, ACL behavior, key

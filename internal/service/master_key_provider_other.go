@@ -12,6 +12,10 @@ func readLinuxMasterKeyBinding(string, string, int) ([]byte, error) {
 	return nil, errMasterKeyProviderRejected
 }
 
-func createLinuxMasterKeyBinding(string, string, []byte) error {
+func createLinuxMasterKeyBinding(string, string, string, []byte, *masterKeyMaterial) error {
+	return errMasterKeyProviderRejected
+}
+
+func syncLinuxMasterKeyBinding(string, string) error {
 	return errMasterKeyProviderRejected
 }

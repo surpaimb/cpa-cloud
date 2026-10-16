@@ -203,6 +203,119 @@ func TestLinuxSystemdMasterKeyProviderInitializationCanRetryExactCredential(t *t
 	}
 }
 
+func TestLinuxSystemdMasterKeyProviderMissingBindingCannotRebindExistingDatabase(t *testing.T) {
+	credentialDirectory := t.TempDir()
+	material := testMasterKeyMaterial(0x84)
+	writeLinuxSystemdCredential(t, credentialDirectory, material)
+	t.Setenv("CREDENTIALS_DIRECTORY", credentialDirectory)
+	dataDir := filepath.Join(t.TempDir(), "data")
+	cfg := Config{DataDir: dataDir, Listen: "127.0.0.1:0", Version: "test", MasterKeyProvider: masterKeyProviderLinuxSystemdCredentialV1}
+	if err := InitializeWithConfig(context.Background(), cfg, strings.NewReader("synthetic-admin-password\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dataDir, masterKeyBindingFilename)); err != nil {
+		t.Fatal(err)
+	}
+	wrong := material
+	wrong.Key[0] ^= 0xff
+	writeLinuxSystemdCredential(t, credentialDirectory, wrong)
+	before := snapshotMasterKeyProviderDirectory(t, dataDir)
+	if err := InitializeWithConfig(context.Background(), cfg, strings.NewReader("synthetic-admin-password\n")); !errors.Is(err, errMasterKeyProviderRejected) {
+		t.Fatalf("existing database rebound after binding loss: %v", err)
+	}
+	if after := snapshotMasterKeyProviderDirectory(t, dataDir); !reflect.DeepEqual(before, after) {
+		t.Fatalf("rejected rebinding mutated data directory\nbefore=%v\nafter=%v", before, after)
+	}
+}
+
+func TestLinuxSystemdMasterKeyProviderRecoversInterruptedStaging(t *testing.T) {
+	credentialDirectory := t.TempDir()
+	material := testMasterKeyMaterial(0x85)
+	writeLinuxSystemdCredential(t, credentialDirectory, material)
+	t.Setenv("CREDENTIALS_DIRECTORY", credentialDirectory)
+
+	t.Run("partial staging is replaced only in an otherwise fresh directory", func(t *testing.T) {
+		dataDir := filepath.Join(t.TempDir(), "data")
+		if err := os.Mkdir(dataDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dataDir, masterKeyBindingStagingFilename), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{DataDir: dataDir, Listen: "127.0.0.1:0", Version: "test", MasterKeyProvider: masterKeyProviderLinuxSystemdCredentialV1}
+		if err := InitializeWithConfig(context.Background(), cfg, strings.NewReader("synthetic-admin-password\n")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(dataDir, masterKeyBindingStagingFilename)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("partial staging remains: %v", err)
+		}
+	})
+
+	t.Run("complete file-synced staging is atomically published", func(t *testing.T) {
+		dataDir := filepath.Join(t.TempDir(), "data")
+		if err := os.Mkdir(dataDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		binding, err := createMasterKeyBinding(&material)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clearBytes(binding)
+		stagingPath := filepath.Join(dataDir, masterKeyBindingStagingFilename)
+		if err := os.WriteFile(stagingPath, binding, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		staged, err := os.OpenFile(stagingPath, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := staged.Sync(); err != nil {
+			staged.Close()
+			t.Fatal(err)
+		}
+		if err := staged.Close(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{DataDir: dataDir, Listen: "127.0.0.1:0", Version: "test", MasterKeyProvider: masterKeyProviderLinuxSystemdCredentialV1}
+		if err := InitializeWithConfig(context.Background(), cfg, strings.NewReader("synthetic-admin-password\n")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(stagingPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("published staging remains: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dataDir, masterKeyBindingFilename)); err != nil {
+			t.Fatalf("binding was not published: %v", err)
+		}
+	})
+}
+
+func TestLinuxSystemdMasterKeyProviderRetriesDirectorySyncAfterPublish(t *testing.T) {
+	credentialDirectory := t.TempDir()
+	material := testMasterKeyMaterial(0x86)
+	writeLinuxSystemdCredential(t, credentialDirectory, material)
+	t.Setenv("CREDENTIALS_DIRECTORY", credentialDirectory)
+	dataDir := filepath.Join(t.TempDir(), "data")
+	cfg := Config{DataDir: dataDir, Listen: "127.0.0.1:0", Version: "test", MasterKeyProvider: masterKeyProviderLinuxSystemdCredentialV1}
+
+	originalSync := linuxSyncDirectory
+	linuxSyncDirectory = func(int) error { return errors.New("synthetic directory sync failure") }
+	err := InitializeWithConfig(context.Background(), cfg, strings.NewReader("synthetic-admin-password\n"))
+	linuxSyncDirectory = originalSync
+	defer func() { linuxSyncDirectory = originalSync }()
+	if !errors.Is(err, errMasterKeyProviderRejected) {
+		t.Fatalf("directory sync failure accepted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, masterKeyBindingFilename)); err != nil {
+		t.Fatalf("fully written binding not retained for sync retry: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "cpa-cloud.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("database opened after directory sync failure: %v", err)
+	}
+	if err := InitializeWithConfig(context.Background(), cfg, strings.NewReader("synthetic-admin-password\n")); err != nil {
+		t.Fatalf("exact retry did not repeat durability sync: %v", err)
+	}
+}
+
 func writeLinuxSystemdCredential(t *testing.T, directory string, material masterKeyMaterial) {
 	t.Helper()
 	if err := os.Chmod(directory, 0o700); err != nil {
