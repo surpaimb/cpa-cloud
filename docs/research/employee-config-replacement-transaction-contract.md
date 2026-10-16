@@ -431,9 +431,10 @@ the completion tombstone before workspace removal, refuses to call provider
 deletion before both are recorded durable, and permits tombstone removal only
 after deletion is confirmed as `deleted` or already `missing`. Locked,
 wrong-identity, corrupt or unavailable deletion leaves the tombstone phase
-retryable. The completion-tombstone transition remains a caller assertion at
-this pure layer; the workspace transition now requires the concrete removal
-receipt described below. A
+retryable. The pure gate now accepts only the exact durable tombstone receipt
+bound to its terminal, transaction, complete recovery-key reference and root
+identity; the workspace transition requires the concrete removal receipt
+described below. A
 separate Linux-only synthetic-root module now stages a versioned non-secret
 completion tombstone as an owner-private single-link file, flushes it, and
 publishes it under the final name with no-replace `renameat2`. A crash before
@@ -477,8 +478,18 @@ transaction, and concurrent duplicate appends cannot leave a pending record. A
 visible `.pending` event blocks recovery rather than being inferred complete.
 The durable wrapper records provider deletion only after the provider returns
 `deleted` or `missing`, and an append failure rolls the in-memory sequence back
-to its preceding durable phase so a restart can retry. The completion-tombstone
-transition remains a caller assertion. The workspace transition no longer is:
+to its preceding durable phase so a restart can retry. The replacement journal
+now issues the cleanup journal's only production input: a crate-private,
+non-serializable `DurableTerminalHandoff` created only after the exact terminal
+event is flushed, replayed and matched to revalidated root/workspace
+descriptors. It binds journal version, outcome, transaction, root identity,
+canonical workspace identity and complete recovery-key reference. The
+completion-tombstone transition requires the store's exact non-serializable
+durable receipt; cross-bound receipts fail without advancing. This integration
+is fixed by the [durable terminal handoff contract](durable-terminal-handoff-contract.md)
+and deliberately stops at `CompletionTombstoneDurable`, with the replacement
+workspace still non-empty and provider deletion uncalled. The later workspace
+transition is also no longer a caller assertion:
 a separate Linux-only synthetic-root store accepts only one exact empty `0700`
 transaction workspace while holding the existing transaction lock, flushes a
 private pending proof before descriptor-relative removal, flushes the
@@ -491,11 +502,13 @@ but before proof publication leaves `.pending` and blocks automatic cleanup
 rather than inferring success from absence. Renamed, replaced, non-empty,
 missing, cross-workspace or mismatched state likewise fails closed. The
 authorization, caller path and proof must all match the workspace leaf and
-device/inode already recorded in the durable cleanup journal. This bounded
-slice intentionally has no production constructor for the initial trusted
-workspace-target evidence; until the durable replacement transaction supplies
-that binding, initial cleanup-journal creation remains fail-closed. Synthetic
-tests alone mint target evidence under `cfg(test)`. The store does not delete
+device/inode already recorded in the durable cleanup journal. The synthetic
+Linux replacement journal now supplies the only production constructor input:
+its exact durable terminal handoff. Cleanup restart accepts only the current
+replacement-journal version and the canonical workspace leaf derived from the
+transaction; loose legacy workspace fixtures remain `cfg(test)` only. This path
+is still unavailable to real clients because the synthetic-root approval has
+no production constructor. The store does not delete
 transaction contents; its reviewed slice begins only after another component
 has safely removed every known child and left the exact workspace empty. It
 does not remove completed journals/proofs, authenticate against a hostile

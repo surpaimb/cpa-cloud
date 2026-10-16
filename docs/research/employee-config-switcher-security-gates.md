@@ -376,12 +376,20 @@ The durable cleanup journal repeats the expected workspace leaf and
 device/inode in every event; authorization, caller path, proof, restart and
 provider deletion must all match that binding and the exact workspace name must
 remain absent. Pending, cross-workspace, renamed, replaced, non-empty or
-mismatched state blocks cleanup. No production constructor currently issues
-the initial trusted workspace-target evidence, so cleanup-journal creation is
-fail-closed until the durable replacement transaction provides it; only
-`cfg(test)` synthetic fixtures mint that evidence. The slice does not remove
-transaction contents and remains gated on a producer that safely empties the
-exact workspace first. It retains the exact
+mismatched state blocks cleanup. The replacement journal now issues the only
+production `DurableTerminalHandoff` after flushing and replaying its exact
+terminal event and revalidating held root/workspace descriptors. The
+crate-private, non-serializable capability binds journal version, outcome,
+transaction, root and canonical workspace identities, plus the complete
+recovery-key reference; cleanup-journal creation no longer accepts loose
+parameters. The completion-tombstone transition likewise requires the exact
+non-serializable receipt returned after the active record and namespace/root
+are flushed and revalidated. Cleanup repeats and reconstructs these bindings
+and rolls its in-memory phase back if publication fails. The bounded slice
+stops at `CompletionTombstoneDurable`: it leaves the replacement workspace
+present and non-empty, calls no provider deletion and remains gated on a future
+producer that safely empties the exact workspace first. See the fixed
+[durable terminal handoff contract](durable-terminal-handoff-contract.md). It retains the exact
 transaction/reference pair, treats
 `deleted` and already-`missing` as idempotent completion, preserves the tombstone
 phase on every blocking deletion outcome, and permits tombstone removal last.
