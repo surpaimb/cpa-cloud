@@ -1271,6 +1271,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn empty_workspace(root: &Path, suffix: u8) -> PathBuf {
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
         let replacement_root = root.join(super::super::workspace_retirement::REPLACEMENT_DIRECTORY);
         if !replacement_root.exists() {
             fs::create_dir(&replacement_root).unwrap();
