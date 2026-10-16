@@ -1164,11 +1164,7 @@ mod platform {
             verify_retired_artifact(retirement_tx, transaction_path, &quarantine_artifact, kind)?;
         let reopened =
             verify_retired_artifact(retirement_tx, transaction_path, &quarantine_artifact, kind)?;
-        require_same_identity(
-            &retained,
-            &reopened,
-            &transaction_path.join(quarantine),
-        )?;
+        require_same_identity(&retained, &reopened, &transaction_path.join(quarantine))?;
         sync_directory(retirement_tx, transaction_path, fault)
     }
 
