@@ -1187,6 +1187,10 @@ fn validate_secret_transfer(
 }
 
 #[cfg(test)]
+#[path = "linux_secret_service_fixture.rs"]
+mod real_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{

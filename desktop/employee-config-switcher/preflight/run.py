@@ -75,8 +75,8 @@ def denied_socket(path):
         raise PreflightFailure("host-socket-reachable")
 
 
-def inside(metadata_path):
-    metadata = json.loads(Path(metadata_path).read_text())
+def verify_isolation(metadata):
+    """Shared prerequisite: all assertions finish before any secret operation."""
     uid, work = metadata["uid"], Path(metadata["work"])
     require(os.geteuid() == uid and uid != 0 and os.getegid() == metadata["gid"], "nonroot-required")
     require(not any(name.lower().endswith("_proxy") for name in os.environ), "proxy-inherited")
@@ -124,6 +124,11 @@ def inside(metadata_path):
     local.unlink()
     print("ISOLATION_OK", flush=True)
 
+
+def inside(metadata_path):
+    metadata = json.loads(Path(metadata_path).read_text())
+    verify_isolation(metadata)
+    uid, work = metadata["uid"], Path(metadata["work"])
     processes, logs, observed_ok = [], [], False
     try:
         def start(args, environment, name):
@@ -196,7 +201,9 @@ def package_manifest():
     require(run(["pkg-config", "--modversion", "libsecret-1"]).stdout.strip() == b"0.21.4", "libsecret-api-version")
 
 
-def outer():
+def outer(fixture=None):
+    # The no-argument CLI remains metadata-only. Only the separately invoked
+    # synthetic fixture harness supplies this in-process extension.
     require(sys.platform == "linux" and os.geteuid() == 0, "linux-root-harness-required")
     require(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
             and os.environ.get("RUNNER_OS") == "Linux", "disposable-runner-required")
@@ -263,6 +270,8 @@ def outer():
         metadata = dict(uid=uid, gid=gid, work=str(work), host_home=str(host_home), host_netns=os.readlink("/proc/self/ns/net"),
                         host_sockets=[str(host_socket)], shm_host=str(shm_host), shm_unit=str(shm_unit),
                         observer=str(observer), bus_config=str(bus_config))
+        if fixture is not None:
+            fixture.prepare(root, metadata)
         metadata_path = root / "metadata.json"
         metadata_path.write_text(json.dumps(metadata))
         metadata_path.chmod(0o444)
@@ -282,11 +291,19 @@ def outer():
         args = ["systemd-run", "--wait", "--collect", "--quiet", "--pipe", "--unit=" + UNIT]
         args += ["--property=" + item for item in properties]
         args += ["/usr/bin/env", "-i"] + [key + "=" + value for key, value in environment.items()]
-        args += ["/usr/bin/python3", str(root / "run.py"), "--inside", str(metadata_path)]
+        script = root / ("run.py" if fixture is None else "interop.py")
+        args += ["/usr/bin/python3", str(script), "--inside", str(metadata_path)]
         started = True
         result = run(args, timeout=110, check=False)
         # Never relay raw daemon, D-Bus, GLib, journal or child process output.
         if result.returncode != 0:
+            if fixture is not None:
+                for label in fixture.failures:
+                    if ("FAIL: " + label + "\n").encode() in result.stdout:
+                        print("CHECK rejected=" + label, flush=True)
+                for label in ("setup", "verify", "create", "reopen", "wrong-transaction", "wrong-namespace", "missing-item", "no-service"):
+                    if ("CASE_FAILURE " + label + "\n").encode() in result.stdout:
+                        print("CHECK case-failed=" + label, flush=True)
             for label in BUS_DIAGNOSTICS:
                 if ("BUS_DIAGNOSTIC " + label + "\n").encode() in result.stdout:
                     print("BUS_DIAGNOSTIC " + label, flush=True)
@@ -299,11 +316,17 @@ def outer():
                           "process-executable", "process-cgroup", "owned-daemon-exited", "metadata-observer-failed"):
                 if ("FAIL: " + label + "\n").encode() in result.stdout:
                     print("CHECK rejected=" + label, flush=True)
-        for marker in MARKERS:
+        markers = MARKERS if fixture is None else fixture.markers
+        for marker in markers:
             require(result.returncode == 0 and marker.encode() in result.stdout, "unit-preflight-failed")
         require(shm_host.read_text() == "public-host-marker" and not shm_unit.exists(), "host-shm-changed")
         connect(host_socket)
-        print("PASS: fixed components; nonroot private bus/service; tested namespace boundaries; no key operations", flush=True)
+        if fixture is None:
+            print("PASS: fixed components; nonroot private bus/service; tested namespace boundaries; no key operations", flush=True)
+        else:
+            # Extension output remains captured. Publish only its static cases.
+            for marker in markers:
+                print("CHECK " + marker + "=true", flush=True)
     finally:
         if started:
             run(["systemctl", "stop", UNIT], check=False)

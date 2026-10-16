@@ -232,6 +232,17 @@ now has one exact fixed native fixture, but all client adapters remain blocked
 from real configuration writes until each remaining native-version requirement
 and the replacement transaction contract are recorded and tested.
 
+## Real volatile Secret Service interoperability fixture
+
+`interop/` and the cfg(test)-only `live/linux_secret_service_fixture.rs` are
+independently authored from the [slice A contract](interop/CONTRACT.md), public
+libsecret/Secret Service documentation and CPA's own envelope format. They reuse
+PR80's actual isolation assertions and exact component manifest. No runtime
+approval constructor, production apply/UI connection or new dependency is added.
+Slice A covers volatile-session interoperability only; persistent collection
+restart, lock/corruption/duplicate cases, concurrent create and exact deletion
+remain explicitly unimplemented, not silently skipped or claimed as accepted.
+
 ## Rust dependency resolution
 
 The independently authored [Secret Service read compatibility contract](SECRET-SERVICE-READ-COMPAT.md)
