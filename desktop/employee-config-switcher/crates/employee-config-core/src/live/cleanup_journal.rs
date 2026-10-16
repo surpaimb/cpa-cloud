@@ -21,6 +21,10 @@ use super::{
     },
     replacement::ReplacementPhase,
     workspace_removal::{remove_workspace, verify_workspace_removal, WorkspaceRemovalError},
+    workspace_retirement::{
+        retire_workspace_contents, WorkspaceContentsRetiredReceipt, WorkspaceRetirementError,
+        WorkspaceRetirementPlan,
+    },
 };
 #[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
@@ -34,7 +38,7 @@ const CLEANUP_DIRECTORY: &str = ".cpa-cloud-employee-config-cleanup";
 pub(crate) struct DurablePhaseEvidence(());
 pub(crate) struct RetirementEvidence(());
 #[cfg(target_os = "linux")]
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 #[cfg(target_os = "linux")]
 const MAX_TRANSACTIONS: usize = 64;
 #[cfg(target_os = "linux")]
@@ -70,6 +74,8 @@ pub enum CleanupJournalError {
     Cleanup(#[from] RecoveryKeyCleanupError),
     #[error("workspace removal failed: {0}")]
     WorkspaceRemoval(#[from] WorkspaceRemovalError),
+    #[error("workspace content retirement failed: {0}")]
+    WorkspaceRetirement(#[from] WorkspaceRetirementError),
     #[error("completion tombstone verification failed: {0}")]
     CompletionTombstone(#[from] CompletionTombstoneError),
     #[error("cleanup journal filesystem operation failed for {path}: {source}")]
@@ -121,6 +127,31 @@ impl DurableCleanupJournal {
         self.sequence
             .record_workspace_removal_durable(verified.receipt())?;
         self.persist_or_restore(previous)
+    }
+
+    /// Retires only the fixed terminal-handoff allowlist. The replacement
+    /// workspace remains present and empty; this does not advance the cleanup
+    /// sequence or authorize provider deletion.
+    pub(crate) fn retire_workspace_contents_durable(
+        &self,
+    ) -> Result<WorkspaceContentsRetiredReceipt, CleanupJournalError> {
+        let authorization = self.sequence.authorize_workspace_retirement()?;
+        Ok(retire_workspace_contents(&self.root, &authorization)?)
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn retire_workspace_contents_with_fault(
+        &self,
+        boundary: usize,
+    ) -> Result<WorkspaceContentsRetiredReceipt, CleanupJournalError> {
+        let authorization = self.sequence.authorize_workspace_retirement()?;
+        Ok(
+            super::workspace_retirement::retire_workspace_contents_with_fault(
+                &self.root,
+                &authorization,
+                boundary,
+            )?,
+        )
     }
 
     pub fn delete_key<P: RecoveryKeyProvider + ?Sized>(
@@ -185,6 +216,7 @@ impl DurableCleanupJournal {
                 self.sequence.root_device(),
                 self.sequence.root_inode(),
                 self.sequence.workspace_target().clone(),
+                self.sequence.retirement_plan().cloned(),
             )
             .expect("the prior durable cleanup phase remains valid");
             return Err(error);
@@ -299,6 +331,7 @@ struct CleanupEvent {
     workspace_name: String,
     workspace_device: u64,
     workspace_inode: u64,
+    retirement_plan: Option<WorkspaceRetirementPlan>,
 }
 
 #[cfg(target_os = "linux")]
@@ -411,6 +444,7 @@ fn event_for(
         workspace_name: sequence.workspace_name().to_owned(),
         workspace_device: sequence.workspace_target().device(),
         workspace_inode: sequence.workspace_target().inode(),
+        retirement_plan: sequence.retirement_plan().cloned(),
     })
 }
 
@@ -627,6 +661,7 @@ mod platform {
                     || current.root_device() != sequence.root_device()
                     || current.root_inode() != sequence.root_inode()
                     || current.workspace_target() != sequence.workspace_target()
+                    || current.retirement_plan() != sequence.retirement_plan()
                 {
                     return Err(CleanupJournalError::RecoveryConflict(
                         directory_path.clone(),
@@ -808,6 +843,7 @@ mod platform {
                     || event.workspace_name != first.workspace_name
                     || event.workspace_device != first.workspace_device
                     || event.workspace_inode != first.workspace_inode
+                    || event.retirement_plan != first.retirement_plan
                 {
                     return Err(CleanupJournalError::Corrupt);
                 }
@@ -821,6 +857,20 @@ mod platform {
                 first.workspace_device,
                 first.workspace_inode,
             )?;
+            let retirement_plan = first
+                .retirement_plan
+                .clone()
+                .map(|plan| {
+                    plan.validate_durable(
+                        transaction_id,
+                        first.root_identity.device,
+                        first.root_identity.inode,
+                        &first.workspace_name,
+                        first.workspace_device,
+                        first.workspace_inode,
+                    )
+                })
+                .transpose()?;
             sequences.push(RecoveryKeyCleanupSequence::from_durable_phase(
                 DurablePhaseEvidence(()),
                 phase,
@@ -831,6 +881,7 @@ mod platform {
                 first.root_identity.device,
                 first.root_identity.inode,
                 workspace_target,
+                retirement_plan,
             )?);
         }
 
@@ -1487,6 +1538,7 @@ mod tests {
                 1,
                 1,
                 canonical,
+                None,
             ),
             Err(RecoveryKeyCleanupError::InvalidTerminal)
         ));

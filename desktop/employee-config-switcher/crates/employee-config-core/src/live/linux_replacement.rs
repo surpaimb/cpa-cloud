@@ -16,6 +16,7 @@ use super::{
         ReplacementTransactionId,
     },
     replacement::ReplacementPhase,
+    workspace_retirement::{capture_terminal_plan, WorkspaceRetirementPlan},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -35,7 +36,7 @@ const PENDING_SLOTS_READY_FILE: &str = ".journal-pending-ready";
 const DESIRED_STAGE: &str = "desired.stage";
 const ROLLBACK_STAGE: &str = "rollback.stage";
 const ROLLBACK_STAGE_PENDING: &str = "rollback.stage.pending";
-pub(crate) const REPLACEMENT_JOURNAL_FORMAT_VERSION: u32 = 1;
+pub(crate) const REPLACEMENT_JOURNAL_FORMAT_VERSION: u32 = 2;
 const MAX_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_JOURNAL_BYTES: usize = 128 * 1024;
 const MAX_EVENTS: usize = 24;
@@ -84,6 +85,7 @@ pub(crate) struct DurableTerminalHandoff {
     workspace_device: u64,
     workspace_inode: u64,
     reference: RecoveryKeyReference,
+    retirement_plan: Option<WorkspaceRetirementPlan>,
 }
 
 impl DurableTerminalHandoff {
@@ -130,6 +132,10 @@ impl DurableTerminalHandoff {
         &self.reference
     }
 
+    pub(crate) fn retirement_plan(&self) -> Option<&WorkspaceRetirementPlan> {
+        self.retirement_plan.as_ref()
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(
         outcome: ReplacementOutcome,
@@ -150,6 +156,7 @@ impl DurableTerminalHandoff {
             workspace_device,
             workspace_inode,
             reference,
+            retirement_plan: None,
         }
     }
 }
@@ -167,6 +174,7 @@ impl std::fmt::Debug for DurableTerminalHandoff {
             .field("workspace_device", &self.workspace_device)
             .field("workspace_inode", &self.workspace_inode)
             .field("reference", &self.reference)
+            .field("retirement_plan", &self.retirement_plan)
             .finish()
     }
 }
@@ -287,6 +295,8 @@ enum JournalEvent {
     },
     BackedUp {
         workspace: String,
+        manifest_digest: String,
+        ciphertext_digest: String,
     },
     Staged {
         identity: FileIdentity,
@@ -314,6 +324,8 @@ struct JournalState {
     desired_len: usize,
     reference: Option<RecoveryKeyReference>,
     backup_workspace: Option<String>,
+    backup_manifest_digest: Option<String>,
+    backup_ciphertext_digest: Option<String>,
     desired_identity: Option<FileIdentity>,
     commit_prepared: bool,
     published: bool,
@@ -563,6 +575,8 @@ mod platform {
             &workspace_path,
             &JournalEvent::BackedUp {
                 workspace: backup.workspace.clone(),
+                manifest_digest: backup.manifest_digest.clone(),
+                ciphertext_digest: backup.ciphertext_digest.clone(),
             },
         )?;
         inject(fault, FaultPoint::AfterBackup)?;
@@ -1135,6 +1149,8 @@ mod platform {
             desired_len: *desired_len,
             reference: None,
             backup_workspace: None,
+            backup_manifest_digest: None,
+            backup_ciphertext_digest: None,
             desired_identity: None,
             commit_prepared: false,
             published: false,
@@ -1163,12 +1179,24 @@ mod platform {
                         .map_err(|_| SyntheticReplacementError::CorruptJournal)?,
                     );
                 }
-                JournalEvent::BackedUp { workspace }
-                    if state.reference.is_some()
-                        && state.backup_workspace.is_none()
-                        && state.desired_identity.is_none() =>
+                JournalEvent::BackedUp {
+                    workspace,
+                    manifest_digest,
+                    ciphertext_digest,
+                } if state.reference.is_some()
+                    && state.backup_workspace.is_none()
+                    && state.backup_manifest_digest.is_none()
+                    && state.backup_ciphertext_digest.is_none()
+                    && state.desired_identity.is_none() =>
                 {
-                    state.backup_workspace = Some(workspace.clone())
+                    if digest_text_invalid(manifest_digest)
+                        || digest_text_invalid(ciphertext_digest)
+                    {
+                        return Err(SyntheticReplacementError::CorruptJournal);
+                    }
+                    state.backup_workspace = Some(workspace.clone());
+                    state.backup_manifest_digest = Some(manifest_digest.clone());
+                    state.backup_ciphertext_digest = Some(ciphertext_digest.clone());
                 }
                 JournalEvent::Staged { identity }
                     if state.backup_workspace.is_some() && state.desired_identity.is_none() =>
@@ -1260,6 +1288,7 @@ mod platform {
         if transaction.state.terminal != Some(outcome) {
             return Err(SyntheticReplacementError::CorruptJournal);
         }
+        normalize_terminal_workspace(transaction, outcome)?;
         let reference = transaction
             .state
             .reference
@@ -1295,6 +1324,33 @@ mod platform {
             return Err(SyntheticReplacementError::RecoveryConflict);
         }
         let workspace_identity = identity(&transaction.workspace, &transaction.workspace_path)?;
+        let backup_workspace = journal_state
+            .backup_workspace
+            .as_deref()
+            .ok_or(SyntheticReplacementError::CorruptJournal)?;
+        let backup_manifest_digest = journal_state
+            .backup_manifest_digest
+            .as_deref()
+            .ok_or(SyntheticReplacementError::CorruptJournal)?;
+        let backup_ciphertext_digest = journal_state
+            .backup_ciphertext_digest
+            .as_deref()
+            .ok_or(SyntheticReplacementError::CorruptJournal)?;
+        let retirement_plan = capture_terminal_plan(
+            &transaction.root_path,
+            transaction.state.transaction_id,
+            &reference,
+            root_identity.volume,
+            root_identity.file,
+            &expected_workspace,
+            workspace_identity.volume,
+            workspace_identity.file,
+            backup_workspace,
+            backup_manifest_digest,
+            backup_ciphertext_digest,
+        )
+        .map_err(|_| SyntheticReplacementError::RecoveryConflict)?;
+        revalidate_namespace(transaction)?;
         let terminal_handoff = DurableTerminalHandoff {
             journal_version: REPLACEMENT_JOURNAL_FORMAT_VERSION,
             outcome,
@@ -1305,6 +1361,7 @@ mod platform {
             workspace_device: workspace_identity.volume,
             workspace_inode: workspace_identity.file,
             reference,
+            retirement_plan: Some(retirement_plan),
         };
         Ok(ReplacementReceipt {
             transaction_id: transaction.state.transaction_id,
@@ -2298,6 +2355,74 @@ mod platform {
         Ok(())
     }
 
+    fn normalize_terminal_workspace(
+        transaction: &OpenTransaction,
+        outcome: ReplacementOutcome,
+    ) -> Result<(), SyntheticReplacementError> {
+        cleanup_swapped_stage(transaction, DESIRED_STAGE, &transaction.state.original)?;
+        let desired_identity = transaction
+            .state
+            .desired_identity
+            .ok_or(SyntheticReplacementError::CorruptJournal)?;
+        let desired = TargetState {
+            identity: desired_identity,
+            digest: transaction.state.desired_digest.clone(),
+            len: transaction.state.desired_len,
+            mode: transaction.state.original.mode,
+            uid: transaction.state.original.uid,
+            gid: transaction.state.original.gid,
+        };
+        match outcome {
+            ReplacementOutcome::Complete => {
+                if stage_exists(transaction, ROLLBACK_STAGE)? {
+                    return Err(SyntheticReplacementError::RecoveryConflict);
+                }
+                cleanup_unused_rollback_reservation(transaction)
+            }
+            ReplacementOutcome::RolledBack => {
+                if stage_exists(transaction, ROLLBACK_STAGE_PENDING)? {
+                    return Err(SyntheticReplacementError::RecoveryConflict);
+                }
+                cleanup_swapped_stage(transaction, ROLLBACK_STAGE, &desired)
+            }
+        }
+    }
+
+    fn cleanup_unused_rollback_reservation(
+        transaction: &OpenTransaction,
+    ) -> Result<(), SyntheticReplacementError> {
+        if !stage_exists(transaction, ROLLBACK_STAGE_PENDING)? {
+            return Ok(());
+        }
+        let display = transaction.workspace_path.join(ROLLBACK_STAGE_PENDING);
+        let mut reservation = open_private_or_original_mode_file(
+            transaction.workspace.as_raw_fd(),
+            OsStr::new(ROLLBACK_STAGE_PENDING),
+            &display,
+        )?;
+        let actual = state_from_open_file(&mut reservation, &display)?;
+        let expected_zero_digest = digest(&vec![0_u8; transaction.state.original.len]);
+        if actual.digest != expected_zero_digest
+            || actual.len != transaction.state.original.len
+            || actual.mode != 0o600
+            || actual.uid != transaction.state.original.uid
+            || actual.gid != transaction.state.original.gid
+        {
+            return Err(SyntheticReplacementError::RecoveryConflict);
+        }
+        drop(reservation);
+        unlink_entry(
+            transaction.workspace.as_raw_fd(),
+            OsStr::new(ROLLBACK_STAGE_PENDING),
+            &display,
+        )?;
+        transaction
+            .workspace
+            .sync_all()
+            .map_err(|source| io_error(&transaction.workspace_path, source))?;
+        Ok(())
+    }
+
     fn revalidate_namespace(
         transaction: &OpenTransaction,
     ) -> Result<(), SyntheticReplacementError> {
@@ -2866,6 +2991,11 @@ mod tests {
             CreatedRecoveryKey, RecoveryKeyCleanupPhase, RecoveryKeyDeleteOutcome,
             RecoveryKeyOpenOutcome,
         },
+        workspace_retirement::{
+            install_before_pending_publish_revalidation_barrier,
+            install_before_quarantine_revalidation_barrier, WorkspaceRetirementError,
+            BACKUP_DIRECTORY,
+        },
     };
     use std::{
         fs::{self, File, OpenOptions},
@@ -3131,6 +3261,51 @@ mod tests {
         ));
         assert!(detached_path.is_dir());
         assert!(workspace_path.is_dir());
+    }
+
+    #[test]
+    fn terminal_handoff_refuses_a_changed_durable_backup_manifest() {
+        let (root, approval) = fixture();
+        let transaction_id = transaction(0x3e);
+        let mut provider = TestProvider::new(0x3e);
+        assert!(matches!(
+            platform::replace_with_fault(
+                &approval,
+                Path::new("config.json"),
+                b"new-employee-key",
+                transaction_id,
+                &mut provider,
+                SyntheticValidation::Accept,
+                FaultPoint::AfterTerminal,
+            ),
+            Err(SyntheticReplacementError::Injected(
+                FaultPoint::AfterTerminal
+            ))
+        ));
+        let backup_root = root.path().join(BACKUP_DIRECTORY);
+        let backup_workspace = fs::read_dir(&backup_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let manifest_path = backup_workspace.join("rollback.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["target"] = serde_json::Value::String("external.json".to_owned());
+        let changed = serde_json::to_vec(&manifest).unwrap();
+        fs::write(&manifest_path, &changed).unwrap();
+        assert!(matches!(
+            recover_existing_synthetic(
+                &approval,
+                transaction_id,
+                &mut provider,
+                SyntheticValidation::Accept,
+            ),
+            Err(SyntheticReplacementError::RecoveryConflict)
+        ));
+        assert_eq!(fs::read(&manifest_path).unwrap(), changed);
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -3903,5 +4078,315 @@ mod tests {
         assert!(workspace_path.is_dir());
         assert!(fs::read_dir(&workspace_path).unwrap().next().is_some());
         assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    fn cleanup_ready_fixture(
+        byte: u8,
+    ) -> (
+        TempDir,
+        SyntheticRootApproval,
+        TestProvider,
+        ReplacementTransactionId,
+        PathBuf,
+        PathBuf,
+        crate::live::cleanup_journal::DurableCleanupJournal,
+    ) {
+        let (root, approval) = fixture();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(byte);
+        let mut provider = TestProvider::new(byte);
+        let receipt = replace_existing_synthetic(
+            &approval,
+            Path::new("config.json"),
+            b"new-employee-key",
+            transaction_id,
+            &mut provider,
+            SyntheticValidation::Accept,
+        )
+        .unwrap();
+        let handoff = receipt.terminal_handoff();
+        let backup_workspace = handoff
+            .retirement_plan()
+            .unwrap()
+            .backup_workspace_name()
+            .to_owned();
+        let reference = handoff.reference().clone();
+        let tombstone = persist_completion_tombstone(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            &reference,
+        )
+        .unwrap();
+        let mut cleanup =
+            create_durable_cleanup_journal(&root_path, receipt.into_terminal_handoff()).unwrap();
+        cleanup
+            .record_completion_tombstone_durable(&tombstone)
+            .unwrap();
+        let workspace_path = workspace(&root_path, transaction_id);
+        let backup_path = root_path.join(BACKUP_DIRECTORY).join(backup_workspace);
+        (
+            root,
+            approval,
+            provider,
+            transaction_id,
+            workspace_path,
+            backup_path,
+            cleanup,
+        )
+    }
+
+    #[test]
+    fn terminal_handoff_retires_only_exact_contents_and_stops_before_workspace_receipt() {
+        let (root, _approval, provider, transaction_id, workspace_path, backup_path, cleanup) =
+            cleanup_ready_fixture(0xa8);
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let receipt = cleanup.retire_workspace_contents_durable().unwrap();
+        assert_eq!(
+            receipt.workspace_name(),
+            format!("tx-{}", transaction_text(transaction_id))
+        );
+        assert!(workspace_path.is_dir());
+        assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
+        assert!(!backup_path.exists());
+        let retirement_transaction = root_path
+            .join(".cpa-cloud-employee-config-workspace-retirements")
+            .join(transaction_text(transaction_id));
+        for index in 0..29 {
+            let quarantine = retirement_transaction.join(format!("quarantine-{index:02}"));
+            if index == 2 {
+                assert!(quarantine.is_dir());
+                assert!(fs::read_dir(&quarantine).unwrap().next().is_none());
+            } else {
+                assert!(quarantine.is_file());
+                assert!(fs::read(&quarantine).unwrap().is_empty());
+            }
+        }
+        assert_eq!(
+            cleanup.phase(),
+            RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+        );
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+
+        drop(cleanup);
+        let loaded = load_durable_cleanup_journals(&root_path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].phase(),
+            RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+        );
+        loaded[0].retire_workspace_contents_durable().unwrap();
+        assert!(workspace_path.is_dir());
+        assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+
+        let retained_backup = retirement_transaction.join("quarantine-00");
+        fs::write(&retained_backup, b"externally-restored-sensitive-content").unwrap();
+        assert!(matches!(
+            loaded[0].retire_workspace_contents_durable(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(
+            fs::read(&retained_backup).unwrap(),
+            b"externally-restored-sensitive-content"
+        );
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn workspace_retirement_preserves_unknown_and_edited_entries() {
+        let (root, _approval, provider, _transaction_id, workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xa9);
+        let unexpected = workspace_path.join("unexpected");
+        fs::write(&unexpected, b"external").unwrap();
+        fs::set_permissions(&unexpected, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            cleanup.retire_workspace_contents_durable(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(fs::read(&unexpected).unwrap(), b"external");
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+        drop(cleanup);
+        drop(root);
+
+        let (_root, _approval, provider, _transaction_id, workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xaa);
+        let edited = workspace_path.join(platform::pending_slot_name(0));
+        let mut file = OpenOptions::new().write(true).open(&edited).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(b"external-edit").unwrap();
+        file.sync_all().unwrap();
+        assert!(matches!(
+            cleanup.retire_workspace_contents_durable(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert!(fs::read(&edited).unwrap().starts_with(b"external-edit"));
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+
+        let (root, _approval, provider, _transaction_id, workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xab);
+        let replaced = workspace_path.join(platform::pending_slot_name(1));
+        let detached = root.path().join("detached-pending-slot");
+        let original = fs::read(&replaced).unwrap();
+        let original_inode = fs::metadata(&replaced).unwrap().ino();
+        fs::rename(&replaced, &detached).unwrap();
+        fs::write(&replaced, &original).unwrap();
+        fs::set_permissions(&replaced, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_ne!(fs::metadata(&replaced).unwrap().ino(), original_inode);
+        assert!(matches!(
+            cleanup.retire_workspace_contents_durable(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(fs::read(&replaced).unwrap(), original);
+        assert_eq!(fs::read(&detached).unwrap(), original);
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn workspace_retirement_preserves_conflicting_pending_evidence() {
+        let (root, _approval, provider, transaction_id, _workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xac);
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        assert!(matches!(
+            cleanup.retire_workspace_contents_with_fault(3),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::InjectedCrash
+            ))
+        ));
+        drop(cleanup);
+        let pending = root_path
+            .join(".cpa-cloud-employee-config-workspace-retirements")
+            .join(transaction_text(transaction_id))
+            .join(".plan.json.pending");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&pending)
+            .unwrap();
+        file.write_all(b"external-edit").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let loaded = load_durable_cleanup_journals(&root_path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(
+            loaded[0].retire_workspace_contents_durable(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(fs::read(&pending).unwrap(), b"external-edit");
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn workspace_retirement_revalidates_pending_and_quarantine_at_syscall_boundary() {
+        let (root, _approval, provider, transaction_id, _workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xad);
+        let retirement_transaction = root
+            .path()
+            .join(".cpa-cloud-employee-config-workspace-retirements")
+            .join(transaction_text(transaction_id));
+        let pending = retirement_transaction.join(".plan.json.pending");
+        let pending_barrier = Arc::new(Barrier::new(2));
+        install_before_pending_publish_revalidation_barrier(
+            pending.clone(),
+            Arc::clone(&pending_barrier),
+        );
+        let worker = thread::spawn(move || cleanup.retire_workspace_contents_durable());
+        pending_barrier.wait();
+        let detached = root.path().join("detached-retirement-plan-pending");
+        fs::rename(&pending, &detached).unwrap();
+        fs::write(&pending, b"external-pending").unwrap();
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        pending_barrier.wait();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(
+            fs::read(retirement_transaction.join("plan.json")).unwrap(),
+            b"external-pending"
+        );
+        assert!(detached.is_file());
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+
+        let (root, _approval, provider, transaction_id, _workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xae);
+        let retirement_transaction = root
+            .path()
+            .join(".cpa-cloud-employee-config-workspace-retirements")
+            .join(transaction_text(transaction_id));
+        let quarantine = retirement_transaction.join("quarantine-00");
+        let quarantine_barrier = Arc::new(Barrier::new(2));
+        install_before_quarantine_revalidation_barrier(
+            quarantine.clone(),
+            Arc::clone(&quarantine_barrier),
+        );
+        let worker = thread::spawn(move || cleanup.retire_workspace_contents_durable());
+        quarantine_barrier.wait();
+        let bytes = fs::read(&quarantine).unwrap();
+        let detached = root.path().join("detached-retirement-quarantine");
+        fs::rename(&quarantine, &detached).unwrap();
+        fs::write(&quarantine, &bytes).unwrap();
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o600)).unwrap();
+        quarantine_barrier.wait();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(fs::read(&quarantine).unwrap(), bytes);
+        assert!(fs::read(&detached).unwrap().is_empty());
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn every_retirement_content_delete_and_directory_flush_boundary_recovers_uniquely() {
+        let mut boundary = 1usize;
+        loop {
+            let byte = 0xb0_u8.wrapping_add((boundary % 64) as u8);
+            let (root, _approval, provider, _transaction_id, workspace_path, backup_path, cleanup) =
+                cleanup_ready_fixture(byte);
+            let root_path = fs::canonicalize(root.path()).unwrap();
+            let result = cleanup.retire_workspace_contents_with_fault(boundary);
+            if result.is_ok() {
+                assert!(workspace_path.is_dir());
+                assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
+                assert!(!backup_path.exists());
+                assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+                break;
+            }
+            assert!(matches!(
+                result,
+                Err(CleanupJournalError::WorkspaceRetirement(
+                    WorkspaceRetirementError::InjectedCrash
+                ))
+            ));
+            drop(cleanup);
+            let loaded = load_durable_cleanup_journals(&root_path).unwrap();
+            assert_eq!(loaded.len(), 1);
+            loaded[0].retire_workspace_contents_durable().unwrap();
+            assert!(workspace_path.is_dir());
+            assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
+            assert!(!backup_path.exists());
+            assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+            boundary += 1;
+            assert!(
+                boundary < 512,
+                "retirement boundary count must remain bounded"
+            );
+        }
+        assert!(boundary > 100, "the matrix must cover every fixed object");
     }
 }
