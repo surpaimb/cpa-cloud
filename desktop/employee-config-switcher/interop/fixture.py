@@ -30,7 +30,9 @@ PANICS = ("fixture-check-failed", "fixture-root-required", "fixture-mode-require
           "fixture-retry-failed", "oracle-create-failed", "oracle-write-failed", "oracle-flush-failed",
           "oracle-metadata-failed", "oracle-read-failed", "oracle-reference-failed", "fixture-reopen-failed",
           "fixture-other-approval-failed", "fixture-other-provider-failed", "fixture-missing-reference-failed",
-          "fixture-mode-invalid")
+          "fixture-mode-invalid", "native-access-denied", "native-unknown-method", "native-unknown-object",
+          "native-invalid-args", "native-locked", "native-missing", "native-no-session", "native-other-error",
+          "native-create-no-item", "native-create-one-item", "native-create-multiple-items", "native-search-failed")
 
 
 def secret_forms(value):

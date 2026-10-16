@@ -2,6 +2,21 @@
 use super::*;
 use std::{fs, os::unix::fs::MetadataExt};
 
+pub(super) fn backend_error(error: &dbus::Error) {
+    // Never print the daemon's error message or arbitrary error name.
+    let label = match error.name() {
+        Some("org.freedesktop.DBus.Error.AccessDenied") => "native-access-denied",
+        Some("org.freedesktop.DBus.Error.UnknownMethod") => "native-unknown-method",
+        Some("org.freedesktop.DBus.Error.UnknownObject") => "native-unknown-object",
+        Some("org.freedesktop.DBus.Error.InvalidArgs") => "native-invalid-args",
+        Some("org.freedesktop.Secret.Error.IsLocked") => "native-locked",
+        Some("org.freedesktop.Secret.Error.NoSuchObject") => "native-missing",
+        Some("org.freedesktop.Secret.Error.NoSession") => "native-no-session",
+        _ => "native-other-error",
+    };
+    eprintln!("{label}");
+}
+
 fn check(value: bool) {
     // Do not include compared values, errors, paths, keys or envelopes in panics.
     assert!(value, "fixture-check-failed");
@@ -54,7 +69,17 @@ fn volatile_collection_interop() {
     if mode == "create" {
         let created = match provider.create(transaction) {
             RecoveryKeyCreateOutcome::Created(value) => value,
-            _ => panic!("fixture-create-failed"),
+            _ => {
+                // Read-only failure diagnosis. Never retry CreateItem or replace.
+                let attributes = base_attributes(transaction, uid, provider.inner.lock_namespace);
+                match provider.inner.backend.search(&attributes) {
+                    Ok(items) if items.is_empty() => eprintln!("native-create-no-item"),
+                    Ok(items) if items.len() == 1 => eprintln!("native-create-one-item"),
+                    Ok(_) => eprintln!("native-create-multiple-items"),
+                    Err(_) => eprintln!("native-search-failed"),
+                }
+                panic!("fixture-create-failed");
+            }
         };
         // Exclusive fixture oracles, not provider storage or a fallback path.
         for (name, bytes) in [

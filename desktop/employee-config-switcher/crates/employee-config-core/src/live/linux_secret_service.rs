@@ -1049,6 +1049,8 @@ impl DbusBackend {
     }
 
     fn classify(error: &dbus::Error) -> BackendError {
+        #[cfg(test)]
+        real_fixture::backend_error(error);
         match error.name() {
             Some("org.freedesktop.Secret.Error.IsLocked") => BackendError::Locked,
             Some("org.freedesktop.Secret.Error.NoSuchObject") => BackendError::Missing,
