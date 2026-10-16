@@ -1268,6 +1268,7 @@ mod platform {
         if transaction.state.terminal != Some(outcome) {
             return Err(SyntheticReplacementError::CorruptJournal);
         }
+        normalize_terminal_workspace(transaction, outcome)?;
         let reference = transaction
             .state
             .reference
@@ -1318,11 +1319,7 @@ mod platform {
             workspace_identity.file,
             backup_workspace,
         )
-        .map_err(|error| {
-            #[cfg(test)]
-            eprintln!("workspace retirement plan capture failed: {error:?}");
-            SyntheticReplacementError::RecoveryConflict
-        })?;
+        .map_err(|_| SyntheticReplacementError::RecoveryConflict)?;
         revalidate_namespace(transaction)?;
         let terminal_handoff = DurableTerminalHandoff {
             journal_version: REPLACEMENT_JOURNAL_FORMAT_VERSION,
@@ -2320,6 +2317,74 @@ mod platform {
             transaction.workspace.as_raw_fd(),
             OsStr::new(name),
             &transaction.workspace_path.join(name),
+        )?;
+        transaction
+            .workspace
+            .sync_all()
+            .map_err(|source| io_error(&transaction.workspace_path, source))?;
+        Ok(())
+    }
+
+    fn normalize_terminal_workspace(
+        transaction: &OpenTransaction,
+        outcome: ReplacementOutcome,
+    ) -> Result<(), SyntheticReplacementError> {
+        cleanup_swapped_stage(transaction, DESIRED_STAGE, &transaction.state.original)?;
+        let desired_identity = transaction
+            .state
+            .desired_identity
+            .ok_or(SyntheticReplacementError::CorruptJournal)?;
+        let desired = TargetState {
+            identity: desired_identity,
+            digest: transaction.state.desired_digest.clone(),
+            len: transaction.state.desired_len,
+            mode: transaction.state.original.mode,
+            uid: transaction.state.original.uid,
+            gid: transaction.state.original.gid,
+        };
+        match outcome {
+            ReplacementOutcome::Complete => {
+                if stage_exists(transaction, ROLLBACK_STAGE)? {
+                    return Err(SyntheticReplacementError::RecoveryConflict);
+                }
+                cleanup_unused_rollback_reservation(transaction)
+            }
+            ReplacementOutcome::RolledBack => {
+                if stage_exists(transaction, ROLLBACK_STAGE_PENDING)? {
+                    return Err(SyntheticReplacementError::RecoveryConflict);
+                }
+                cleanup_swapped_stage(transaction, ROLLBACK_STAGE, &desired)
+            }
+        }
+    }
+
+    fn cleanup_unused_rollback_reservation(
+        transaction: &OpenTransaction,
+    ) -> Result<(), SyntheticReplacementError> {
+        if !stage_exists(transaction, ROLLBACK_STAGE_PENDING)? {
+            return Ok(());
+        }
+        let display = transaction.workspace_path.join(ROLLBACK_STAGE_PENDING);
+        let mut reservation = open_private_or_original_mode_file(
+            transaction.workspace.as_raw_fd(),
+            OsStr::new(ROLLBACK_STAGE_PENDING),
+            &display,
+        )?;
+        let actual = state_from_open_file(&mut reservation, &display)?;
+        let expected_zero_digest = digest(&vec![0_u8; transaction.state.original.len]);
+        if actual.digest != expected_zero_digest
+            || actual.len != transaction.state.original.len
+            || actual.mode != 0o600
+            || actual.uid != transaction.state.original.uid
+            || actual.gid != transaction.state.original.gid
+        {
+            return Err(SyntheticReplacementError::RecoveryConflict);
+        }
+        drop(reservation);
+        unlink_entry(
+            transaction.workspace.as_raw_fd(),
+            OsStr::new(ROLLBACK_STAGE_PENDING),
+            &display,
         )?;
         transaction
             .workspace
