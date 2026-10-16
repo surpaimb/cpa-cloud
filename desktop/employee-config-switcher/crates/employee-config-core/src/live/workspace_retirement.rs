@@ -23,7 +23,7 @@ use std::{
 pub(crate) const REPLACEMENT_DIRECTORY: &str = ".cpa-cloud-employee-config-replacements";
 pub(crate) const BACKUP_DIRECTORY: &str = ".cpa-cloud-employee-config-backups";
 const RETIREMENT_DIRECTORY: &str = ".cpa-cloud-employee-config-workspace-retirements";
-const TARGET_LOCK_FILE: &str = "single-target.lock";
+pub(crate) const TARGET_LOCK_FILE: &str = "single-target.lock";
 const PLAN_FILE: &str = "plan.json";
 const COMPLETE_FILE: &str = "complete.json";
 const JOURNAL_FILE: &str = "journal.jsonl";
@@ -243,8 +243,47 @@ pub(crate) struct WorkspaceContentsRetiredReceipt {
 }
 
 impl WorkspaceContentsRetiredReceipt {
+    pub(crate) fn terminal(&self) -> ReplacementPhase {
+        self.terminal
+    }
+
+    pub(crate) fn transaction_id(&self) -> ReplacementTransactionId {
+        self.transaction_id
+    }
+
+    pub(crate) fn reference(&self) -> &RecoveryKeyReference {
+        &self.reference
+    }
+
     pub(crate) fn workspace_name(&self) -> &str {
         &self.workspace_name
+    }
+
+    pub(crate) fn workspace_device(&self) -> u64 {
+        self.workspace_device
+    }
+
+    pub(crate) fn workspace_inode(&self) -> u64 {
+        self.workspace_inode
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        terminal: ReplacementPhase,
+        transaction_id: ReplacementTransactionId,
+        reference: RecoveryKeyReference,
+        workspace_name: String,
+        workspace_device: u64,
+        workspace_inode: u64,
+    ) -> Self {
+        Self {
+            terminal,
+            transaction_id,
+            reference,
+            workspace_name,
+            workspace_device,
+            workspace_inode,
+        }
     }
 }
 

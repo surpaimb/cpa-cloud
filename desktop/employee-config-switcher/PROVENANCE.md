@@ -112,7 +112,34 @@ keeps cleanup at `CompletionTombstoneDurable`, and makes zero provider-delete
 calls. PR72 and PR73 remain unchanged; the Windows Claude native gate remains
 blocked and unexecuted.
 
+### Linux synthetic empty-workspace removal receipt slice (2026-10-16)
+
+The changes to live/workspace_removal.rs, live/recovery_key.rs,
+live/cleanup_journal.rs, live/workspace_retirement.rs and their tests are
+newly authored CPA code implementing the fixed
+[Linux workspace removal receipt contract](../../docs/research/linux-workspace-removal-receipt-contract.md).
+The only mutation is beneath an owner-private synthetic root. Authorization
+requires the exact non-serializable content-retirement receipt, terminal
+handoff root/workspace identities, and a cleanup phase of
+CompletionTombstoneDurable. The implementation uses descriptor-relative
+renameat2(RENAME_NOREPLACE), openat/fstatat no-follow checks, flock, and fsync
+according to the public Linux man-pages cited below. It retains the exact
+empty workspace inode as evidence rather than performing a raceable pathname
+rmdir; no new third-party dependency or license is introduced. The slice
+stops after the exact removal receipt is durably journaled as
+WorkspaceRemovalDurable, with provider deletion, production apply, UI write,
+real directories, port 8787, deployment and packaging all unexecuted.
+
 ## Public protocol sources
+
+- Linux durable empty-workspace removal uses the Linux man-pages for
+  [openat(2)](https://man7.org/linux/man-pages/man2/openat.2.html),
+  [renameat2(2)](https://man7.org/linux/man-pages/man2/rename.2.html),
+  [flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html), and
+  [fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html) (accessed
+  2026-10-16). These document descriptor-relative/no-follow opening,
+  no-replace rename, advisory locking, and the need to flush containing
+  directories for durable namespace changes.
 
 - Windows security-descriptor ownership and access-token APIs: Microsoft Learn documentation for [`SetNamedSecurityInfoW`](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow), [`GetSecurityDescriptorOwner`](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getsecuritydescriptorowner), [`OpenProcessToken`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken), and [`GetTokenInformation`](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation) (accessed 2026-10-15). Creation sets the owner to the current process-token user SID; recovery compares the file owner with that SID in addition to verifying the protected owner-rights DACL.
 - macOS extended ACL enumeration: Apple `acl_get_fd_np(3)` and `acl_get_entry(3)` manual pages (accessed 2026-10-15). The private-directory boundary queries the already-open object, rejects any extended ACL entry rather than relying only on BSD owner/mode metadata, and separately confirms that a lock path still names the locked inode.

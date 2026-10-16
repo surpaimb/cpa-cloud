@@ -1,19 +1,16 @@
-//! Durable proof for removal of an empty synthetic transaction workspace.
+//! Durable proof that one exact synthetic replacement workspace left the live namespace.
 //!
-//! This Linux-only boundary removes only one exact owner-private empty
-//! workspace below the create-only transaction directory. A private proof is
-//! flushed before the directory is removed, then published only after the
-//! transaction directory and synthetic root are flushed. An interrupted
-//! pending proof blocks recovery; absence alone is never treated as success.
+//! Linux moves the exact empty directory into an owner-private retained-evidence
+//! namespace instead of unlinking a pathname. Both directory namespaces and the
+//! synthetic root are flushed before the receipt proof is published.
 
-#[cfg(test)]
-use super::recovery_key::{valid_replacement_workspace_name, WorkspaceRemovalTarget};
 use super::{
     recovery_key::{
-        valid_workspace_name, RecoveryKeyReference, ReplacementTransactionId,
+        valid_replacement_workspace_name, RecoveryKeyReference, ReplacementTransactionId,
         WorkspaceRemovalAuthorization,
     },
     replacement::ReplacementPhase,
+    workspace_retirement::{REPLACEMENT_DIRECTORY, TARGET_LOCK_FILE},
 };
 #[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
@@ -23,19 +20,19 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const TRANSACTION_DIRECTORY: &str = ".cpa-cloud-employee-config-transactions";
-const TRANSACTION_LOCK: &str = ".cpa-cloud-employee-config.lock";
 const PROOF_DIRECTORY: &str = ".cpa-cloud-employee-config-workspace-removals";
 #[cfg(target_os = "linux")]
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 #[cfg(target_os = "linux")]
-const MAX_PROOFS: usize = 64;
+const MAX_NAMESPACE_ENTRIES: usize = 192;
 #[cfg(target_os = "linux")]
 const MAX_PROOF_BYTES: usize = 16 * 1024;
 #[cfg(target_os = "linux")]
 const FINAL_SUFFIX: &str = ".removed.json";
 #[cfg(target_os = "linux")]
 const PENDING_SUFFIX: &str = ".pending";
+#[cfg(target_os = "linux")]
+const RETAINED_SUFFIX: &str = ".workspace";
 
 pub(crate) struct WorkspaceRemovalReceipt {
     terminal: ReplacementPhase,
@@ -50,43 +47,30 @@ impl WorkspaceRemovalReceipt {
     pub(crate) fn terminal(&self) -> ReplacementPhase {
         self.terminal
     }
-
     pub(crate) fn transaction_id(&self) -> ReplacementTransactionId {
         self.transaction_id
     }
-
     pub(crate) fn reference(&self) -> &RecoveryKeyReference {
         &self.reference
     }
-
     pub(crate) fn workspace_name(&self) -> &str {
         &self.workspace_name
     }
-
     pub(crate) fn workspace_device(&self) -> u64 {
         self.workspace_device
     }
-
     pub(crate) fn workspace_inode(&self) -> u64 {
         self.workspace_inode
     }
-
     #[cfg(test)]
     pub(crate) fn for_test(authorization: &WorkspaceRemovalAuthorization) -> Self {
-        Self {
-            terminal: authorization.terminal(),
-            transaction_id: authorization.transaction_id(),
-            reference: authorization.reference().clone(),
-            workspace_name: authorization.workspace_name().to_owned(),
-            workspace_device: authorization.workspace_device(),
-            workspace_inode: authorization.workspace_inode(),
-        }
+        receipt(authorization)
     }
 }
 
 pub(crate) struct VerifiedWorkspaceRemoval {
     receipt: WorkspaceRemovalReceipt,
-    _transaction_lock: Option<File>,
+    _target_lock: Option<File>,
 }
 
 impl VerifiedWorkspaceRemoval {
@@ -101,8 +85,6 @@ pub enum WorkspaceRemovalError {
     UnsupportedPlatform,
     #[error("workspace-removal root must not be empty or contain parent traversal: {0}")]
     InvalidRoot(PathBuf),
-    #[error("workspace is not a canonical direct transaction child: {0}")]
-    InvalidWorkspace(PathBuf),
     #[error("workspace-removal proof namespace exceeds its bounded count")]
     TooMany,
     #[error("workspace-removal proof is missing: {0:?}")]
@@ -124,12 +106,22 @@ pub enum WorkspaceRemovalError {
     InjectedCrash,
 }
 
+fn receipt(authorization: &WorkspaceRemovalAuthorization) -> WorkspaceRemovalReceipt {
+    WorkspaceRemovalReceipt {
+        terminal: authorization.terminal(),
+        transaction_id: authorization.transaction_id(),
+        reference: authorization.reference().clone(),
+        workspace_name: authorization.workspace_name().to_owned(),
+        workspace_device: authorization.workspace_device(),
+        workspace_inode: authorization.workspace_inode(),
+    }
+}
+
 pub(crate) fn remove_workspace(
     root: &Path,
     authorization: &WorkspaceRemovalAuthorization,
-    workspace: &Path,
 ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError> {
-    platform::remove(root, authorization, workspace)
+    platform::remove(root, authorization)
 }
 
 pub(crate) fn verify_workspace_removal(
@@ -137,6 +129,15 @@ pub(crate) fn verify_workspace_removal(
     authorization: &WorkspaceRemovalAuthorization,
 ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError> {
     platform::verify(root, authorization)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn remove_workspace_with_fault(
+    root: &Path,
+    authorization: &WorkspaceRemovalAuthorization,
+    boundary: usize,
+) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError> {
+    platform::remove_with_fault(root, authorization, boundary)
 }
 
 #[cfg(target_os = "linux")]
@@ -160,32 +161,33 @@ struct WorkspaceRemovalProof {
     workspace_name: String,
     workspace_parent_identity: FileIdentity,
     workspace_identity: FileIdentity,
+    retained_name: String,
 }
 
 #[cfg(target_os = "linux")]
-fn transaction_hex(transaction_id: ReplacementTransactionId) -> String {
-    hex::encode(transaction_id.as_bytes())
+fn transaction_hex(id: ReplacementTransactionId) -> String {
+    hex::encode(id.as_bytes())
 }
-
 #[cfg(target_os = "linux")]
-fn proof_name(transaction_id: ReplacementTransactionId) -> String {
-    format!("{}{FINAL_SUFFIX}", transaction_hex(transaction_id))
+fn final_name(id: ReplacementTransactionId) -> String {
+    format!("{}{FINAL_SUFFIX}", transaction_hex(id))
 }
-
 #[cfg(target_os = "linux")]
-fn pending_name(transaction_id: ReplacementTransactionId) -> String {
-    format!("{}{PENDING_SUFFIX}", transaction_hex(transaction_id))
+fn pending_name(id: ReplacementTransactionId) -> String {
+    format!("{}{PENDING_SUFFIX}", transaction_hex(id))
 }
-
 #[cfg(target_os = "linux")]
-fn terminal_text(terminal: ReplacementPhase) -> Result<&'static str, WorkspaceRemovalError> {
-    match terminal {
+fn retained_name(id: ReplacementTransactionId) -> String {
+    format!("{}{RETAINED_SUFFIX}", transaction_hex(id))
+}
+#[cfg(target_os = "linux")]
+fn terminal_text(value: ReplacementPhase) -> Result<&'static str, WorkspaceRemovalError> {
+    match value {
         ReplacementPhase::Complete => Ok("complete"),
         ReplacementPhase::RolledBack => Ok("rolled_back"),
         _ => Err(WorkspaceRemovalError::Corrupt),
     }
 }
-
 #[cfg(target_os = "linux")]
 fn io_error(path: impl Into<PathBuf>, source: io::Error) -> WorkspaceRemovalError {
     WorkspaceRemovalError::Io {
@@ -209,328 +211,195 @@ mod platform {
         },
     };
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum RemovalFault {
-        Never,
-        AfterDeleteBeforeProof,
+    struct FaultState {
+        target: Option<usize>,
+        current: usize,
+    }
+    impl FaultState {
+        fn none() -> Self {
+            Self {
+                target: None,
+                current: 0,
+            }
+        }
+        #[cfg(test)]
+        fn at(target: usize) -> Self {
+            Self {
+                target: Some(target),
+                current: 0,
+            }
+        }
+        fn checkpoint(&mut self) -> Result<(), WorkspaceRemovalError> {
+            self.current += 1;
+            if self.target == Some(self.current) {
+                Err(WorkspaceRemovalError::InjectedCrash)
+            } else {
+                Ok(())
+            }
+        }
     }
 
     pub(super) fn remove(
         root: &Path,
         authorization: &WorkspaceRemovalAuthorization,
-        workspace: &Path,
     ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError> {
-        remove_inner(root, authorization, workspace, RemovalFault::Never, || {
-            Ok(())
-        })
+        remove_inner(root, authorization, &mut FaultState::none())
     }
-
     #[cfg(test)]
-    pub(super) fn remove_with_hook<F>(
+    pub(super) fn remove_with_fault(
         root: &Path,
         authorization: &WorkspaceRemovalAuthorization,
-        workspace: &Path,
-        after_delete: bool,
-        before_delete: F,
-    ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError>
-    where
-        F: FnMut() -> Result<(), WorkspaceRemovalError>,
-    {
-        remove_inner(
-            root,
-            authorization,
-            workspace,
-            if after_delete {
-                RemovalFault::AfterDeleteBeforeProof
-            } else {
-                RemovalFault::Never
-            },
-            before_delete,
-        )
+        boundary: usize,
+    ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError> {
+        remove_inner(root, authorization, &mut FaultState::at(boundary))
     }
 
-    fn remove_inner<F>(
+    fn remove_inner(
         root: &Path,
         authorization: &WorkspaceRemovalAuthorization,
-        workspace: &Path,
-        fault: RemovalFault,
-        mut before_delete: F,
-    ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError>
-    where
-        F: FnMut() -> Result<(), WorkspaceRemovalError>,
-    {
-        let workspace_name =
-            validate_workspace_path(root, workspace, authorization.transaction_id())?;
-        if workspace_name != OsStr::new(authorization.workspace_name()) {
-            return Err(WorkspaceRemovalError::InvalidWorkspace(
-                workspace.to_path_buf(),
-            ));
-        }
+        fault: &mut FaultState,
+    ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError> {
         let root_dir = open_root(root)?;
-        let root_identity = identity(&root_dir).map_err(|source| io_error(root, source))?;
-        let transaction_lock = acquire_transaction_lock(root, &root_dir)?;
-        let transaction_path = root.join(TRANSACTION_DIRECTORY);
-        let transaction_dir = open_private_directory_at(
+        let root_id = identity(&root_dir).map_err(|source| io_error(root, source))?;
+        require_root(root_id, authorization, root)?;
+        let replacement_path = root.join(REPLACEMENT_DIRECTORY);
+        let replacement = open_private_dir_at(
             root_dir.as_raw_fd(),
-            OsStr::new(TRANSACTION_DIRECTORY),
-            &transaction_path,
+            OsStr::new(REPLACEMENT_DIRECTORY),
+            &replacement_path,
         )?;
-        let transaction_identity =
-            identity(&transaction_dir).map_err(|source| io_error(&transaction_path, source))?;
-
+        let replacement_id =
+            identity(&replacement).map_err(|source| io_error(&replacement_path, source))?;
+        let target_lock = acquire_target_lock(&replacement, &replacement_path)?;
+        let workspace_path = replacement_path.join(authorization.workspace_name());
         let proof_path = root.join(PROOF_DIRECTORY);
-        let proof_dir = match open_private_directory_at(
+
+        let proof_dir = match open_private_dir_at(
             root_dir.as_raw_fd(),
             OsStr::new(PROOF_DIRECTORY),
             &proof_path,
         ) {
-            Ok(directory) => Some(directory),
+            Ok(directory) => directory,
             Err(WorkspaceRemovalError::Io { source, .. })
                 if source.kind() == io::ErrorKind::NotFound =>
             {
-                None
+                drop(open_exact_empty(
+                    &replacement,
+                    authorization,
+                    &workspace_path,
+                )?);
+                let directory = create_private_dir_at(
+                    root_dir.as_raw_fd(),
+                    OsStr::new(PROOF_DIRECTORY),
+                    &proof_path,
+                )?;
+                root_dir
+                    .sync_all()
+                    .map_err(|source| io_error(root, source))?;
+                fault.checkpoint()?;
+                directory
             }
             Err(error) => return Err(error),
         };
+        lock_exclusive(&proof_dir, &proof_path)?;
+        validate_namespace(&proof_dir, &proof_path)?;
 
-        if let Some(proof_dir) = proof_dir {
-            lock_exclusive(&proof_dir, &proof_path)?;
-            let proof_count = validate_proof_namespace(&proof_dir, &proof_path)?;
-            if final_exists(&proof_dir, authorization, &proof_path)? {
-                let receipt = verify_locked(
-                    root,
-                    &root_dir,
-                    root_identity,
-                    authorization,
-                    &transaction_dir,
-                    transaction_identity,
-                    &proof_dir,
-                    &proof_path,
-                )?;
-                return Ok(VerifiedWorkspaceRemoval {
-                    receipt,
-                    _transaction_lock: Some(transaction_lock),
-                });
-            }
-            if proof_count >= MAX_PROOFS {
-                return Err(WorkspaceRemovalError::TooMany);
-            }
-            return remove_new(
+        let final_file = final_name(authorization.transaction_id());
+        if file_exists(&proof_dir, &final_file, &proof_path)? {
+            let result = verify_locked(
                 root,
                 &root_dir,
-                root_identity,
+                root_id,
                 authorization,
-                workspace,
-                workspace_name,
-                &transaction_dir,
-                transaction_identity,
-                proof_dir,
+                &replacement,
+                replacement_id,
+                &proof_dir,
                 &proof_path,
-                transaction_lock,
-                fault,
-                &mut before_delete,
-            );
+            )?;
+            return Ok(VerifiedWorkspaceRemoval {
+                receipt: result,
+                _target_lock: Some(target_lock),
+            });
         }
 
-        let workspace_dir =
-            open_private_directory_at(transaction_dir.as_raw_fd(), workspace_name, workspace)?;
-        ensure_empty(&workspace_dir, workspace)?;
-        let (proof_dir, created) = open_or_create_private_directory(
-            root_dir.as_raw_fd(),
-            OsStr::new(PROOF_DIRECTORY),
-            &proof_path,
-        )?;
-        lock_exclusive(&proof_dir, &proof_path)?;
-        if created {
+        let pending_file = pending_name(authorization.transaction_id());
+        let retained = retained_name(authorization.transaction_id());
+        let proof = if file_exists(&proof_dir, &pending_file, &proof_path)? {
+            read_proof(
+                &proof_dir,
+                &pending_file,
+                &proof_path,
+                root_id,
+                authorization,
+                replacement_id,
+            )?
+            .0
+        } else {
+            if dir_exists(&proof_dir, &retained, &proof_path)? {
+                return Err(WorkspaceRemovalError::RecoveryConflict(
+                    proof_path.join(retained),
+                ));
+            }
+            let workspace = open_exact_empty(&replacement, authorization, &workspace_path)?;
+            let proof = WorkspaceRemovalProof {
+                version: FORMAT_VERSION,
+                transaction_id: transaction_hex(authorization.transaction_id()),
+                root_identity: root_id,
+                terminal: terminal_text(authorization.terminal())?.to_owned(),
+                provider_kind: authorization.reference().provider_kind().to_owned(),
+                provider_version: authorization.reference().provider_version(),
+                opaque_reference: hex::encode(authorization.reference().opaque_reference()),
+                workspace_name: authorization.workspace_name().to_owned(),
+                workspace_parent_identity: replacement_id,
+                workspace_identity: identity(&workspace)
+                    .map_err(|source| io_error(&workspace_path, source))?,
+                retained_name: retained,
+            };
+            persist_pending(&proof_dir, &proof_path, &pending_file, &proof, fault)?;
             root_dir
                 .sync_all()
                 .map_err(|source| io_error(root, source))?;
-        }
-        let proof_count = validate_proof_namespace(&proof_dir, &proof_path)?;
-        if proof_count >= MAX_PROOFS {
-            return Err(WorkspaceRemovalError::TooMany);
-        }
-        remove_new_with_workspace(
+            fault.checkpoint()?;
+            proof
+        };
+
+        move_or_verify(
             root,
             &root_dir,
-            root_identity,
+            root_id,
             authorization,
-            workspace,
-            workspace_name,
-            &transaction_dir,
-            transaction_identity,
-            workspace_dir,
-            proof_dir,
+            &replacement,
+            replacement_id,
+            &workspace_path,
+            &proof_dir,
             &proof_path,
-            transaction_lock,
+            &proof,
             fault,
-            &mut before_delete,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn remove_new<F>(
-        root: &Path,
-        root_dir: &File,
-        root_identity: FileIdentity,
-        authorization: &WorkspaceRemovalAuthorization,
-        workspace: &Path,
-        workspace_name: &OsStr,
-        transaction_dir: &File,
-        transaction_identity: FileIdentity,
-        proof_dir: File,
-        proof_path: &Path,
-        transaction_lock: File,
-        fault: RemovalFault,
-        before_delete: &mut F,
-    ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError>
-    where
-        F: FnMut() -> Result<(), WorkspaceRemovalError>,
-    {
-        let workspace_dir =
-            open_private_directory_at(transaction_dir.as_raw_fd(), workspace_name, workspace)?;
-        ensure_empty(&workspace_dir, workspace)?;
-        remove_new_with_workspace(
+        )?;
+        publish(
             root,
-            root_dir,
-            root_identity,
+            &root_dir,
+            root_id,
             authorization,
-            workspace,
-            workspace_name,
-            transaction_dir,
-            transaction_identity,
-            workspace_dir,
-            proof_dir,
-            proof_path,
-            transaction_lock,
+            &replacement,
+            replacement_id,
+            &proof_dir,
+            &proof_path,
             fault,
-            before_delete,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn remove_new_with_workspace<F>(
-        root: &Path,
-        root_dir: &File,
-        root_identity: FileIdentity,
-        authorization: &WorkspaceRemovalAuthorization,
-        workspace: &Path,
-        workspace_name: &OsStr,
-        transaction_dir: &File,
-        transaction_identity: FileIdentity,
-        workspace_dir: File,
-        proof_dir: File,
-        proof_path: &Path,
-        transaction_lock: File,
-        fault: RemovalFault,
-        before_delete: &mut F,
-    ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError>
-    where
-        F: FnMut() -> Result<(), WorkspaceRemovalError>,
-    {
-        let final_name = proof_name(authorization.transaction_id());
-        let pending_name = pending_name(authorization.transaction_id());
-        let final_path = proof_path.join(&final_name);
-        let pending_path = proof_path.join(&pending_name);
-        let workspace_identity =
-            identity(&workspace_dir).map_err(|source| io_error(workspace, source))?;
-        if workspace_identity.device != authorization.workspace_device()
-            || workspace_identity.inode != authorization.workspace_inode()
-        {
-            return Err(WorkspaceRemovalError::RecoveryConflict(
-                workspace.to_path_buf(),
-            ));
-        }
-        let proof = WorkspaceRemovalProof {
-            version: FORMAT_VERSION,
-            transaction_id: transaction_hex(authorization.transaction_id()),
-            root_identity,
-            terminal: terminal_text(authorization.terminal())?.to_owned(),
-            provider_kind: authorization.reference().provider_kind().to_owned(),
-            provider_version: authorization.reference().provider_version(),
-            opaque_reference: hex::encode(authorization.reference().opaque_reference()),
-            workspace_name: workspace_name
-                .to_str()
-                .ok_or_else(|| WorkspaceRemovalError::InvalidWorkspace(workspace.to_path_buf()))?
-                .to_owned(),
-            workspace_parent_identity: transaction_identity,
-            workspace_identity,
-        };
-        let mut bytes = serde_json::to_vec(&proof).map_err(|_| WorkspaceRemovalError::Corrupt)?;
-        bytes.push(b'\n');
-        if bytes.len() > MAX_PROOF_BYTES {
-            return Err(WorkspaceRemovalError::Corrupt);
-        }
-        let mut pending = create_private_file_at(
-            proof_dir.as_raw_fd(),
-            OsStr::new(&pending_name),
-            &pending_path,
         )?;
-        pending
-            .write_all(&bytes)
-            .map_err(|source| io_error(&pending_path, source))?;
-        pending
-            .sync_all()
-            .map_err(|source| io_error(&pending_path, source))?;
-        let pending_identity =
-            identity(&pending).map_err(|source| io_error(&pending_path, source))?;
-        proof_dir
-            .sync_all()
-            .map_err(|source| io_error(proof_path, source))?;
-        root_dir
-            .sync_all()
-            .map_err(|source| io_error(root, source))?;
-
-        before_delete()?;
-        verify_named_directory(
-            transaction_dir,
-            workspace_name,
-            workspace,
-            workspace_identity,
+        let result = verify_locked(
+            root,
+            &root_dir,
+            root_id,
+            authorization,
+            &replacement,
+            replacement_id,
+            &proof_dir,
+            &proof_path,
         )?;
-        ensure_empty(&workspace_dir, workspace)?;
-        if identity(transaction_dir).map_err(|source| io_error(root, source))?
-            != transaction_identity
-            || identity(root_dir).map_err(|source| io_error(root, source))? != root_identity
-        {
-            return Err(WorkspaceRemovalError::RecoveryConflict(
-                workspace.to_path_buf(),
-            ));
-        }
-        remove_named_directory(transaction_dir, workspace_name, workspace)?;
-        transaction_dir
-            .sync_all()
-            .map_err(|source| io_error(root.join(TRANSACTION_DIRECTORY), source))?;
-        root_dir
-            .sync_all()
-            .map_err(|source| io_error(root, source))?;
-        ensure_child_absent(transaction_dir, workspace_name, workspace)?;
-        if fault == RemovalFault::AfterDeleteBeforeProof {
-            return Err(WorkspaceRemovalError::InjectedCrash);
-        }
-
-        rename_no_replace(
-            proof_dir.as_raw_fd(),
-            OsStr::new(&pending_name),
-            OsStr::new(&final_name),
-            &final_path,
-        )?;
-        proof_dir
-            .sync_all()
-            .map_err(|source| io_error(proof_path, source))?;
-        root_dir
-            .sync_all()
-            .map_err(|source| io_error(root, source))?;
-        let reopened =
-            open_private_file_at(proof_dir.as_raw_fd(), OsStr::new(&final_name), &final_path)?;
-        if identity(&reopened).map_err(|source| io_error(&final_path, source))? != pending_identity
-        {
-            return Err(WorkspaceRemovalError::RecoveryConflict(final_path));
-        }
-        let receipt = validate_proof(&proof, root_identity, authorization, transaction_identity)?;
         Ok(VerifiedWorkspaceRemoval {
-            receipt,
-            _transaction_lock: Some(transaction_lock),
+            receipt: result,
+            _target_lock: Some(target_lock),
         })
     }
 
@@ -539,143 +408,402 @@ mod platform {
         authorization: &WorkspaceRemovalAuthorization,
     ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError> {
         let root_dir = open_root(root)?;
-        let root_identity = identity(&root_dir).map_err(|source| io_error(root, source))?;
-        let transaction_lock = acquire_transaction_lock(root, &root_dir)?;
-        let transaction_path = root.join(TRANSACTION_DIRECTORY);
-        let transaction_dir = open_private_directory_at(
+        let root_id = identity(&root_dir).map_err(|source| io_error(root, source))?;
+        require_root(root_id, authorization, root)?;
+        let replacement_path = root.join(REPLACEMENT_DIRECTORY);
+        let replacement = open_private_dir_at(
             root_dir.as_raw_fd(),
-            OsStr::new(TRANSACTION_DIRECTORY),
-            &transaction_path,
+            OsStr::new(REPLACEMENT_DIRECTORY),
+            &replacement_path,
         )?;
-        let transaction_identity =
-            identity(&transaction_dir).map_err(|source| io_error(&transaction_path, source))?;
+        let replacement_id =
+            identity(&replacement).map_err(|source| io_error(&replacement_path, source))?;
+        let target_lock = acquire_target_lock(&replacement, &replacement_path)?;
         let proof_path = root.join(PROOF_DIRECTORY);
-        let proof_dir = open_private_directory_at(
+        let proof_dir = open_private_dir_at(
             root_dir.as_raw_fd(),
             OsStr::new(PROOF_DIRECTORY),
             &proof_path,
         )?;
         lock_exclusive(&proof_dir, &proof_path)?;
-        validate_proof_namespace(&proof_dir, &proof_path)?;
-        let receipt = verify_locked(
+        validate_namespace(&proof_dir, &proof_path)?;
+        let result = verify_locked(
             root,
             &root_dir,
-            root_identity,
+            root_id,
             authorization,
-            &transaction_dir,
-            transaction_identity,
+            &replacement,
+            replacement_id,
             &proof_dir,
             &proof_path,
         )?;
         Ok(VerifiedWorkspaceRemoval {
-            receipt,
-            _transaction_lock: Some(transaction_lock),
+            receipt: result,
+            _target_lock: Some(target_lock),
         })
+    }
+
+    fn persist_pending(
+        proof_dir: &File,
+        proof_path: &Path,
+        name: &str,
+        proof: &WorkspaceRemovalProof,
+        fault: &mut FaultState,
+    ) -> Result<(), WorkspaceRemovalError> {
+        let path = proof_path.join(name);
+        let mut bytes = serde_json::to_vec(proof).map_err(|_| WorkspaceRemovalError::Corrupt)?;
+        bytes.push(b'\n');
+        if bytes.len() > MAX_PROOF_BYTES {
+            return Err(WorkspaceRemovalError::Corrupt);
+        }
+        let mut file = create_private_file_at(proof_dir.as_raw_fd(), OsStr::new(name), &path)?;
+        file.write_all(&bytes)
+            .map_err(|source| io_error(&path, source))?;
+        file.sync_all().map_err(|source| io_error(&path, source))?;
+        fault.checkpoint()?;
+        proof_dir
+            .sync_all()
+            .map_err(|source| io_error(proof_path, source))?;
+        fault.checkpoint()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn move_or_verify(
+        root: &Path,
+        root_dir: &File,
+        root_id: FileIdentity,
+        authorization: &WorkspaceRemovalAuthorization,
+        replacement: &File,
+        replacement_id: FileIdentity,
+        workspace_path: &Path,
+        proof_dir: &File,
+        proof_path: &Path,
+        proof: &WorkspaceRemovalProof,
+        fault: &mut FaultState,
+    ) -> Result<(), WorkspaceRemovalError> {
+        validate_proof(proof, root_id, authorization, replacement_id)?;
+        let retained_path = proof_path.join(&proof.retained_name);
+        if dir_exists(proof_dir, &proof.retained_name, proof_path)? {
+            ensure_absent(
+                replacement,
+                OsStr::new(authorization.workspace_name()),
+                workspace_path,
+            )?;
+            return verify_retained(proof_dir, proof, &retained_path);
+        }
+        let workspace = open_exact_empty(replacement, authorization, workspace_path)?;
+        require_identity(&workspace, proof.workspace_identity, workspace_path)?;
+        require_identity(
+            replacement,
+            replacement_id,
+            &root.join(REPLACEMENT_DIRECTORY),
+        )?;
+        require_identity(root_dir, root_id, root)?;
+        rename_no_replace(
+            replacement.as_raw_fd(),
+            OsStr::new(authorization.workspace_name()),
+            proof_dir.as_raw_fd(),
+            OsStr::new(&proof.retained_name),
+            &retained_path,
+        )?;
+        fault.checkpoint()?;
+        verify_retained(proof_dir, proof, &retained_path)?;
+        ensure_absent(
+            replacement,
+            OsStr::new(authorization.workspace_name()),
+            workspace_path,
+        )?;
+        proof_dir
+            .sync_all()
+            .map_err(|source| io_error(proof_path, source))?;
+        fault.checkpoint()?;
+        replacement
+            .sync_all()
+            .map_err(|source| io_error(root.join(REPLACEMENT_DIRECTORY), source))?;
+        fault.checkpoint()?;
+        root_dir
+            .sync_all()
+            .map_err(|source| io_error(root, source))?;
+        fault.checkpoint()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn publish(
+        root: &Path,
+        root_dir: &File,
+        root_id: FileIdentity,
+        authorization: &WorkspaceRemovalAuthorization,
+        replacement: &File,
+        replacement_id: FileIdentity,
+        proof_dir: &File,
+        proof_path: &Path,
+        fault: &mut FaultState,
+    ) -> Result<(), WorkspaceRemovalError> {
+        let pending = pending_name(authorization.transaction_id());
+        let final_file = final_name(authorization.transaction_id());
+        let final_path = proof_path.join(&final_file);
+        let (proof, pending_id, bytes) = read_proof(
+            proof_dir,
+            &pending,
+            proof_path,
+            root_id,
+            authorization,
+            replacement_id,
+        )?;
+        verify_retained(proof_dir, &proof, &proof_path.join(&proof.retained_name))?;
+        ensure_absent(
+            replacement,
+            OsStr::new(authorization.workspace_name()),
+            &root
+                .join(REPLACEMENT_DIRECTORY)
+                .join(authorization.workspace_name()),
+        )?;
+        rename_no_replace(
+            proof_dir.as_raw_fd(),
+            OsStr::new(&pending),
+            proof_dir.as_raw_fd(),
+            OsStr::new(&final_file),
+            &final_path,
+        )?;
+        fault.checkpoint()?;
+        proof_dir
+            .sync_all()
+            .map_err(|source| io_error(proof_path, source))?;
+        fault.checkpoint()?;
+        root_dir
+            .sync_all()
+            .map_err(|source| io_error(root, source))?;
+        fault.checkpoint()?;
+        let (_, final_id, final_bytes) = read_proof(
+            proof_dir,
+            &final_file,
+            proof_path,
+            root_id,
+            authorization,
+            replacement_id,
+        )?;
+        if final_id != pending_id || final_bytes != bytes {
+            return Err(WorkspaceRemovalError::RecoveryConflict(final_path));
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     fn verify_locked(
         root: &Path,
         root_dir: &File,
-        root_identity: FileIdentity,
+        root_id: FileIdentity,
         authorization: &WorkspaceRemovalAuthorization,
-        transaction_dir: &File,
-        transaction_identity: FileIdentity,
+        replacement: &File,
+        replacement_id: FileIdentity,
         proof_dir: &File,
         proof_path: &Path,
     ) -> Result<WorkspaceRemovalReceipt, WorkspaceRemovalError> {
-        let name = proof_name(authorization.transaction_id());
-        let path = proof_path.join(&name);
-        let mut file = match open_private_file_at(proof_dir.as_raw_fd(), OsStr::new(&name), &path) {
-            Ok(file) => file,
-            Err(WorkspaceRemovalError::Io { source, .. })
-                if source.kind() == io::ErrorKind::NotFound =>
-            {
-                return Err(WorkspaceRemovalError::Missing(
-                    authorization.transaction_id(),
-                ));
-            }
-            Err(error) => return Err(error),
-        };
-        let opened_identity = identity(&file).map_err(|source| io_error(&path, source))?;
-        let bytes = read_bounded(&mut file, MAX_PROOF_BYTES, &path)?;
-        if !bytes.ends_with(b"\n") {
-            return Err(WorkspaceRemovalError::IncompleteWrite(path));
+        let name = final_name(authorization.transaction_id());
+        let pending = pending_name(authorization.transaction_id());
+        if file_exists(proof_dir, &pending, proof_path)? {
+            return Err(WorkspaceRemovalError::RecoveryConflict(
+                proof_path.join(pending),
+            ));
         }
-        let proof: WorkspaceRemovalProof =
-            serde_json::from_slice(&bytes).map_err(|_| WorkspaceRemovalError::Corrupt)?;
-        let receipt = validate_proof(&proof, root_identity, authorization, transaction_identity)?;
-        let workspace = root.join(TRANSACTION_DIRECTORY).join(&proof.workspace_name);
-        ensure_child_absent(
-            transaction_dir,
-            OsStr::new(&proof.workspace_name),
-            &workspace,
+        if !file_exists(proof_dir, &name, proof_path)? {
+            return Err(WorkspaceRemovalError::Missing(
+                authorization.transaction_id(),
+            ));
+        }
+        let (proof, opened_id, bytes) = read_proof(
+            proof_dir,
+            &name,
+            proof_path,
+            root_id,
+            authorization,
+            replacement_id,
         )?;
-        file.sync_all().map_err(|source| io_error(&path, source))?;
-        transaction_dir
+        let workspace_path = root
+            .join(REPLACEMENT_DIRECTORY)
+            .join(authorization.workspace_name());
+        ensure_absent(
+            replacement,
+            OsStr::new(authorization.workspace_name()),
+            &workspace_path,
+        )?;
+        verify_retained(proof_dir, &proof, &proof_path.join(&proof.retained_name))?;
+        replacement
             .sync_all()
-            .map_err(|source| io_error(root.join(TRANSACTION_DIRECTORY), source))?;
+            .map_err(|source| io_error(root.join(REPLACEMENT_DIRECTORY), source))?;
         proof_dir
             .sync_all()
             .map_err(|source| io_error(proof_path, source))?;
         root_dir
             .sync_all()
             .map_err(|source| io_error(root, source))?;
-        let reopened = open_private_file_at(proof_dir.as_raw_fd(), OsStr::new(&name), &path)?;
-        if identity(&reopened).map_err(|source| io_error(&path, source))? != opened_identity
-            || identity(transaction_dir).map_err(|source| io_error(root, source))?
-                != transaction_identity
-            || identity(root_dir).map_err(|source| io_error(root, source))? != root_identity
-        {
-            return Err(WorkspaceRemovalError::RecoveryConflict(path));
-        }
-        ensure_child_absent(
-            transaction_dir,
-            OsStr::new(&proof.workspace_name),
-            &workspace,
+        let (_, reopened_id, reopened_bytes) = read_proof(
+            proof_dir,
+            &name,
+            proof_path,
+            root_id,
+            authorization,
+            replacement_id,
         )?;
-        Ok(receipt)
+        if reopened_id != opened_id || reopened_bytes != bytes {
+            return Err(WorkspaceRemovalError::RecoveryConflict(
+                proof_path.join(name),
+            ));
+        }
+        ensure_absent(
+            replacement,
+            OsStr::new(authorization.workspace_name()),
+            &workspace_path,
+        )?;
+        verify_retained(proof_dir, &proof, &proof_path.join(&proof.retained_name))?;
+        validate_proof(&proof, root_id, authorization, replacement_id)
+    }
+
+    fn read_proof(
+        proof_dir: &File,
+        name: &str,
+        proof_path: &Path,
+        root_id: FileIdentity,
+        authorization: &WorkspaceRemovalAuthorization,
+        replacement_id: FileIdentity,
+    ) -> Result<(WorkspaceRemovalProof, FileIdentity, Vec<u8>), WorkspaceRemovalError> {
+        let path = proof_path.join(name);
+        let mut file = open_private_file_at(proof_dir.as_raw_fd(), OsStr::new(name), &path)?;
+        let opened_id = identity(&file).map_err(|source| io_error(&path, source))?;
+        let bytes = read_bounded(&mut file, MAX_PROOF_BYTES, &path)?;
+        if !bytes.ends_with(b"\n") {
+            return Err(WorkspaceRemovalError::IncompleteWrite(path));
+        }
+        let proof = serde_json::from_slice(&bytes).map_err(|_| WorkspaceRemovalError::Corrupt)?;
+        validate_proof(&proof, root_id, authorization, replacement_id)?;
+        file.sync_all().map_err(|source| io_error(&path, source))?;
+        Ok((proof, opened_id, bytes))
     }
 
     fn validate_proof(
         proof: &WorkspaceRemovalProof,
-        root_identity: FileIdentity,
+        root_id: FileIdentity,
         authorization: &WorkspaceRemovalAuthorization,
-        transaction_identity: FileIdentity,
+        replacement_id: FileIdentity,
     ) -> Result<WorkspaceRemovalReceipt, WorkspaceRemovalError> {
         if proof.version != FORMAT_VERSION
             || proof.transaction_id != transaction_hex(authorization.transaction_id())
-            || proof.root_identity != root_identity
+            || proof.root_identity != root_id
             || proof.terminal != terminal_text(authorization.terminal())?
             || proof.provider_kind != authorization.reference().provider_kind()
             || proof.provider_version != authorization.reference().provider_version()
             || proof.opaque_reference != hex::encode(authorization.reference().opaque_reference())
             || proof.workspace_name != authorization.workspace_name()
+            || proof.workspace_parent_identity != replacement_id
             || proof.workspace_identity.device != authorization.workspace_device()
             || proof.workspace_identity.inode != authorization.workspace_inode()
-            || proof.workspace_parent_identity != transaction_identity
-            || !valid_removal_workspace_name(&proof.workspace_name, authorization.transaction_id())
+            || proof.retained_name != retained_name(authorization.transaction_id())
+            || !valid_replacement_workspace_name(
+                &proof.workspace_name,
+                authorization.transaction_id(),
+            )
         {
             return Err(WorkspaceRemovalError::Corrupt);
         }
-        Ok(WorkspaceRemovalReceipt {
-            terminal: authorization.terminal(),
-            transaction_id: authorization.transaction_id(),
-            reference: authorization.reference().clone(),
-            workspace_name: authorization.workspace_name().to_owned(),
-            workspace_device: authorization.workspace_device(),
-            workspace_inode: authorization.workspace_inode(),
-        })
+        Ok(receipt(authorization))
     }
 
-    fn final_exists(
-        proof_dir: &File,
+    fn open_exact_empty(
+        replacement: &File,
         authorization: &WorkspaceRemovalAuthorization,
-        proof_path: &Path,
-    ) -> Result<bool, WorkspaceRemovalError> {
-        let name = proof_name(authorization.transaction_id());
-        let path = proof_path.join(&name);
-        match open_private_file_at(proof_dir.as_raw_fd(), OsStr::new(&name), &path) {
+        path: &Path,
+    ) -> Result<File, WorkspaceRemovalError> {
+        let workspace = open_private_dir_at(
+            replacement.as_raw_fd(),
+            OsStr::new(authorization.workspace_name()),
+            path,
+        )?;
+        require_identity(
+            &workspace,
+            FileIdentity {
+                device: authorization.workspace_device(),
+                inode: authorization.workspace_inode(),
+            },
+            path,
+        )?;
+        ensure_empty(&workspace, path)?;
+        Ok(workspace)
+    }
+
+    fn verify_retained(
+        proof_dir: &File,
+        proof: &WorkspaceRemovalProof,
+        path: &Path,
+    ) -> Result<(), WorkspaceRemovalError> {
+        let directory = open_private_dir_at(
+            proof_dir.as_raw_fd(),
+            OsStr::new(&proof.retained_name),
+            path,
+        )?;
+        require_identity(&directory, proof.workspace_identity, path)?;
+        ensure_empty(&directory, path)
+    }
+
+    fn require_root(
+        actual: FileIdentity,
+        authorization: &WorkspaceRemovalAuthorization,
+        path: &Path,
+    ) -> Result<(), WorkspaceRemovalError> {
+        if actual.device == authorization.root_device()
+            && actual.inode == authorization.root_inode()
+        {
+            Ok(())
+        } else {
+            Err(WorkspaceRemovalError::RecoveryConflict(path.to_path_buf()))
+        }
+    }
+    fn require_identity(
+        file: &File,
+        expected: FileIdentity,
+        path: &Path,
+    ) -> Result<(), WorkspaceRemovalError> {
+        if identity(file).map_err(|source| io_error(path, source))? == expected {
+            Ok(())
+        } else {
+            Err(WorkspaceRemovalError::RecoveryConflict(path.to_path_buf()))
+        }
+    }
+
+    fn validate_namespace(directory: &File, path: &Path) -> Result<(), WorkspaceRemovalError> {
+        let names = read_names(directory, path)?;
+        if names.len() > MAX_NAMESPACE_ENTRIES {
+            return Err(WorkspaceRemovalError::TooMany);
+        }
+        for name in names {
+            let text = name.to_str().ok_or(WorkspaceRemovalError::Corrupt)?;
+            let transaction = [FINAL_SUFFIX, PENDING_SUFFIX, RETAINED_SUFFIX]
+                .iter()
+                .find_map(|suffix| text.strip_suffix(suffix))
+                .ok_or(WorkspaceRemovalError::Corrupt)?;
+            if transaction.len() != 32
+                || !transaction
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(WorkspaceRemovalError::Corrupt);
+            }
+        }
+        Ok(())
+    }
+
+    fn file_exists(parent: &File, name: &str, path: &Path) -> Result<bool, WorkspaceRemovalError> {
+        match open_private_file_at(parent.as_raw_fd(), OsStr::new(name), &path.join(name)) {
+            Ok(_) => Ok(true),
+            Err(WorkspaceRemovalError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    fn dir_exists(parent: &File, name: &str, path: &Path) -> Result<bool, WorkspaceRemovalError> {
+        match open_private_dir_at(parent.as_raw_fd(), OsStr::new(name), &path.join(name)) {
             Ok(_) => Ok(true),
             Err(WorkspaceRemovalError::Io { source, .. })
                 if source.kind() == io::ErrorKind::NotFound =>
@@ -686,86 +814,19 @@ mod platform {
         }
     }
 
-    fn validate_proof_namespace(
-        directory: &File,
-        display: &Path,
-    ) -> Result<usize, WorkspaceRemovalError> {
-        let names = read_directory_names(directory, display)?;
-        if names.len() > MAX_PROOFS {
-            return Err(WorkspaceRemovalError::TooMany);
-        }
-        for name in &names {
-            let text = name.to_str().ok_or(WorkspaceRemovalError::Corrupt)?;
-            if text.ends_with(PENDING_SUFFIX) {
-                return Err(WorkspaceRemovalError::IncompleteWrite(display.join(name)));
-            }
-            let transaction = text
-                .strip_suffix(FINAL_SUFFIX)
-                .ok_or(WorkspaceRemovalError::Corrupt)?;
-            if transaction.len() != 32
-                || !transaction
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            {
-                return Err(WorkspaceRemovalError::Corrupt);
-            }
-        }
-        Ok(names.len())
-    }
-
-    fn validate_workspace_path<'a>(
-        root: &Path,
-        workspace: &'a Path,
-        transaction_id: ReplacementTransactionId,
-    ) -> Result<&'a OsStr, WorkspaceRemovalError> {
-        let name = workspace
-            .file_name()
-            .ok_or_else(|| WorkspaceRemovalError::InvalidWorkspace(workspace.to_path_buf()))?;
-        let text = name
-            .to_str()
-            .ok_or_else(|| WorkspaceRemovalError::InvalidWorkspace(workspace.to_path_buf()))?;
-        if workspace != root.join(TRANSACTION_DIRECTORY).join(name)
-            || !valid_removal_workspace_name(text, transaction_id)
-        {
-            return Err(WorkspaceRemovalError::InvalidWorkspace(
-                workspace.to_path_buf(),
-            ));
-        }
-        Ok(name)
-    }
-
-    fn valid_removal_workspace_name(name: &str, transaction_id: ReplacementTransactionId) -> bool {
-        if valid_workspace_name(name) {
-            return true;
-        }
-        #[cfg(test)]
-        {
-            valid_replacement_workspace_name(name, transaction_id)
-        }
-        #[cfg(not(test))]
-        {
-            let _ = transaction_id;
-            false
-        }
-    }
-
-    fn acquire_transaction_lock(
-        root: &Path,
-        root_dir: &File,
-    ) -> Result<File, WorkspaceRemovalError> {
-        let path = root.join(TRANSACTION_LOCK);
-        let file = open_private_file_at(root_dir.as_raw_fd(), OsStr::new(TRANSACTION_LOCK), &path)?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(io_error(&path, io::Error::last_os_error()));
-        }
-        Ok(file)
+    fn acquire_target_lock(parent: &File, path: &Path) -> Result<File, WorkspaceRemovalError> {
+        let lock_path = path.join(TARGET_LOCK_FILE);
+        let lock =
+            open_private_file_at(parent.as_raw_fd(), OsStr::new(TARGET_LOCK_FILE), &lock_path)?;
+        lock_exclusive(&lock, &lock_path)?;
+        Ok(lock)
     }
 
     fn open_root(path: &Path) -> Result<File, WorkspaceRemovalError> {
         if path.as_os_str().is_empty()
             || path
                 .components()
-                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+                .any(|value| matches!(value, Component::ParentDir | Component::Prefix(_)))
         {
             return Err(WorkspaceRemovalError::InvalidRoot(path.to_path_buf()));
         }
@@ -775,7 +836,7 @@ mod platform {
             Path::new(".")
         };
         let c_anchor =
-            CString::new(anchor.as_os_str().as_bytes()).expect("Linux root anchors contain no NUL");
+            CString::new(anchor.as_os_str().as_bytes()).expect("Linux root anchor has no NUL");
         let fd = unsafe {
             libc::open(
                 c_anchor.as_ptr(),
@@ -789,54 +850,44 @@ mod platform {
         let mut display = anchor.to_path_buf();
         for component in path.components() {
             match component {
-                Component::RootDir | Component::CurDir => continue,
+                Component::RootDir | Component::CurDir => {}
                 Component::Normal(name) => {
                     display.push(name);
-                    directory = open_directory_at(directory.as_raw_fd(), name, &display)?;
+                    directory = open_dir_at(directory.as_raw_fd(), name, &display)?;
                 }
                 Component::ParentDir | Component::Prefix(_) => {
                     return Err(WorkspaceRemovalError::InvalidRoot(path.to_path_buf()));
                 }
             }
         }
+        verify_private_dir(&directory, path)?;
         Ok(directory)
     }
 
-    fn open_or_create_private_directory(
+    fn create_private_dir_at(
         parent: RawFd,
         name: &OsStr,
-        display: &Path,
-    ) -> Result<(File, bool), WorkspaceRemovalError> {
-        let c_name = os_c_string(name)?;
-        let result = unsafe { libc::mkdirat(parent, c_name.as_ptr(), 0o700) };
-        let created = result == 0;
-        if result != 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::AlreadyExists {
-                return Err(io_error(display, error));
-            }
-        }
-        let directory = open_private_directory_at(parent, name, display)?;
-        if created {
-            set_mode(&directory, 0o700, display)?;
-        }
-        Ok((directory, created))
-    }
-
-    fn open_private_directory_at(
-        parent: RawFd,
-        name: &OsStr,
-        display: &Path,
+        path: &Path,
     ) -> Result<File, WorkspaceRemovalError> {
-        let directory = open_directory_at(parent, name, display)?;
-        verify_private_directory(&directory, display)?;
-        Ok(directory)
+        let c_name = os_string(name)?;
+        if unsafe { libc::mkdirat(parent, c_name.as_ptr(), 0o700) } != 0 {
+            return Err(io_error(path, io::Error::last_os_error()));
+        }
+        open_private_dir_at(parent, name, path)
     }
-
-    fn open_directory_at(
+    fn open_private_dir_at(
         parent: RawFd,
         name: &OsStr,
-        display: &Path,
+        path: &Path,
+    ) -> Result<File, WorkspaceRemovalError> {
+        let file = open_dir_at(parent, name, path)?;
+        verify_private_dir(&file, path)?;
+        Ok(file)
+    }
+    fn open_dir_at(
+        parent: RawFd,
+        name: &OsStr,
+        path: &Path,
     ) -> Result<File, WorkspaceRemovalError> {
         open_file_at(
             parent,
@@ -844,13 +895,12 @@ mod platform {
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0,
         )
-        .map_err(|source| io_error(display, source))
+        .map_err(|source| io_error(path, source))
     }
-
     fn create_private_file_at(
         parent: RawFd,
         name: &OsStr,
-        display: &Path,
+        path: &Path,
     ) -> Result<File, WorkspaceRemovalError> {
         let file = open_file_at(
             parent,
@@ -858,16 +908,14 @@ mod platform {
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0o600,
         )
-        .map_err(|source| io_error(display, source))?;
-        set_mode(&file, 0o600, display)?;
-        verify_private_file(&file, display)?;
+        .map_err(|source| io_error(path, source))?;
+        verify_private_file(&file, path)?;
         Ok(file)
     }
-
     fn open_private_file_at(
         parent: RawFd,
         name: &OsStr,
-        display: &Path,
+        path: &Path,
     ) -> Result<File, WorkspaceRemovalError> {
         let file = open_file_at(
             parent,
@@ -875,11 +923,10 @@ mod platform {
             libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0,
         )
-        .map_err(|source| io_error(display, source))?;
-        verify_private_file(&file, display)?;
+        .map_err(|source| io_error(path, source))?;
+        verify_private_file(&file, path)?;
         Ok(file)
     }
-
     fn open_file_at(
         parent: RawFd,
         name: &OsStr,
@@ -890,54 +937,42 @@ mod platform {
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         let fd = unsafe { libc::openat(parent, name.as_ptr(), flags, mode as libc::c_uint) };
         if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(unsafe { File::from_raw_fd(fd) })
-    }
-
-    fn verify_named_directory(
-        parent: &File,
-        name: &OsStr,
-        display: &Path,
-        expected: FileIdentity,
-    ) -> Result<(), WorkspaceRemovalError> {
-        let reopened = open_private_directory_at(parent.as_raw_fd(), name, display)?;
-        if identity(&reopened).map_err(|source| io_error(display, source))? != expected {
-            return Err(WorkspaceRemovalError::RecoveryConflict(
-                display.to_path_buf(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn ensure_empty(directory: &File, display: &Path) -> Result<(), WorkspaceRemovalError> {
-        if read_directory_names(directory, display)?.is_empty() {
-            Ok(())
+            Err(io::Error::last_os_error())
         } else {
-            Err(WorkspaceRemovalError::RecoveryConflict(
-                display.to_path_buf(),
-            ))
+            Ok(unsafe { File::from_raw_fd(fd) })
         }
     }
 
-    fn remove_named_directory(
-        parent: &File,
-        name: &OsStr,
-        display: &Path,
+    fn rename_no_replace(
+        from_parent: RawFd,
+        from: &OsStr,
+        to_parent: RawFd,
+        to: &OsStr,
+        path: &Path,
     ) -> Result<(), WorkspaceRemovalError> {
-        let name = os_c_string(name)?;
-        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-            return Err(io_error(display, io::Error::last_os_error()));
+        let from = os_string(from)?;
+        let to = os_string(to)?;
+        if unsafe {
+            libc::renameat2(
+                from_parent,
+                from.as_ptr(),
+                to_parent,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        } != 0
+        {
+            Err(io_error(path, io::Error::last_os_error()))
+        } else {
+            Ok(())
         }
-        Ok(())
     }
-
-    fn ensure_child_absent(
+    fn ensure_absent(
         parent: &File,
         name: &OsStr,
-        display: &Path,
+        path: &Path,
     ) -> Result<(), WorkspaceRemovalError> {
-        let name = os_c_string(name)?;
+        let name = os_string(name)?;
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe {
             libc::fstatat(
@@ -948,90 +983,52 @@ mod platform {
             )
         } == 0
         {
-            return Err(WorkspaceRemovalError::RecoveryConflict(
-                display.to_path_buf(),
-            ));
+            return Err(WorkspaceRemovalError::RecoveryConflict(path.to_path_buf()));
         }
         let error = io::Error::last_os_error();
         if error.kind() == io::ErrorKind::NotFound {
             Ok(())
         } else {
-            Err(io_error(display, error))
+            Err(io_error(path, error))
         }
     }
-
-    fn rename_no_replace(
-        parent: RawFd,
-        from: &OsStr,
-        to: &OsStr,
-        display: &Path,
-    ) -> Result<(), WorkspaceRemovalError> {
-        let from = os_c_string(from)?;
-        let to = os_c_string(to)?;
-        if unsafe {
-            libc::renameat2(
-                parent,
-                from.as_ptr(),
-                parent,
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        } != 0
+    fn ensure_empty(directory: &File, path: &Path) -> Result<(), WorkspaceRemovalError> {
+        if read_names(directory, path)?.is_empty() {
+            Ok(())
+        } else {
+            Err(WorkspaceRemovalError::RecoveryConflict(path.to_path_buf()))
+        }
+    }
+    fn verify_private_dir(file: &File, path: &Path) -> Result<(), WorkspaceRemovalError> {
+        let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+        if metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o7777 == 0o700
         {
-            return Err(io_error(display, io::Error::last_os_error()));
+            Ok(())
+        } else {
+            Err(WorkspaceRemovalError::RecoveryConflict(path.to_path_buf()))
         }
-        Ok(())
     }
-
-    fn verify_private_directory(file: &File, display: &Path) -> Result<(), WorkspaceRemovalError> {
-        let metadata = file
-            .metadata()
-            .map_err(|source| io_error(display, source))?;
-        if !metadata.is_dir()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o7777 != 0o700
+    fn verify_private_file(file: &File, path: &Path) -> Result<(), WorkspaceRemovalError> {
+        let metadata = file.metadata().map_err(|source| io_error(path, source))?;
+        if metadata.is_file()
+            && metadata.nlink() == 1
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o7777 == 0o600
         {
-            return Err(WorkspaceRemovalError::RecoveryConflict(
-                display.to_path_buf(),
-            ));
+            Ok(())
+        } else {
+            Err(WorkspaceRemovalError::RecoveryConflict(path.to_path_buf()))
         }
-        Ok(())
     }
-
-    fn verify_private_file(file: &File, display: &Path) -> Result<(), WorkspaceRemovalError> {
-        let metadata = file
-            .metadata()
-            .map_err(|source| io_error(display, source))?;
-        if !metadata.is_file()
-            || metadata.nlink() != 1
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o7777 != 0o600
-        {
-            return Err(WorkspaceRemovalError::RecoveryConflict(
-                display.to_path_buf(),
-            ));
+    fn lock_exclusive(file: &File, path: &Path) -> Result<(), WorkspaceRemovalError> {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            Ok(())
+        } else {
+            Err(io_error(path, io::Error::last_os_error()))
         }
-        Ok(())
     }
-
-    fn set_mode(
-        file: &File,
-        mode: libc::mode_t,
-        display: &Path,
-    ) -> Result<(), WorkspaceRemovalError> {
-        if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
-            return Err(io_error(display, io::Error::last_os_error()));
-        }
-        Ok(())
-    }
-
-    fn lock_exclusive(file: &File, display: &Path) -> Result<(), WorkspaceRemovalError> {
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(io_error(display, io::Error::last_os_error()));
-        }
-        Ok(())
-    }
-
     fn identity(file: &File) -> io::Result<FileIdentity> {
         let metadata = file.metadata()?;
         Ok(FileIdentity {
@@ -1039,35 +1036,31 @@ mod platform {
             inode: metadata.ino(),
         })
     }
-
     fn read_bounded(
         file: &mut File,
         limit: usize,
-        display: &Path,
+        path: &Path,
     ) -> Result<Vec<u8>, WorkspaceRemovalError> {
         let mut bytes = Vec::new();
         file.take((limit + 1) as u64)
             .read_to_end(&mut bytes)
-            .map_err(|source| io_error(display, source))?;
+            .map_err(|source| io_error(path, source))?;
         if bytes.len() > limit {
-            return Err(WorkspaceRemovalError::Corrupt);
+            Err(WorkspaceRemovalError::Corrupt)
+        } else {
+            Ok(bytes)
         }
-        Ok(bytes)
     }
-
-    fn read_directory_names(
-        directory: &File,
-        display: &Path,
-    ) -> Result<Vec<OsString>, WorkspaceRemovalError> {
+    fn read_names(directory: &File, path: &Path) -> Result<Vec<OsString>, WorkspaceRemovalError> {
         let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
         if duplicate < 0 {
-            return Err(io_error(display, io::Error::last_os_error()));
+            return Err(io_error(path, io::Error::last_os_error()));
         }
         let stream = unsafe { libc::fdopendir(duplicate) };
         if stream.is_null() {
             let source = io::Error::last_os_error();
             unsafe { libc::close(duplicate) };
-            return Err(io_error(display, source));
+            return Err(io_error(path, source));
         }
         let mut names = Vec::new();
         loop {
@@ -1080,7 +1073,7 @@ mod platform {
                     names.sort();
                     Ok(names)
                 } else {
-                    Err(io_error(display, source))
+                    Err(io_error(path, source))
                 };
             }
             let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
@@ -1089,8 +1082,7 @@ mod platform {
             }
         }
     }
-
-    fn os_c_string(value: &OsStr) -> Result<CString, WorkspaceRemovalError> {
+    fn os_string(value: &OsStr) -> Result<CString, WorkspaceRemovalError> {
         CString::new(value.as_bytes()).map_err(|_| WorkspaceRemovalError::Corrupt)
     }
 }
@@ -1098,15 +1090,12 @@ mod platform {
 #[cfg(not(target_os = "linux"))]
 mod platform {
     use super::*;
-
     pub(super) fn remove(
         _root: &Path,
         _authorization: &WorkspaceRemovalAuthorization,
-        _workspace: &Path,
     ) -> Result<VerifiedWorkspaceRemoval, WorkspaceRemovalError> {
         Err(WorkspaceRemovalError::UnsupportedPlatform)
     }
-
     pub(super) fn verify(
         _root: &Path,
         _authorization: &WorkspaceRemovalAuthorization,
@@ -1118,10 +1107,6 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::{
-        completion_tombstone::CompletionTombstoneDurableReceipt,
-        recovery_key::RecoveryKeyCleanupSequence,
-    };
     #[cfg(target_os = "linux")]
     use std::{
         fs,
@@ -1131,182 +1116,164 @@ mod tests {
     fn transaction(byte: u8) -> ReplacementTransactionId {
         ReplacementTransactionId::from_bytes([byte; 16]).unwrap()
     }
-
     fn reference() -> RecoveryKeyReference {
-        RecoveryKeyReference::new("test-provider", 1, b"opaque-workspace-reference".to_vec())
-            .unwrap()
+        RecoveryKeyReference::new("test-provider", 1, b"opaque-reference".to_vec()).unwrap()
     }
-
-    fn authorization(byte: u8, target: WorkspaceRemovalTarget) -> WorkspaceRemovalAuthorization {
-        let mut cleanup = RecoveryKeyCleanupSequence::for_test(
-            ReplacementPhase::Complete,
-            transaction(byte),
-            reference(),
-            1,
-            1,
-            target,
-        )
-        .unwrap();
-        let receipt = CompletionTombstoneDurableReceipt::for_test(
-            ReplacementPhase::Complete,
-            transaction(byte),
-            reference(),
-            1,
-            1,
-        );
-        cleanup
-            .record_completion_tombstone_durable(&receipt)
-            .unwrap();
-        cleanup.authorize_workspace_removal().unwrap()
-    }
-
     #[cfg(target_os = "linux")]
-    fn fixture(byte: u8) -> (tempfile::TempDir, PathBuf) {
+    fn fixture(byte: u8) -> (tempfile::TempDir, PathBuf, WorkspaceRemovalAuthorization) {
         let root = tempfile::tempdir().unwrap();
         let root_path = fs::canonicalize(root.path()).unwrap();
-        let lock = root_path.join(TRANSACTION_LOCK);
+        fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let parent = root_path.join(REPLACEMENT_DIRECTORY);
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = parent.join(TARGET_LOCK_FILE);
         fs::write(&lock, b"").unwrap();
         fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
-        let transaction_root = root_path.join(TRANSACTION_DIRECTORY);
-        fs::create_dir(&transaction_root).unwrap();
-        fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o700)).unwrap();
-        let workspace = transaction_root.join(format!("tx-1-{:x}-0", byte as u128 + 1));
+        let workspace = parent.join(format!("tx-{}", hex::encode([byte; 16])));
         fs::create_dir(&workspace).unwrap();
         fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700)).unwrap();
-        (root, workspace)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn workspace_target(workspace: &Path) -> WorkspaceRemovalTarget {
-        let metadata = fs::metadata(workspace).unwrap();
-        WorkspaceRemovalTarget::for_test(
-            workspace.file_name().unwrap().to_str().unwrap(),
-            metadata.dev(),
-            metadata.ino(),
-        )
+        let root_meta = fs::metadata(&root_path).unwrap();
+        let workspace_meta = fs::metadata(&workspace).unwrap();
+        let authorization = WorkspaceRemovalAuthorization::for_test(
+            ReplacementPhase::Complete,
+            transaction(byte),
+            reference(),
+            root_meta.dev(),
+            root_meta.ino(),
+            workspace.file_name().unwrap().to_str().unwrap().to_owned(),
+            workspace_meta.dev(),
+            workspace_meta.ino(),
+        );
+        (root, workspace, authorization)
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn exact_empty_workspace_is_removed_and_proof_reloads() {
-        let (root, workspace) = fixture(0x21);
+    fn exact_empty_workspace_yields_restart_verifiable_receipt() {
+        let (root, workspace, authorization) = fixture(0x21);
         let root_path = fs::canonicalize(root.path()).unwrap();
-        let authorization = authorization(0x21, workspace_target(&workspace));
-        let verified = remove_workspace(&root_path, &authorization, &workspace).unwrap();
+        let verified = remove_workspace(&root_path, &authorization).unwrap();
         assert!(!workspace.exists());
         assert_eq!(verified.receipt().transaction_id(), transaction(0x21));
+        assert!(root_path
+            .join(PROOF_DIRECTORY)
+            .join(retained_name(transaction(0x21)))
+            .is_dir());
         drop(verified);
-
-        let restarted = verify_workspace_removal(&root_path, &authorization).unwrap();
-        assert_eq!(restarted.receipt().terminal(), ReplacementPhase::Complete);
-        assert_eq!(restarted.receipt().reference(), &reference());
+        verify_workspace_removal(&root_path, &authorization).unwrap();
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn existing_proof_cannot_authorize_a_different_workspace() {
-        let (root, workspace) = fixture(0x26);
-        let root_path = fs::canonicalize(root.path()).unwrap();
-        let authorization = authorization(0x26, workspace_target(&workspace));
-        remove_workspace(&root_path, &authorization, &workspace).unwrap();
-
-        let other = workspace.with_file_name("tx-1-28-0");
-        fs::create_dir(&other).unwrap();
-        fs::set_permissions(&other, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(matches!(
-            remove_workspace(&root_path, &authorization, &other),
-            Err(WorkspaceRemovalError::InvalidWorkspace(path)) if path == other
-        ));
-        assert!(other.exists());
+    fn each_flush_or_rename_fault_restarts_to_one_receipt() {
+        for boundary in 1..=11 {
+            let byte = 0x30 + boundary as u8;
+            let (root, workspace, authorization) = fixture(byte);
+            let root_path = fs::canonicalize(root.path()).unwrap();
+            assert!(matches!(
+                remove_workspace_with_fault(&root_path, &authorization, boundary),
+                Err(WorkspaceRemovalError::InjectedCrash)
+            ));
+            let restarted = remove_workspace(&root_path, &authorization).unwrap();
+            assert_eq!(restarted.receipt().transaction_id(), transaction(byte));
+            assert!(!workspace.exists());
+            drop(restarted);
+            verify_workspace_removal(&root_path, &authorization).unwrap();
+        }
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn authorization_for_one_workspace_cannot_delete_another() {
-        let (root, workspace) = fixture(0x29);
+    fn unknown_entry_is_preserved_and_blocks_proof() {
+        let (root, workspace, authorization) = fixture(0x22);
         let root_path = fs::canonicalize(root.path()).unwrap();
-        let other = workspace.with_file_name("tx-1-2b-0");
-        fs::create_dir(&other).unwrap();
-        fs::set_permissions(&other, fs::Permissions::from_mode(0o700)).unwrap();
-        let authorization = authorization(0x29, workspace_target(&workspace));
-
+        let unknown = workspace.join("unknown");
+        fs::write(&unknown, b"keep").unwrap();
         assert!(matches!(
-            remove_workspace(&root_path, &authorization, &other),
-            Err(WorkspaceRemovalError::InvalidWorkspace(path)) if path == other
+            remove_workspace(&root_path, &authorization),
+            Err(WorkspaceRemovalError::RecoveryConflict(_))
         ));
-        assert!(workspace.exists());
-        assert!(other.exists());
+        assert_eq!(fs::read(&unknown).unwrap(), b"keep");
         assert!(!root_path.join(PROOF_DIRECTORY).exists());
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn interruption_after_delete_leaves_pending_and_never_infers_success() {
-        let (root, workspace) = fixture(0x22);
+    fn unknown_entry_after_logical_removal_is_retained_and_blocks_receipt() {
+        let (root, workspace, authorization) = fixture(0x26);
         let root_path = fs::canonicalize(root.path()).unwrap();
-        let authorization = authorization(0x22, workspace_target(&workspace));
         assert!(matches!(
-            platform::remove_with_hook(&root_path, &authorization, &workspace, true, || Ok(())),
+            remove_workspace_with_fault(&root_path, &authorization, 5),
             Err(WorkspaceRemovalError::InjectedCrash)
         ));
         assert!(!workspace.exists());
+        let retained = root_path
+            .join(PROOF_DIRECTORY)
+            .join(retained_name(transaction(0x26)));
+        let unknown = retained.join("unknown");
+        fs::write(&unknown, b"preserve").unwrap();
         assert!(matches!(
-            verify_workspace_removal(&root_path, &authorization),
-            Err(WorkspaceRemovalError::IncompleteWrite(_))
-        ));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn workspace_replacement_before_delete_is_preserved_and_blocks_proof() {
-        let (root, workspace) = fixture(0x23);
-        let root_path = fs::canonicalize(root.path()).unwrap();
-        let authorization = authorization(0x23, workspace_target(&workspace));
-        let moved = workspace.with_extension("moved");
-        let result =
-            platform::remove_with_hook(&root_path, &authorization, &workspace, false, || {
-                fs::rename(&workspace, &moved).map_err(|source| io_error(&workspace, source))?;
-                fs::create_dir(&workspace).map_err(|source| io_error(&workspace, source))?;
-                fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))
-                    .map_err(|source| io_error(&workspace, source))?;
-                Ok(())
-            });
-        let error = match result {
-            Ok(_) => panic!("workspace replacement must block removal"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, WorkspaceRemovalError::RecoveryConflict(_)));
-        assert!(workspace.exists());
-        assert!(moved.exists());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn nonempty_workspace_is_preserved_before_proof_namespace_creation() {
-        let (root, workspace) = fixture(0x24);
-        let root_path = fs::canonicalize(root.path()).unwrap();
-        let sentinel = workspace.join("journal.jsonl");
-        fs::write(&sentinel, b"sentinel").unwrap();
-        fs::set_permissions(&sentinel, fs::Permissions::from_mode(0o600)).unwrap();
-        let authorization = authorization(0x24, workspace_target(&workspace));
-        assert!(matches!(
-            remove_workspace(&root_path, &authorization, &workspace),
+            remove_workspace(&root_path, &authorization),
             Err(WorkspaceRemovalError::RecoveryConflict(_))
         ));
-        assert_eq!(fs::read(&sentinel).unwrap(), b"sentinel");
-        assert!(!root_path.join(PROOF_DIRECTORY).exists());
+        assert_eq!(fs::read(&unknown).unwrap(), b"preserve");
+        assert!(!root_path
+            .join(PROOF_DIRECTORY)
+            .join(final_name(transaction(0x26)))
+            .exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_or_workspace_replacement_fails_closed() {
+        let (root, workspace, authorization) = fixture(0x23);
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let replacement = workspace.with_extension("replacement");
+        fs::rename(&workspace, &replacement).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(
+            remove_workspace(&root_path, &authorization),
+            Err(WorkspaceRemovalError::RecoveryConflict(_))
+        ));
+        assert!(workspace.exists());
+        assert!(replacement.exists());
+
+        let bad_root = WorkspaceRemovalAuthorization::for_test(
+            authorization.terminal(),
+            authorization.transaction_id(),
+            authorization.reference().clone(),
+            authorization.root_device(),
+            authorization.root_inode() + 1,
+            authorization.workspace_name().to_owned(),
+            authorization.workspace_device(),
+            authorization.workspace_inode(),
+        );
+        assert!(matches!(
+            remove_workspace(&root_path, &bad_root),
+            Err(WorkspaceRemovalError::RecoveryConflict(path)) if path == root_path
+        ));
     }
 
     #[test]
-    fn unsupported_platform_fails_before_creating_proof_material() {
+    fn unsupported_platform_fails_without_proof_material() {
         if cfg!(target_os = "linux") {
             return;
         }
         let root = tempfile::tempdir().unwrap();
-        let authorization =
-            authorization(0x25, WorkspaceRemovalTarget::for_test("tx-1-26-0", 1, 1));
+        let authorization = WorkspaceRemovalAuthorization::for_test(
+            ReplacementPhase::Complete,
+            transaction(0x25),
+            reference(),
+            1,
+            1,
+            format!("tx-{}", hex::encode([0x25; 16])),
+            1,
+            1,
+        );
         assert!(matches!(
-            remove_workspace(root.path(), &authorization, Path::new("workspace")),
+            remove_workspace(root.path(), &authorization),
             Err(WorkspaceRemovalError::UnsupportedPlatform)
         ));
         assert!(!root.path().join(PROOF_DIRECTORY).exists());
