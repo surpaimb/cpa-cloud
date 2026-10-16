@@ -1,0 +1,35 @@
+<!-- Independently authored private, non-activating, metadata-only test bus. -->
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:path=@BUS_PATH@</listen>
+  <auth>EXTERNAL</auth>
+  <!-- No include, servicedir, standard_session_servicedirs or activation helper. -->
+  <policy context="default">
+    <allow user="@USER@"/>
+    <allow own="*"/>
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <deny send_interface="org.freedesktop.Secret.Service"/>
+    <deny send_interface="org.freedesktop.Secret.Collection"/>
+    <deny send_interface="org.freedesktop.Secret.Item"/>
+    <deny send_interface="org.freedesktop.Secret.Prompt"/>
+    <deny send_interface="org.freedesktop.DBus.Properties" send_member="Set"/>
+    <!-- Method names are also denied when the optional interface is omitted. -->
+    <deny send_member="OpenSession"/>
+    <deny send_member="CreateCollection"/>
+    <deny send_member="SearchItems"/>
+    <deny send_member="GetSecrets"/>
+    <deny send_member="Unlock"/>
+    <deny send_member="Lock"/>
+    <deny send_member="ReadAlias"/>
+    <deny send_member="SetAlias"/>
+    <deny send_member="CreateItem"/>
+    <deny send_member="Delete"/>
+    <deny send_member="GetSecret"/>
+    <deny send_member="SetSecret"/>
+    <deny send_member="Prompt"/>
+    <deny send_member="Dismiss"/>
+    <deny send_member="Set"/>
+  </policy>
+</busconfig>

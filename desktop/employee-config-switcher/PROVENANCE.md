@@ -1,5 +1,9 @@
 # Source provenance
 
+The independently authored, metadata-only Linux CI environment preflight and
+its fixed distro components are recorded in [preflight/CONTRACT.md](preflight/CONTRACT.md).
+It is not a secret-bearing provider test and adds no application dependency.
+
 Fixed upstream revision: `farion1231/cc-switch@c21106ff20e351d40f412cb51d1f24da177b113d`.
 
 Acquisition: GitHub codeload archive for the exact commit. Downloaded archive SHA-256:
