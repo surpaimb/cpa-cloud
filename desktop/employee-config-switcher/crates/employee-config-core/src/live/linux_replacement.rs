@@ -36,7 +36,7 @@ const PENDING_SLOTS_READY_FILE: &str = ".journal-pending-ready";
 const DESIRED_STAGE: &str = "desired.stage";
 const ROLLBACK_STAGE: &str = "rollback.stage";
 const ROLLBACK_STAGE_PENDING: &str = "rollback.stage.pending";
-pub(crate) const REPLACEMENT_JOURNAL_FORMAT_VERSION: u32 = 1;
+pub(crate) const REPLACEMENT_JOURNAL_FORMAT_VERSION: u32 = 2;
 const MAX_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_JOURNAL_BYTES: usize = 128 * 1024;
 const MAX_EVENTS: usize = 24;
@@ -295,6 +295,8 @@ enum JournalEvent {
     },
     BackedUp {
         workspace: String,
+        manifest_digest: String,
+        ciphertext_digest: String,
     },
     Staged {
         identity: FileIdentity,
@@ -322,6 +324,8 @@ struct JournalState {
     desired_len: usize,
     reference: Option<RecoveryKeyReference>,
     backup_workspace: Option<String>,
+    backup_manifest_digest: Option<String>,
+    backup_ciphertext_digest: Option<String>,
     desired_identity: Option<FileIdentity>,
     commit_prepared: bool,
     published: bool,
@@ -571,6 +575,8 @@ mod platform {
             &workspace_path,
             &JournalEvent::BackedUp {
                 workspace: backup.workspace.clone(),
+                manifest_digest: backup.manifest_digest.clone(),
+                ciphertext_digest: backup.ciphertext_digest.clone(),
             },
         )?;
         inject(fault, FaultPoint::AfterBackup)?;
@@ -1143,6 +1149,8 @@ mod platform {
             desired_len: *desired_len,
             reference: None,
             backup_workspace: None,
+            backup_manifest_digest: None,
+            backup_ciphertext_digest: None,
             desired_identity: None,
             commit_prepared: false,
             published: false,
@@ -1171,12 +1179,25 @@ mod platform {
                         .map_err(|_| SyntheticReplacementError::CorruptJournal)?,
                     );
                 }
-                JournalEvent::BackedUp { workspace }
+                JournalEvent::BackedUp {
+                    workspace,
+                    manifest_digest,
+                    ciphertext_digest,
+                }
                     if state.reference.is_some()
                         && state.backup_workspace.is_none()
+                        && state.backup_manifest_digest.is_none()
+                        && state.backup_ciphertext_digest.is_none()
                         && state.desired_identity.is_none() =>
                 {
-                    state.backup_workspace = Some(workspace.clone())
+                    if digest_text_invalid(manifest_digest)
+                        || digest_text_invalid(ciphertext_digest)
+                    {
+                        return Err(SyntheticReplacementError::CorruptJournal);
+                    }
+                    state.backup_workspace = Some(workspace.clone());
+                    state.backup_manifest_digest = Some(manifest_digest.clone());
+                    state.backup_ciphertext_digest = Some(ciphertext_digest.clone());
                 }
                 JournalEvent::Staged { identity }
                     if state.backup_workspace.is_some() && state.desired_identity.is_none() =>
@@ -1308,6 +1329,14 @@ mod platform {
             .backup_workspace
             .as_deref()
             .ok_or(SyntheticReplacementError::CorruptJournal)?;
+        let backup_manifest_digest = journal_state
+            .backup_manifest_digest
+            .as_deref()
+            .ok_or(SyntheticReplacementError::CorruptJournal)?;
+        let backup_ciphertext_digest = journal_state
+            .backup_ciphertext_digest
+            .as_deref()
+            .ok_or(SyntheticReplacementError::CorruptJournal)?;
         let retirement_plan = capture_terminal_plan(
             &transaction.root_path,
             transaction.state.transaction_id,
@@ -1318,6 +1347,8 @@ mod platform {
             workspace_identity.volume,
             workspace_identity.file,
             backup_workspace,
+            backup_manifest_digest,
+            backup_ciphertext_digest,
         )
         .map_err(|_| SyntheticReplacementError::RecoveryConflict)?;
         revalidate_namespace(transaction)?;
@@ -2961,7 +2992,11 @@ mod tests {
             CreatedRecoveryKey, RecoveryKeyCleanupPhase, RecoveryKeyDeleteOutcome,
             RecoveryKeyOpenOutcome,
         },
-        workspace_retirement::{WorkspaceRetirementError, BACKUP_DIRECTORY},
+        workspace_retirement::{
+            install_before_pending_publish_revalidation_barrier,
+            install_before_quarantine_revalidation_barrier, WorkspaceRetirementError,
+            BACKUP_DIRECTORY,
+        },
     };
     use std::{
         fs::{self, File, OpenOptions},
@@ -3227,6 +3262,51 @@ mod tests {
         ));
         assert!(detached_path.is_dir());
         assert!(workspace_path.is_dir());
+    }
+
+    #[test]
+    fn terminal_handoff_refuses_a_changed_durable_backup_manifest() {
+        let (root, approval) = fixture();
+        let transaction_id = transaction(0x3e);
+        let mut provider = TestProvider::new(0x3e);
+        assert!(matches!(
+            platform::replace_with_fault(
+                &approval,
+                Path::new("config.json"),
+                b"new-employee-key",
+                transaction_id,
+                &mut provider,
+                SyntheticValidation::Accept,
+                FaultPoint::AfterTerminal,
+            ),
+            Err(SyntheticReplacementError::Injected(
+                FaultPoint::AfterTerminal
+            ))
+        ));
+        let backup_root = root.path().join(BACKUP_DIRECTORY);
+        let backup_workspace = fs::read_dir(&backup_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let manifest_path = backup_workspace.join("rollback.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["target"] = serde_json::Value::String("external.json".to_owned());
+        let changed = serde_json::to_vec(&manifest).unwrap();
+        fs::write(&manifest_path, &changed).unwrap();
+        assert!(matches!(
+            recover_existing_synthetic(
+                &approval,
+                transaction_id,
+                &mut provider,
+                SyntheticValidation::Accept,
+            ),
+            Err(SyntheticReplacementError::RecoveryConflict)
+        ));
+        assert_eq!(fs::read(&manifest_path).unwrap(), changed);
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -4177,6 +4257,68 @@ mod tests {
             ))
         ));
         assert_eq!(fs::read(&pending).unwrap(), b"external-edit");
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn workspace_retirement_revalidates_pending_and_quarantine_at_syscall_boundary() {
+        let (root, _approval, provider, transaction_id, _workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xad);
+        let retirement_transaction = root
+            .path()
+            .join(".cpa-cloud-employee-config-workspace-retirements")
+            .join(transaction_text(transaction_id));
+        let pending = retirement_transaction.join(".plan.json.pending");
+        let pending_barrier = Arc::new(Barrier::new(2));
+        install_before_pending_publish_revalidation_barrier(
+            pending.clone(),
+            Arc::clone(&pending_barrier),
+        );
+        let worker = thread::spawn(move || cleanup.retire_workspace_contents_durable());
+        pending_barrier.wait();
+        let detached = root.path().join("detached-retirement-plan-pending");
+        fs::rename(&pending, &detached).unwrap();
+        fs::write(&pending, b"external-pending").unwrap();
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        pending_barrier.wait();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(fs::read(retirement_transaction.join("plan.json")).unwrap(), b"external-pending");
+        assert!(detached.is_file());
+        assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
+
+        let (root, _approval, provider, transaction_id, _workspace_path, _backup_path, cleanup) =
+            cleanup_ready_fixture(0xae);
+        let retirement_transaction = root
+            .path()
+            .join(".cpa-cloud-employee-config-workspace-retirements")
+            .join(transaction_text(transaction_id));
+        let quarantine = retirement_transaction.join("quarantine-00");
+        let quarantine_barrier = Arc::new(Barrier::new(2));
+        install_before_quarantine_revalidation_barrier(
+            quarantine.clone(),
+            Arc::clone(&quarantine_barrier),
+        );
+        let worker = thread::spawn(move || cleanup.retire_workspace_contents_durable());
+        quarantine_barrier.wait();
+        let bytes = fs::read(&quarantine).unwrap();
+        let detached = root.path().join("detached-retirement-quarantine");
+        fs::rename(&quarantine, &detached).unwrap();
+        fs::write(&quarantine, &bytes).unwrap();
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o600)).unwrap();
+        quarantine_barrier.wait();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(CleanupJournalError::WorkspaceRetirement(
+                WorkspaceRetirementError::RecoveryConflict(_)
+            ))
+        ));
+        assert_eq!(fs::read(&quarantine).unwrap(), bytes);
+        assert_eq!(fs::read(&detached).unwrap(), bytes);
         assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
     }
 

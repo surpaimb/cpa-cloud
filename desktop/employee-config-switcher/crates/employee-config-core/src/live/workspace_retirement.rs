@@ -293,6 +293,8 @@ pub(crate) fn capture_terminal_plan(
     workspace_device: u64,
     workspace_inode: u64,
     backup_workspace_name: &str,
+    expected_manifest_digest: &str,
+    expected_ciphertext_digest: &str,
 ) -> Result<WorkspaceRetirementPlan, WorkspaceRetirementError> {
     platform::capture(
         root,
@@ -304,6 +306,8 @@ pub(crate) fn capture_terminal_plan(
         workspace_device,
         workspace_inode,
         backup_workspace_name,
+        expected_manifest_digest,
+        expected_ciphertext_digest,
     )
 }
 
@@ -321,6 +325,22 @@ pub(crate) fn retire_workspace_contents_with_fault(
     boundary: usize,
 ) -> Result<WorkspaceContentsRetiredReceipt, WorkspaceRetirementError> {
     platform::retire_with_fault(root, authorization, platform::FaultSchedule::at(boundary))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn install_before_pending_publish_revalidation_barrier(
+    path: PathBuf,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+) {
+    platform::install_before_pending_publish_revalidation_barrier(path, barrier)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn install_before_quarantine_revalidation_barrier(
+    path: PathBuf,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+) {
+    platform::install_before_quarantine_revalidation_barrier(path, barrier)
 }
 
 fn transaction_hex(transaction_id: ReplacementTransactionId) -> String {
@@ -419,6 +439,64 @@ mod platform {
         },
         path::Component,
     };
+
+    #[cfg(test)]
+    static BEFORE_PENDING_PUBLISH_REVALIDATION: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>>,
+    > = std::sync::OnceLock::new();
+
+    #[cfg(test)]
+    static BEFORE_QUARANTINE_REVALIDATION: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>>,
+    > = std::sync::OnceLock::new();
+
+    #[cfg(test)]
+    pub(super) fn install_before_pending_publish_revalidation_barrier(
+        path: PathBuf,
+        barrier: std::sync::Arc<std::sync::Barrier>,
+    ) {
+        install_barrier(&BEFORE_PENDING_PUBLISH_REVALIDATION, path, barrier);
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_before_quarantine_revalidation_barrier(
+        path: PathBuf,
+        barrier: std::sync::Arc<std::sync::Barrier>,
+    ) {
+        install_barrier(&BEFORE_QUARANTINE_REVALIDATION, path, barrier);
+    }
+
+    #[cfg(test)]
+    fn install_barrier(
+        cell: &'static std::sync::OnceLock<
+            std::sync::Mutex<std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>>,
+        >,
+        path: PathBuf,
+        barrier: std::sync::Arc<std::sync::Barrier>,
+    ) {
+        let barriers = cell.get_or_init(|| {
+            std::sync::Mutex::new(std::collections::BTreeMap::new())
+        });
+        let replaced = barriers.lock().unwrap().insert(path, barrier);
+        assert!(replaced.is_none(), "test retirement barrier already installed");
+    }
+
+    #[cfg(test)]
+    fn wait_at_barrier(
+        cell: &'static std::sync::OnceLock<
+            std::sync::Mutex<std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Barrier>>>,
+        >,
+        path: &Path,
+    ) {
+        let barriers = cell.get_or_init(|| {
+            std::sync::Mutex::new(std::collections::BTreeMap::new())
+        });
+        let barrier = barriers.lock().unwrap().remove(path);
+        if let Some(barrier) = barrier {
+            barrier.wait();
+            barrier.wait();
+        }
+    }
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -520,10 +598,14 @@ mod platform {
         workspace_device: u64,
         workspace_inode: u64,
         backup_workspace_name: &str,
+        expected_manifest_digest: &str,
+        expected_ciphertext_digest: &str,
     ) -> Result<WorkspaceRetirementPlan, WorkspaceRetirementError> {
         let transaction = transaction_hex(transaction_id);
         if !valid_workspace_name(workspace_name, &transaction)
             || !valid_backup_workspace_name(backup_workspace_name)
+            || !valid_digest(expected_manifest_digest)
+            || !valid_digest(expected_ciphertext_digest)
         {
             return Err(WorkspaceRetirementError::Corrupt);
         }
@@ -604,6 +686,8 @@ mod platform {
             root_identity,
             &backup_artifact,
             &manifest_artifact,
+            expected_manifest_digest,
+            expected_ciphertext_digest,
         )?;
         let plan = WorkspaceRetirementPlan {
             version: FORMAT_VERSION,
@@ -673,6 +757,8 @@ mod platform {
         root_identity: RetirementIdentity,
         backup_artifact: &RetirementArtifact,
         manifest_artifact: &RetirementArtifact,
+        expected_manifest_digest: &str,
+        expected_ciphertext_digest: &str,
     ) -> Result<(), WorkspaceRetirementError> {
         let mut manifest = open_private_file_at(
             workspace.as_raw_fd(),
@@ -687,6 +773,8 @@ mod platform {
         if identity(&manifest, &workspace_path.join(MANIFEST_FILE))? != manifest_artifact.identity
             || bytes.len() as u64 != manifest_artifact.len
             || digest(&bytes) != manifest_artifact.digest
+            || manifest_artifact.digest != expected_manifest_digest
+            || backup_artifact.digest != expected_ciphertext_digest
         {
             return Err(WorkspaceRetirementError::RecoveryConflict(
                 workspace_path.join(MANIFEST_FILE),
@@ -706,6 +794,7 @@ mod platform {
                     file: root_identity.inode,
                 })
             || manifest.ciphertext_digest != backup_artifact.digest
+            || manifest.ciphertext_digest != expected_ciphertext_digest
             || !valid_digest(&manifest.original_digest)
             || manifest.original_len > 4 * 1024 * 1024
             || manifest.original_mode & 0o400 == 0
@@ -985,7 +1074,7 @@ mod platform {
             ));
         }
         if entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))? {
-            verify_artifact(
+            let removed_handle = verify_artifact(
                 retirement_tx,
                 transaction_path,
                 &RetirementArtifact {
@@ -1004,6 +1093,20 @@ mod platform {
             fault,
         )?;
         if entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))? {
+            #[cfg(test)]
+            wait_at_barrier(
+                &BEFORE_QUARANTINE_REVALIDATION,
+                &transaction_path.join(&quarantine),
+            );
+            verify_artifact(
+                retirement_tx,
+                transaction_path,
+                &RetirementArtifact {
+                    name: quarantine.clone(),
+                    ..artifact.clone()
+                },
+                kind,
+            )?;
             unlink_named(
                 retirement_tx,
                 OsStr::new(&quarantine),
@@ -1011,6 +1114,16 @@ mod platform {
                 &transaction_path.join(&quarantine),
                 fault,
             )?;
+            let removed_metadata = removed_handle
+                .metadata()
+                .map_err(|source| io_error(transaction_path.join(&quarantine), source))?;
+            if entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))?
+                || (kind == ObjectKind::File && removed_metadata.nlink() != 0)
+            {
+                return Err(WorkspaceRetirementError::RecoveryConflict(
+                    transaction_path.join(&quarantine),
+                ));
+            }
         }
         sync_directory(retirement_tx, transaction_path, fault)?;
         Ok(())
@@ -1113,6 +1226,7 @@ mod platform {
                 OsStr::new(&pending_name),
                 &path.join(&pending_name),
             )?;
+            let pending_identity = identity(&pending, &path.join(&pending_name))?;
             let current = read_bounded(&mut pending, limit, &path.join(&pending_name))?;
             if current != bytes {
                 return Err(WorkspaceRetirementError::RecoveryConflict(
@@ -1123,6 +1237,19 @@ mod platform {
                 .sync_all()
                 .map_err(|source| io_error(path.join(&pending_name), source))?;
             sync_directory(directory, path, fault)?;
+            let current_pending = open_exact_file(
+                directory,
+                path,
+                &pending_name,
+                bytes,
+                limit,
+                pending_identity,
+            )?;
+            #[cfg(test)]
+            wait_at_barrier(
+                &BEFORE_PENDING_PUBLISH_REVALIDATION,
+                &path.join(&pending_name),
+            );
             rename_no_replace(
                 directory,
                 OsStr::new(&pending_name),
@@ -1130,6 +1257,15 @@ mod platform {
                 OsStr::new(name),
                 &path.join(name),
             )?;
+            let published = open_exact_file(
+                directory,
+                path,
+                name,
+                bytes,
+                limit,
+                pending_identity,
+            )?;
+            require_same_identity(&published, &current_pending, &path.join(name))?;
             sync_directory(directory, path, fault)?;
             return Ok(());
         }
@@ -1138,6 +1274,7 @@ mod platform {
             OsStr::new(&pending_name),
             &path.join(&pending_name),
         )?;
+        let pending_identity = identity(&pending, &path.join(&pending_name))?;
         pending
             .write_all(bytes)
             .map_err(|source| io_error(path.join(&pending_name), source))?;
@@ -1145,6 +1282,19 @@ mod platform {
             .sync_all()
             .map_err(|source| io_error(path.join(&pending_name), source))?;
         sync_directory(directory, path, fault)?;
+        let current_pending = open_exact_file(
+            directory,
+            path,
+            &pending_name,
+            bytes,
+            limit,
+            pending_identity,
+        )?;
+        #[cfg(test)]
+        wait_at_barrier(
+            &BEFORE_PENDING_PUBLISH_REVALIDATION,
+            &path.join(&pending_name),
+        );
         rename_no_replace(
             directory,
             OsStr::new(&pending_name),
@@ -1152,8 +1302,35 @@ mod platform {
             OsStr::new(name),
             &path.join(name),
         )?;
+        let published = open_exact_file(
+            directory,
+            path,
+            name,
+            bytes,
+            limit,
+            pending_identity,
+        )?;
+        require_same_identity(&published, &current_pending, &path.join(name))?;
         sync_directory(directory, path, fault)?;
         Ok(())
+    }
+
+    fn open_exact_file(
+        directory: &File,
+        path: &Path,
+        name: &str,
+        expected: &[u8],
+        limit: usize,
+        expected_identity: RetirementIdentity,
+    ) -> Result<File, WorkspaceRetirementError> {
+        let display = path.join(name);
+        let mut file = open_private_file_at(directory.as_raw_fd(), OsStr::new(name), &display)?;
+        require_identity(&file, expected_identity, &display)?;
+        let bytes = read_bounded(&mut file, limit, &display)?;
+        if bytes != expected || identity(&file, &display)? != expected_identity {
+            return Err(WorkspaceRetirementError::RecoveryConflict(display));
+        }
+        Ok(file)
     }
 
     fn validate_source_names(
@@ -1259,6 +1436,15 @@ mod platform {
         display: &Path,
         limit: usize,
     ) -> Result<RetirementArtifact, WorkspaceRetirementError> {
+        capture_open_file(parent, name, display, limit).map(|(_, artifact)| artifact)
+    }
+
+    fn capture_open_file(
+        parent: &File,
+        name: &str,
+        display: &Path,
+        limit: usize,
+    ) -> Result<(File, RetirementArtifact), WorkspaceRetirementError> {
         let mut file = open_private_file_at(parent.as_raw_fd(), OsStr::new(name), display)?;
         let before = file
             .metadata()
@@ -1279,15 +1465,18 @@ mod platform {
                 display.to_path_buf(),
             ));
         }
-        Ok(RetirementArtifact {
-            name: name.to_owned(),
-            identity: captured_identity,
-            len: before.len(),
-            mode: before.mode() & 0o7777,
-            uid: before.uid(),
-            gid: before.gid(),
-            digest: digest(&bytes),
-        })
+        Ok((
+            file,
+            RetirementArtifact {
+                name: name.to_owned(),
+                identity: captured_identity,
+                len: before.len(),
+                mode: before.mode() & 0o7777,
+                uid: before.uid(),
+                gid: before.gid(),
+                digest: digest(&bytes),
+            },
+        ))
     }
 
     fn verify_artifact(
@@ -1295,15 +1484,16 @@ mod platform {
         parent_path: &Path,
         artifact: &RetirementArtifact,
         kind: ObjectKind,
-    ) -> Result<(), WorkspaceRetirementError> {
+    ) -> Result<File, WorkspaceRetirementError> {
         let display = parent_path.join(&artifact.name);
         match kind {
             ObjectKind::File => {
-                let current =
-                    capture_file(parent, &artifact.name, &display, artifact.len as usize)?;
+                let (file, current) =
+                    capture_open_file(parent, &artifact.name, &display, artifact.len as usize)?;
                 if current != *artifact {
                     return Err(WorkspaceRetirementError::RecoveryConflict(display));
                 }
+                Ok(file)
             }
             ObjectKind::Directory => {
                 let directory = open_private_directory_at(
@@ -1315,9 +1505,9 @@ mod platform {
                     return Err(WorkspaceRetirementError::RecoveryConflict(display));
                 }
                 ensure_empty(&directory, &display)?;
+                Ok(directory)
             }
         }
-        Ok(())
     }
 
     fn require_exact_names(
@@ -1745,6 +1935,8 @@ mod platform {
         _workspace_device: u64,
         _workspace_inode: u64,
         _backup_workspace_name: &str,
+        _expected_manifest_digest: &str,
+        _expected_ciphertext_digest: &str,
     ) -> Result<WorkspaceRetirementPlan, WorkspaceRetirementError> {
         Err(WorkspaceRetirementError::UnsupportedPlatform)
     }

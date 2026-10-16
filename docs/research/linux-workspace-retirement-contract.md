@@ -17,6 +17,12 @@ opaque retirement authorization. The authorization repeats the exact terminal
 outcome, transaction, recovery-key reference and the immutable retirement plan
 captured by `DurableTerminalHandoff`.
 
+Replacement journal format 2 records the SHA-256 digests of the exact durable
+backup manifest and ciphertext in its `BackedUp` event before any publish step.
+Handoff capture requires those journal commitments to match both files and the
+manifest's own ciphertext commitment, so a post-backup manifest or ciphertext
+edit cannot be re-authorized for deletion.
+
 The plan binds root, replacement parent, replacement workspace, backup parent
 and backup workspace device/inode identities. Its only removable file names
 are:
@@ -54,8 +60,13 @@ For each fixed object it:
 
 Plan, marker and completion publication uses an exact private pending file,
 file flush, directory flush, no-replace rename and another directory flush.
-Restart may finish an exact pending publication; conflicting final/pending
-bytes or simultaneous names are preserved and rejected. Test-only injection
+The pending identity and bytes are revalidated immediately before the rename,
+and the published name is reopened and matched to that same identity and bytes
+before success. Quarantine identity and content are likewise revalidated after
+marker publication immediately before removal. Restart may finish an exact
+pending publication; conflicting final/pending bytes or simultaneous names are
+preserved and rejected. Test-only race barriers replace pending and quarantine
+entries in those windows and require preservation plus failure. Test-only injection
 can interrupt after every removal and every directory flush. A fresh restart
 must either resume the same plan to the single completed state or fail closed.
 

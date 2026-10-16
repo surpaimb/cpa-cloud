@@ -69,6 +69,8 @@ impl std::fmt::Debug for BackupKey {
 pub struct BackupReceipt {
     pub workspace: String,
     pub target: PathBuf,
+    pub(crate) manifest_digest: String,
+    pub(crate) ciphertext_digest: String,
 }
 
 /// Exact current target state accepted while reopening rollback material after
@@ -493,6 +495,8 @@ mod platform {
         Ok(BackupReceipt {
             workspace,
             target: target.to_path_buf(),
+            manifest_digest: digest(&manifest_bytes),
+            ciphertext_digest: manifest.ciphertext_digest,
         })
     }
 
