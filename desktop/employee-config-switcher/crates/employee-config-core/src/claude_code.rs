@@ -250,9 +250,7 @@ mod tests {
             &profile,
         )
         .unwrap();
-        let settings = include_bytes!(
-            "../tests/fixtures/claude-code-2.1.266/settings.json"
-        );
+        let settings = include_bytes!("../tests/fixtures/claude-code-2.1.266/settings.json");
         let evidence: serde_json::Value = serde_json::from_slice(include_bytes!(
             "../tests/fixtures/claude-code-2.1.266/static-evidence.json"
         ))
