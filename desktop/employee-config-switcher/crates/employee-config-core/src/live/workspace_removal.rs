@@ -1178,6 +1178,7 @@ mod tests {
             let restarted = remove_workspace(&root_path, &authorization).unwrap();
             assert_eq!(restarted.receipt().transaction_id(), transaction(byte));
             assert!(!workspace.exists());
+            drop(restarted);
             verify_workspace_removal(&root_path, &authorization).unwrap();
         }
     }
