@@ -1534,13 +1534,19 @@ mod platform {
             .metadata()
             .map_err(|source| io_error(&display, source))?;
         let current_identity = identity(&file, &display)?;
-        let bytes = read_bounded(&mut file, 0, &display)?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| io_error(&display, source))?;
+        let mut first_byte = [0_u8; 1];
+        let content_present = file
+            .read(&mut first_byte)
+            .map_err(|source| io_error(&display, source))?
+            != 0;
         let after = file
             .metadata()
             .map_err(|source| io_error(&display, source))?;
         if current_identity != artifact.identity
             || identity(&file, &display)? != current_identity
-            || !bytes.is_empty()
+            || content_present
             || before.len() != 0
             || after.len() != 0
             || before.mode() & 0o7777 != artifact.mode
