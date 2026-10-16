@@ -1079,7 +1079,7 @@ mod platform {
             ));
         }
         if entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))? {
-            let removed_handle = verify_artifact(
+            verify_artifact(
                 retirement_tx,
                 transaction_path,
                 &RetirementArtifact {
@@ -1103,7 +1103,7 @@ mod platform {
                 &BEFORE_QUARANTINE_REVALIDATION,
                 &transaction_path.join(&quarantine),
             );
-            verify_artifact(
+            let removed_handle = verify_artifact(
                 retirement_tx,
                 transaction_path,
                 &RetirementArtifact {
