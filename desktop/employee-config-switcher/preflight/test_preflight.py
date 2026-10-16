@@ -55,6 +55,11 @@ class PreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(module.PreflightFailure, "^fixed-label$"):
             module.require(False, "fixed-label")
 
+    def test_baseline_runner_does_not_depend_on_sbin_path(self):
+        source = (HERE / "run.py").read_text()
+        self.assertIn('["/usr/sbin/runuser", "-u", USER', source)
+        self.assertNotIn('["runuser",', source)
+
 
 if __name__ == "__main__":
     unittest.main()

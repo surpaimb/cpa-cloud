@@ -246,7 +246,7 @@ def outer():
         metadata_path.write_text(json.dumps(metadata))
         metadata_path.chmod(0o444)
         # Prove these public probes are reachable by this UID outside the unit.
-        run(["runuser", "-u", USER, "--", "/usr/bin/python3", str(root / "run.py"), "--baseline", str(metadata_path)], env=SAFE_ENV)
+        run(["/usr/sbin/runuser", "-u", USER, "--", "/usr/bin/python3", str(root / "run.py"), "--baseline", str(metadata_path)], env=SAFE_ENV)
         properties = ["User=" + USER, "Group=" + USER, "UMask=0077", "NoNewPrivileges=yes",
                       "PrivateNetwork=yes", "PrivateIPC=yes", "PrivateDevices=yes", "PrivateTmp=yes",
                       "TemporaryFileSystem=/dev/shm:rw,mode=1777", "ProtectHome=yes", "ProtectSystem=strict",
