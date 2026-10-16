@@ -1538,7 +1538,15 @@ mod tests {
         cleanup
             .record_completion_tombstone_durable(&receipt)
             .unwrap();
-        let workspace_authorization = cleanup.authorize_workspace_removal().unwrap();
+        let retired = crate::live::workspace_retirement::WorkspaceContentsRetiredReceipt::for_test(
+            ReplacementPhase::Complete,
+            transaction_id,
+            cleanup.reference().clone(),
+            cleanup.workspace_name().to_owned(),
+            cleanup.workspace_target().device(),
+            cleanup.workspace_target().inode(),
+        );
+        let workspace_authorization = cleanup.authorize_workspace_removal(&retired).unwrap();
         let workspace_receipt = crate::live::workspace_removal::WorkspaceRemovalReceipt::for_test(
             &workspace_authorization,
         );

@@ -117,12 +117,12 @@ impl DurableCleanupJournal {
         self.persist_or_restore(previous)
     }
 
-    pub fn remove_workspace_durable(
+    pub(crate) fn remove_workspace_durable(
         &mut self,
-        workspace: &Path,
+        retired: &WorkspaceContentsRetiredReceipt,
     ) -> Result<(), CleanupJournalError> {
-        let authorization = self.sequence.authorize_workspace_removal()?;
-        let verified = remove_workspace(&self.root, &authorization, workspace)?;
+        let authorization = self.sequence.authorize_workspace_removal(retired)?;
+        let verified = remove_workspace(&self.root, &authorization)?;
         let previous = self.phase();
         self.sequence
             .record_workspace_removal_durable(verified.receipt())?;
@@ -1271,17 +1271,15 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn empty_workspace(root: &Path, suffix: u8) -> PathBuf {
-        let lock = root.join(".cpa-cloud-employee-config.lock");
-        if !lock.exists() {
+        let replacement_root = root.join(super::super::workspace_retirement::REPLACEMENT_DIRECTORY);
+        if !replacement_root.exists() {
+            fs::create_dir(&replacement_root).unwrap();
+            fs::set_permissions(&replacement_root, fs::Permissions::from_mode(0o700)).unwrap();
+            let lock = replacement_root.join(super::super::workspace_retirement::TARGET_LOCK_FILE);
             fs::write(&lock, b"").unwrap();
             fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
         }
-        let transaction_root = root.join(".cpa-cloud-employee-config-transactions");
-        if !transaction_root.exists() {
-            fs::create_dir(&transaction_root).unwrap();
-            fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let workspace = transaction_root.join(workspace_name(suffix));
+        let workspace = replacement_root.join(workspace_name(suffix));
         fs::create_dir(&workspace).unwrap();
         fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700)).unwrap();
         workspace
@@ -1301,6 +1299,23 @@ mod tests {
             metadata.ino(),
         )
         .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn retired_receipt(
+        terminal: ReplacementPhase,
+        transaction_id: ReplacementTransactionId,
+        reference: RecoveryKeyReference,
+        target: &WorkspaceRemovalTarget,
+    ) -> WorkspaceContentsRetiredReceipt {
+        WorkspaceContentsRetiredReceipt::for_test(
+            terminal,
+            transaction_id,
+            reference,
+            target.workspace_name().to_owned(),
+            target.device(),
+            target.inode(),
+        )
     }
 
     #[cfg(target_os = "linux")]
@@ -1373,7 +1388,20 @@ mod tests {
             journal.phase(),
             RecoveryKeyCleanupPhase::CompletionTombstoneDurable
         );
-        journal.remove_workspace_durable(&workspace).unwrap();
+        let retired = retired_receipt(
+            ReplacementPhase::Complete,
+            transaction_id,
+            reference.clone(),
+            &WorkspaceRemovalTarget::from_durable(
+                DurablePhaseEvidence(()),
+                transaction_id,
+                workspace_name(0x61),
+                workspace_device,
+                workspace_inode,
+            )
+            .unwrap(),
+        );
+        journal.remove_workspace_durable(&retired).unwrap();
         assert!(!workspace.exists());
         drop(journal);
 
@@ -1426,6 +1454,49 @@ mod tests {
         let rendered = format!("{retirement:?}");
         assert!(!rendered.contains("opaque-cleanup-reference"));
         assert!(!format!("{:?}", loaded[0]).contains("opaque-cleanup-reference"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn removal_receipt_stops_at_workspace_removal_durable_without_provider_delete() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let transaction_id = transaction(0x68);
+        let reference = reference();
+        let tombstone = persist_completion_tombstone(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            &reference,
+        )
+        .unwrap();
+        let workspace = empty_workspace(&root_path, 0x68);
+        let target = workspace_target(&workspace);
+        let retired = retired_receipt(
+            ReplacementPhase::Complete,
+            transaction_id,
+            reference.clone(),
+            &target,
+        );
+        let mut journal = create_durable_cleanup_journal_for_test(
+            &root_path,
+            ReplacementPhase::Complete,
+            transaction_id,
+            reference,
+            target,
+        )
+        .unwrap();
+        journal
+            .record_completion_tombstone_durable(&tombstone)
+            .unwrap();
+        journal.remove_workspace_durable(&retired).unwrap();
+        let provider = DeletedProvider { delete_calls: 0 };
+        assert_eq!(
+            journal.phase(),
+            RecoveryKeyCleanupPhase::WorkspaceRemovalDurable
+        );
+        assert_eq!(provider.delete_calls, 0);
+        assert!(!workspace.exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -1498,7 +1569,12 @@ mod tests {
             Err(CleanupJournalError::AlreadyExists(_))
         ));
         assert!(matches!(
-            journal.remove_workspace_durable(Path::new("unused")),
+            journal.remove_workspace_durable(&retired_receipt(
+                ReplacementPhase::RolledBack,
+                transaction_id,
+                reference(),
+                &workspace_target(&workspace),
+            )),
             Err(CleanupJournalError::Cleanup(_))
         ));
         assert_eq!(journal.phase(), RecoveryKeyCleanupPhase::TerminalRecorded);

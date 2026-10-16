@@ -11,7 +11,10 @@ use super::{
     linux_replacement::{DurableTerminalHandoff, REPLACEMENT_JOURNAL_FORMAT_VERSION},
     replacement::ReplacementPhase,
     workspace_removal::WorkspaceRemovalReceipt,
-    workspace_retirement::{WorkspaceRetirementAuthorization, WorkspaceRetirementPlan},
+    workspace_retirement::{
+        WorkspaceContentsRetiredReceipt, WorkspaceRetirementAuthorization,
+        WorkspaceRetirementPlan,
+    },
 };
 
 const TRANSACTION_ID_BYTES: usize = 16;
@@ -485,10 +488,38 @@ pub struct WorkspaceRemovalAuthorization {
     terminal: ReplacementPhase,
     transaction_id: ReplacementTransactionId,
     reference: RecoveryKeyReference,
+    root_device: u64,
+    root_inode: u64,
     target: WorkspaceRemovalTarget,
 }
 
 impl WorkspaceRemovalAuthorization {
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn for_test(
+        terminal: ReplacementPhase,
+        transaction_id: ReplacementTransactionId,
+        reference: RecoveryKeyReference,
+        root_device: u64,
+        root_inode: u64,
+        workspace_name: String,
+        workspace_device: u64,
+        workspace_inode: u64,
+    ) -> Self {
+        Self {
+            terminal,
+            transaction_id,
+            reference,
+            root_device,
+            root_inode,
+            target: WorkspaceRemovalTarget {
+                workspace_name,
+                device: workspace_device,
+                inode: workspace_inode,
+            },
+        }
+    }
+
     pub(crate) fn terminal(&self) -> ReplacementPhase {
         self.terminal
     }
@@ -499,6 +530,14 @@ impl WorkspaceRemovalAuthorization {
 
     pub(crate) fn reference(&self) -> &RecoveryKeyReference {
         &self.reference
+    }
+
+    pub(crate) fn root_device(&self) -> u64 {
+        self.root_device
+    }
+
+    pub(crate) fn root_inode(&self) -> u64 {
+        self.root_inode
     }
 
     pub(crate) fn workspace_name(&self) -> &str {
@@ -521,6 +560,8 @@ impl std::fmt::Debug for WorkspaceRemovalAuthorization {
             .field("terminal", &self.terminal)
             .field("transaction_id", &self.transaction_id)
             .field("reference", &self.reference)
+            .field("root_device", &self.root_device)
+            .field("root_inode", &self.root_inode)
             .field("target", &self.target)
             .finish()
     }
@@ -695,8 +736,18 @@ impl RecoveryKeyCleanupSequence {
 
     pub fn authorize_workspace_removal(
         &self,
+        retired: &WorkspaceContentsRetiredReceipt,
     ) -> Result<WorkspaceRemovalAuthorization, RecoveryKeyCleanupError> {
         self.require_phase(RecoveryKeyCleanupPhase::CompletionTombstoneDurable)?;
+        if retired.terminal() != self.terminal
+            || retired.transaction_id() != self.transaction_id
+            || retired.reference() != &self.reference
+            || retired.workspace_name() != self.workspace_target.workspace_name()
+            || retired.workspace_device() != self.workspace_target.device()
+            || retired.workspace_inode() != self.workspace_target.inode()
+        {
+            return Err(RecoveryKeyCleanupError::InvalidTransition(self.phase));
+        }
         Ok(self.workspace_removal_authorization())
     }
 
@@ -721,6 +772,8 @@ impl RecoveryKeyCleanupSequence {
             terminal: self.terminal,
             transaction_id: self.transaction_id,
             reference: self.reference.clone(),
+            root_device: self.root_device,
+            root_inode: self.root_inode,
             target: self.workspace_target.clone(),
         }
     }
@@ -913,6 +966,17 @@ mod tests {
         CompletionTombstoneDurableReceipt::for_test(terminal, transaction_id(), reference(), 1, 1)
     }
 
+    fn retired_receipt(terminal: ReplacementPhase) -> WorkspaceContentsRetiredReceipt {
+        WorkspaceContentsRetiredReceipt::for_test(
+            terminal,
+            transaction_id(),
+            reference(),
+            format!("tx-{}", hex::encode(transaction_id().as_bytes())),
+            1,
+            1,
+        )
+    }
+
     fn cleanup_ready_for_key_deletion() -> RecoveryKeyCleanupSequence {
         let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(handoff(
             ReplacementOutcome::RolledBack,
@@ -921,10 +985,41 @@ mod tests {
         cleanup
             .record_completion_tombstone_durable(&tombstone_receipt(ReplacementPhase::RolledBack))
             .unwrap();
-        let authorization = cleanup.authorize_workspace_removal().unwrap();
+        let authorization = cleanup
+            .authorize_workspace_removal(&retired_receipt(ReplacementPhase::RolledBack))
+            .unwrap();
         let receipt = WorkspaceRemovalReceipt::for_test(&authorization);
         cleanup.record_workspace_removal_durable(&receipt).unwrap();
         cleanup
+    }
+
+    #[test]
+    fn workspace_removal_requires_the_exact_contents_retired_receipt() {
+        let mut cleanup = RecoveryKeyCleanupSequence::after_durable_terminal(handoff(
+            ReplacementOutcome::Complete,
+        ))
+        .unwrap();
+        cleanup
+            .record_completion_tombstone_durable(&tombstone_receipt(ReplacementPhase::Complete))
+            .unwrap();
+        let wrong = WorkspaceContentsRetiredReceipt::for_test(
+            ReplacementPhase::Complete,
+            transaction_id(),
+            reference(),
+            format!("tx-{}", hex::encode(transaction_id().as_bytes())),
+            1,
+            2,
+        );
+        assert!(matches!(
+            cleanup.authorize_workspace_removal(&wrong),
+            Err(RecoveryKeyCleanupError::InvalidTransition(
+                RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+            ))
+        ));
+        assert_eq!(
+            cleanup.phase(),
+            RecoveryKeyCleanupPhase::CompletionTombstoneDurable
+        );
     }
 
     #[test]
@@ -1062,7 +1157,9 @@ mod tests {
         ));
         assert_eq!(provider.delete_calls, 0);
 
-        let workspace_authorization = cleanup.authorize_workspace_removal().unwrap();
+        let workspace_authorization = cleanup
+            .authorize_workspace_removal(&retired_receipt(ReplacementPhase::Complete))
+            .unwrap();
         let workspace_receipt = WorkspaceRemovalReceipt::for_test(&workspace_authorization);
         cleanup
             .record_workspace_removal_durable(&workspace_receipt)
