@@ -24,8 +24,8 @@ manifest's own ciphertext commitment, so a post-backup manifest or ciphertext
 edit cannot be re-authorized for deletion.
 
 The plan binds root, replacement parent, replacement workspace, backup parent
-and backup workspace device/inode identities. Its only removable file names
-are:
+and backup workspace device/inode identities. Its only content-retirable file
+names are:
 
 - replacement `journal.jsonl`, `.journal-pending-ready`, and the 24 fixed
   `.journal-pending-00` through `.journal-pending-23` slots; and
@@ -42,9 +42,8 @@ preserved and fails closed.
 ## Durable retirement protocol
 
 Linux retirement holds the existing replacement target lock and a separate
-retirement-namespace lock. All source opens, moves and removals are relative to
-already validated directory descriptors and use no-follow or no-replace
-operations.
+retirement-namespace lock. All source opens and moves are relative to already
+validated directory descriptors and use no-follow or no-replace operations.
 
 Before mutating a source, the protocol durably publishes the exact immutable
 plan beneath `.cpa-cloud-employee-config-workspace-retirements/<transaction>`.
@@ -55,20 +54,29 @@ For each fixed object it:
 2. moves the object without replacement to its transaction-scoped quarantine;
 3. flushes the source and quarantine directories;
 4. durably publishes an exact plan-bound step marker;
-5. removes only that verified quarantine name; and
-6. flushes the quarantine directory again.
+5. reopens and revalidates the quarantine object, then erases file content
+   through that already verified descriptor and flushes the file; and
+6. reopens the retained empty quarantine entry, requires the same identity and
+   flushes the quarantine directory again.
+
+The empty backup-workspace directory and zero-length quarantine files remain
+as transaction evidence. The protocol deliberately performs no pathname
+unlink after verification: a concurrent same-name replacement is therefore
+preserved, fails the post-erasure identity check, and cannot be mistaken for
+the descriptor-bound object whose content was authorized for retirement.
 
 Plan, marker and completion publication uses an exact private pending file,
 file flush, directory flush, no-replace rename and another directory flush.
 The pending identity and bytes are revalidated immediately before the rename,
 and the published name is reopened and matched to that same identity and bytes
 before success. Quarantine identity and content are likewise revalidated after
-marker publication immediately before removal. Restart may finish an exact
-pending publication; conflicting final/pending bytes or simultaneous names are
-preserved and rejected. Test-only race barriers replace pending and quarantine
-entries in those windows and require preservation plus failure. Test-only injection
-can interrupt after every removal and every directory flush. A fresh restart
-must either resume the same plan to the single completed state or fail closed.
+marker publication immediately before descriptor-bound content erasure.
+Restart may finish an exact pending publication; conflicting final/pending
+bytes or simultaneous names are preserved and rejected. Test-only race
+barriers replace pending and quarantine entries in those windows and require
+preservation plus failure. Test-only injection can interrupt after every
+destructive truncation and every directory flush. A fresh restart must either
+resume the same plan to the single completed state or fail closed.
 
 Completion requires the backup workspace to be absent and the original
 replacement workspace descriptor to remain present and empty. The completion
@@ -90,9 +98,10 @@ has `executed=false`.
 ## Required evidence
 
 Automated Linux evidence covers exact retirement and idempotent restart,
-unknown-name and edited-object preservation, every injected removal/directory
-flush boundary, an empty retained workspace, absent backup workspace, unchanged
-cleanup phase and zero provider deletions. Results from GitHub Actions must be
+unknown-name and edited-object preservation, every injected
+content-erasure/directory-flush boundary, an empty retained workspace, absent
+backup workspace, unchanged cleanup phase and zero provider deletions. Results
+from GitHub Actions must be
 reported as tested behavior; workspace-directory removal, key deletion and real
 client integration remain planned behavior only.
 
@@ -102,7 +111,7 @@ The implementation and tests are newly authored CPA code from this contract,
 the repository's synthetic state machines and the public Linux
 [`openat(2)`](https://man7.org/linux/man-pages/man2/openat.2.html),
 [`renameat2(2)`](https://man7.org/linux/man-pages/man2/renameat2.2.html),
-[`unlinkat(2)`](https://man7.org/linux/man-pages/man2/unlink.2.html),
+[`ftruncate(2)`](https://man7.org/linux/man-pages/man2/truncate.2.html),
 [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html), and
 [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html) contracts
 (accessed 2026-10-16). No CLIProxyAPI, Sub2API, archived CPA or adjacent

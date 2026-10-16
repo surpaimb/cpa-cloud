@@ -3,10 +3,12 @@
 //! The only production authorization is derived from the exact terminal
 //! handoff.  It names a fixed set of replacement-journal and encrypted-backup
 //! objects captured before cleanup begins.  Each object is moved by descriptor
-//! relative, no-follow rename into an owner-private quarantine, both directory
-//! namespaces are flushed, and an immutable deletion authorization is made
-//! durable before the quarantined object is unlinked.  Unknown entries and
-//! identity or content changes are preserved and fail closed.
+//! relative, no-follow rename into an owner-private quarantine and both
+//! directory namespaces are flushed.  An immutable retirement authorization
+//! is then made durable before file contents are erased through the already
+//! verified descriptor.  Empty quarantine entries are retained as evidence,
+//! so no pathname deletion can race a same-name replacement.  Unknown entries
+//! and identity or content changes are preserved and fail closed.
 
 use super::{
     recovery_key::{RecoveryKeyReference, ReplacementTransactionId},
@@ -1073,22 +1075,22 @@ mod platform {
             fault.boundary()?;
             sync_directory(source_parent, source_path, fault)?;
             sync_directory(retirement_tx, transaction_path, fault)?;
-        } else if !quarantine_exists && !marker_exists {
+        } else if !quarantine_exists {
             return Err(WorkspaceRetirementError::RecoveryConflict(
                 source_path.join(&artifact.name),
             ));
         }
-        if entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))? {
-            verify_artifact(
-                retirement_tx,
-                transaction_path,
-                &RetirementArtifact {
-                    name: quarantine.clone(),
-                    ..artifact.clone()
-                },
-                kind,
-            )?;
-        }
+        let quarantine_artifact = RetirementArtifact {
+            name: quarantine.clone(),
+            ..artifact.clone()
+        };
+        let (_, already_retired) = open_quarantine_for_retirement(
+            retirement_tx,
+            transaction_path,
+            &quarantine_artifact,
+            kind,
+            marker_exists,
+        )?;
         persist_marker(
             retirement_tx,
             transaction_path,
@@ -1097,39 +1099,46 @@ mod platform {
             plan_digest,
             fault,
         )?;
-        if entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))? {
-            #[cfg(test)]
-            wait_at_barrier(
-                &BEFORE_QUARANTINE_REVALIDATION,
-                &transaction_path.join(&quarantine),
-            );
-            let removed_handle = verify_artifact(
+        let verified_handle = if already_retired {
+            verify_retired_artifact(
                 retirement_tx,
                 transaction_path,
-                &RetirementArtifact {
-                    name: quarantine.clone(),
-                    ..artifact.clone()
-                },
+                &quarantine_artifact,
                 kind,
-            )?;
-            unlink_named(
+            )?
+        } else {
+            verify_artifact(
                 retirement_tx,
-                OsStr::new(&quarantine),
+                transaction_path,
+                &quarantine_artifact,
                 kind,
-                &transaction_path.join(&quarantine),
-                fault,
-            )?;
-            let removed_metadata = removed_handle
-                .metadata()
+            )?
+        };
+        #[cfg(test)]
+        wait_at_barrier(
+            &BEFORE_QUARANTINE_REVALIDATION,
+            &transaction_path.join(&quarantine),
+        );
+        if kind == ObjectKind::File && !already_retired {
+            verified_handle
+                .set_len(0)
                 .map_err(|source| io_error(transaction_path.join(&quarantine), source))?;
-            if entry_exists(retirement_tx.as_raw_fd(), OsStr::new(&quarantine))?
-                || (kind == ObjectKind::File && removed_metadata.nlink() != 0)
-            {
-                return Err(WorkspaceRetirementError::RecoveryConflict(
-                    transaction_path.join(&quarantine),
-                ));
-            }
+            verified_handle
+                .sync_all()
+                .map_err(|source| io_error(transaction_path.join(&quarantine), source))?;
+            fault.boundary()?;
         }
+        let current = verify_retired_artifact(
+            retirement_tx,
+            transaction_path,
+            &quarantine_artifact,
+            kind,
+        )?;
+        require_same_identity(
+            &current,
+            &verified_handle,
+            &transaction_path.join(&quarantine),
+        )?;
         sync_directory(retirement_tx, transaction_path, fault)?;
         Ok(())
     }
@@ -1501,6 +1510,70 @@ mod platform {
         }
     }
 
+    fn open_quarantine_for_retirement(
+        parent: &File,
+        parent_path: &Path,
+        artifact: &RetirementArtifact,
+        kind: ObjectKind,
+        marker_preexisting: bool,
+    ) -> Result<(File, bool), WorkspaceRetirementError> {
+        if kind == ObjectKind::Directory {
+            return verify_artifact(parent, parent_path, artifact, kind).map(|file| (file, true));
+        }
+        match verify_artifact(parent, parent_path, artifact, kind) {
+            Ok(file) => Ok((file, artifact.len == 0)),
+            Err(original_error) if marker_preexisting => {
+                match verify_retired_artifact(parent, parent_path, artifact, kind) {
+                    Ok(file) => Ok((file, true)),
+                    Err(_) => Err(original_error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn verify_retired_artifact(
+        parent: &File,
+        parent_path: &Path,
+        artifact: &RetirementArtifact,
+        kind: ObjectKind,
+    ) -> Result<File, WorkspaceRetirementError> {
+        if kind == ObjectKind::Directory {
+            return verify_artifact(parent, parent_path, artifact, kind);
+        }
+        let display = parent_path.join(&artifact.name);
+        let mut file = open_private_file_at(
+            parent.as_raw_fd(),
+            OsStr::new(&artifact.name),
+            &display,
+        )?;
+        let before = file
+            .metadata()
+            .map_err(|source| io_error(&display, source))?;
+        let current_identity = identity(&file, &display)?;
+        let bytes = read_bounded(&mut file, 0, &display)?;
+        let after = file
+            .metadata()
+            .map_err(|source| io_error(&display, source))?;
+        if current_identity != artifact.identity
+            || identity(&file, &display)? != current_identity
+            || !bytes.is_empty()
+            || before.len() != 0
+            || after.len() != 0
+            || before.mode() & 0o7777 != artifact.mode
+            || after.mode() != before.mode()
+            || before.uid() != artifact.uid
+            || after.uid() != before.uid()
+            || before.gid() != artifact.gid
+            || after.gid() != before.gid()
+            || before.nlink() != 1
+            || after.nlink() != 1
+        {
+            return Err(WorkspaceRetirementError::RecoveryConflict(display));
+        }
+        Ok(file)
+    }
+
     fn require_exact_names(
         directory: &File,
         path: &Path,
@@ -1568,25 +1641,6 @@ mod platform {
             return Err(io_error(display, io::Error::last_os_error()));
         }
         Ok(())
-    }
-
-    fn unlink_named(
-        parent: &File,
-        name: &OsStr,
-        kind: ObjectKind,
-        display: &Path,
-        fault: &mut FaultState,
-    ) -> Result<(), WorkspaceRetirementError> {
-        let name = c_string(name)?;
-        let flags = if kind == ObjectKind::Directory {
-            libc::AT_REMOVEDIR
-        } else {
-            0
-        };
-        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) } != 0 {
-            return Err(io_error(display, io::Error::last_os_error()));
-        }
-        fault.boundary()
     }
 
     fn sync_directory(

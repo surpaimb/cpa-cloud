@@ -4149,6 +4149,19 @@ mod tests {
         assert!(workspace_path.is_dir());
         assert!(fs::read_dir(&workspace_path).unwrap().next().is_none());
         assert!(!backup_path.exists());
+        let retirement_transaction = root_path
+            .join(".cpa-cloud-employee-config-workspace-retirements")
+            .join(transaction_text(transaction_id));
+        for index in 0..29 {
+            let quarantine = retirement_transaction.join(format!("quarantine-{index:02}"));
+            if index == 2 {
+                assert!(quarantine.is_dir());
+                assert!(fs::read_dir(&quarantine).unwrap().next().is_none());
+            } else {
+                assert!(quarantine.is_file());
+                assert!(fs::read(&quarantine).unwrap().is_empty());
+            }
+        }
         assert_eq!(
             cleanup.phase(),
             RecoveryKeyCleanupPhase::CompletionTombstoneDurable
@@ -4320,12 +4333,12 @@ mod tests {
             ))
         ));
         assert_eq!(fs::read(&quarantine).unwrap(), bytes);
-        assert_eq!(fs::read(&detached).unwrap(), bytes);
+        assert!(fs::read(&detached).unwrap().is_empty());
         assert_eq!(provider.deletes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn every_retirement_delete_and_directory_flush_boundary_recovers_uniquely() {
+    fn every_retirement_content_delete_and_directory_flush_boundary_recovers_uniquely() {
         let mut boundary = 1usize;
         loop {
             let byte = 0xb0_u8.wrapping_add((boundary % 64) as u8);
