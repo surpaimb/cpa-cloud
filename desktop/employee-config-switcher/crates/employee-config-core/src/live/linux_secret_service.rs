@@ -1451,6 +1451,15 @@ mod tests {
                     Envelope::Corrupt
                 ));
             }
+            // Isolate magic rejection from checksum rejection: removing the
+            // magic guard would accept this otherwise valid envelope.
+            let mut wrong_magic = original.clone();
+            wrong_magic[0] ^= 1;
+            rechecksum(&mut wrong_magic, ENVELOPE_CONTEXT);
+            assert!(matches!(
+                decode_envelope(tx, 1001, namespace, id, &transferred(wrong_magic)),
+                Envelope::Corrupt
+            ));
             // Recompute a valid checksum to prove it is not a MAC or a substitute
             // for transaction/UID/namespace/item identity comparison.
             for offset in [16, 32, 36, 68] {
@@ -1600,6 +1609,17 @@ mod tests {
                     RecoveryKeyOpenOutcome::WrongIdentity
                 ));
             }
+            // A valid checksum must not mask a missing reference-magic guard.
+            // All other identity fields still select the original valid item.
+            let mut wrong_magic = first.reference.opaque_reference().to_vec();
+            wrong_magic[0] ^= 1;
+            rechecksum(&mut wrong_magic, REFERENCE_CONTEXT);
+            let reference =
+                RecoveryKeyReference::new(PROVIDER_KIND, PROVIDER_VERSION, wrong_magic).unwrap();
+            assert!(matches!(
+                provider.open(tx, &reference),
+                RecoveryKeyOpenOutcome::Corrupt
+            ));
             for length in [REFERENCE_BYTES - 1, REFERENCE_BYTES + 1] {
                 let mut changed = first.reference.opaque_reference().to_vec();
                 changed.resize(length, 0);
