@@ -287,6 +287,35 @@ func TestLinuxSystemdMasterKeyProviderRecoversInterruptedStaging(t *testing.T) {
 			t.Fatalf("binding was not published: %v", err)
 		}
 	})
+
+	t.Run("complete staging from a different credential fails closed", func(t *testing.T) {
+		dataDir := filepath.Join(t.TempDir(), "data")
+		if err := os.Mkdir(dataDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		wrong := material
+		wrong.Key[0] ^= 0xff
+		binding, err := createMasterKeyBinding(&wrong)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clearBytes(binding)
+		stagingPath := filepath.Join(dataDir, masterKeyBindingStagingFilename)
+		if err := os.WriteFile(stagingPath, binding, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before := snapshotMasterKeyProviderDirectory(t, dataDir)
+		cfg := Config{DataDir: dataDir, Listen: "127.0.0.1:0", Version: "test", MasterKeyProvider: masterKeyProviderLinuxSystemdCredentialV1}
+		if err := InitializeWithConfig(context.Background(), cfg, strings.NewReader("synthetic-admin-password\n")); !errors.Is(err, errMasterKeyProviderRejected) {
+			t.Fatalf("different credential adopted complete staging: %v", err)
+		}
+		if after := snapshotMasterKeyProviderDirectory(t, dataDir); !reflect.DeepEqual(before, after) {
+			t.Fatalf("rejected complete staging mutated data directory\nbefore=%v\nafter=%v", before, after)
+		}
+		if _, err := os.Stat(filepath.Join(dataDir, masterKeyBindingFilename)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("final binding was published for wrong credential: %v", err)
+		}
+	})
 }
 
 func TestLinuxSystemdMasterKeyProviderRetriesDirectorySyncAfterPublish(t *testing.T) {

@@ -47,13 +47,18 @@ func createLinuxMasterKeyBinding(dataDir, name, stagingName string, encoded []by
 	}
 	if len(entries) == 1 {
 		staged, readErr := readLinuxPrivateFileAt(directoryFD, directoryStat, stagingName, masterKeyBindingMaxBytes, 0o600)
-		valid := readErr == nil && verifyMasterKeyBinding(staged, material) == nil
+		var stagedBinding masterKeyBinding
+		complete := readErr == nil && decodeStrictJSON(staged, &stagedBinding) == nil
+		valid := complete && verifyMasterKeyBinding(staged, material) == nil
 		clearBytes(staged)
 		if valid {
 			if err := syncLinuxPrivateFileAt(directoryFD, directoryStat, stagingName, 0o600); err != nil {
 				return err
 			}
 			return publishLinuxMasterKeyBinding(directoryFD, stagingName, name)
+		}
+		if complete {
+			return errors.New("staged binding does not match credential")
 		}
 		if err := unix.Unlinkat(directoryFD, stagingName, 0); err != nil {
 			return err
