@@ -67,14 +67,11 @@ sudo install -d -o "$test_user" -g "$test_user" -m 0700 "$test_root/state"
 
 make_encrypted_credential() {
   local output=$1
-  local marker=$2
-  local plaintext="$test_root/plaintext-$marker.json"
   local key
   key=$(head -c 32 /dev/urandom | base64 -w0 | tr -d '=')
-  umask 077
-  printf '{"format_version":1,"provider_kind":"linux-systemd-credential-v1","instance_id":"01234567-89ab-cdef-0123-456789abcdef","key_id":"installation-root","key_version":1,"master_key":"%s"}' "$key" >"$plaintext"
-  sudo systemd-creds encrypt --with-key=host --name="$credential_name" "$plaintext" "$output" >/dev/null
-  rm -f -- "$plaintext"
+  printf '{"format_version":1,"provider_kind":"linux-systemd-credential-v1","instance_id":"01234567-89ab-cdef-0123-456789abcdef","key_id":"installation-root","key_version":1,"master_key":"%s"}' "$key" |
+    sudo systemd-creds encrypt --with-key=host --name="$credential_name" - "$output" >/dev/null
+  unset key
 }
 
 run_unit() {
@@ -98,8 +95,8 @@ run_unit() {
 sudo systemd-creds setup >/dev/null
 credential="$test_root/credential.encrypted"
 wrong_credential="$test_root/wrong-credential.encrypted"
-make_encrypted_credential "$credential" primary
-make_encrypted_credential "$wrong_credential" wrong
+make_encrypted_credential "$credential"
+make_encrypted_credential "$wrong_credential"
 
 metadata="$test_root/state/activation-metadata.txt"
 run_unit "$credential" \

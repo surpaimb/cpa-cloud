@@ -75,11 +75,15 @@ func readLinuxSystemdCredential(directory, name string, maxBytes int) ([]byte, e
 	if err != nil || defaultACL != nil {
 		return nil, errors.New("invalid credential directory ACL")
 	}
-	readOnly, err := linuxFileSystemReadOnly(directoryFD)
+	directoryReadOnly, err := linuxFileSystemReadOnly(directoryFD)
 	if err != nil {
 		return nil, err
 	}
-	layout := classifyLinuxSystemdCredentialObject(&directoryStat, directoryACL, true, readOnly)
+	directoryMountID, err := linuxMountID(directoryFD)
+	if err != nil {
+		return nil, err
+	}
+	layout := classifyLinuxSystemdCredentialObject(&directoryStat, directoryACL, true, directoryReadOnly)
 	if layout == linuxSystemdCredentialLayoutInvalid {
 		return nil, errors.New("invalid credential directory")
 	}
@@ -99,8 +103,16 @@ func readLinuxSystemdCredential(directory, name string, maxBytes int) ([]byte, e
 	if err := unix.Fstat(fileFD, &first); err != nil || first.Size <= 0 || first.Size > int64(maxBytes) || first.Nlink != 1 {
 		return nil, errors.New("invalid credential")
 	}
+	fileReadOnly, err := linuxFileSystemReadOnly(fileFD)
+	if err != nil {
+		return nil, err
+	}
+	fileMountID, err := linuxMountID(fileFD)
+	if err != nil || first.Dev != directoryStat.Dev || fileMountID != directoryMountID {
+		return nil, errors.New("invalid credential mount")
+	}
 	fileACL, err := readLinuxACLXattr(fileFD, "system.posix_acl_access")
-	if err != nil || classifyLinuxSystemdCredentialObject(&first, fileACL, false, readOnly) != layout {
+	if err != nil || classifyLinuxSystemdCredentialObject(&first, fileACL, false, fileReadOnly) != layout {
 		return nil, errors.New("invalid credential ACL")
 	}
 	encoded, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
@@ -113,17 +125,23 @@ func readLinuxSystemdCredential(directory, name string, maxBytes int) ([]byte, e
 	secondFileACL, fileACLErr := readLinuxACLXattr(fileFD, "system.posix_acl_access")
 	secondDirectoryACL, directoryACLErr := readLinuxACLXattr(directoryFD, "system.posix_acl_access")
 	secondDefaultACL, defaultACLErr := readLinuxACLXattr(directoryFD, "system.posix_acl_default")
-	secondReadOnly, readOnlyErr := linuxFileSystemReadOnly(directoryFD)
+	secondDirectoryReadOnly, directoryReadOnlyErr := linuxFileSystemReadOnly(directoryFD)
+	secondFileReadOnly, fileReadOnlyErr := linuxFileSystemReadOnly(fileFD)
+	secondDirectoryMountID, directoryMountErr := linuxMountID(directoryFD)
+	secondFileMountID, fileMountErr := linuxMountID(fileFD)
 	if err := unix.Fstat(fileFD, &second); err != nil ||
 		unix.Fstatat(directoryFD, name, &named, unix.AT_SYMLINK_NOFOLLOW) != nil ||
 		unix.Fstat(directoryFD, &currentDirectory) != nil ||
-		fileACLErr != nil || directoryACLErr != nil || defaultACLErr != nil || readOnlyErr != nil ||
+		fileACLErr != nil || directoryACLErr != nil || defaultACLErr != nil ||
+		directoryReadOnlyErr != nil || fileReadOnlyErr != nil || directoryMountErr != nil || fileMountErr != nil ||
 		!sameLinuxCredentialObject(&first, &second) || !sameLinuxCredentialObject(&first, &named) ||
 		!sameLinuxCredentialObject(&directoryStat, &currentDirectory) || int64(len(encoded)) != second.Size ||
 		!bytes.Equal(fileACL, secondFileACL) || !bytes.Equal(directoryACL, secondDirectoryACL) ||
-		secondDefaultACL != nil || readOnly != secondReadOnly ||
-		classifyLinuxSystemdCredentialObject(&second, secondFileACL, false, secondReadOnly) != layout ||
-		classifyLinuxSystemdCredentialObject(&currentDirectory, secondDirectoryACL, true, secondReadOnly) != layout {
+		secondDefaultACL != nil || directoryReadOnly != secondDirectoryReadOnly || fileReadOnly != secondFileReadOnly ||
+		directoryMountID != secondDirectoryMountID || fileMountID != secondFileMountID ||
+		second.Dev != currentDirectory.Dev || secondFileMountID != secondDirectoryMountID ||
+		classifyLinuxSystemdCredentialObject(&second, secondFileACL, false, secondFileReadOnly) != layout ||
+		classifyLinuxSystemdCredentialObject(&currentDirectory, secondDirectoryACL, true, secondDirectoryReadOnly) != layout {
 		clearBytes(encoded)
 		return nil, errors.New("credential changed")
 	}
@@ -198,6 +216,14 @@ func linuxFileSystemReadOnly(fd int) (bool, error) {
 		return false, err
 	}
 	return stat.Flags&unix.ST_RDONLY != 0, nil
+}
+
+func linuxMountID(fd int) (uint64, error) {
+	var stat unix.Statx_t
+	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_STATX_SYNC_AS_STAT, unix.STATX_MNT_ID, &stat); err != nil || stat.Mask&unix.STATX_MNT_ID == 0 {
+		return 0, errors.New("read credential mount identity")
+	}
+	return stat.Mnt_id, nil
 }
 
 func sameLinuxCredentialObject(left, right *unix.Stat_t) bool {

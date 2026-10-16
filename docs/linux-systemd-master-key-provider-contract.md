@@ -87,7 +87,10 @@ effective-UID-owned 0700 application data directory and must be a regular,
 single-link, effective-UID-owned 0600 file. Credential and binding device/inode,
 size, mode, owner, and directory identity are rechecked after reading. The
 credential access/default ACL bytes and read-only filesystem state are also
-rechecked. Any mismatch fails closed. Running this provider as root is rejected.
+rechecked. The directory and credential file must retain the same device and
+Linux mount ID; the fallback independently requires both descriptors to report
+a read-only filesystem. Any mismatch fails closed. Running this provider as
+root is rejected.
 
 ## Startup ordering and failure behavior
 

@@ -468,6 +468,9 @@ func TestLinuxSystemdCredentialLayoutAdmission(t *testing.T) {
 	if got := classifyLinuxSystemdCredentialObject(&ownedFile, nil, false, true); got != linuxSystemdCredentialLayoutOwnedReadOnly {
 		t.Fatalf("read-only owner fallback file layout=%v", got)
 	}
+	if got := classifyLinuxSystemdCredentialObject(&ownedFile, nil, false, false); got != linuxSystemdCredentialLayoutInvalid {
+		t.Fatalf("owner fallback file on writable mount layout=%v", got)
+	}
 	if got := classifyLinuxSystemdCredentialObject(&ownedDirectory, nil, true, false); got != linuxSystemdCredentialLayoutInvalid {
 		t.Fatalf("writable owner fallback layout=%v", got)
 	}
