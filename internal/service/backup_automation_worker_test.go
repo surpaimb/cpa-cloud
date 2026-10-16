@@ -18,9 +18,11 @@ import (
 )
 
 type fakeBackupKeyStore struct {
-	mu       sync.Mutex
-	ready    bool
-	versions map[string]map[uint64][32]byte
+	mu            sync.Mutex
+	ready         bool
+	versions      map[string]map[uint64][32]byte
+	configured    *keyprovider.Reference
+	configuredKey [32]byte
 }
 
 type fakePreparedKey struct {
@@ -42,6 +44,20 @@ func (s *fakeBackupKeyStore) Ready() (bool, string) {
 	return false, keyprovider.ReasonUnsupported
 }
 
+func (s *fakeBackupKeyStore) ProviderKind() string {
+	if s.configured != nil {
+		return s.configured.Kind
+	}
+	return keyprovider.KindWindowsDPAPIUser
+}
+
+func (s *fakeBackupKeyStore) ConfiguredReference() (keyprovider.Reference, bool) {
+	if s.configured != nil {
+		return *s.configured, true
+	}
+	return keyprovider.Reference{}, false
+}
+
 func (s *fakeBackupKeyStore) PrepareVersion(_ context.Context, id string, version uint64) (backupPreparedKeyVersion, error) {
 	if !s.ready {
 		return nil, keyprovider.ErrUnavailable
@@ -56,6 +72,9 @@ func (s *fakeBackupKeyStore) PrepareVersion(_ context.Context, id string, versio
 func (s *fakeBackupKeyStore) Resolve(_ context.Context, id string, version uint64) (*keyprovider.Material, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.configured != nil && s.configured.ProviderID == id && s.configured.Version == version {
+		return &keyprovider.Material{ProviderID: id, Kind: s.configured.Kind, InstanceID: s.configured.InstanceID, KeyID: s.configured.KeyID, Version: version, Key: s.configuredKey}, nil
+	}
 	versions := s.versions[id]
 	key, ok := versions[version]
 	if !ok {
@@ -205,6 +224,46 @@ func TestBackupAutomationManualRunVerifyRehearsalAndRetention(t *testing.T) {
 	leftovers, err := filepath.Glob(filepath.Join(fixture.worker.output.path, ".cpa-cloud-rehearsal-*"))
 	if err != nil || len(leftovers) != 0 {
 		t.Fatalf("rehearsal plaintext remains: %v %v", leftovers, err)
+	}
+}
+
+func TestBackupRehearsalCleanupIncludesBindingAndPreservesUnknownFiles(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		parent := filepath.Join(t.TempDir(), "rehearsal")
+		target := filepath.Join(parent, "restored")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"cpa-cloud.db", masterKeyBindingFilename} {
+			if err := os.WriteFile(filepath.Join(target, name), []byte("synthetic"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if unknown {
+			if err := os.WriteFile(filepath.Join(target, "unrecognized"), []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := removeBackupRehearsal(parent, target)
+		if !unknown {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(parent); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rehearsal remains: %v", err)
+			}
+		} else {
+			if err == nil {
+				t.Fatal("unknown file silently removed")
+			}
+			contents, err := os.ReadFile(filepath.Join(target, "unrecognized"))
+			if err != nil || string(contents) != "keep" {
+				t.Fatalf("unknown file changed: %v", err)
+			}
+		}
+		if _, err := os.Lstat(filepath.Join(target, masterKeyBindingFilename)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("binding remains: %v", err)
+		}
 	}
 }
 

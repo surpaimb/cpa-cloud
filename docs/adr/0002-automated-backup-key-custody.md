@@ -2,6 +2,8 @@
 
 状态：Accepted for implementation（F1/F2）
 
+Linux 后续增量：只读 systemd credential 与独立 v3 格式见 [ADR 0005](0005-linux-systemd-backup-wrapping-key.md)；本 ADR 的 Windows v2 语义保持不变。
+
 日期：2026-09-24
 所有者：F 自动备份与密钥托管组件
 

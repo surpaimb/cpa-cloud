@@ -9,10 +9,12 @@ import (
 )
 
 const (
-	KindWindowsDPAPIUser = "windows-dpapi-user"
-	ScopeCurrentUser     = "current-user"
-	ReasonUnsupported    = "unsupported_platform"
-	ReasonReady          = ""
+	KindWindowsDPAPIUser         = "windows-dpapi-user"
+	KindLinuxSystemdCredentialV1 = "linux-systemd-credential-v1"
+	ScopeCurrentUser             = "current-user"
+	ScopeSystemdService          = "systemd-service"
+	ReasonUnsupported            = "unsupported_platform"
+	ReasonReady                  = ""
 
 	MaxPublicVersion = uint64(9007199254740991)
 	maxProviderID    = 64
@@ -25,8 +27,27 @@ var ErrUnavailable = errors.New("backup key provider is unavailable")
 type Material struct {
 	ProviderID string
 	Kind       string
+	InstanceID string
+	KeyID      string
 	Version    uint64
 	Key        [32]byte
+}
+
+// Reference is the non-secret identity of one exact wrapping key.
+type Reference struct {
+	ProviderID string
+	Kind       string
+	InstanceID string
+	KeyID      string
+	Version    uint64
+}
+
+// InstanceBinding ties a headless backup credential to the already verified
+// installation credential without sharing either secret.
+type InstanceBinding struct {
+	InstanceID        string
+	ExcludedKeyID     string
+	ExcludedKeyDigest [32]byte
 }
 
 func (m *Material) Destroy() {
@@ -55,7 +76,19 @@ func validVersion(version uint64) bool {
 }
 
 func validateMaterial(material *Material) error {
-	if material == nil || !validProviderID(material.ProviderID) || material.Kind != KindWindowsDPAPIUser || !validVersion(material.Version) {
+	if material == nil || !validProviderID(material.ProviderID) || !validVersion(material.Version) {
+		return errors.New("backup key material reference is invalid")
+	}
+	switch material.Kind {
+	case KindWindowsDPAPIUser:
+		if material.InstanceID != "" || material.KeyID != "" {
+			return errors.New("backup key material reference is invalid")
+		}
+	case KindLinuxSystemdCredentialV1:
+		if !validInstanceID(material.InstanceID) || !validKeyID(material.KeyID) {
+			return errors.New("backup key material reference is invalid")
+		}
+	default:
 		return errors.New("backup key material reference is invalid")
 	}
 	var nonzero byte
@@ -66,4 +99,39 @@ func validateMaterial(material *Material) error {
 		return errors.New("backup key material is invalid")
 	}
 	return nil
+}
+
+func validInstanceID(value string) bool {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	for index, character := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			continue
+		}
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func validKeyID(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func wipe(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }

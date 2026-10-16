@@ -69,9 +69,11 @@ type Info struct {
 // KeyReference identifies the exact non-secret provider version required to
 // open a key-material backup. It never contains the wrapping key.
 type KeyReference struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Version uint64 `json:"version"`
+	ID         string `json:"id"`
+	Kind       string `json:"kind"`
+	InstanceID string `json:"instance_id,omitempty"`
+	KeyID      string `json:"key_id,omitempty"`
+	Version    uint64 `json:"version"`
 }
 
 type FileInfo struct {
@@ -479,7 +481,7 @@ func equalKeyReference(left, right *KeyReference) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}
-	return left.ID == right.ID && left.Kind == right.Kind && left.Version == right.Version
+	return left.ID == right.ID && left.Kind == right.Kind && left.InstanceID == right.InstanceID && left.KeyID == right.KeyID && left.Version == right.Version
 }
 
 func decodeRecord(reader *bytes.Reader) (record, error) {
@@ -1009,6 +1011,10 @@ func writeNewSyncedFileWithSync(output string, data []byte, syncDir func(string)
 }
 
 func publishRestoreDirectory(stage, target string) error {
+	return publishRestoreDirectoryFiles(stage, target, databaseFilename, rootKeyFilename)
+}
+
+func publishRestoreDirectoryFiles(stage, target string, names ...string) error {
 	if _, err := os.Lstat(target); err == nil {
 		return errors.New("restore target already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -1028,13 +1034,13 @@ func publishRestoreDirectory(stage, target string) error {
 		}
 		current, err := os.Lstat(target)
 		if err == nil && os.SameFile(createdInfo, current) {
-			removeKnownDirectory(target, databaseFilename, rootKeyFilename)
+			removeKnownDirectory(target, names...)
 		}
 	}()
 	if err := hardenPath(target, true); err != nil {
 		return err
 	}
-	for _, name := range []string{databaseFilename, rootKeyFilename} {
+	for _, name := range names {
 		from, to := filepath.Join(stage, name), filepath.Join(target, name)
 		if err := os.Rename(from, to); err != nil {
 			return err

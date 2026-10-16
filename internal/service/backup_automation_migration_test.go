@@ -71,6 +71,43 @@ func TestBackupAutomationMigrationRejectsLookalikeAndRollsBack(t *testing.T) {
 	}
 }
 
+func TestBackupAutomationMigratesLegacyWindowsRowsWithoutInventingLinuxBinding(t *testing.T) {
+	db := openBackupMigrationDB(t)
+	defer db.Close()
+	for _, ddl := range []string{legacyBackupKeyProviderDDL, backupPlanDDL, legacyBackupRunDDL, backupPlanDueIndexDDL, backupRunPlanIndexDDL, backupSingleRunDDL} {
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stamp := "2026-09-24T01:00:00Z"
+	if _, err := db.Exec(`INSERT INTO backup_key_providers(id,kind,scope,status,reason_code,active_version,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at) VALUES('bkp_legacy','windows-dpapi-user','current-user','ready',NULL,2,3,'adm_test','adm_test',?,?)`, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO backup_plans(id,name,key_provider_id,interval_seconds,retention_count,rehearsal_enabled,enabled,next_run_at,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at) VALUES('bpl_legacy','Legacy','bkp_legacy',900,2,0,0,NULL,1,'adm_test','adm_test',?,?)`, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO backup_runs(id,plan_id,plan_revision,key_provider_id,key_provider_kind,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at) VALUES('brn_legacy','bpl_legacy',1,'bkp_legacy','windows-dpapi-user',2,'scheduled',NULL,?,?,?,'succeeded','legacy.cpacb',12,1,NULL,?,'skipped',NULL,NULL,?)`, stamp, stamp, stamp, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateBackupAutomation(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var kind, scope string
+	var instanceID, keyID sql.NullString
+	if err := db.QueryRow(`SELECT kind,scope,instance_id,key_id FROM backup_key_providers WHERE id='bkp_legacy'`).Scan(&kind, &scope, &instanceID, &keyID); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "windows-dpapi-user" || scope != "current-user" || instanceID.Valid || keyID.Valid {
+		t.Fatalf("migrated=%q %q %+v %+v", kind, scope, instanceID, keyID)
+	}
+	if err := db.QueryRow(`SELECT key_provider_instance_id,key_provider_key_id FROM backup_runs WHERE id='brn_legacy'`).Scan(&instanceID, &keyID); err != nil || instanceID.Valid || keyID.Valid {
+		t.Fatalf("run binding=%+v %+v err=%v", instanceID, keyID, err)
+	}
+	if err := migrateBackupAutomation(context.Background(), db); err != nil {
+		t.Fatalf("second migration: %v", err)
+	}
+}
+
 func TestBackupAutomationSchemaEnforcesSafeVersionsAndSingleRun(t *testing.T) {
 	db := openBackupMigrationDB(t)
 	defer db.Close()

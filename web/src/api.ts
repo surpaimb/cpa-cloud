@@ -501,8 +501,10 @@ export type ChannelMonitorSummary = {
 
 export type BackupKeyProvider = {
   id: string
-  kind: 'windows-dpapi-user'
-  scope: 'current-user'
+  kind: 'windows-dpapi-user' | 'linux-systemd-credential-v1'
+  scope: 'current-user' | 'systemd-service'
+  instance_id: string | null
+  key_id: string | null
   status: 'ready' | 'unavailable' | 'degraded'
   reason_code: string | null
   active_version: number
@@ -517,7 +519,9 @@ export type BackupRun = {
   plan_id: string
   plan_revision: number
   key_provider_id: string
-  key_provider_kind: 'windows-dpapi-user'
+  key_provider_kind: 'windows-dpapi-user' | 'linux-systemd-credential-v1'
+  key_provider_instance_id: string | null
+  key_provider_key_id: string | null
   key_provider_version: number
   trigger_kind: 'scheduled' | 'manual'
   requested_by_admin_id: string | null
@@ -1181,8 +1185,8 @@ export const api = {
   billingRefunds: (afterId?: string, limit = 50, signal?: AbortSignal) => billingList<BillingRefund>('/billing/refunds', afterId, limit, signal),
   createBillingRefund: (body: { operation_id: string; payment_id: string; amount_micro: string }, csrf: string) => request<{ receipt: BillingReceipt; refund: BillingRefund }>('/billing/refunds', { method: 'POST', body: JSON.stringify(body) }, csrf),
   status: (signal?: AbortSignal) => request<SystemStatus>('/system/status', { signal }),
-	backupKeyProviders: (signal?: AbortSignal) => request<{ items: BackupKeyProvider[]; ready: boolean; store_ready: boolean; reason_code: string | null }>('/backups/key-providers', { signal }),
-	createBackupKeyProvider: (csrf: string) => request<BackupKeyProvider>('/backups/key-providers', { method: 'POST', body: JSON.stringify({ kind: 'windows-dpapi-user' }) }, csrf),
+	backupKeyProviders: (signal?: AbortSignal) => request<{ items: BackupKeyProvider[]; ready: boolean; store_ready: boolean; configured_kind?: BackupKeyProvider['kind']; reason_code: string | null }>('/backups/key-providers', { signal }),
+	createBackupKeyProvider: (csrf: string, kind: BackupKeyProvider['kind'] = 'windows-dpapi-user') => request<BackupKeyProvider>('/backups/key-providers', { method: 'POST', body: JSON.stringify({ kind }) }, csrf),
 	rotateBackupKeyProvider: (id: string, expectedRevision: number, csrf: string) => request<BackupKeyProvider>(`/backups/key-providers/${encodeURIComponent(id)}/rotate`, { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }) }, csrf),
 	activateBackupKeyProviderVersion: (id: string, expectedRevision: number, version: number, csrf: string) => request<BackupKeyProvider>(`/backups/key-providers/${encodeURIComponent(id)}/activate-version`, { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, version }) }, csrf),
 	backupPlans: (signal?: AbortSignal) => request<{ items: BackupPlan[] }>('/backups/plans', { signal }),
