@@ -1100,19 +1100,9 @@ mod platform {
             fault,
         )?;
         let verified_handle = if already_retired {
-            verify_retired_artifact(
-                retirement_tx,
-                transaction_path,
-                &quarantine_artifact,
-                kind,
-            )?
+            verify_retired_artifact(retirement_tx, transaction_path, &quarantine_artifact, kind)?
         } else {
-            verify_artifact(
-                retirement_tx,
-                transaction_path,
-                &quarantine_artifact,
-                kind,
-            )?
+            verify_artifact(retirement_tx, transaction_path, &quarantine_artifact, kind)?
         };
         #[cfg(test)]
         wait_at_barrier(
@@ -1128,12 +1118,8 @@ mod platform {
                 .map_err(|source| io_error(transaction_path.join(&quarantine), source))?;
             fault.boundary()?;
         }
-        let current = verify_retired_artifact(
-            retirement_tx,
-            transaction_path,
-            &quarantine_artifact,
-            kind,
-        )?;
+        let current =
+            verify_retired_artifact(retirement_tx, transaction_path, &quarantine_artifact, kind)?;
         require_same_identity(
             &current,
             &verified_handle,
@@ -1542,11 +1528,8 @@ mod platform {
             return verify_artifact(parent, parent_path, artifact, kind);
         }
         let display = parent_path.join(&artifact.name);
-        let mut file = open_private_file_at(
-            parent.as_raw_fd(),
-            OsStr::new(&artifact.name),
-            &display,
-        )?;
+        let mut file =
+            open_private_file_at(parent.as_raw_fd(), OsStr::new(&artifact.name), &display)?;
         let before = file
             .metadata()
             .map_err(|source| io_error(&display, source))?;
