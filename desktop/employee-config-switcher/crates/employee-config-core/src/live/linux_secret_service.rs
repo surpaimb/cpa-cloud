@@ -175,7 +175,7 @@ struct CreateRequest<'a> {
 trait SecretServiceBackend {
     fn search(&mut self, attributes: &Attributes) -> Result<Vec<ServiceItem>, BackendError>;
     fn create_item(&mut self, request: CreateRequest<'_>) -> Result<String, BackendError>;
-    fn get_secret(&mut self, handle: &str) -> Result<Vec<u8>, BackendError>;
+    fn get_secret(&mut self, handle: &str) -> Result<Zeroizing<Vec<u8>>, BackendError>;
     fn delete_item(&mut self, handle: &str) -> Result<(), BackendError>;
 }
 
@@ -478,7 +478,7 @@ fn verify_item<B: SecretServiceBackend>(
         return VerifiedItem::Corrupt;
     }
     let secret = match backend.get_secret(&item.handle) {
-        Ok(secret) => Zeroizing::new(secret),
+        Ok(secret) => secret,
         Err(BackendError::Locked | BackendError::PromptRequired) => return VerifiedItem::Locked,
         Err(BackendError::Corrupt) => return VerifiedItem::Corrupt,
         Err(_) => return VerifiedItem::Unavailable,
@@ -1137,7 +1137,7 @@ impl SecretServiceBackend for DbusBackend {
         Ok(item.to_string())
     }
 
-    fn get_secret(&mut self, handle: &str) -> Result<Vec<u8>, BackendError> {
+    fn get_secret(&mut self, handle: &str) -> Result<Zeroizing<Vec<u8>>, BackendError> {
         let proxy = self
             .connection
             .with_proxy(SERVICE_NAME, handle, DBUS_TIMEOUT);
@@ -1149,10 +1149,10 @@ impl SecretServiceBackend for DbusBackend {
         ),) = proxy
             .method_call(ITEM_INTERFACE, "GetSecret", (self.session.clone(),))
             .map_err(|error| Self::classify(&error))?;
-        if session != self.session || !parameters.is_empty() || content_type != CONTENT_TYPE {
-            return Err(BackendError::Corrupt);
-        }
-        Ok(value)
+        // Own the decoded allocation before any metadata rejection. The guard
+        // also stays alive through the caller's envelope and identity checks.
+        let value = Zeroizing::new(value);
+        validate_secret_transfer(session == self.session, &parameters, &content_type, value)
     }
 
     fn delete_item(&mut self, handle: &str) -> Result<(), BackendError> {
@@ -1167,6 +1167,23 @@ impl SecretServiceBackend for DbusBackend {
         }
         Ok(())
     }
+}
+
+fn validate_secret_transfer(
+    session_matches: bool,
+    parameters: &[u8],
+    content_type: &str,
+    value: Zeroizing<Vec<u8>>,
+) -> Result<Zeroizing<Vec<u8>>, BackendError> {
+    // Exact read compatibility only: no normalization, service-brand trust,
+    // text decoding or NUL truncation. Writes retain canonical CONTENT_TYPE.
+    if !session_matches
+        || !parameters.is_empty()
+        || !matches!(content_type, CONTENT_TYPE | "text/plain")
+    {
+        return Err(BackendError::Corrupt);
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -1211,6 +1228,7 @@ mod tests {
         last_replace: Option<bool>,
         next_fault: Option<Fault>,
         replacement_after_delete: Option<FakeItem>,
+        read_content_type: Option<String>,
     }
 
     #[derive(Clone, Default)]
@@ -1286,17 +1304,23 @@ mod tests {
             Ok(handle)
         }
 
-        fn get_secret(&mut self, handle: &str) -> Result<Vec<u8>, BackendError> {
+        fn get_secret(&mut self, handle: &str) -> Result<Zeroizing<Vec<u8>>, BackendError> {
             let mut state = self.state.lock().unwrap();
             state.gets += 1;
             if Self::take_fault(&mut state, Fault::GetLocked) {
                 return Err(BackendError::Locked);
             }
-            state
+            let value = state
                 .items
                 .get(handle)
-                .map(|item| item.secret.clone())
-                .ok_or(BackendError::Missing)
+                .map(|item| Zeroizing::new(item.secret.clone()))
+                .ok_or(BackendError::Missing)?;
+            validate_secret_transfer(
+                true,
+                &[],
+                state.read_content_type.as_deref().unwrap_or(CONTENT_TYPE),
+                value,
+            )
         }
 
         fn delete_item(&mut self, handle: &str) -> Result<(), BackendError> {
@@ -1339,6 +1363,276 @@ mod tests {
         match outcome {
             RecoveryKeyCreateOutcome::Created(created) => created,
             other => panic!("expected Created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_mime_is_exact_and_never_decodes_or_truncates_binary() {
+        for mime in [CONTENT_TYPE, "text/plain"] {
+            let binary = vec![0, 0xff, 0x80, b'a', 0, b'z'];
+            let received =
+                validate_secret_transfer(true, &[], mime, Zeroizing::new(binary.clone())).unwrap();
+            assert!(received.as_slice() == binary.as_slice());
+            for (matches, parameters) in [(false, vec![]), (true, vec![0]), (false, vec![1])] {
+                assert!(matches!(
+                    validate_secret_transfer(
+                        matches,
+                        &parameters,
+                        mime,
+                        Zeroizing::new(binary.clone())
+                    ),
+                    Err(BackendError::Corrupt)
+                ));
+            }
+        }
+        for mime in [
+            "",
+            "application/json",
+            "application/Octet-Stream",
+            "Text/Plain",
+            "TEXT/PLAIN",
+            "text/plain; charset=utf-8",
+            "text/plain;charset=utf-8",
+            "application/octet-stream; charset=binary",
+            " text/plain",
+            "text/plain ",
+            "text/plain\n",
+            "text/plain\0",
+            "text/plain,application/octet-stream",
+        ] {
+            assert!(matches!(
+                validate_secret_transfer(
+                    true,
+                    &[],
+                    mime,
+                    Zeroizing::new(vec![0x51; ENVELOPE_BYTES])
+                ),
+                Err(BackendError::Corrupt)
+            ));
+        }
+    }
+
+    fn rechecksum(bytes: &mut [u8], context: &[u8]) {
+        let offset = bytes.len() - CHECKSUM_BYTES;
+        let mut hasher = Sha256::new();
+        hasher.update(context);
+        hasher.update(&bytes[..offset]);
+        bytes[offset..].copy_from_slice(&hasher.finalize());
+    }
+
+    #[test]
+    fn both_read_types_preserve_envelope_format_checksum_and_identity_rejection() {
+        for mime in [CONTENT_TYPE, "text/plain"] {
+            let tx = transaction(0x61);
+            let namespace = [0x62; LOCK_NAMESPACE_BYTES];
+            let id = [0x63; ITEM_ID_BYTES];
+            let key = BackupKey::from_bytes(Zeroizing::new([0; KEY_BYTES]));
+            let original = encode_envelope(tx, 1001, namespace, id, &key);
+            let transferred =
+                |bytes| validate_secret_transfer(true, &[], mime, Zeroizing::new(bytes)).unwrap();
+            let accepted = transferred(original.clone());
+            match decode_envelope(tx, 1001, namespace, id, &accepted) {
+                Envelope::Available(key) => assert!(key.expose().iter().all(|byte| *byte == 0)),
+                _ => panic!("expected synthetic envelope acceptance"),
+            }
+            for length in [0, ENVELOPE_BYTES - 1, ENVELOPE_BYTES + 1] {
+                let mut changed = original.clone();
+                changed.resize(length, 0);
+                assert!(matches!(
+                    decode_envelope(tx, 1001, namespace, id, &transferred(changed)),
+                    Envelope::Corrupt
+                ));
+            }
+            for offset in [0, ENVELOPE_BYTES - 1] {
+                let mut changed = original.clone();
+                changed[offset] ^= 1;
+                assert!(matches!(
+                    decode_envelope(tx, 1001, namespace, id, &transferred(changed)),
+                    Envelope::Corrupt
+                ));
+            }
+            // Isolate magic rejection from checksum rejection: removing the
+            // magic guard would accept this otherwise valid envelope.
+            let mut wrong_magic = original.clone();
+            wrong_magic[0] ^= 1;
+            rechecksum(&mut wrong_magic, ENVELOPE_CONTEXT);
+            assert!(matches!(
+                decode_envelope(tx, 1001, namespace, id, &transferred(wrong_magic)),
+                Envelope::Corrupt
+            ));
+            // Recompute a valid checksum to prove it is not a MAC or a substitute
+            // for transaction/UID/namespace/item identity comparison.
+            for offset in [16, 32, 36, 68] {
+                let mut changed = original.clone();
+                changed[offset] ^= 1;
+                rechecksum(&mut changed, ENVELOPE_CONTEXT);
+                assert!(matches!(
+                    decode_envelope(tx, 1001, namespace, id, &transferred(changed)),
+                    Envelope::WrongIdentity
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn both_read_types_preserve_provider_attribute_and_reference_checks() {
+        for mime in [CONTENT_TYPE, "text/plain"] {
+            let (root, _) = fixture();
+            let backend = FakeBackend::default();
+            let mut provider = provider(backend.clone(), root.path());
+            let tx = transaction(0x64);
+            let first = created(provider.create(tx)); // Fake create asserts canonical write MIME.
+            backend.state.lock().unwrap().read_content_type = Some(mime.to_owned());
+            match provider.open(tx, &first.reference) {
+                RecoveryKeyOpenOutcome::Available(key) => {
+                    assert!(verify_slices_are_equal(key.expose(), first.key.expose()).is_ok())
+                }
+                _ => panic!("expected synthetic provider acceptance"),
+            }
+            backend.state.lock().unwrap().read_content_type =
+                Some("text/plain; charset=utf-8".to_owned());
+            assert!(matches!(
+                provider.open(tx, &first.reference),
+                RecoveryKeyOpenOutcome::Corrupt
+            ));
+            backend.state.lock().unwrap().read_content_type = Some(mime.to_owned());
+            let item = backend
+                .state
+                .lock()
+                .unwrap()
+                .items
+                .values()
+                .next()
+                .unwrap()
+                .clone();
+            let service_item = ServiceItem {
+                handle: backend
+                    .state
+                    .lock()
+                    .unwrap()
+                    .items
+                    .keys()
+                    .next()
+                    .unwrap()
+                    .clone(),
+                attributes: item.attributes.clone(),
+                locked: false,
+            };
+            let parsed_id: [u8; ITEM_ID_BYTES] =
+                hex::decode(item.attributes.get("item-id").unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+            for name in item.attributes.keys() {
+                let mut altered = service_item.clone();
+                altered.attributes.insert(name.clone(), "wrong".to_owned());
+                assert!(!matches!(
+                    verify_item(
+                        &mut backend.clone(),
+                        tx,
+                        provider.uid,
+                        provider.lock_namespace,
+                        &altered,
+                        Some(parsed_id)
+                    ),
+                    VerifiedItem::Available { .. }
+                ));
+                altered = service_item.clone();
+                altered.attributes.remove(name);
+                assert!(!matches!(
+                    verify_item(
+                        &mut backend.clone(),
+                        tx,
+                        provider.uid,
+                        provider.lock_namespace,
+                        &altered,
+                        Some(parsed_id)
+                    ),
+                    VerifiedItem::Available { .. }
+                ));
+            }
+            let mut extra = service_item.clone();
+            extra
+                .attributes
+                .insert("unexpected".to_owned(), "value".to_owned());
+            assert!(matches!(
+                verify_item(
+                    &mut backend.clone(),
+                    tx,
+                    provider.uid,
+                    provider.lock_namespace,
+                    &extra,
+                    Some(parsed_id)
+                ),
+                VerifiedItem::Corrupt
+            ));
+            let mut wrong_id = parsed_id;
+            wrong_id[0] ^= 1;
+            assert!(matches!(
+                verify_item(
+                    &mut backend.clone(),
+                    tx,
+                    provider.uid,
+                    provider.lock_namespace,
+                    &service_item,
+                    Some(wrong_id)
+                ),
+                VerifiedItem::WrongIdentity
+            ));
+            for offset in [0, 16, 32, 36, 68, 84, REFERENCE_BYTES - 1] {
+                let mut changed = first.reference.opaque_reference().to_vec();
+                changed[offset] ^= 1;
+                // Identity and attribute-digest corruption must fail even with
+                // a freshly recomputed unkeyed checksum.
+                if (16..116).contains(&offset) {
+                    rechecksum(&mut changed, REFERENCE_CONTEXT);
+                }
+                let reference =
+                    RecoveryKeyReference::new(PROVIDER_KIND, PROVIDER_VERSION, changed).unwrap();
+                assert!(!matches!(
+                    provider.open(tx, &reference),
+                    RecoveryKeyOpenOutcome::Available(_)
+                ));
+            }
+            for (kind, version) in [
+                ("different-provider", PROVIDER_VERSION),
+                (PROVIDER_KIND, PROVIDER_VERSION + 1),
+            ] {
+                let reference = RecoveryKeyReference::new(
+                    kind,
+                    version,
+                    first.reference.opaque_reference().to_vec(),
+                )
+                .unwrap();
+                assert!(matches!(
+                    provider.open(tx, &reference),
+                    RecoveryKeyOpenOutcome::WrongIdentity
+                ));
+            }
+            // A valid checksum must not mask a missing reference-magic guard.
+            // All other identity fields still select the original valid item.
+            let mut wrong_magic = first.reference.opaque_reference().to_vec();
+            wrong_magic[0] ^= 1;
+            rechecksum(&mut wrong_magic, REFERENCE_CONTEXT);
+            let reference =
+                RecoveryKeyReference::new(PROVIDER_KIND, PROVIDER_VERSION, wrong_magic).unwrap();
+            assert!(matches!(
+                provider.open(tx, &reference),
+                RecoveryKeyOpenOutcome::Corrupt
+            ));
+            for length in [REFERENCE_BYTES - 1, REFERENCE_BYTES + 1] {
+                let mut changed = first.reference.opaque_reference().to_vec();
+                changed.resize(length, 0);
+                let reference =
+                    RecoveryKeyReference::new(PROVIDER_KIND, PROVIDER_VERSION, changed).unwrap();
+                assert!(matches!(
+                    provider.open(tx, &reference),
+                    RecoveryKeyOpenOutcome::Corrupt
+                ));
+            }
+            let state = backend.state.lock().unwrap();
+            assert_eq!(state.creates, 1);
+            assert_eq!(state.deletes, 0);
         }
     }
 
@@ -1757,7 +2051,7 @@ mod tests {
             self.inner.create_item(request)
         }
 
-        fn get_secret(&mut self, handle: &str) -> Result<Vec<u8>, BackendError> {
+        fn get_secret(&mut self, handle: &str) -> Result<Zeroizing<Vec<u8>>, BackendError> {
             self.inner.get_secret(handle)
         }
 
