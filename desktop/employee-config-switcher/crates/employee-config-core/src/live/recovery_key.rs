@@ -596,7 +596,7 @@ impl RecoveryKeyCleanupSequence {
             terminal,
             transaction_id,
             reference,
-            replacement_journal_version: 1,
+            replacement_journal_version: REPLACEMENT_JOURNAL_FORMAT_VERSION,
             root_device,
             root_inode,
             workspace_target,
