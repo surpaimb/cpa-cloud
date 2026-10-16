@@ -12,8 +12,7 @@ use super::{
     replacement::ReplacementPhase,
     workspace_removal::WorkspaceRemovalReceipt,
     workspace_retirement::{
-        WorkspaceContentsRetiredReceipt, WorkspaceRetirementAuthorization,
-        WorkspaceRetirementPlan,
+        WorkspaceContentsRetiredReceipt, WorkspaceRetirementAuthorization, WorkspaceRetirementPlan,
     },
 };
 

@@ -293,7 +293,9 @@ mod platform {
                     OsStr::new(PROOF_DIRECTORY),
                     &proof_path,
                 )?;
-                root_dir.sync_all().map_err(|source| io_error(root, source))?;
+                root_dir
+                    .sync_all()
+                    .map_err(|source| io_error(root, source))?;
                 fault.checkpoint()?;
                 directory
             }
@@ -354,7 +356,9 @@ mod platform {
                 retained_name: retained,
             };
             persist_pending(&proof_dir, &proof_path, &pending_file, &proof, fault)?;
-            root_dir.sync_all().map_err(|source| io_error(root, source))?;
+            root_dir
+                .sync_all()
+                .map_err(|source| io_error(root, source))?;
             fault.checkpoint()?;
             proof
         };
@@ -489,7 +493,11 @@ mod platform {
         }
         let workspace = open_exact_empty(replacement, authorization, workspace_path)?;
         require_identity(&workspace, proof.workspace_identity, workspace_path)?;
-        require_identity(replacement, replacement_id, &root.join(REPLACEMENT_DIRECTORY))?;
+        require_identity(
+            replacement,
+            replacement_id,
+            &root.join(REPLACEMENT_DIRECTORY),
+        )?;
         require_identity(root_dir, root_id, root)?;
         rename_no_replace(
             replacement.as_raw_fd(),
@@ -513,7 +521,9 @@ mod platform {
             .sync_all()
             .map_err(|source| io_error(root.join(REPLACEMENT_DIRECTORY), source))?;
         fault.checkpoint()?;
-        root_dir.sync_all().map_err(|source| io_error(root, source))?;
+        root_dir
+            .sync_all()
+            .map_err(|source| io_error(root, source))?;
         fault.checkpoint()
     }
 
@@ -560,7 +570,9 @@ mod platform {
             .sync_all()
             .map_err(|source| io_error(proof_path, source))?;
         fault.checkpoint()?;
-        root_dir.sync_all().map_err(|source| io_error(root, source))?;
+        root_dir
+            .sync_all()
+            .map_err(|source| io_error(root, source))?;
         fault.checkpoint()?;
         let (_, final_id, final_bytes) = read_proof(
             proof_dir,
@@ -622,7 +634,9 @@ mod platform {
         proof_dir
             .sync_all()
             .map_err(|source| io_error(proof_path, source))?;
-        root_dir.sync_all().map_err(|source| io_error(root, source))?;
+        root_dir
+            .sync_all()
+            .map_err(|source| io_error(root, source))?;
         let (_, reopened_id, reopened_bytes) = read_proof(
             proof_dir,
             &name,
@@ -660,8 +674,7 @@ mod platform {
         if !bytes.ends_with(b"\n") {
             return Err(WorkspaceRemovalError::IncompleteWrite(path));
         }
-        let proof =
-            serde_json::from_slice(&bytes).map_err(|_| WorkspaceRemovalError::Corrupt)?;
+        let proof = serde_json::from_slice(&bytes).map_err(|_| WorkspaceRemovalError::Corrupt)?;
         validate_proof(&proof, root_id, authorization, replacement_id)?;
         file.sync_all().map_err(|source| io_error(&path, source))?;
         Ok((proof, opened_id, bytes))
@@ -803,11 +816,8 @@ mod platform {
 
     fn acquire_target_lock(parent: &File, path: &Path) -> Result<File, WorkspaceRemovalError> {
         let lock_path = path.join(TARGET_LOCK_FILE);
-        let lock = open_private_file_at(
-            parent.as_raw_fd(),
-            OsStr::new(TARGET_LOCK_FILE),
-            &lock_path,
-        )?;
+        let lock =
+            open_private_file_at(parent.as_raw_fd(), OsStr::new(TARGET_LOCK_FILE), &lock_path)?;
         lock_exclusive(&lock, &lock_path)?;
         Ok(lock)
     }
