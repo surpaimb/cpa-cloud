@@ -24,7 +24,7 @@ MARKERS = ("ISOLATION_OK", "PRIVATE_BUS_SERVICE_UID_PID_OK", "CREATE_AND_LIBSECR
            "MISSING_ITEM_UNCHANGED_OK", "MISSING_SERVICE_OK", "SECRET_LOG_SCAN_OK", "OWNED_PROCESSES_STOPPED")
 FAILURES = ("fixture-binary-path", "fixture-binary-missing", "fixture-bus-exited", "fixture-bus-unavailable",
             "fixture-daemon-exited", "fixture-identity-failed", "fixture-case-failed", "fixture-oracle-invalid",
-            "fixture-secret-output", "fixture-child-remains")
+            "fixture-secret-output", "fixture-child-remains", "fixture-scan-incomplete")
 PANICS = ("fixture-check-failed", "fixture-root-required", "fixture-mode-required", "fixture-root-metadata",
           "fixture-cgroup", "fixture-approval-failed", "fixture-provider-failed", "fixture-create-failed",
           "fixture-retry-failed", "oracle-create-failed", "oracle-write-failed", "oracle-flush-failed",
@@ -32,7 +32,10 @@ PANICS = ("fixture-check-failed", "fixture-root-required", "fixture-mode-require
           "fixture-other-approval-failed", "fixture-other-provider-failed", "fixture-missing-reference-failed",
           "fixture-mode-invalid", "native-access-denied", "native-unknown-method", "native-unknown-object",
           "native-invalid-args", "native-locked", "native-missing", "native-no-session", "native-other-error",
-          "native-create-no-item", "native-create-one-item", "native-create-multiple-items", "native-search-failed")
+          "native-create-no-item", "native-create-one-item", "native-create-multiple-items", "native-search-failed",
+          "native-item-locked", "native-attribute-count", "native-extra-schema", "native-attribute-mismatch",
+          "native-envelope-valid", "native-envelope-identity", "native-envelope-corrupt", "native-transfer-metadata",
+          "native-secret-unavailable", "native-item-id-invalid")
 
 
 def secret_forms(value):
@@ -68,6 +71,7 @@ def scan(work, outputs):
             body = b"CPA-SS-KEY-V1\0\0\0" + reference[16:84] + secrets[0]
             secrets.append(body + hashlib.sha256(b"cpa-cloud/linux-secret-service/envelope/v1\0" + body).digest())
     reject_secret_output(secrets, outputs)
+    return len(secrets) == 2
 
 
 class Fixture:
@@ -197,7 +201,7 @@ def inside(metadata_path):
         for name in ("bus.log", "keyring.log"):
             if (work / name).is_file():
                 outputs.append((work / name).read_bytes())
-        scan(work, outputs)
+        require(scan(work, outputs), "fixture-scan-incomplete")
         print("SECRET_LOG_SCAN_OK", flush=True)
         print("OWNED_PROCESSES_STOPPED", flush=True)
 

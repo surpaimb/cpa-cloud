@@ -74,7 +74,60 @@ fn volatile_collection_interop() {
                 let attributes = base_attributes(transaction, uid, provider.inner.lock_namespace);
                 match provider.inner.backend.search(&attributes) {
                     Ok(items) if items.is_empty() => eprintln!("native-create-no-item"),
-                    Ok(items) if items.len() == 1 => eprintln!("native-create-one-item"),
+                    Ok(items) if items.len() == 1 => {
+                        eprintln!("native-create-one-item");
+                        let item = &items[0];
+                        if item.locked {
+                            eprintln!("native-item-locked");
+                        }
+                        if item.attributes.len() != 7 {
+                            eprintln!("native-attribute-count");
+                        }
+                        if item.attributes.contains_key("xdg:schema") {
+                            eprintln!("native-extra-schema");
+                        }
+                        let item_id = item
+                            .attributes
+                            .get("item-id")
+                            .and_then(|value| hex::decode(value).ok())
+                            .and_then(|bytes| <[u8; 16]>::try_from(bytes.as_slice()).ok());
+                        if let Some(item_id) = item_id {
+                            if item.attributes
+                                != full_attributes(
+                                    transaction,
+                                    uid,
+                                    provider.inner.lock_namespace,
+                                    item_id,
+                                )
+                            {
+                                eprintln!("native-attribute-mismatch");
+                            }
+                            match provider.inner.backend.get_secret(&item.handle) {
+                                Ok(bytes) => {
+                                    let bytes = Zeroizing::new(bytes);
+                                    match decode_envelope(
+                                        transaction,
+                                        uid,
+                                        provider.inner.lock_namespace,
+                                        item_id,
+                                        &bytes,
+                                    ) {
+                                        Envelope::Available(_) => {
+                                            eprintln!("native-envelope-valid")
+                                        }
+                                        Envelope::WrongIdentity => {
+                                            eprintln!("native-envelope-identity")
+                                        }
+                                        Envelope::Corrupt => eprintln!("native-envelope-corrupt"),
+                                    }
+                                }
+                                Err(BackendError::Corrupt) => eprintln!("native-transfer-metadata"),
+                                Err(_) => eprintln!("native-secret-unavailable"),
+                            }
+                        } else {
+                            eprintln!("native-item-id-invalid");
+                        }
+                    }
                     Ok(_) => eprintln!("native-create-multiple-items"),
                     Err(_) => eprintln!("native-search-failed"),
                 }
