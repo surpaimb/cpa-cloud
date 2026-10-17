@@ -1,11 +1,18 @@
 //! Independent test-only entry point for interop/CONTRACT.md, never a production API.
 use super::*;
-use std::{cell::RefCell, fs, os::unix::fs::MetadataExt};
+use std::{
+    cell::{Cell, RefCell},
+    fs,
+    os::unix::fs::MetadataExt,
+};
 
 thread_local! {
     // Enabled only after the explicit native test has checked its fixture root,
     // UID, cgroup and private bus address. Normal contract tests have no oracle.
     static DIAGNOSTIC_ROOT: RefCell<Option<File>> = const { RefCell::new(None) };
+    // Counts attempts before exclusive oracle writes: a rejected overwrite must
+    // never masquerade as duplicate detection. Test-only, process-local evidence.
+    static OUTGOING_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     static REOPEN_TRACE: RefCell<Option<BTreeMap<&'static str, &'static str>>> = const { RefCell::new(None) };
 }
 
@@ -151,6 +158,7 @@ fn write_sample(directory: &File, name: &str, value: &[u8]) -> io::Result<()> {
 /// Capture the actual original random Key and envelope before the first secret
 /// is sent. Failure prevents sending. Never derive an oracle from a response.
 pub(super) fn capture_outgoing(key: &BackupKey, envelope: &[u8]) -> bool {
+    OUTGOING_ATTEMPTS.with(|count| count.set(count.get() + 1));
     DIAGNOSTIC_ROOT.with(|root| {
         let root = root.borrow();
         let Some(directory) = root.as_ref() else {
@@ -776,6 +784,24 @@ fn volatile_collection_interop() {
             .expect("oracle-reference-failed");
         stage("reference-build", true);
         match mode.as_str() {
+            "duplicate-open" => {
+                check(OUTGOING_ATTEMPTS.with(Cell::get) == 0);
+                check(matches!(
+                    provider.open(transaction, &reference),
+                    RecoveryKeyOpenOutcome::Corrupt
+                ));
+                check(OUTGOING_ATTEMPTS.with(Cell::get) == 0);
+                println!("A2_OPEN_CORRUPT_OK");
+            }
+            "duplicate-create" => {
+                check(OUTGOING_ATTEMPTS.with(Cell::get) == 0);
+                check(matches!(
+                    provider.create(transaction),
+                    RecoveryKeyCreateOutcome::Unavailable
+                ));
+                check(OUTGOING_ATTEMPTS.with(Cell::get) == 0);
+                println!("A2_CREATE_UNAVAILABLE_NO_SEND_OK");
+            }
             "reopen" => {
                 let expected = Zeroizing::new(oracle(
                     &work.join("expected.key"),
