@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
 #include <sys/stat.h>
@@ -13,6 +14,24 @@
 #define ENVELOPE_SIZE 148
 #define KEY_SIZE 32
 #define SESSION "/org/freedesktop/secrets/collection/session"
+/* Fixed source-owned checkpoints only; never print arguments or error objects. */
+static const char *stage_names[] = {"guard", "directory", "reference", "original-envelope",
+    "original-key", "original-path", "original-valid", "session", "random", "second-valid",
+    "capture-key", "capture-envelope", "encode", "owner", "create-call", "create-reply", "capture-path",
+    "pair-envelope", "pair-key", "pair-path", "pair-valid", "search", "cardinality", "pair-items"};
+static unsigned char stage_states[G_N_ELEMENTS(stage_names)];
+enum { GUARD, DIRECTORY, REFERENCE, ORIGINAL_ENVELOPE, ORIGINAL_KEY, ORIGINAL_PATH, ORIGINAL_VALID,
+    SESSION_OPEN, RANDOM_KEY, SECOND_VALID, CAPTURE_KEY, CAPTURE_ENVELOPE, ENCODE, OWNER, CREATE_CALL,
+    CREATE_REPLY, CAPTURE_PATH, PAIR_ENVELOPE, PAIR_KEY, PAIR_PATH, PAIR_VALID, SEARCH, CARDINALITY, PAIR_ITEMS };
+static gboolean checkpoint(unsigned stage, gboolean ok) {
+    stage_states[stage] = ok ? 1 : 2;
+    return ok;
+}
+static void emit_stages(void) {
+    static const char *states[] = {"not-reached", "ok", "failed"};
+    for (unsigned i = 0; i < G_N_ELEMENTS(stage_names); i++)
+        g_print("A2_HELPER_STAGE %s %s\n", stage_names[i], states[stage_states[i]]);
+}
 typedef struct { SecretService parent; } A2NoPrompt;
 typedef struct { SecretServiceClass parent; } A2NoPromptClass;
 G_DEFINE_TYPE(A2NoPrompt, a2_no_prompt, SECRET_TYPE_SERVICE)
@@ -137,17 +156,18 @@ static gboolean inject(SecretService *service, int dir, const unsigned char refe
     unsigned char second[148], key[32];
     memcpy(second, original, sizeof second);
     second[68] ^= 1; /* guaranteed different identity; base-query attributes unchanged */
-    gboolean ok = getrandom(key, sizeof key, 0) == (ssize_t)sizeof key && memcmp(key, original_key, sizeof key) != 0;
+    gboolean ok = checkpoint(RANDOM_KEY, getrandom(key, sizeof key, 0) == (ssize_t)sizeof key && memcmp(key, original_key, sizeof key) != 0);
     if (!ok) { wipe(key, sizeof key); wipe(second, sizeof second); return FALSE; }
     memcpy(second + 84, key, sizeof key);
     checksum(second, second + 116);
-    ok = valid_envelope(second, sizeof second, reference, key) &&
-        save_sample(dir, "duplicate.sent.key", key, sizeof key) &&
-        save_sample(dir, "duplicate.sent.envelope", second, sizeof second);
+    ok = checkpoint(SECOND_VALID, valid_envelope(second, sizeof second, reference, key)) &&
+        checkpoint(CAPTURE_KEY, save_sample(dir, "duplicate.sent.key", key, sizeof key)) &&
+        checkpoint(CAPTURE_ENVELOPE, save_sample(dir, "duplicate.sent.envelope", second, sizeof second));
     /* The exact outgoing bytes, not a returned value, are now durably captured. */
     if (ok) {
         SecretValue *value = secret_value_new((const char *)second, sizeof second, "application/octet-stream");
         GVariant *encoded = secret_service_encode_dbus_secret(service, value);
+        checkpoint(ENCODE, encoded != NULL);
         GHashTable *attrs = attributes(second);
         GVariantBuilder properties, attr_values;
         g_variant_builder_init(&properties, G_VARIANT_TYPE("a{sv}"));
@@ -159,12 +179,14 @@ static gboolean inject(SecretService *service, int dir, const unsigned char refe
         g_variant_builder_add(&properties, "{sv}", "org.freedesktop.Secret.Item.Attributes", g_variant_builder_end(&attr_values));
         g_variant_builder_add(&properties, "{sv}", "org.freedesktop.Secret.Item.Label", g_variant_new_string("CPA synthetic A2 duplicate"));
         gchar *owner = g_dbus_proxy_get_name_owner(G_DBUS_PROXY(service));
+        checkpoint(OWNER, owner != NULL);
         GVariant *reply = NULL;
         if (encoded && owner) {
             reply = g_dbus_connection_call_sync(g_dbus_proxy_get_connection(G_DBUS_PROXY(service)), owner,
                 SESSION, "org.freedesktop.Secret.Collection", "CreateItem",
                 g_variant_new("(a{sv}@(oayays)b)", &properties, encoded, FALSE),
                 G_VARIANT_TYPE("(oo)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, NULL, NULL);
+            checkpoint(CREATE_CALL, reply != NULL);
         } else {
             g_variant_builder_clear(&properties);
             if (encoded) g_variant_unref(encoded);
@@ -173,9 +195,9 @@ static gboolean inject(SecretService *service, int dir, const unsigned char refe
         if (reply) {
             const char *path, *prompt;
             g_variant_get(reply, "(&o&o)", &path, &prompt);
-            ok = strcmp(prompt, "/") == 0 && g_str_has_prefix(path, SESSION "/") &&
-                strcmp(path, original_path) != 0 && strlen(path) < 256 &&
-                save_sample(dir, "duplicate.item.path", path, strlen(path));
+            ok = checkpoint(CREATE_REPLY, strcmp(prompt, "/") == 0 && g_str_has_prefix(path, SESSION "/") &&
+                strcmp(path, original_path) != 0 && strlen(path) < 256) &&
+                checkpoint(CAPTURE_PATH, save_sample(dir, "duplicate.item.path", path, strlen(path)));
             g_variant_unref(reply);
         }
         g_free(owner); g_hash_table_unref(attrs); secret_value_unref(value);
@@ -187,18 +209,20 @@ static gboolean verify_pair(SecretService *service, int dir, const unsigned char
                             const unsigned char original[148], const unsigned char original_key[32],
                             const char *original_path) {
     unsigned char second[148], key[32]; char second_path[256];
-    gboolean ok = read_sample(dir, "duplicate.sent.envelope", second, sizeof second) &&
-        read_sample(dir, "duplicate.sent.key", key, sizeof key) && read_path(dir, "duplicate.item.path", second_path) &&
-        valid_envelope(second, sizeof second, reference, key) && memcmp(second + 68, original + 68, 16) != 0 &&
-        memcmp(key, original_key, sizeof key) != 0 && strcmp(second_path, original_path) != 0;
+    gboolean ok = checkpoint(PAIR_ENVELOPE, read_sample(dir, "duplicate.sent.envelope", second, sizeof second)) &&
+        checkpoint(PAIR_KEY, read_sample(dir, "duplicate.sent.key", key, sizeof key)) &&
+        checkpoint(PAIR_PATH, read_path(dir, "duplicate.item.path", second_path)) &&
+        checkpoint(PAIR_VALID, valid_envelope(second, sizeof second, reference, key) && memcmp(second + 68, original + 68, 16) != 0 &&
+        memcmp(key, original_key, sizeof key) != 0 && strcmp(second_path, original_path) != 0);
     GHashTable *query = g_hash_table_new(g_str_hash, g_str_equal);
     g_hash_table_insert(query, "application", "cpa-cloud");
     g_hash_table_insert(query, "purpose", "employee-config-recovery-key");
     gchar **unlocked = NULL, **locked = NULL;
-    if (ok) ok = secret_service_search_for_dbus_paths_sync(service, NULL, query, NULL, &unlocked, &locked, NULL);
+    if (ok) ok = checkpoint(SEARCH, secret_service_search_for_dbus_paths_sync(service, NULL, query, NULL, &unlocked, &locked, NULL));
     /* Broad query catches a third application/purpose item even with altered identity. */
-    if (ok) ok = unlocked && g_strv_length(unlocked) == 2 && (!locked || g_strv_length(locked) == 0) &&
-        strcmp(unlocked[0], unlocked[1]) != 0;
+    if (ok) ok = checkpoint(CARDINALITY, unlocked && g_strv_length(unlocked) == 2 && (!locked || g_strv_length(locked) == 0) &&
+        strcmp(unlocked[0], unlocked[1]) != 0);
+    gboolean items_reached = ok;
     for (unsigned i = 0; ok && i < 2; i++) {
         const unsigned char *expected = NULL, *expected_key = NULL;
         if (!strcmp(unlocked[i], original_path)) { expected = original; expected_key = original_key; }
@@ -219,6 +243,7 @@ static gboolean verify_pair(SecretService *service, int dir, const unsigned char
         g_hash_table_unref(wanted);
         if (item) g_object_unref(item);
     }
+    if (items_reached) checkpoint(PAIR_ITEMS, ok);
     g_hash_table_unref(query); g_strfreev(unlocked); g_strfreev(locked);
     wipe(key, sizeof key); wipe(second, sizeof second);
     return ok;
@@ -263,19 +288,23 @@ int main(int argc, char **argv) {
         if (!self_test()) return 11;
         g_print("A2_HELPER_SELF_TEST_OK\n"); return 0;
     }
-    if (geteuid() == 0 || getuid() != geteuid()) return 12;
+    atexit(emit_stages);
+    if (!checkpoint(GUARD, geteuid() != 0 && getuid() == geteuid())) return 12;
     const char *address = g_getenv("DBUS_SESSION_BUS_ADDRESS");
-    if (!address || !g_str_has_prefix(address, "unix:path=/opt/cpa-ss-preflight.")) return 13;
+    if (!checkpoint(GUARD, address && g_str_has_prefix(address, "unix:path=/opt/cpa-ss-preflight."))) return 13;
     int dir = private_directory();
-    if (dir < 0) return 14;
+    if (!checkpoint(DIRECTORY, dir >= 0)) return 14;
     unsigned char reference[148], original[148], original_key[32]; char original_path[256];
-    gboolean ok = read_sample(dir, "reference.bin", reference, sizeof reference) &&
-        read_sample(dir, "expected.envelope", original, sizeof original) &&
-        read_sample(dir, "expected.key", original_key, sizeof original_key) && read_path(dir, "item.path", original_path) &&
-        valid_envelope(original, sizeof original, reference, original_key) && memcmp(original + 68, reference + 68, 16) == 0;
+    gboolean ok = checkpoint(REFERENCE, read_sample(dir, "reference.bin", reference, sizeof reference)) &&
+        checkpoint(ORIGINAL_ENVELOPE, read_sample(dir, "expected.envelope", original, sizeof original)) &&
+        checkpoint(ORIGINAL_KEY, read_sample(dir, "expected.key", original_key, sizeof original_key)) &&
+        checkpoint(ORIGINAL_PATH, read_path(dir, "item.path", original_path)) &&
+        checkpoint(ORIGINAL_VALID, valid_envelope(original, sizeof original, reference, original_key) && memcmp(original + 68, reference + 68, 16) == 0);
+    gboolean session_reached = ok;
     SecretService *service = ok ? secret_service_open_sync(a2_no_prompt_get_type(), "org.freedesktop.secrets",
         SECRET_SERVICE_OPEN_SESSION, NULL, NULL) : NULL;
     ok = service != NULL;
+    if (session_reached) checkpoint(SESSION_OPEN, ok);
     if (ok && !strcmp(argv[1], "inject")) ok = inject(service, dir, reference, original, original_key, original_path);
     else if (ok && !strcmp(argv[1], "verify-two")) ok = verify_pair(service, dir, reference, original, original_key, original_path);
     else ok = FALSE;

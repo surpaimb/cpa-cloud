@@ -24,7 +24,10 @@ dbus-daemon 1.14.10-4ubuntu4.1 (AFL-2.1 or GPL-2.0-or-later), GNOME Keyring
 46.1-2ubuntu0.2 (GPL-2.0-or-later, component exceptions in package copyright),
 libsecret runtime/dev 0.21.4-1build3 (LGPL-2.1-or-later). GLib/GIO retain
 LGPL-2.1-or-later. Ubuntu package copyright records are required and hashed by
-the unchanged supervisor. Python uses its standard library (PSF license), Rust
+the supervisor. The 2026-10-18 diagnostic extension adds only independently
+authored fixed-category reporting, optional cleanup result hooks and public
+dummy/mock tests to the existing harness; its isolation and protocol checks
+remain the sources above. Python uses its standard library (PSF license), Rust
 uses existing locked dependencies with their own licenses; no new runtime
 dependency or vendored source. Compilation tools do not transfer their license
 to independently authored fixture source. No distribution/release is authorized.

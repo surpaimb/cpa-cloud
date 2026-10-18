@@ -22,15 +22,15 @@ class A2Tests(unittest.TestCase):
     def run_cases(self, fail_at=None):
         calls, env, output = [], {}, io.StringIO()
 
-        def call(args, environment, expected, label, outputs):
+        def call(args, environment, expected, label, outputs, report, phase):
             calls.append((args[0], args[-1] if args[0] != "cpa" else environment["CPA_SS_FIXTURE_MODE"]))
             if len(calls) == fail_at:
-                raise module.base.PreflightFailure(label)
+                raise module.CaseFailure("child-failed")
 
         with patch.object(module, "bounded_call", side_effect=call), contextlib.redirect_stdout(output):
             try:
                 module.cases(dict(cpa="cpa", verifier="verifier", a2_helper="helper"), env, [], lambda: None)
-            except module.base.PreflightFailure:
+            except module.CaseFailure:
                 pass
         return calls, output.getvalue()
 
@@ -52,7 +52,7 @@ class A2Tests(unittest.TestCase):
     def test_case_time_budget_reserves_cleanup_before_outer_deadline(self):
         with patch.object(module.time, "monotonic", side_effect=[0, 19]), \
                 patch.object(module, "bounded_call") as call:
-            with self.assertRaises(module.base.PreflightFailure):
+            with self.assertRaises(module.CaseFailure):
                 module.cases(dict(cpa="cpa", verifier="verifier", a2_helper="helper"), {}, [], lambda: None)
             call.assert_not_called()
 
@@ -70,7 +70,7 @@ class A2Tests(unittest.TestCase):
             outputs, relay = [], io.StringIO()
             config = {"side_effect": result} if isinstance(result, Exception) else {"return_value": result}
             with patch.object(module.base, "run", **config), contextlib.redirect_stdout(relay):
-                with self.assertRaises(module.base.PreflightFailure):
+                with self.assertRaises(module.CaseFailure):
                     module.bounded_call([], {}, b"expected", "a2-inject-failed", outputs)
             self.assertEqual(outputs, [b"private-untrusted-output"])
             self.assertNotIn("private-untrusted-output", relay.getvalue())
@@ -82,8 +82,9 @@ class A2Tests(unittest.TestCase):
             self.assertTrue(module.scan(HERE, [b"fixed-safe-label"]))
             for value in samples.values():
                 for form in module.volatile.secret_forms(value):
-                    with self.assertRaises(module.base.PreflightFailure):
-                        module.scan(HERE, [b"prefix" + form + b"suffix"])
+                    report = module.Report()
+                    self.assertTrue(module.scan(HERE, [b"prefix" + form + b"suffix"], report))
+                    self.assertEqual(report.states["scan-content"], "matched")
 
     def test_incomplete_or_invalid_sample_still_scans_other_actual_samples(self):
         second = b"public-dummy-second-key-32-bytes!!"
@@ -96,22 +97,25 @@ class A2Tests(unittest.TestCase):
                 return second if path.name == "duplicate.sent.key" else b"x" * size
             with patch.object(module.volatile, "read_sample", side_effect=read):
                 self.assertFalse(module.scan(HERE, []))
-                with self.assertRaises(module.base.PreflightFailure):
-                    module.scan(HERE, [second.hex().encode()])
+                report = module.Report()
+                self.assertFalse(module.scan(HERE, [second.hex().encode()], report))
+                self.assertEqual(report.states["scan-content"], "matched")
 
     def test_cleanup_attempts_every_owned_child_and_scan_even_if_stop_fails(self):
         children, handles, order = [Mock(), Mock()], [Mock()], []
+        report = module.Report()
         def stop(child):
             order.append(child)
             if child is children[1]:
                 raise OSError()
         with tempfile.TemporaryDirectory() as directory, patch.object(module, "stop", side_effect=stop), \
                 patch.object(module, "scan", return_value=True) as scan, contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(module.base.PreflightFailure):
-                module.cleanup(Path(directory), children, handles, [])
+            module.cleanup(Path(directory), dict(zip(("bus", "keyring"), children)),
+                           {"bus": handles[0]}, [], report, set())
             self.assertEqual(order, list(reversed(children)))
             scan.assert_called_once()
             handles[0].close.assert_called_once()
+            self.assertEqual(report.states["cleanup"], "failed")
 
     def test_second_samples_precede_encoding_and_only_false_create(self):
         start = C.index("static gboolean inject(")
@@ -163,8 +167,8 @@ class A2Tests(unittest.TestCase):
         source = (HERE / "fixture.py").read_text()
         self.assertIn("super().prepare(root, metadata)", source)
         self.assertNotIn("bus.conf.in", source)
-        self.assertLess(source.index("base.verify_isolation(metadata)"), source.index("bus = start("))
-        self.assertIn("finally:\n        cleanup(work, processes, handles, outputs)", source)
+        self.assertLess(source.index("base.verify_isolation(metadata)"), source.index('report.run("bus-start"'))
+        self.assertIn("finish_inside(report, operation,", source)
 
     def test_docs_links_and_dedicated_exact_head_workflow(self):
         for name in ("CONTRACT.md", "PROVENANCE.md"):
@@ -188,6 +192,194 @@ class A2Tests(unittest.TestCase):
             self.assertTrue(result.returncode == 0, "fixed-helper-self-test-failed")
             self.assertEqual(result.stdout, b"A2_HELPER_SELF_TEST_OK\n")
             self.assertEqual(result.stderr, b"")
+
+    def assert_fixed_report(self, text):
+        for line in text.splitlines():
+            if line.startswith("FIXTURE_DIAGNOSTIC "):
+                self.assertIn(line.removeprefix("FIXTURE_DIAGNOSTIC "), module.DIAGNOSTICS)
+
+    def test_simultaneous_operation_sample_content_log_child_handle_and_outer_failures(self):
+        report, relay = module.Report(), io.StringIO()
+        dummy = b"public-dummy-only-scan-value-12345"
+        report.attempted.update(("create", "inject"))
+        children = {"bus": Mock(), "keyring": Mock()}
+        handles = {"bus": Mock(), "keyring": Mock()}
+        handles["bus"].close.side_effect = OSError("untrusted-error-must-not-appear")
+        order = []
+
+        def stop(child):
+            order.append(child)
+            raise OSError("untrusted-error-must-not-appear")
+
+        def read(path, size):
+            if path.name == "sent.envelope":
+                raise module.base.PreflightFailure("fixture-oracle-invalid")
+            if path.name == "duplicate.sent.envelope":
+                return None
+            return dummy
+
+        def operation():
+            report.run("inject", lambda: (_ for _ in ()).throw(module.CaseFailure("child-failed")))
+
+        def finalizer():
+            module.cleanup(HERE, children, handles, [dummy.hex().encode()], report, {"bus", "keyring"})
+            def failure():
+                raise OSError("untrusted-error-must-not-appear")
+            with self.assertRaises(module.base.PreflightFailure):
+                module.base.diagnostic_cleanup([("unit", failure), ("work-root", lambda: None)],
+                                               lambda key, value: report.set("outer-" + key, value))
+
+        with patch.object(module, "stop", side_effect=stop), patch.object(Path, "read_bytes", side_effect=FileNotFoundError()), \
+                patch.object(module.volatile, "read_sample", side_effect=read), contextlib.redirect_stdout(relay):
+            with self.assertRaises(module.base.PreflightFailure):
+                module.finish_inside(report, operation, finalizer)
+            report.emit(outer=True)
+        self.assertEqual(order, list(reversed(tuple(children.values()))))
+        for handle in handles.values():
+            handle.close.assert_called_once()
+        self.assertEqual(report.first, ("inject", "child-failed"))
+        for key, value in {"sample-original-envelope": "invalid", "sample-duplicate-envelope": "missing",
+                           "scan-content": "matched", "scan-completeness": "incomplete", "cleanup": "failed",
+                           "log-bus": "missing", "log-keyring": "missing", "child-bus": "failed",
+                           "handle-bus": "failed", "outer-unit": "failed", "outer-work-root": "ok",
+                           "outer-cleanup": "failed"}.items():
+            self.assertEqual(report.states[key], value)
+        self.assert_fixed_report(relay.getvalue())
+        self.assertNotIn(dummy.decode(), relay.getvalue())
+        self.assertNotIn(dummy.hex(), relay.getvalue())
+        self.assertNotIn("untrusted-error", relay.getvalue())
+
+    def test_expected_log_missing_or_unreadable_cannot_pass_complete_scan(self):
+        for error, state in ((FileNotFoundError(), "missing"), (PermissionError(), "read-failed")):
+            report = module.Report()
+            with patch.object(Path, "read_bytes", side_effect=error) as read, \
+                    patch.object(module.volatile, "read_sample", side_effect=lambda path, n: b"x" * n), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(module.base.PreflightFailure):
+                    module.finish_inside(report, lambda: None,
+                                         lambda: module.cleanup(HERE, {}, {}, [], report, {"bus"}))
+            self.assertEqual(read.call_count, 1)
+            self.assertEqual(report.states["log-bus"], state)
+            self.assertEqual(report.states["log-keyring"], "not-created")
+            self.assertEqual(report.states["scan-content"], "clear")
+            self.assertEqual(report.states["scan-completeness"], "incomplete")
+            self.assertEqual(report.states["cleanup"], "ok")
+
+    def test_each_sample_category_and_remaining_samples_scanned_once(self):
+        report = module.Report()
+        report.attempted.add("create")
+        samples = [None, b"public", module.base.PreflightFailure("fixture-oracle-invalid"), PermissionError()]
+        def read(path, size):
+            value = samples.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        with patch.object(module.volatile, "read_sample", side_effect=read) as read:
+            self.assertFalse(module.scan(HERE, [], report))
+            self.assertEqual(read.call_count, 4)
+        self.assertEqual([report.states["sample-" + key] for key in module.SAMPLE_ROLES],
+                         ["missing", "valid", "invalid", "read-failed"])
+        report = module.Report()
+        with patch.object(module.volatile, "read_sample", return_value=None):
+            self.assertFalse(module.scan(HERE, [], report))
+        self.assertTrue(all(report.states["sample-" + key] == "not-reached" for key in module.SAMPLE_ROLES))
+
+    def test_timeout_first_category_survives_scan_and_cleanup_exception(self):
+        report, relay, outputs = module.Report(), io.StringIO(), []
+        def operation():
+            report.run("inject", lambda: module.bounded_call([], {}, b"ok", "a2-inject-failed", outputs, report, "inject"))
+        def finalizer():
+            report.set("scan-content", "failed")
+            report.set("scan-completeness", "incomplete")
+            raise OSError("untrusted-error-must-not-appear")
+        with patch.object(module.base, "run", side_effect=subprocess.TimeoutExpired("untrusted-command", 12, output=b"public-dummy")), \
+                contextlib.redirect_stdout(relay):
+            with self.assertRaises(module.base.PreflightFailure):
+                module.finish_inside(report, operation, finalizer)
+        self.assertEqual(report.first, ("inject", "timeout"))
+        self.assertEqual(report.states["operation-two-items"], "not-reached")
+        self.assertEqual(report.states["scan-content"], "failed")
+        self.assertEqual(report.states["cleanup"], "failed")
+        self.assertEqual(outputs, [b"public-dummy"])
+        self.assert_fixed_report(relay.getvalue())
+        self.assertNotIn("untrusted-", relay.getvalue())
+
+    def test_outer_cleanup_attempts_existing_actions_once_and_keeps_all_statuses(self):
+        states, calls = {}, []
+        def action(name, error=None):
+            def invoke():
+                calls.append(name)
+                if error:
+                    raise error
+            return invoke
+        with self.assertRaises(module.base.PreflightFailure):
+            module.base.diagnostic_cleanup([
+                ("unit", action("unit", subprocess.TimeoutExpired("public-dummy", 1))),
+                ("user", action("user", OSError())), ("work-root", action("work-root"))], states.__setitem__)
+        self.assertEqual(calls, ["unit", "user", "work-root"])
+        self.assertEqual(states, {"unit": "timeout", "user": "failed", "work-root": "ok", "cleanup": "failed"})
+
+    def test_helper_only_reports_fixed_existing_checkpoints_without_new_calls(self):
+        report = module.Report()
+        report.helper("inject", b"A2_HELPER_STAGE reference failed\nA2_HELPER_STAGE session not-reached\n"
+                      b"A2_HELPER_STAGE secret-raw-value failed\nA2_HELPER_STAGE reference private-value\n")
+        self.assertEqual(report.states["helper-inject-reference"], "failed")
+        self.assertEqual(report.states["helper-inject-session"], "not-reached")
+        with self.assertRaises(ValueError):
+            report.set("untrusted-key", "failed")
+        stages = C[C.index("static const char *stage_names[]"):C.index("static unsigned char stage_states")]
+        self.assertEqual(re.findall(r'"([a-z-]+)"', stages), list(module.HELPER_STAGES))
+        self.assertEqual(C.count('"CreateItem"'), 1)
+        self.assertEqual(C.count("getrandom("), 1)
+        self.assertEqual(C.count("secret_service_open_sync("), 1)
+        self.assertEqual(C.count("secret_service_get_secret_for_dbus_path_sync("), 1)
+        self.assertIn("atexit(emit_stages);", C)
+
+    def test_outer_wrapper_preserves_operation_and_cleanup_categories_without_exception_text(self):
+        relay = io.StringIO()
+        def fixture(binary, report):
+            value = Mock()
+            value.outer_diagnostic.side_effect = lambda key, status: report.set("outer-" + key, status)
+            return value
+        def fail(value):
+            value.outer_diagnostic("operation", "failed")
+            value.outer_diagnostic("unit", "timeout")
+            value.outer_diagnostic("cleanup", "failed")
+            raise OSError("untrusted-outer-error")
+        with patch.object(module, "Fixture", side_effect=fixture), patch.object(module.base, "outer", side_effect=fail), \
+                contextlib.redirect_stdout(relay):
+            with self.assertRaises(OSError):
+                module.outer("public-dummy")
+        self.assertIn("a2-outer-operation-failed", relay.getvalue())
+        self.assertIn("a2-outer-unit-timeout", relay.getvalue())
+        self.assertIn("a2-outer-cleanup-failed", relay.getvalue())
+        self.assertNotIn("A2_OUTER_CLEANUP_OK=true", relay.getvalue())
+        self.assertNotIn("untrusted-", relay.getvalue())
+        self.assert_fixed_report(relay.getvalue())
+
+    def test_missing_helper_report_is_unobserved_and_not_proof_of_no_send(self):
+        report = module.Report()
+        report.attempted.add("inject")
+        report.helper("inject", b"public-dummy-unstructured-output")
+        self.assertEqual(report.states["helper-inject-capture-key"], "unobserved")
+        with patch.object(module.volatile, "read_sample", return_value=None):
+            module.scan(HERE, [], report)
+        self.assertEqual(report.states["sample-duplicate-key"], "missing")
+        report.helper("inject", b"A2_HELPER_STAGE capture-key not-reached\n")
+        with patch.object(module.volatile, "read_sample", return_value=None):
+            module.scan(HERE, [], report)
+        self.assertEqual(report.states["sample-duplicate-key"], "not-reached")
+
+    def test_successful_helper_without_complete_diagnostic_frame_fails_closed(self):
+        report = module.Report()
+        with patch.object(module.base, "run", return_value=Mock(returncode=0, stdout=b"A2_HELPER_OK\n")):
+            with self.assertRaises(module.CaseFailure) as failure:
+                module.bounded_call([], {}, b"A2_HELPER_OK\n", "a2-inject-failed", [], report, "inject")
+        self.assertEqual(failure.exception.category, "marker-missing")
+        frame = b"A2_HELPER_OK\n" + b"".join(("A2_HELPER_STAGE " + stage + " not-reached\n").encode()
+                                                for stage in module.HELPER_STAGES)
+        with patch.object(module.base, "run", return_value=Mock(returncode=0, stdout=frame)):
+            module.bounded_call([], {}, b"A2_HELPER_OK\n", "a2-inject-failed", [], report, "inject")
 
 
 if __name__ == "__main__":

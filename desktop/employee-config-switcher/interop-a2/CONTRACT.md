@@ -42,7 +42,39 @@ No Delete, SetSecret, Prompt, Unlock, collection provisioning, production
 provider/apply/UI/key-deletion changes, bus-policy widening, secret diagnostic
 reads or manual rerun/dispatch. The two items disappear only with the owned
 volatile service/fixture teardown; this is **not** exact item-deletion acceptance.
-Private temporary samples are test-only and removed by the unchanged supervisor.
+Private temporary samples are test-only and removed by the supervisor.
+
+## Bounded diagnostic correction
+
+Operation stages retain their first fixed failure category independently of all
+later scanner and cleanup results. The C helper reports only fixed checkpoints
+around its existing predicates/calls; its arguments, return values and D-Bus
+errors are never printed. No checkpoint repeats a read, secret operation,
+randomness request or injection. Missing helper output is `unobserved`, including
+after timeout; it is not proof that no send occurred. A reported `not-reached`
+checkpoint means that the helper's normal-exit trace did not reach that point.
+
+Each of the four existing pre-send sample reads separately reports `not-reached`,
+`valid`, `missing`, `invalid` or `read-failed`. Samples not found are `not-reached`
+only when their generating operation was not entered, or the helper explicitly
+reported its capture point not reached. Actual available samples are still all
+scanned once. Content matching (`clear`/`matched`/`failed`) is separate from scan
+completeness: `clear` only concerns available samples/captured output and cannot
+make missing evidence acceptable.
+
+Expected daemon logs come from the actual log-open/start registry. Each is
+`not-created`, `collected`, `missing` or `read-failed`; a missing/unreadable
+expected log fails completeness. Existing per-child stops, handle closes and
+outer resource cleanup have separate fixed states. The supervisor has optional
+fixture-only reporting hooks and an action collector, with unchanged isolation,
+package pins, bus policy, cleanup targets and checks. A2 attempts each existing
+cleanup action once; unit-inactive validation still gates user/root removal.
+Other entry points keep their prior fail-fast cleanup behavior. All categories
+survive simultaneous failures; any required operation, scan or cleanup failure
+still yields nonzero. Success evidence requires the entire sequence; older
+failed CI and reviews never certify a later head.
+Unstopped writers or unclosed handles also make scan completeness fail. A helper
+success without its complete fixed checkpoint frame is a missing-marker failure.
 
 ## Evidence boundaries
 

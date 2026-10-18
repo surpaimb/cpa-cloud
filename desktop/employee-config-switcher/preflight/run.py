@@ -201,9 +201,27 @@ def package_manifest():
     require(run(["pkg-config", "--modversion", "libsecret-1"]).stdout.strip() == b"0.21.4", "libsecret-api-version")
 
 
+def diagnostic_cleanup(actions, diagnostic):
+    """Optional fixture reporting: attempt existing cleanup actions once each."""
+    failed = False
+    for stage, action in actions:
+        try:
+            action()
+            diagnostic(stage, "ok")
+        except subprocess.TimeoutExpired:
+            diagnostic(stage, "timeout")
+            failed = True
+        except Exception:
+            diagnostic(stage, "failed")
+            failed = True
+    diagnostic("cleanup", "failed" if failed else "ok")
+    require(not failed, "cleanup-diagnostic-failed")
+
+
 def outer(fixture=None):
     # The no-argument CLI remains metadata-only. Only the separately invoked
     # synthetic fixture harness supplies this in-process extension.
+    diagnostic = getattr(fixture, "outer_diagnostic", None)
     require(sys.platform == "linux" and os.geteuid() == 0, "linux-root-harness-required")
     require(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
             and os.environ.get("RUNNER_OS") == "Linux", "disposable-runner-required")
@@ -296,9 +314,14 @@ def outer(fixture=None):
         started = True
         result = run(args, timeout=110, check=False)
         # Never relay raw daemon, D-Bus, GLib, journal or child process output.
+        always_diagnostics = fixture is not None and getattr(fixture, "diagnostics_always", False)
+        if always_diagnostics:
+            for label in fixture.diagnostics:
+                if ("FIXTURE_DIAGNOSTIC " + label + "\n").encode() in result.stdout:
+                    print("FIXTURE_DIAGNOSTIC " + label, flush=True)
         if result.returncode != 0:
             if fixture is not None:
-                for label in fixture.diagnostics:
+                for label in (() if always_diagnostics else fixture.diagnostics):
                     if ("FIXTURE_DIAGNOSTIC " + label + "\n").encode() in result.stdout:
                         print("FIXTURE_DIAGNOSTIC " + label, flush=True)
                 for label in fixture.failures:
@@ -330,21 +353,50 @@ def outer(fixture=None):
             # Extension output remains captured. Publish only its static cases.
             for marker in markers:
                 print("CHECK " + marker + "=true", flush=True)
+        if diagnostic:
+            diagnostic("operation", "ok")
+    except subprocess.TimeoutExpired:
+        if diagnostic:
+            diagnostic("operation", "timeout")
+        raise
+    except Exception:
+        if diagnostic:
+            diagnostic("operation", "failed")
+        raise
     finally:
+        actions = []
+        unit_stopped = not started
         if started:
-            run(["systemctl", "stop", UNIT], check=False)
-            state = run(["systemctl", "show", UNIT, "--property=ActiveState", "--value"], check=False).stdout.strip()
-            require(state in (b"inactive", b"failed"), "cleanup-unit-active")
+            def unit_cleanup():
+                nonlocal unit_stopped
+                run(["systemctl", "stop", UNIT], check=False)
+                state = run(["systemctl", "show", UNIT, "--property=ActiveState", "--value"], check=False).stdout.strip()
+                require(state in (b"inactive", b"failed"), "cleanup-unit-active")
+                unit_stopped = True
+            actions.append(("unit", unit_cleanup))
         for server in sockets:
-            server.close()
+            actions.append(("sockets", server.close))
         if created_user:
-            run(["userdel", USER])
-        if shm_host.exists():
-            shm_host.unlink()
+            def user_cleanup():
+                require(not diagnostic or unit_stopped, "cleanup-unit-active")
+                run(["userdel", USER])
+            actions.append(("user", user_cleanup))
+        def shm_cleanup():
+            if shm_host.exists():
+                shm_host.unlink()
+        actions.append(("shm", shm_cleanup))
         for directory, parent, prefix in ((root, Path("/opt"), "cpa-ss-preflight."), (host, Path("/var/tmp"), "cpa-ss-host.")):
-            require(directory.resolve() == directory and directory.parent == parent and directory.name.startswith(prefix)
-                    and not directory.is_symlink(), "cleanup-path-rejected")
-            shutil.rmtree(directory)
+            def directory_cleanup(directory=directory, parent=parent, prefix=prefix):
+                require(not diagnostic or unit_stopped, "cleanup-unit-active")
+                require(directory.resolve() == directory and directory.parent == parent and directory.name.startswith(prefix)
+                        and not directory.is_symlink(), "cleanup-path-rejected")
+                shutil.rmtree(directory)
+            actions.append(("work-root" if directory == root else "host-root", directory_cleanup))
+        if diagnostic:
+            diagnostic_cleanup(actions, diagnostic)
+        else:
+            for _, action in actions:
+                action()
 
 
 if __name__ == "__main__":
