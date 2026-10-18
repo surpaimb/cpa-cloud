@@ -1,10 +1,13 @@
 /* Independently authored libsecret oracle, not linked into CPA. See CONTRACT.md. */
+#define _GNU_SOURCE
 #define SECRET_API_SUBJECT_TO_CHANGE
 #include <libsecret/secret.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include "private-envelope.h"
+#include "private-path.h"
 
 typedef struct { SecretService parent; } NoPrompt;
 typedef struct { SecretServiceClass parent; } NoPromptClass;
@@ -70,8 +73,7 @@ int main(int argc, char **argv) {
                 original_size != strlen(unlocked[0]) || memcmp(original, unlocked[0], original_size)) return 34;
             g_free(original);
         } else {
-            FILE *record = fopen("item.path", "wx");
-            if (!record || fwrite(unlocked[0], 1, strlen(unlocked[0]), record) != strlen(unlocked[0]) || fclose(record)) return 35;
+            if (!write_item_path(unlocked[0], strlen(unlocked[0]))) return 35;
         }
         SecretItem *item = secret_item_new_for_dbus_path_sync(service, unlocked[0], SECRET_ITEM_NONE, NULL, NULL);
         if (!item || secret_item_get_locked(item)) return 36;
@@ -103,8 +105,7 @@ int main(int argc, char **argv) {
         g_checksum_free(checksum);
         /* Independent repeat-verification sample, not the pre-send scanner oracle. */
         if (!g_file_test("expected.envelope", G_FILE_TEST_EXISTS)) {
-            FILE *record = fopen("expected.envelope", "wx");
-            if (!record || fwrite(bytes, 1, size, record) != size || fclose(record)) return 41;
+            if (!write_expected_envelope(bytes, size)) return 41;
         } else {
             unsigned char prior[148];
             if (!read_exact("expected.envelope", prior, sizeof prior) || memcmp(prior, bytes, size)) return 42;
