@@ -376,7 +376,7 @@ class A2Tests(unittest.TestCase):
             with self.assertRaises(module.CaseFailure) as failure:
                 module.bounded_call([], {}, b"A2_HELPER_OK\n", "a2-inject-failed", [], report, "inject")
         self.assertEqual(failure.exception.category, "marker-missing")
-        frame = b"A2_HELPER_OK\nA2_ORIGINAL_ENVELOPE_READ ok\n" + b"".join(("A2_HELPER_STAGE " + stage + " not-reached\n").encode()
+        frame = b"A2_HELPER_OK\nA2_ORIGINAL_ENVELOPE_READ ok\nA2_ORIGINAL_PATH_READ ok\n" + b"".join(("A2_HELPER_STAGE " + stage + " not-reached\n").encode()
                                                 for stage in module.HELPER_STAGES)
         with patch.object(module.base, "run", return_value=Mock(returncode=0, stdout=frame)):
             module.bounded_call([], {}, b"A2_HELPER_OK\n", "a2-inject-failed", [], report, "inject")
@@ -416,6 +416,55 @@ class A2Tests(unittest.TestCase):
             self.assertEqual(report.states["helper-inject-original-read"], category)
         report.helper("inject", b"A2_ORIGINAL_ENVELOPE_READ private-untrusted-value\n")
         self.assertEqual(report.states["helper-inject-original-read"], "close-failed")
+
+    def test_item_path_writer_is_private_exclusive_and_uses_existing_libsecret_path(self):
+        writer = (HERE.parent / "interop/private-path.h").read_text()
+        verifier = (HERE.parent / "interop/verifier.c").read_text()
+        self.assertIn('openat(dir, "item.path", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600)', writer)
+        self.assertIn("if (!length || length >= 256) return false;", writer)
+        self.assertLess(writer.index("item_path_metadata(&before, 0)"), writer.index("write(fd, bytes, length)"))
+        for predicate in ("s->st_uid == geteuid()", "s->st_gid == getegid()", "s->st_nlink == 1", "0600",
+                          "fsync(fd)", "fsync(dir)", "AT_SYMLINK_NOFOLLOW", "before.st_ino == entry.st_ino"):
+            self.assertIn(predicate, writer)
+        self.assertNotIn("chmod(", writer)
+        self.assertNotIn("read(", writer)
+        self.assertIn("write_item_path(unlocked[0], strlen(unlocked[0]))", verifier)
+        self.assertNotIn('fopen("item.path", "wx")', verifier)
+        self.assertLess(verifier.index("secret_service_search_for_dbus_paths_sync"), verifier.index("write_item_path("))
+        self.assertIn('static const char public_path[] = SESSION "/public_item";', C)
+        self.assertIn("read_original_path(dir, loaded_path)", C)
+        self.assertIn('!write_item_path("must-not-overwrite", 18)', C)
+
+    def test_path_categories_preserve_existing_read_and_format_predicates(self):
+        reader = C[C.index("static gboolean read_path("):C.index("static gboolean read_original_path(")]
+        for call in ("fstatat(", "read_sample(", "strlen(", "g_variant_is_object_path(", "g_str_has_prefix("):
+            self.assertEqual(reader.count(call), 1, call)
+        for predicate in ("s.st_size <= 0", "s.st_size >= 256", "AT_SYMLINK_NOFOLLOW",
+                          "private_file(&s, (size_t)s.st_size)", "strlen(out) == n", 'SESSION "/"'):
+            self.assertIn(predicate, reader)
+        self.assertNotIn("openat(", reader)
+        self.assertNotIn("read(", reader)
+        for category in ("PATH_METADATA", "PATH_READ", "PATH_FORMAT"):
+            self.assertIn(category, reader)
+        wrapper = C[C.index("static gboolean read_original_path("):C.index("static void checksum(")]
+        self.assertEqual(wrapper.count("read_path("), 1)
+        self.assertIn("original_path_category = last_path_category;", wrapper)
+
+    def test_path_enum_rejects_raw_values_and_missing_success_frame_fails_closed(self):
+        for category in module.PATH_CATEGORIES[1:]:
+            report = module.Report()
+            report.helper("inject", ("A2_ORIGINAL_PATH_READ " + category + "\n").encode())
+            self.assertEqual(report.states["helper-inject-original-path-read"], category)
+        report.helper("inject", b"A2_ORIGINAL_PATH_READ private-untrusted-value\n")
+        self.assertEqual(report.states["helper-inject-original-path-read"], "format-failed")
+        report = module.Report()
+        frame = b"A2_HELPER_OK\nA2_ORIGINAL_ENVELOPE_READ ok\n" + b"".join(
+            ("A2_HELPER_STAGE " + stage + " not-reached\n").encode() for stage in module.HELPER_STAGES)
+        with patch.object(module.base, "run", return_value=Mock(returncode=0, stdout=frame)):
+            with self.assertRaises(module.CaseFailure) as failure:
+                module.bounded_call([], {}, b"A2_HELPER_OK\n", "a2-inject-failed", [], report, "inject")
+        self.assertEqual(failure.exception.category, "marker-missing")
+        self.assertEqual(report.states["helper-inject-original-path-read"], "unobserved")
 
 
 if __name__ == "__main__":

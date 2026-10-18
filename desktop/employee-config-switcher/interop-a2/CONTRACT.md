@@ -90,6 +90,17 @@ Categories reuse the same open/metadata/read/close operations and never expose
 actual attributes, paths, sizes or error text. This correction does not identify
 which predicate caused the previous run's coarse original-envelope failure.
 
+The next bounded correction applies the same explicit private/exclusive/no-follow
+creation and stable-file checks to the verifier's existing `item.path` sample,
+using only the path bytes from its existing libsecret search result. The earlier
+envelope writer and all path metadata, exact-read, object-path and session-prefix
+predicates remain unchanged. Public dummy paths test the real writer/reader,
+refusal to overwrite, and metadata/format rejection. The original path check
+reports only `not-reached`, `ok`, `metadata-failed`, `read-failed` or `format-failed`
+(absent output is `unobserved`), reusing its existing stat and read operations.
+No extra path/secret read or D-Bus operation is added to the real fixture. Neither
+the old coarse failure nor this correction establishes a mode mismatch as cause.
+
 ## Evidence boundaries
 
 Portable tests check orchestration, scanner and source guards. Linux-only helper

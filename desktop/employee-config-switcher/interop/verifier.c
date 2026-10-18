@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "private-envelope.h"
+#include "private-path.h"
 
 typedef struct { SecretService parent; } NoPrompt;
 typedef struct { SecretServiceClass parent; } NoPromptClass;
@@ -72,8 +73,7 @@ int main(int argc, char **argv) {
                 original_size != strlen(unlocked[0]) || memcmp(original, unlocked[0], original_size)) return 34;
             g_free(original);
         } else {
-            FILE *record = fopen("item.path", "wx");
-            if (!record || fwrite(unlocked[0], 1, strlen(unlocked[0]), record) != strlen(unlocked[0]) || fclose(record)) return 35;
+            if (!write_item_path(unlocked[0], strlen(unlocked[0]))) return 35;
         }
         SecretItem *item = secret_item_new_for_dbus_path_sync(service, unlocked[0], SECRET_ITEM_NONE, NULL, NULL);
         if (!item || secret_item_get_locked(item)) return 36;

@@ -39,3 +39,10 @@ It uses the existing POSIX file operations and project-owned strict private-file
 contract; no new dependency or third-party implementation is imported. The same
 test-only writer is included by the existing libsecret verifier and A2's public
 dummy self-test; production provider code and protocol calls are unchanged.
+
+The subsequent 2026-10-19 path-only correction independently authors
+`../interop/private-path.h` from the same project-owned private-file contract
+and POSIX file operations. It writes the existing libsecret search-result path,
+not a replacement path, and is shared only with the public dummy self-test.
+Fixed path-check categories reuse the existing checks; no new protocol source,
+dependency, production change or additional real path/secret read is introduced.

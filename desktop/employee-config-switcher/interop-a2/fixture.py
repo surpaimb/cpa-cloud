@@ -33,12 +33,14 @@ HELPER_STAGES = ("guard", "directory", "reference", "original-envelope", "origin
 HELPER_PHASES = ("inject", "two-items", "open-verify", "create-verify-after")
 READ_CATEGORIES = ("unobserved", "not-reached", "ok", "open-failed", "metadata-failed",
                    "length-read-failed", "post-read-changed", "close-failed")
+PATH_CATEGORIES = ("unobserved", "not-reached", "ok", "metadata-failed", "read-failed", "format-failed")
 SAMPLE_ROLES = ("original-key", "original-envelope", "duplicate-key", "duplicate-envelope")
 OP_STATUSES = ("not-reached", "ok", "failed", "timeout", "budget", "child-failed", "marker-missing")
 SCHEMA = {**{"operation-" + phase: OP_STATUSES for phase in OPERATIONS},
           **{"helper-" + phase + "-" + stage: ("unobserved", "not-reached", "ok", "failed")
              for phase in HELPER_PHASES for stage in HELPER_STAGES},
           **{"helper-" + phase + "-original-read": READ_CATEGORIES for phase in HELPER_PHASES},
+          **{"helper-" + phase + "-original-path-read": PATH_CATEGORIES for phase in HELPER_PHASES},
           **{"sample-" + role: ("not-reached", "valid", "missing", "invalid", "read-failed") for role in SAMPLE_ROLES},
           **{"log-" + role: ("not-created", "collected", "missing", "read-failed") for role in ("bus", "keyring")},
           **{"child-" + role: ("not-created", "stopped", "failed", "timeout") for role in ("bus", "keyring")},
@@ -95,6 +97,9 @@ class Report:
             for category in READ_CATEGORIES[1:]:
                 if ("A2_ORIGINAL_ENVELOPE_READ " + category).encode() in lines:
                     self.set("helper-" + phase + "-original-read", category)
+            for category in PATH_CATEGORIES[1:]:
+                if ("A2_ORIGINAL_PATH_READ " + category).encode() in lines:
+                    self.set("helper-" + phase + "-original-path-read", category)
 
     def emit(self, outer=False):
         for key, status in self.states.items():
@@ -182,7 +187,8 @@ def bounded_call(args, environment, expected, label, outputs, report=None, phase
         report.helper(phase, result.stdout)
         if result.returncode == 0 and phase in HELPER_PHASES and (any(
                 report.states["helper-" + phase + "-" + stage] == "unobserved" for stage in HELPER_STAGES) or
-                report.states["helper-" + phase + "-original-read"] == "unobserved"):
+                report.states["helper-" + phase + "-original-read"] == "unobserved" or
+                report.states["helper-" + phase + "-original-path-read"] == "unobserved"):
             raise CaseFailure("marker-missing")
     if result.returncode != 0 or expected not in result.stdout:
         for panic in volatile.diagnostic_labels(result.stdout):

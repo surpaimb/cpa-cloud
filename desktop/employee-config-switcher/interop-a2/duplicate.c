@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "../interop/private-envelope.h"
+#include "../interop/private-path.h"
 
 #define ENVELOPE_SIZE 148
 #define KEY_SIZE 32
@@ -25,6 +26,9 @@ enum ReadCategory { READ_NOT_REACHED, READ_OK, READ_OPEN, READ_METADATA, READ_LE
 static const char *read_categories[] = {"not-reached", "ok", "open-failed", "metadata-failed",
     "length-read-failed", "post-read-changed", "close-failed"};
 static enum ReadCategory last_read_category, original_read_category;
+enum PathCategory { PATH_NOT_REACHED, PATH_OK, PATH_METADATA, PATH_READ, PATH_FORMAT };
+static const char *path_categories[] = {"not-reached", "ok", "metadata-failed", "read-failed", "format-failed"};
+static enum PathCategory last_path_category, original_path_category;
 enum { GUARD, DIRECTORY, REFERENCE, ORIGINAL_ENVELOPE, ORIGINAL_KEY, ORIGINAL_PATH, ORIGINAL_VALID,
     SESSION_OPEN, RANDOM_KEY, SECOND_VALID, CAPTURE_KEY, CAPTURE_ENVELOPE, ENCODE, OWNER, CREATE_CALL,
     CREATE_REPLY, CAPTURE_PATH, PAIR_ENVELOPE, PAIR_KEY, PAIR_PATH, PAIR_VALID, SEARCH, CARDINALITY, PAIR_ITEMS };
@@ -37,6 +41,7 @@ static void emit_stages(void) {
     for (unsigned i = 0; i < G_N_ELEMENTS(stage_names); i++)
         g_print("A2_HELPER_STAGE %s %s\n", stage_names[i], states[stage_states[i]]);
     g_print("A2_ORIGINAL_ENVELOPE_READ %s\n", read_categories[original_read_category]);
+    g_print("A2_ORIGINAL_PATH_READ %s\n", path_categories[original_path_category]);
 }
 typedef struct { SecretService parent; } A2NoPrompt;
 typedef struct { SecretServiceClass parent; } A2NoPromptClass;
@@ -115,12 +120,21 @@ static gboolean read_original_envelope(int dir, unsigned char bytes[148]) {
 }
 static gboolean read_path(int dir, const char *name, char out[256]) {
     struct stat s;
+    last_path_category = PATH_METADATA;
     if (fstatat(dir, name, &s, AT_SYMLINK_NOFOLLOW) || s.st_size <= 0 || s.st_size >= 256 ||
         !private_file(&s, (size_t)s.st_size)) return FALSE;
     size_t n = (size_t)s.st_size;
+    last_path_category = PATH_READ;
     if (!read_sample(dir, name, out, n)) return FALSE;
     out[n] = 0;
-    return strlen(out) == n && g_variant_is_object_path(out) && g_str_has_prefix(out, SESSION "/");
+    gboolean ok = strlen(out) == n && g_variant_is_object_path(out) && g_str_has_prefix(out, SESSION "/");
+    last_path_category = ok ? PATH_OK : PATH_FORMAT;
+    return ok;
+}
+static gboolean read_original_path(int dir, char out[256]) {
+    gboolean ok = read_path(dir, "item.path", out);
+    original_path_category = last_path_category;
+    return ok;
 }
 static void checksum(const unsigned char *bytes, unsigned char out[32]) {
     static const unsigned char context[] = "cpa-cloud/linux-secret-service/envelope/v1";
@@ -311,6 +325,16 @@ static gboolean self_test(void) {
     ok = ok && written && !write_expected_envelope(envelope, sizeof envelope) &&
         read_original_envelope(dir, loaded) && original_read_category == READ_OK &&
         memcmp(envelope, loaded, sizeof envelope) == 0;
+    static const char public_path[] = SESSION "/public_item";
+    char loaded_path[256];
+    prior_mask = umask(0);
+    written = write_item_path(public_path, sizeof public_path - 1);
+    umask(prior_mask);
+    ok = ok && written && !write_item_path("must-not-overwrite", 18) &&
+        read_original_path(dir, loaded_path) && original_path_category == PATH_OK &&
+        strcmp(loaded_path, public_path) == 0 &&
+        !read_path(dir, "public.alias", loaded_path) && last_path_category == PATH_METADATA &&
+        !read_path(dir, "public.sample", loaded_path) && last_path_category == PATH_FORMAT;
     close(dir);
     return ok; /* caller owns the public-only temporary self-test directory */
 }
@@ -330,7 +354,7 @@ int main(int argc, char **argv) {
     gboolean ok = checkpoint(REFERENCE, read_sample(dir, "reference.bin", reference, sizeof reference)) &&
         checkpoint(ORIGINAL_ENVELOPE, read_original_envelope(dir, original)) &&
         checkpoint(ORIGINAL_KEY, read_sample(dir, "expected.key", original_key, sizeof original_key)) &&
-        checkpoint(ORIGINAL_PATH, read_path(dir, "item.path", original_path)) &&
+        checkpoint(ORIGINAL_PATH, read_original_path(dir, original_path)) &&
         checkpoint(ORIGINAL_VALID, valid_envelope(original, sizeof original, reference, original_key) && memcmp(original + 68, reference + 68, 16) == 0);
     gboolean session_reached = ok;
     SecretService *service = ok ? secret_service_open_sync(a2_no_prompt_get_type(), "org.freedesktop.secrets",
