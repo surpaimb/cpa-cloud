@@ -262,7 +262,7 @@ func crossSeedPolicy(t *testing.T, app *App) {
 	_, err = tx.Exec(`INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,created_at) VALUES('cross-upstream','Synthetic','openai-compatible','https://unused.invalid',1,?,1,1,?)`, ciphertext, utcNow())
 	crossCheck(t, err == nil, "cross-policy-seed-failed")
 	for _, model := range []string{"cross-allowed", "cross-denied"} {
-		_, err = tx.Exec(`INSERT INTO models(id,upstream_id,upstream_model,enabled) VALUES(?,'cross-upstream',?,1)`, model, model)
+		_, err = tx.Exec(`INSERT INTO models(id,upstream_id,upstream_model,enabled,created_at) VALUES(?,'cross-upstream',?,1,?)`, model, model, utcNow())
 		crossCheck(t, err == nil, "cross-policy-seed-failed")
 	}
 	_, err = tx.Exec(`INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,created_at) VALUES('cross-key','cross-employee','Synthetic',?,?,1,'cross-operation',?)`, crossSelector, app.secrets.digest("employee-key/v1\x00"+crossSelector, crossSecret), utcNow())
