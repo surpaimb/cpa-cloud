@@ -10,6 +10,7 @@
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../interop/private-envelope.h"
 
 #define ENVELOPE_SIZE 148
 #define KEY_SIZE 32
@@ -20,6 +21,10 @@ static const char *stage_names[] = {"guard", "directory", "reference", "original
     "capture-key", "capture-envelope", "encode", "owner", "create-call", "create-reply", "capture-path",
     "pair-envelope", "pair-key", "pair-path", "pair-valid", "search", "cardinality", "pair-items"};
 static unsigned char stage_states[G_N_ELEMENTS(stage_names)];
+enum ReadCategory { READ_NOT_REACHED, READ_OK, READ_OPEN, READ_METADATA, READ_LENGTH, READ_CHANGED, READ_CLOSE };
+static const char *read_categories[] = {"not-reached", "ok", "open-failed", "metadata-failed",
+    "length-read-failed", "post-read-changed", "close-failed"};
+static enum ReadCategory last_read_category, original_read_category;
 enum { GUARD, DIRECTORY, REFERENCE, ORIGINAL_ENVELOPE, ORIGINAL_KEY, ORIGINAL_PATH, ORIGINAL_VALID,
     SESSION_OPEN, RANDOM_KEY, SECOND_VALID, CAPTURE_KEY, CAPTURE_ENVELOPE, ENCODE, OWNER, CREATE_CALL,
     CREATE_REPLY, CAPTURE_PATH, PAIR_ENVELOPE, PAIR_KEY, PAIR_PATH, PAIR_VALID, SEARCH, CARDINALITY, PAIR_ITEMS };
@@ -31,6 +36,7 @@ static void emit_stages(void) {
     static const char *states[] = {"not-reached", "ok", "failed"};
     for (unsigned i = 0; i < G_N_ELEMENTS(stage_names); i++)
         g_print("A2_HELPER_STAGE %s %s\n", stage_names[i], states[stage_states[i]]);
+    g_print("A2_ORIGINAL_ENVELOPE_READ %s\n", read_categories[original_read_category]);
 }
 typedef struct { SecretService parent; } A2NoPrompt;
 typedef struct { SecretServiceClass parent; } A2NoPromptClass;
@@ -82,13 +88,29 @@ static gboolean read_sample(int dir, const char *name, void *bytes, size_t lengt
     int fd = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     struct stat before, after, entry;
     unsigned char extra;
-    if (fd < 0) return FALSE;
+    last_read_category = READ_OK;
+    if (fd < 0) { last_read_category = READ_OPEN; return FALSE; }
     gboolean ok = fstat(fd, &before) == 0 && private_file(&before, length);
-    if (ok) ok = read(fd, bytes, length) == (ssize_t)length && read(fd, &extra, 1) == 0;
-    if (ok) ok = fstat(fd, &after) == 0 && private_file(&after, length) && same_file(&before, &after) &&
-        fstatat(dir, name, &entry, AT_SYMLINK_NOFOLLOW) == 0 && private_file(&entry, length) &&
-        same_file(&before, &entry);
-    if (close(fd)) ok = FALSE;
+    if (!ok) last_read_category = READ_METADATA;
+    if (ok) {
+        ok = read(fd, bytes, length) == (ssize_t)length && read(fd, &extra, 1) == 0;
+        if (!ok) last_read_category = READ_LENGTH;
+    }
+    if (ok) {
+        ok = fstat(fd, &after) == 0 && private_file(&after, length) && same_file(&before, &after) &&
+            fstatat(dir, name, &entry, AT_SYMLINK_NOFOLLOW) == 0 && private_file(&entry, length) &&
+            same_file(&before, &entry);
+        if (!ok) last_read_category = READ_CHANGED;
+    }
+    if (close(fd)) {
+        if (ok) last_read_category = READ_CLOSE;
+        ok = FALSE;
+    }
+    return ok;
+}
+static gboolean read_original_envelope(int dir, unsigned char bytes[148]) {
+    gboolean ok = read_sample(dir, "expected.envelope", bytes, 148);
+    original_read_category = last_read_category;
     return ok;
 }
 static gboolean read_path(int dir, const char *name, char out[256]) {
@@ -268,8 +290,10 @@ static gboolean self_test(void) {
         !save_sample(dir, "public.sample", "must-not-overwrite", 18) &&
         read_sample(dir, "public.sample", readback, sizeof readback) && !memcmp(readback, key, sizeof key) &&
         !read_sample(dir, "public.sample", readback, sizeof readback - 1) &&
+        last_read_category == READ_METADATA &&
         symlinkat("public.sample", dir, "public.alias") == 0 &&
         !save_sample(dir, "public.alias", key, sizeof key) && !read_sample(dir, "public.alias", readback, sizeof readback) &&
+        last_read_category == READ_OPEN &&
         fstatat(dir, "public.sample", &s, AT_SYMLINK_NOFOLLOW) == 0;
     if (ok) {
         struct stat changed = s; changed.st_mode |= 0040;
@@ -279,6 +303,14 @@ static gboolean self_test(void) {
         changed = s; changed.st_gid++; ok = ok && !private_file(&changed, sizeof key);
         changed = s; changed.st_mode = S_IFDIR | 0600; ok = ok && !private_file(&changed, sizeof key);
     }
+    unsigned char envelope[148], loaded[148];
+    memset(envelope, 0x51, sizeof envelope); /* Public dummy, never a generated Key. */
+    mode_t prior_mask = umask(0);
+    gboolean written = write_expected_envelope(envelope, sizeof envelope);
+    umask(prior_mask);
+    ok = ok && written && !write_expected_envelope(envelope, sizeof envelope) &&
+        read_original_envelope(dir, loaded) && original_read_category == READ_OK &&
+        memcmp(envelope, loaded, sizeof envelope) == 0;
     close(dir);
     return ok; /* caller owns the public-only temporary self-test directory */
 }
@@ -296,7 +328,7 @@ int main(int argc, char **argv) {
     if (!checkpoint(DIRECTORY, dir >= 0)) return 14;
     unsigned char reference[148], original[148], original_key[32]; char original_path[256];
     gboolean ok = checkpoint(REFERENCE, read_sample(dir, "reference.bin", reference, sizeof reference)) &&
-        checkpoint(ORIGINAL_ENVELOPE, read_sample(dir, "expected.envelope", original, sizeof original)) &&
+        checkpoint(ORIGINAL_ENVELOPE, read_original_envelope(dir, original)) &&
         checkpoint(ORIGINAL_KEY, read_sample(dir, "expected.key", original_key, sizeof original_key)) &&
         checkpoint(ORIGINAL_PATH, read_path(dir, "item.path", original_path)) &&
         checkpoint(ORIGINAL_VALID, valid_envelope(original, sizeof original, reference, original_key) && memcmp(original + 68, reference + 68, 16) == 0);

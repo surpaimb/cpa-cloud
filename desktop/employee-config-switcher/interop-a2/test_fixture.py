@@ -376,10 +376,46 @@ class A2Tests(unittest.TestCase):
             with self.assertRaises(module.CaseFailure) as failure:
                 module.bounded_call([], {}, b"A2_HELPER_OK\n", "a2-inject-failed", [], report, "inject")
         self.assertEqual(failure.exception.category, "marker-missing")
-        frame = b"A2_HELPER_OK\n" + b"".join(("A2_HELPER_STAGE " + stage + " not-reached\n").encode()
+        frame = b"A2_HELPER_OK\nA2_ORIGINAL_ENVELOPE_READ ok\n" + b"".join(("A2_HELPER_STAGE " + stage + " not-reached\n").encode()
                                                 for stage in module.HELPER_STAGES)
         with patch.object(module.base, "run", return_value=Mock(returncode=0, stdout=frame)):
             module.bounded_call([], {}, b"A2_HELPER_OK\n", "a2-inject-failed", [], report, "inject")
+
+    def test_expected_sample_writer_uses_explicit_private_creation_and_real_libsecret_bytes(self):
+        writer = (HERE.parent / "interop/private-envelope.h").read_text()
+        verifier = (HERE.parent / "interop/verifier.c").read_text()
+        self.assertIn('openat(dir, "expected.envelope", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600)', writer)
+        self.assertLess(writer.index("expected_envelope_metadata(&before, 0)"), writer.index("write(fd, bytes, length)"))
+        for predicate in ("s->st_uid == geteuid()", "s->st_gid == getegid()", "s->st_nlink == 1", "0600",
+                          "fsync(fd)", "fsync(dir)", "AT_SYMLINK_NOFOLLOW", "before.st_ino == entry.st_ino"):
+            self.assertIn(predicate, writer)
+        self.assertNotIn("chmod(", writer)
+        self.assertNotIn("read(", writer)
+        self.assertIn("write_expected_envelope(bytes, size)", verifier)
+        self.assertNotIn('fopen("expected.envelope", "wx")', verifier)
+        self.assertLess(verifier.index("secret_service_get_secret_for_dbus_path_sync"), verifier.index("write_expected_envelope(bytes, size)"))
+        self.assertIn("umask(0)", C)
+        self.assertIn("read_original_envelope(dir, loaded)", C)
+
+    def test_reader_categories_preserve_existing_syscall_counts_and_predicates(self):
+        reader = C[C.index("static gboolean read_sample("):C.index("static gboolean read_original_envelope(")]
+        for call, count in (("openat(", 1), ("fstat(", 2), ("fstatat(", 1), ("read(", 2), ("close(", 1)):
+            self.assertEqual(reader.count(call), count, call)
+        for category in ("READ_OPEN", "READ_METADATA", "READ_LENGTH", "READ_CHANGED", "READ_CLOSE"):
+            self.assertIn("last_read_category = " + category, reader)
+        self.assertIn("if (ok) last_read_category = READ_CLOSE;", reader)
+        self.assertIn("private_file(&before, length)", reader)
+        self.assertIn("same_file(&before, &entry)", reader)
+        wrapper = C[C.index("static gboolean read_original_envelope("):C.index("static gboolean read_path(")]
+        self.assertEqual(wrapper.count("read_sample("), 1)
+
+    def test_read_failure_categories_only_accept_source_owned_enum(self):
+        for category in module.READ_CATEGORIES[1:]:
+            report = module.Report()
+            report.helper("inject", ("A2_ORIGINAL_ENVELOPE_READ " + category + "\n").encode())
+            self.assertEqual(report.states["helper-inject-original-read"], category)
+        report.helper("inject", b"A2_ORIGINAL_ENVELOPE_READ private-untrusted-value\n")
+        self.assertEqual(report.states["helper-inject-original-read"], "close-failed")
 
 
 if __name__ == "__main__":

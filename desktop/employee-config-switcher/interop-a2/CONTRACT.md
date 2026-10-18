@@ -76,6 +76,20 @@ failed CI and reviews never certify a later head.
 Unstopped writers or unclosed handles also make scan completeness fail. A helper
 success without its complete fixed checkpoint frame is a missing-marker failure.
 
+The libsecret verifier's existing `expected.envelope` sample is now created by
+a shared test-only writer with explicit exclusive/no-follow `0600` creation,
+private-directory and pre-write file checks, and post-write size/inode checks
+and fsync. Its bytes still come from the existing actual libsecret response;
+it is not the pre-send scanner oracle. No chmod, repair, recreation or extra
+secret read is introduced. A public dummy self-test exercises that writer and
+the unchanged strict A2 reader with a loose umask and checks refusal to overwrite.
+The existing original-envelope read also reports one fixed category:
+`not-reached`, `ok`, `open-failed`, `metadata-failed`, `length-read-failed`,
+`post-read-changed` or `close-failed`; absent output remains `unobserved`.
+Categories reuse the same open/metadata/read/close operations and never expose
+actual attributes, paths, sizes or error text. This correction does not identify
+which predicate caused the previous run's coarse original-envelope failure.
+
 ## Evidence boundaries
 
 Portable tests check orchestration, scanner and source guards. Linux-only helper

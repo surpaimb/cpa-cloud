@@ -31,3 +31,11 @@ remain the sources above. Python uses its standard library (PSF license), Rust
 uses existing locked dependencies with their own licenses; no new runtime
 dependency or vendored source. Compilation tools do not transfer their license
 to independently authored fixture source. No distribution/release is authorized.
+
+The 2026-10-19 bounded correction independently authors
+`../interop/private-envelope.h` for the existing actual-response sample writer,
+fixed read-failure categories and public writer/reader compatibility tests.
+It uses the existing POSIX file operations and project-owned strict private-file
+contract; no new dependency or third-party implementation is imported. The same
+test-only writer is included by the existing libsecret verifier and A2's public
+dummy self-test; production provider code and protocol calls are unchanged.
