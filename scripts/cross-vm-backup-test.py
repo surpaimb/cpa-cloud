@@ -181,6 +181,10 @@ class CrossVMTests(unittest.TestCase):
         for required in ("validator(encoded)", 'calls == 2', 'os.Rename(path, filepath.Join(root, "staged-binding-before"))', 'os.Setenv("CREDENTIALS_DIRECTORY", path)',
                          "bcrypt.CompareHashAndPassword", "authorizeKeyPolicy", "crossSessionStatus(app) == 401", "unix.AF_INET6"):
             self.assertIn(required, source)
+        seed = source.split("func crossSeedPolicy(", 1)[1].split("func crossPermissions(", 1)[0]
+        for required in ('SourceMode: "all", SourceCIDRs: []string{}',
+                         'AccountGroupMode: "all", AccountGroupIDs: []string{}'):
+            self.assertIn(required, seed)
 
     def test_workflow_uses_two_fresh_jobs_no_cache_exact_checkout_and_final_deletion(self):
         source = (HERE.parent / ".github/workflows/cross-vm-backup.yml").read_text()

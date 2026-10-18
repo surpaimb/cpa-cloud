@@ -267,7 +267,7 @@ func crossSeedPolicy(t *testing.T, app *App) {
 	}
 	_, err = tx.Exec(`INSERT INTO access_keys(id,employee_id,name,selector,digest,digest_version,operation_id,created_at) VALUES('cross-key','cross-employee','Synthetic',?,?,1,'cross-operation',?)`, crossSelector, app.secrets.digest("employee-key/v1\x00"+crossSelector, crossSecret), utcNow())
 	crossCheck(t, err == nil, "cross-policy-seed-failed")
-	_, err = keypolicy.CreateTx(ctx, tx, "cross-key", keypolicy.Replacement{ProtocolMode: "selected", Protocols: []keypolicy.ClientProtocol{keypolicy.ProtocolOpenAIChat}, ModelMode: "selected", Models: []string{"cross-allowed"}, SourceMode: "all", AccountGroupMode: "all"}, time.Now())
+	_, err = keypolicy.CreateTx(ctx, tx, "cross-key", keypolicy.Replacement{ProtocolMode: "selected", Protocols: []keypolicy.ClientProtocol{keypolicy.ProtocolOpenAIChat}, ModelMode: "selected", Models: []string{"cross-allowed"}, SourceMode: "all", SourceCIDRs: []string{}, AccountGroupMode: "all", AccountGroupIDs: []string{}}, time.Now())
 	crossCheck(t, err == nil && tx.Commit() == nil, "cross-policy-seed-failed")
 }
 
