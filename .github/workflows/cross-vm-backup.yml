@@ -1,0 +1,126 @@
+name: Independent Linux VM v3 synthetic recovery
+
+on:
+  pull_request:
+    paths:
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'scripts/cross-vm-backup*'
+      - '.github/workflows/cross-vm-backup.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'scripts/cross-vm-backup*'
+      - '.github/workflows/cross-vm-backup.yml'
+
+permissions:
+  contents: read
+
+# No cancellation: the independent relay cleanup job must get its turn.
+concurrency:
+  group: cross-vm-backup-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source-a:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact source
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.8'
+          cache: false
+      - name: Public fixture tests and tagged compilation
+        run: |
+          python3 -B scripts/cross-vm-backup-test.py
+          go test -c -tags cpacloud_systemd_acceptance,cpacloud_crossvm_acceptance -o "$RUNNER_TEMP/cross-vm.test" ./internal/service
+      - name: A local provisioning, real activation, closed v3 source and allowlisted relay
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,RUNNER_TEMP python3 -B scripts/cross-vm-backup.py a "$RUNNER_TEMP/cross-vm.test" "$RUNNER_TEMP/cpa-crossvm-relay" "$EXPECTED_HEAD"
+      - name: Transfer only the four synthetic ciphertext or public files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cross-vm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cpa-crossvm-relay/package.cpacb
+            ${{ runner.temp }}/cpa-crossvm-relay/binding.json
+            ${{ runner.temp }}/cpa-crossvm-relay/foreign-master.capsule
+            ${{ runner.temp }}/cpa-crossvm-relay/vm.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: A local relay cleanup
+        if: always()
+        run: python3 -B scripts/cross-vm-backup.py cleanup-relay "$RUNNER_TEMP/cpa-crossvm-relay"
+
+  restore-b:
+    needs: source-a
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact source
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.8'
+          cache: false
+      - name: Compile independently on B
+        run: go test -c -tags cpacloud_systemd_acceptance,cpacloud_crossvm_acceptance -o "$RUNNER_TEMP/cross-vm.test" ./internal/service
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: cross-vm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cpa-crossvm-relay
+      - name: B local provisioning, restore and independent reopen before bounded negatives
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,RUNNER_TEMP python3 -B scripts/cross-vm-backup.py b "$RUNNER_TEMP/cross-vm.test" "$RUNNER_TEMP/cpa-crossvm-relay" "$EXPECTED_HEAD"
+      - name: B local relay cleanup
+        if: always()
+        run: python3 -B scripts/cross-vm-backup.py cleanup-relay "$RUNNER_TEMP/cpa-crossvm-relay"
+
+  relay-cleanup:
+    needs: [source-a, restore-b]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Delete only this run's exact relay artifact and verify absence
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            try {
+              const name = 'cross-vm-' + context.runId + '-' + process.env.GITHUB_RUN_ATTEMPT;
+              const args = {owner: context.repo.owner, repo: context.repo.repo, run_id: context.runId, per_page: 100};
+              const before = await github.rest.actions.listWorkflowRunArtifacts(args);
+              if (before.data.total_count > 100) throw new Error();
+              const owned = before.data.artifacts.filter(a => a.name === name);
+              if (owned.length > 1) throw new Error();
+              for (const artifact of owned) {
+                await github.rest.actions.deleteArtifact({owner: context.repo.owner, repo: context.repo.repo, artifact_id: artifact.id});
+              }
+              const after = await github.rest.actions.listWorkflowRunArtifacts(args);
+              if (after.data.total_count > 100 || after.data.artifacts.some(a => a.name === name)) throw new Error();
+              core.info('CROSSVM_RELAY_CLEANUP ' + (owned.length ? 'ok' : 'not-created'));
+            } catch {
+              core.setFailed('CROSSVM_RELAY_CLEANUP failed');
+            }
