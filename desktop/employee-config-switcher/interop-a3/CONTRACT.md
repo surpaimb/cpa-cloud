@@ -85,3 +85,20 @@ A timeout or merely existing partial log cannot obtain capture acceptance.
 
 Sources and licenses: [PROVENANCE.md](PROVENANCE.md). Tested results remain
 pending until exact-head natural CI; local Windows checks are not Linux runtime.
+
+## Separately bounded fresh-store initialization
+
+Only A3's new `transaction` and `other-transaction` stores may be initialized,
+before targets, samples, secrets, journals or the unit exist. Exclusive mkdir,
+held nofollow parent/child FDs, name/FD identity, 0700 ownership/link and empty
+checks must precede the new object's fd ownership handoff and ACL operations.
+Only that held new-directory FD may lose access/default POSIX ACL attributes;
+only ENODATA means already absent. Recheck the same object's mode/owner/links,
+identity/name binding, both attributes' absence and emptiness before success.
+No existing/nonempty/rebound object is adopted, no ancestor/shared helper or
+product predicate changes, no chmod repair, no hot cleanup-journal ACL repair
+or retry. Failure and close errors stay red; existing owned cleanup applies.
+Public fresh dummy ACL/known inheritance and injected-error tests are mechanism
+and rejection evidence only, never an explanation of historical A3 red runs.
+All old red records remain; one new natural attempt and fresh E/F review gate
+any later acceptance. Production remains NO-GO.

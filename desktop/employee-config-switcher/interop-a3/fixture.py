@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Independent A3 supervisor extension. Explicit disposable Linux invocation only."""
 import importlib.util
+import ctypes
 import errno
 import hashlib
 import json
@@ -132,6 +133,8 @@ JOURNAL_ACL_FAILURES = (
     "a3-acl-result-zero", "a3-acl-result-nonzero",
 )
 RUST_FAILURES += JOURNAL_ACL_FAILURES
+STORE_ACL_ATTRIBUTES = (b"system.posix_acl_access", b"system.posix_acl_default")
+STORE_INIT_DIAGNOSTICS = ("a3-store-init-transaction-ok", "a3-store-init-other-transaction-ok", "a3-store-init-failed")
 VERIFIER_FAILURES = {10: "identity", 11: "bus", 12: "invocation", 13: "work", 14: "directory", 15: "mode",
     20: "session", 21: "policy", 30: "reference", 31: "search", 32: "absence-cardinality",
     33: "collection-absence", 34: "present-cardinality", 35: "item", 36: "attributes", 37: "key-oracle",
@@ -584,10 +587,91 @@ def scan_all(work, case, uid, gid, extra, report):
     return complete and report.states["scan-completeness"] == "complete" and report.states["scan-content"] == "clear"
 
 
+def require_a3_store_acl_absent(descriptor):
+    """Zero-buffer fd queries only: never read or report an ACL value/length."""
+    library = ctypes.CDLL(None, use_errno=True)
+    query = library.fgetxattr
+    query.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
+    query.restype = ctypes.c_ssize_t
+    for attribute in STORE_ACL_ATTRIBUTES:
+        result = query(descriptor, attribute, None, 0)
+        require(result == -1 and ctypes.get_errno() == errno.ENODATA, "a3-store-init-failed")
+
+
+def initialize_a3_store(work, name, uid, gid):
+    """Only an exclusively created, still-empty A3 store may be initialized.
+
+    This runs before the unit/targets/samples/secrets/journal exist. No existing
+    object is adopted, no ancestor ACL changes, and no failure is retried here.
+    The existing outer owned-tree cleanup is responsible for any failed setup.
+    Independently authored; public fd/xattr sources are in PROVENANCE.md.
+    """
+    parent = descriptor = None
+    failed = False
+    try:
+        require(sys.platform == "linux" and name in ("transaction", "other-transaction"), "a3-store-init-failed")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        parent = os.open(work, flags)
+        parent_info = os.fstat(parent)
+        require(stat.S_ISDIR(parent_info.st_mode) and stat.S_IMODE(parent_info.st_mode) == 0o700
+                and (parent_info.st_uid, parent_info.st_gid) == (uid, gid), "a3-store-init-failed")
+
+        def parent_binding(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+
+        expected_parent = parent_binding(parent_info)
+        require(parent_binding(os.stat(work, follow_symlinks=False)) == expected_parent, "a3-store-init-failed")
+        # mkdir has no exist_ok: a reused name, even empty/private, is rejected.
+        os.mkdir(name, mode=0o700, dir_fd=parent)
+        created = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        require(stat.S_ISDIR(created.st_mode) and stat.S_IMODE(created.st_mode) == 0o700
+                and (created.st_uid, created.st_gid) == (os.geteuid(), os.getegid())
+                and created.st_nlink == 2, "a3-store-init-failed")
+        identity = (created.st_dev, created.st_ino)
+        descriptor = os.open(name, flags, dir_fd=parent)
+
+        def verify(expected_uid, expected_gid):
+            held = os.fstat(descriptor)
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            require(stat.S_ISDIR(held.st_mode) and stat.S_IMODE(held.st_mode) == 0o700
+                    and held.st_nlink == 2 and (held.st_uid, held.st_gid) == (expected_uid, expected_gid)
+                    and (held.st_dev, held.st_ino) == identity
+                    and (named.st_dev, named.st_ino, named.st_mode, named.st_uid, named.st_gid, named.st_nlink)
+                    == (held.st_dev, held.st_ino, held.st_mode, held.st_uid, held.st_gid, held.st_nlink), "a3-store-init-failed")
+            require(parent_binding(os.fstat(parent)) == expected_parent
+                    and parent_binding(os.stat(work, follow_symlinks=False)) == expected_parent, "a3-store-init-failed")
+            require(not os.listdir(descriptor), "a3-store-init-failed")
+
+        verify(os.geteuid(), os.getegid())
+        os.fchown(descriptor, uid, gid)  # Ownership handoff of this new object only.
+        verify(uid, gid)
+        for attribute in STORE_ACL_ATTRIBUTES:
+            try:
+                os.removexattr(descriptor, attribute)
+            except OSError as error:
+                require(error.errno == errno.ENODATA, "a3-store-init-failed")
+        verify(uid, gid)
+        require_a3_store_acl_absent(descriptor)
+        verify(uid, gid)  # Rebind and recheck emptiness after the absence queries.
+    except Exception:
+        failed = True
+    finally:
+        for owned in (descriptor, parent):
+            if owned is not None:
+                try:
+                    os.close(owned)  # Close each once; never retry a possibly reused fd.
+                except Exception:
+                    failed = True
+    if failed:
+        print("FIXTURE_DIAGNOSTIC a3-store-init-failed", flush=True)
+        raise base.PreflightFailure("a3-store-init-failed") from None
+    print("FIXTURE_DIAGNOSTIC " + STORE_INIT_DIAGNOSTICS[0 if name == "transaction" else 1], flush=True)
+
+
 class Fixture(a2.Fixture):
     markers = MARKERS
     failures = a2.FAILURES + ("a3-failed",)
-    diagnostics = DIAGNOSTICS + RUST_FAILURES + VERIFIER_LABELS + a2.DIAGNOSTICS + volatile.PANICS
+    diagnostics = DIAGNOSTICS + RUST_FAILURES + VERIFIER_LABELS + a2.DIAGNOSTICS + volatile.PANICS + STORE_INIT_DIAGNOSTICS
     diagnostics_always = True
 
     def __init__(self, binary, case):
@@ -618,7 +702,9 @@ class Fixture(a2.Fixture):
                            ("a3-policy", HERE / "bus.conf.in"), ("a3-supervisor", HERE / "fixture.py")):
             print("FIXTURE " + name + " sha256=" + hashlib.sha256(path.read_bytes()).hexdigest(), flush=True)
         work = Path(metadata["work"])
-        for name in ("target", "neighbor", "transaction", "other-transaction"):
+        for name in ("transaction", "other-transaction"):
+            initialize_a3_store(work, name, metadata["uid"], metadata["gid"])
+        for name in ("target", "neighbor"):
             base.private(work / name, metadata["uid"], metadata["gid"])
         metadata.update(a3_verifier=str(helper), a3_case=self.case)
         # Registration is source-derived, before daemon startup/send/write.

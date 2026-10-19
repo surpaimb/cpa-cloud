@@ -98,3 +98,22 @@ inheritance experiments, diagnosis of any historical run, or durable acceptance.
 No environment/ACL/ancestor modification, retry, dependency/license change,
 copied implementation or strict clean-room claim is introduced. Independently
 authored from the original visible E/F bounded contract and public APIs above.
+
+## Independently bounded fresh A3 store initialization — 2026-10-19
+
+The two new A3 store directories alone receive an independently authored,
+fd-bound pre-unit initialization under the original visible E/F contract.
+It uses Python's existing [fd-capable removexattr](https://docs.python.org/3.12/library/os.html#os.removexattr)
+and [Linux fd xattr semantics](https://man7.org/linux/man-pages/man2/removexattr.2.html).
+Python standard-library ctypes calls the existing system libc fgetxattr with a
+NULL buffer/zero size for absence only; no ACL value or actual size is returned
+as evidence. The product's original ACL admission code is unchanged.
+Public dummy vectors independently encode the version/tags/little-endian fields
+specified by Linux v6.12 [POSIX ACL xattr UAPI](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/posix_acl_xattr.h)
+and [ACL tag UAPI](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/posix_acl.h)
+to demonstrate a known [default ACL mechanism](https://man7.org/linux/man-pages/man5/acl.5.html).
+The referenced UAPI retains LGPL-2.1+ WITH Linux-syscall-note; existing system
+libc and Python retain their own licenses. No header/implementation is imported,
+new dependency installed, real ancestor changed or strict clean-room claim made.
+Dummy inheritance and injected removal-error tests do not establish the ACL
+source of any prior CI failure or actual filesystem I/O fault injection.

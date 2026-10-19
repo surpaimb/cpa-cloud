@@ -7,6 +7,7 @@ import importlib.util
 import io
 import os
 import re
+import struct
 from pathlib import Path
 import tempfile
 import subprocess
@@ -23,9 +24,38 @@ spec.loader.exec_module(f)
 LIVE = HERE.parent / "crates/employee-config-core/src/live"
 
 
+def parent_tree():
+    """Normalize only this independently authorized fresh-store setup batch."""
+    tree = ast.parse((HERE / "fixture.py").read_text())
+    additions = {"STORE_ACL_ATTRIBUTES", "STORE_INIT_DIAGNOSTICS", "require_a3_store_acl_absent", "initialize_a3_store"}
+    old_length = len(tree.body)
+    tree.body = [node for node in tree.body if not (
+        isinstance(node, ast.Import) and len(node.names) == 1 and node.names[0].name == "ctypes" or
+        isinstance(node, ast.FunctionDef) and node.name in additions or
+        isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in additions for target in node.targets))]
+    if old_length - len(tree.body) != 5:
+        raise AssertionError("five-store-setup-definitions-only")
+    fixture = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Fixture")
+    diag = next(node for node in fixture.body if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "diagnostics" for target in node.targets))
+    old = "DIAGNOSTICS + RUST_FAILURES + VERIFIER_LABELS + a2.DIAGNOSTICS + volatile.PANICS"
+    if ast.dump(diag.value) != ast.dump(ast.parse(old + " + STORE_INIT_DIAGNOSTICS", mode="eval").body):
+        raise AssertionError("store-setup-fixed-whitelist-only")
+    diag.value = ast.parse(old, mode="eval").body
+    prepare = next(node for node in fixture.body if isinstance(node, ast.FunctionDef) and node.name == "prepare")
+    new = ast.parse('for name in ("transaction", "other-transaction"):\n    initialize_a3_store(work, name, metadata["uid"], metadata["gid"])\nfor name in ("target", "neighbor"):\n    base.private(work / name, metadata["uid"], metadata["gid"])').body
+    positions = [i for i in range(len(prepare.body) - 1)
+                 if [ast.dump(node) for node in prepare.body[i:i + 2]] == [ast.dump(node) for node in new]]
+    if len(positions) != 1:
+        raise AssertionError("two-exclusive-store-setup-call-sites")
+    index = positions[0]
+    prepare.body[index:index + 2] = ast.parse('for name in ("target", "neighbor", "transaction", "other-transaction"):\n    base.private(work / name, metadata["uid"], metadata["gid"])').body
+    return tree
+
+
 def writer_normalized_tree():
     """Only the three authorized opener substitutions normalize to old source."""
-    tree = ast.parse((HERE / "fixture.py").read_text())
+    tree = parent_tree()
     pairs = (("private_log(path, self.m['uid'], self.m['gid'])", "path.open('xb')"),
              ("private_log(path, m['uid'], m['gid'])", "path.open('xb')"),
              ("private_log(work / (name + '.log'), m['uid'], m['gid'])", "(work / (name + '.log')).open('xb')"))
@@ -386,7 +416,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_crash_batch_freezes_writer_reader_business_and_cleanup(self):
         source = ast.parse((HERE / "fixture.py").read_text())
-        tree = without_crash_command(ast.parse((HERE / "fixture.py").read_text()))
+        tree = without_crash_command(parent_tree())
         self.assertEqual(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest(),
                          "d5b5602a7f2720372c31280150783b6e89122a2c51fac09247e6c15fdc862629")
         owner = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "Children")
@@ -401,7 +431,7 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual([ast.dump(node) for node in gates], [ast.dump(expected)])
 
     def test_journal_batch_freezes_parent_except_fixed_labels_and_noncrash_filter(self):
-        tree = without_acl_parent(ast.parse((HERE / "fixture.py").read_text()))
+        tree = without_acl_parent(parent_tree())
         tree.body = [node for node in tree.body if not (
             isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in ("JOURNAL_FAILURES", "JOURNAL_POINT_FAILURES") for target in node.targets) or
             isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "RUST_FAILURES"
@@ -450,7 +480,7 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(len(set(f.JOURNAL_FAILURES)), 39)
 
     def test_point_batch_freezes_entire_parent_supervisor_except_static_tags(self):
-        tree = without_acl_parent(ast.parse((HERE / "fixture.py").read_text()))
+        tree = without_acl_parent(parent_tree())
         tree.body = [node for node in tree.body if not (
             isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "JOURNAL_POINT_FAILURES" for target in node.targets) or
             isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "RUST_FAILURES"
@@ -556,13 +586,294 @@ class FixtureTests(unittest.TestCase):
             self.assertIn("fn " + name + "()", region)
 
     def test_acl_details_freeze_parent_and_relay_only_eight_fixed_labels(self):
-        tree = without_acl_parent(ast.parse((HERE / "fixture.py").read_text()))
+        tree = without_acl_parent(parent_tree())
         self.assertEqual(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest(),
                          "406c4359ad1fb0e8a74f027b6710323fdb4301c9a8eb5269222704175ce483ff")
         self.assertEqual(len(f.JOURNAL_ACL_FAILURES), 8)
         self.assertEqual(len(set(f.JOURNAL_ACL_FAILURES)), 8)
         payload = b"DO-NOT-PRINT /private/dummy 123456 a3-acl-result-123456 " + b" ".join(value.encode() for value in f.JOURNAL_ACL_FAILURES)
         self.assertEqual(set(f.fixed_child_failures(payload)), set(f.JOURNAL_ACL_FAILURES))
+
+
+class StoreInitializerTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def environment(self, *, child_changes=None, parent_changes=None, exists=False, nonempty=0,
+                    replace_name=False, remove_error=None, close_fd=None, absent_error=None, chown_error=None):
+        parent = dict(st_mode=f.stat.S_IFDIR | 0o700, st_uid=1001, st_gid=1002, st_dev=1, st_ino=2, st_nlink=9)
+        child = dict(st_mode=f.stat.S_IFDIR | 0o700, st_uid=0, st_gid=0, st_dev=1, st_ino=3, st_nlink=2)
+        parent.update(parent_changes or {})
+        child.update(child_changes or {})
+        named_count, list_count = 0, 0
+        def stated(path, **kwargs):
+            nonlocal named_count
+            info = dict(child if kwargs.get("dir_fd") == 31 else parent)
+            if kwargs.get("dir_fd") == 31:
+                named_count += 1
+                if replace_name and named_count > 1:
+                    info["st_ino"] += 1
+            return types.SimpleNamespace(**info)
+        def listed(descriptor):
+            nonlocal list_count
+            self.assertEqual(descriptor, 32)
+            list_count += 1
+            return ["PUBLIC-DUMMY"] if nonempty and list_count >= nonempty else []
+        def chowned(descriptor, uid, gid):
+            self.assertEqual(descriptor, 32)
+            if chown_error:
+                raise chown_error
+            child.update(st_uid=uid, st_gid=gid)
+        def closed(descriptor):
+            if descriptor == close_fd:
+                raise OSError("DO-NOT-PRINT-CLOSE")
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(f.sys, "platform", "linux"))
+            for name, flag in (("O_DIRECTORY", 0x10000), ("O_NOFOLLOW", 0x20000), ("O_CLOEXEC", 0x40000)):
+                stack.enter_context(mock.patch.object(f.os, name, getattr(f.os, name, flag), create=True))
+            stack.enter_context(mock.patch.object(f.os, "geteuid", return_value=0, create=True))
+            stack.enter_context(mock.patch.object(f.os, "getegid", return_value=0, create=True))
+            opened = stack.enter_context(mock.patch.object(f.os, "open", side_effect=[31, 32]))
+            made = stack.enter_context(mock.patch.object(f.os, "mkdir", side_effect=FileExistsError() if exists else None))
+            stack.enter_context(mock.patch.object(f.os, "fstat", side_effect=lambda fd: types.SimpleNamespace(**(parent if fd == 31 else child))))
+            stack.enter_context(mock.patch.object(f.os, "stat", side_effect=stated))
+            stack.enter_context(mock.patch.object(f.os, "listdir", side_effect=listed))
+            chown = stack.enter_context(mock.patch.object(f.os, "fchown", side_effect=chowned, create=True))
+            removed = stack.enter_context(mock.patch.object(f.os, "removexattr", side_effect=remove_error, create=True))
+            absent = stack.enter_context(mock.patch.object(f, "require_a3_store_acl_absent", side_effect=absent_error))
+            close = stack.enter_context(mock.patch.object(f.os, "close", side_effect=closed))
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            yield types.SimpleNamespace(opened=opened, made=made, chown=chown, removed=removed,
+                                        absent=absent, close=close, output=output)
+
+    def test_initializer_only_removes_two_fixed_attributes_from_one_held_new_fd(self):
+        for name, label in zip(("transaction", "other-transaction"), f.STORE_INIT_DIAGNOSTICS[:2]):
+            with self.subTest(name=name), self.environment() as env:
+                f.initialize_a3_store(Path("public-work"), name, 1001, 1002)
+                env.made.assert_called_once_with(name, mode=0o700, dir_fd=31)
+                flags = f.os.O_RDONLY | f.os.O_DIRECTORY | f.os.O_NOFOLLOW | f.os.O_CLOEXEC
+                self.assertEqual(env.opened.call_args_list, [mock.call(Path("public-work"), flags), mock.call(name, flags, dir_fd=31)])
+                env.chown.assert_called_once_with(32, 1001, 1002)
+                self.assertEqual(env.removed.call_args_list, [mock.call(32, value) for value in f.STORE_ACL_ATTRIBUTES])
+                env.absent.assert_called_once_with(32)
+                self.assertEqual(env.close.call_args_list, [mock.call(32), mock.call(31)])
+                self.assertEqual(env.output.getvalue(), "FIXTURE_DIAGNOSTIC " + label + "\n")
+
+    def test_initializer_rejects_existing_nonempty_rebound_and_unsafe_objects_before_acl_mutation(self):
+        cases = [dict(exists=True), dict(nonempty=1), dict(replace_name=True), dict(chown_error=OSError("DO-NOT-PRINT")),
+                 *[dict(child_changes=value) for value in (dict(st_mode=f.stat.S_IFLNK | 0o700),
+                    dict(st_mode=f.stat.S_IFDIR | 0o755), dict(st_uid=9), dict(st_gid=9), dict(st_nlink=3))],
+                 dict(parent_changes=dict(st_uid=9)), dict(parent_changes=dict(st_mode=f.stat.S_IFDIR | 0o755))]
+        for case in cases:
+            with self.subTest(case=case), self.environment(**case) as env:
+                with self.assertRaisesRegex(f.base.PreflightFailure, "^a3-store-init-failed$"):
+                    f.initialize_a3_store(Path("DO-NOT-PRINT"), "transaction", 1001, 1002)
+                env.removed.assert_not_called()
+                self.assertEqual(env.output.getvalue(), "FIXTURE_DIAGNOSTIC a3-store-init-failed\n")
+                self.assertEqual(len(env.close.call_args_list), len(set(call.args[0] for call in env.close.call_args_list)))
+
+    def test_initializer_rejects_unapproved_name_and_platform_without_opening(self):
+        for name, platform in (("../transaction", "linux"), ("target", "linux"), ("transaction", "win32")):
+            with self.subTest(name=name, platform=platform), self.environment() as env, mock.patch.object(f.sys, "platform", platform):
+                with self.assertRaises(f.base.PreflightFailure):
+                    f.initialize_a3_store(Path("DO-NOT-PRINT"), name, 1001, 1002)
+                env.opened.assert_not_called()
+                env.made.assert_not_called()
+                env.removed.assert_not_called()
+
+    def test_initializer_only_tolerates_attribute_absence_and_never_retries(self):
+        with self.environment(remove_error=OSError(f.errno.ENODATA, "DO-NOT-PRINT")) as env:
+            f.initialize_a3_store(Path("public-work"), "transaction", 1001, 1002)
+            self.assertEqual(env.removed.call_count, 2)
+            env.absent.assert_called_once_with(32)
+        for error in (f.errno.EACCES, f.errno.EIO, f.errno.ENOTSUP):
+            with self.subTest(error=error), self.environment(remove_error=OSError(error, "DO-NOT-PRINT")) as env:
+                with self.assertRaises(f.base.PreflightFailure):
+                    f.initialize_a3_store(Path("public-work"), "transaction", 1001, 1002)
+                self.assertEqual(env.removed.call_count, 1)
+                env.absent.assert_not_called()
+                self.assertNotIn("DO-NOT-PRINT", env.output.getvalue())
+
+    def test_initializer_postconditions_and_close_errors_remain_red(self):
+        for case in (dict(nonempty=3), dict(nonempty=4), dict(absent_error=OSError("DO-NOT-PRINT")), dict(close_fd=31), dict(close_fd=32)):
+            with self.subTest(case=case), self.environment(**case) as env:
+                with self.assertRaises(f.base.PreflightFailure):
+                    f.initialize_a3_store(Path("public-work"), "transaction", 1001, 1002)
+                self.assertEqual(env.output.getvalue(), "FIXTURE_DIAGNOSTIC a3-store-init-failed\n")
+                self.assertEqual(env.removed.call_count, 2)
+                self.assertEqual(env.close.call_args_list, [mock.call(32), mock.call(31)])
+
+    def test_absence_gate_uses_null_buffer_and_rejects_every_nonabsence_result(self):
+        for result, error, accepted in ((-1, f.errno.ENODATA, True), (0, 0, False), (8192, 0, False),
+                                        (-1, f.errno.EACCES, False), (-1, f.errno.ENOTSUP, False)):
+            with self.subTest(result=result, error=error):
+                query = mock.Mock(return_value=result)
+                with mock.patch.object(f.ctypes, "CDLL", return_value=types.SimpleNamespace(fgetxattr=query)), mock.patch.object(f.ctypes, "get_errno", return_value=error):
+                    if accepted:
+                        f.require_a3_store_acl_absent(32)
+                    else:
+                        with self.assertRaises(f.base.PreflightFailure):
+                            f.require_a3_store_acl_absent(32)
+                self.assertEqual(query.call_args_list, [mock.call(32, value, None, 0) for value in f.STORE_ACL_ATTRIBUTES[:2 if accepted else 1]])
+                self.assertEqual(query.restype, f.ctypes.c_ssize_t)
+
+    def test_initializer_freezes_all_previous_parent_behavior_except_fresh_setup(self):
+        self.assertEqual(hashlib.sha256(ast.dump(parent_tree(), include_attributes=False).encode()).hexdigest(),
+                         "571117ae2318837bfec8d7b72904e16f095c38b7cb4ff765227fbad92f729df3")
+        source = (HERE / "fixture.py").read_text()
+        helper = source.split("def initialize_a3_store(", 1)[1].split("class Fixture(", 1)[0]
+        for forbidden in ("exist_ok", "os.chmod(", "os.chown(", "os.getxattr(", "os.setxattr(", "shutil.", "rmdir(", "unlink(", "subprocess", "{error", ".resolve("):
+            # The comment explicitly says there is no exist_ok; strip comments.
+            text = "\n".join(line.split("#", 1)[0] for line in helper.splitlines())
+            self.assertNotIn(forbidden, text)
+        self.assertEqual(helper.count("os.removexattr(descriptor, attribute)"), 1)
+        self.assertIn("error.errno == errno.ENODATA", helper)
+        self.assertIn("require_a3_store_acl_absent(descriptor)", helper)
+        self.assertIn("require(not os.listdir(descriptor)", helper)
+        for name, expected in (("cleanup_journal.rs", "4c153bc85f57e7d706ce90c231a1c3c19f9dea4779ce859a7ba7d1c577e7fc87"),
+                               ("linux_secret_service_a3_fixture.rs", "e1b05e2f58cdc26ecf885e956ec91b8ec4ce20f51679db07d317131afe76b150")):
+            self.assertEqual(hashlib.sha256((LIVE / name).read_text().encode()).hexdigest(), expected)
+
+
+@unittest.skipUnless(sys.platform == "linux", "Linux POSIX ACL fd mechanism unavailable on this platform")
+class LinuxStoreInitializerTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def fresh(self, inherited=False):
+        with tempfile.TemporaryDirectory(prefix="a3-public-acl-") as value:
+            root = Path(value)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                info, named = os.fstat(descriptor), root.lstat()
+                self.assertEqual((info.st_dev, info.st_ino), (named.st_dev, named.st_ino))
+                self.assertTrue(f.stat.S_ISDIR(info.st_mode))
+                self.assertEqual((info.st_uid, info.st_gid, f.stat.S_IMODE(info.st_mode), info.st_nlink),
+                                 (os.geteuid(), os.getegid(), 0o700, 2))
+                self.assertEqual(os.listdir(descriptor), [])
+                # Only this verified, fresh public dummy root is touched.
+                for attribute in f.STORE_ACL_ATTRIBUTES:
+                    try:
+                        os.removexattr(descriptor, attribute)
+                    except OSError as error:
+                        self.assertEqual(error.errno, f.errno.ENODATA)
+                f.require_a3_store_acl_absent(descriptor)
+                if inherited:
+                    # Independent wire vector from Linux v6.12 POSIX ACL UAPI.
+                    # A named zero-permission entry keeps the ACL nontrivial.
+                    entries = ((1, 7, 0xffffffff), (2, 0, os.geteuid()), (4, 0, 0xffffffff),
+                               (16, 0, 0xffffffff), (32, 0, 0xffffffff))
+                    payload = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *entry) for entry in entries)
+                    os.setxattr(descriptor, f.STORE_ACL_ATTRIBUTES[1], payload)
+                yield root, descriptor
+            finally:
+                os.close(descriptor)
+
+    def initialize(self, root, name="transaction"):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            f.initialize_a3_store(root, name, os.geteuid(), os.getegid())
+        self.assertEqual(output.getvalue(), "FIXTURE_DIAGNOSTIC " + f.STORE_INIT_DIAGNOSTICS[0 if name == "transaction" else 1] + "\n")
+
+    def test_clean_new_store_remains_same_private_acl_absent_object(self):
+        with self.fresh() as (root, parent):
+            self.initialize(root)
+            descriptor = os.open("transaction", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                f.require_a3_store_acl_absent(descriptor)
+                self.assertEqual(os.listdir(descriptor), [])
+                self.assertEqual(os.fstat(descriptor).st_ino, (root / "transaction").lstat().st_ino)
+            finally:
+                os.close(descriptor)
+
+    def test_known_default_acl_inherits_and_initialization_removes_only_new_store_acl(self):
+        with self.fresh(inherited=True) as (root, parent):
+            os.mkdir("uninitialized", mode=0o700, dir_fd=parent)
+            uninitialized = os.open("uninitialized", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                with self.assertRaises(f.base.PreflightFailure):
+                    f.require_a3_store_acl_absent(uninitialized)
+            finally:
+                os.close(uninitialized)
+            identities = []
+            remove = os.removexattr
+            def observe(descriptor, attribute):
+                identities.append((os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino))
+                return remove(descriptor, attribute)
+            with mock.patch.object(f.os, "removexattr", side_effect=observe):
+                self.initialize(root, "other-transaction")
+            store = root / "other-transaction"
+            info = store.lstat()
+            self.assertEqual(identities, [(info.st_dev, info.st_ino)] * 2)
+            descriptor = os.open(store, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                f.require_a3_store_acl_absent(descriptor)
+                os.mkdir("public-descendant", mode=0o700, dir_fd=descriptor)
+                descendant = os.open("public-descendant", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                try:
+                    f.require_a3_store_acl_absent(descendant)
+                finally:
+                    os.close(descendant)
+            finally:
+                os.close(descriptor)
+            # The dummy ancestor's known default ACL is deliberately unchanged.
+            with self.assertRaises(f.base.PreflightFailure):
+                f.require_a3_store_acl_absent(parent)
+
+    def test_existing_private_store_is_not_adopted_or_cleared(self):
+        with self.fresh(inherited=True) as (root, parent):
+            os.mkdir("transaction", mode=0o700, dir_fd=parent)
+            before = (root / "transaction").lstat()
+            with mock.patch.object(f.os, "removexattr", wraps=os.removexattr) as removed, contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(f.base.PreflightFailure):
+                    f.initialize_a3_store(root, "transaction", os.geteuid(), os.getegid())
+            removed.assert_not_called()
+            self.assertEqual(before.st_ino, (root / "transaction").lstat().st_ino)
+
+    def test_new_but_nonempty_store_is_rejected_before_acl_mutation(self):
+        with self.fresh(inherited=True) as (root, parent):
+            mkdir = os.mkdir
+            def populate(name, **kwargs):
+                mkdir(name, **kwargs)
+                (root / name / "PUBLIC-DUMMY").write_text("public")
+            with mock.patch.object(f.os, "mkdir", side_effect=populate), mock.patch.object(f.os, "removexattr", wraps=os.removexattr) as removed, contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(f.base.PreflightFailure):
+                    f.initialize_a3_store(root, "transaction", os.geteuid(), os.getegid())
+            removed.assert_not_called()
+            self.assertEqual((root / "transaction/PUBLIC-DUMMY").read_text(), "public")
+
+    def test_name_replacement_does_not_redirect_held_fd_acl_mutation(self):
+        with self.fresh(inherited=True) as (root, parent):
+            fstat = os.fstat
+            swapped = False
+            def replace(descriptor):
+                nonlocal swapped
+                info = fstat(descriptor)
+                if not swapped and (root / "transaction").exists() and info.st_ino == (root / "transaction").lstat().st_ino:
+                    swapped = True
+                    os.rename("transaction", "displaced", src_dir_fd=parent, dst_dir_fd=parent)
+                    os.mkdir("transaction", mode=0o700, dir_fd=parent)
+                return info
+            with mock.patch.object(f.os, "fstat", side_effect=replace), mock.patch.object(f.os, "removexattr", wraps=os.removexattr) as removed, contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(f.base.PreflightFailure):
+                    f.initialize_a3_store(root, "transaction", os.geteuid(), os.getegid())
+            self.assertTrue(swapped)
+            removed.assert_not_called()
+            self.assertNotEqual((root / "transaction").lstat().st_ino, (root / "displaced").lstat().st_ino)
+
+    def test_injected_remove_error_stops_without_retry_or_false_absence(self):
+        with self.fresh(inherited=True) as (root, parent):
+            remove = os.removexattr
+            def fail_default(descriptor, attribute):
+                if attribute == f.STORE_ACL_ATTRIBUTES[1]:
+                    raise OSError(f.errno.EIO, "PUBLIC-DUMMY-INJECTED")
+                return remove(descriptor, attribute)
+            with mock.patch.object(f.os, "removexattr", side_effect=fail_default) as removed, contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(f.base.PreflightFailure):
+                    f.initialize_a3_store(root, "transaction", os.geteuid(), os.getegid())
+            self.assertEqual(removed.call_count, 2)
+            self.assertEqual(output.getvalue(), "FIXTURE_DIAGNOSTIC a3-store-init-failed\n")
+            descriptor = os.open("transaction", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                with self.assertRaises(f.base.PreflightFailure):
+                    f.require_a3_store_acl_absent(descriptor)
+            finally:
+                os.close(descriptor)
 
 
 class WriterTests(unittest.TestCase):
