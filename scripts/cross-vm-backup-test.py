@@ -174,6 +174,65 @@ class CrossVMTests(unittest.TestCase):
             with self.assertRaises(h.Failure):
                 fixture.emit("restore", "private-secret")
 
+    def test_preflight_identity_categories_use_only_existing_mocked_checks(self):
+        for failure_index in range(6):  # Five failing public predicates, then all pass.
+            with self.subTest(failure_index=failure_index), tempfile.TemporaryDirectory() as directory:
+                fixture, output = self.harness(Path(directory)), io.StringIO()
+                fixture.command, fixture.capture = Mock(), Mock()
+                user, group = Mock(), Mock()
+                user.getpwnam.side_effect = None if failure_index == 0 else KeyError("public-absent")
+                group.getgrnam.side_effect = None if failure_index == 1 else KeyError("public-absent")
+                manifest = {"machine": "public-local-machine" if failure_index == 3 else "public-other-machine",
+                            "boot": "public-local-boot" if failure_index == 4 else "public-other-boot"}
+                values = {"/proc/1/comm": "systemd", "/etc/machine-id": "public-local-machine",
+                          "/proc/sys/kernel/random/boot_id": "public-local-boot"}
+                with contextlib.ExitStack() as mocks, contextlib.redirect_stdout(output):
+                    for context in (patch.object(h.sys, "platform", "linux"),
+                                    patch.object(h.os, "geteuid", return_value=0, create=True),
+                                    patch.dict(h.os.environ, GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="Linux"),
+                                    patch.dict(h.sys.modules, {"pwd": user, "grp": group}),
+                                    patch.object(Path, "is_file", return_value=True), patch.object(h.os, "access", return_value=True),
+                                    patch.object(h, "validate_relay", return_value=({"vm.json": b"public-dummy-only"}, manifest))):
+                        mocks.enter_context(context)
+                    exists = mocks.enter_context(patch.object(h.os.path, "lexists", return_value=failure_index == 2))
+                    reads = mocks.enter_context(patch.object(Path, "read_text", autospec=True,
+                                                             side_effect=lambda path: values[path.as_posix()]))
+                    if failure_index < 5:
+                        with self.assertRaises(h.Failure) as failure:
+                            fixture.preflight()
+                        self.assertEqual(failure.exception.category, "identity")
+                    else:
+                        fixture.preflight()
+                expected = ["CROSSVM b " + stage + (" failed" if index == failure_index else " ok")
+                            for index, stage in enumerate(h.PREFLIGHT_IDENTITIES) if index <= failure_index]
+                self.assertEqual(output.getvalue().splitlines(), expected)
+                self.assertEqual(user.getpwnam.call_count, 1)
+                self.assertEqual(group.getgrnam.call_count, int(failure_index > 0))
+                self.assertEqual(exists.call_count, int(failure_index > 1))
+                self.assertEqual(reads.call_count, (1, 1, 1, 2, 3, 3)[failure_index])
+                fixture.command.assert_called_once_with(["systemd-detect-virt", "--vm"])
+                for raw in (*values.values(), fixture.user, "/var/lib/systemd/credential.secret"):
+                    self.assertNotIn(raw, output.getvalue())
+
+    def test_preflight_identity_report_rejects_non_source_stage_and_non_boolean(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, output = self.harness(Path(directory)), io.StringIO()
+            with contextlib.redirect_stdout(output):
+                for stage, value in (("private-untrusted-stage", False), (h.PREFLIGHT_IDENTITIES[0], "private-untrusted-value")):
+                    with self.assertRaises(h.Failure):
+                        fixture.preflight_identity(stage, value)
+            self.assertEqual(output.getvalue(), "")
+
+    def test_preflight_diagnostic_has_no_extra_host_or_identity_reads(self):
+        source = (HERE / "cross-vm-backup.py").read_text().split("    def preflight(self):", 1)[1].split("    def provision(self):", 1)[0]
+        for path in ('"/var/lib/systemd/credential.secret"', '"/etc/machine-id"', '"/proc/sys/kernel/random/boot_id"'):
+            self.assertEqual(source.count(path), 1)
+        self.assertEqual(source.count("os.path.lexists("), 1)
+        self.assertEqual(source.count(".read_text()"), 3)  # Existing manager + machine + boot reads.
+        self.assertNotIn(".read_bytes()", source)
+        self.assertIn('manifest["machine"] != Path("/etc/machine-id").read_text().strip()', source)
+        self.assertIn('manifest["boot"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip()', source)
+
     def test_go_exercises_actual_readers_record_policy_session_and_publication(self):
         source = (HERE.parent / "internal/service/cross_vm_backup_linux_test.go").read_text()
         for forbidden in ("linuxReadBackupCredential =", "readLinuxSystemdCredential =", "net.Listen(", "httptest.NewServer("):

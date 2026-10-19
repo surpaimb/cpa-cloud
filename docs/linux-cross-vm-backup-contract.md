@@ -105,6 +105,15 @@ attempts all safe owned cleanup, without removing identities/data while a unit
 may be active. No raw diagnostics, paths, UIDs, key hashes, canary values or
 matched fragments are evidence output.
 
+The bounded preflight diagnostic extension emits only fixed `ok`/`failed`
+checkpoints for test-user absence, test-group absence, host-key absence, and
+(on B) distinct machine and boot identities. It reuses the existing lookups,
+host-key existence check and identity reads, preserving their order and
+short-circuit failure behavior. It never reads the host key or prints names,
+paths, identities or other raw values. Both distinct-identity requirements
+remain fail-closed; unreported later checkpoints are not proof of success.
+Public dummy/mock tests exercise each failure category without host inspection.
+
 Any failed positive, wrong negative stage, identity drift, unexpected socket or
 publication, incomplete scan or cleanup failure stops later cases. No automatic
 retry, weaker configuration, manual rerun/dispatch or secret regeneration after
@@ -123,7 +132,13 @@ separate, unverified gates.
 Independently authored 2026-10-19 from the project contracts and original F's
 read-only first-slice design. Project-owned PR79 test utilities are explicitly
 reused. No prohibited implementation, tests or documentation were copied/ported;
-no strict clean-room claim. Public references inspected:
+no strict clean-room claim.
+
+The later preflight category extension and its public dummy tests are likewise
+independently authored from this project's existing predicates; no new dependency
+or external implementation is introduced.
+
+Public references inspected:
 
 - [systemd v255 credential encryption semantics](https://github.com/systemd/systemd/blob/v255/man/systemd-creds.xml)
 - [systemd v255 execution/credential loading](https://github.com/systemd/systemd/blob/v255/man/systemd.exec.xml)

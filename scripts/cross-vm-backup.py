@@ -25,8 +25,10 @@ NEGATIVES = ("foreign-activation", "missing-master", "wrong-master", "swapped-ma
              "wrong-backup", "backup-id", "backup-version", "header", "ciphertext", "truncate-header", "truncate-body",
              "publish-credential", "publish-parent", "target-exists", "publish-binding")
 CASES = ("source", "restore", "reopen-one", "reopen-two") + NEGATIVES
+PREFLIGHT_IDENTITIES = ("preflight-user-absent", "preflight-group-absent", "preflight-host-key-absent",
+                        "preflight-machine-distinct", "preflight-boot-distinct")
 STAGES = {"preflight", "provision", "relay", "operation", "scan-content", "scan-completeness",
-          "unit-cleanup", "identity-cleanup", "root-cleanup", "local-relay-cleanup"} | set(CASES) | {
+          "unit-cleanup", "identity-cleanup", "root-cleanup", "local-relay-cleanup"} | set(CASES) | set(PREFLIGHT_IDENTITIES) | {
               prefix + case for prefix in ("journal-", "unit-") for case in CASES}
 STATES = {"ok", "failed", "timeout", "not-reached", "clear", "matched", "complete", "incomplete", "not-created", "collected"}
 CATEGORIES = {"guard", "command", "timeout", "scan-match", "evidence", "identity", "publication", "cleanup"}
@@ -162,6 +164,11 @@ class Harness:
         require(stage in STAGES and state in STATES)
         print("CROSSVM " + self.role + " " + stage + " " + state, flush=True)
 
+    def preflight_identity(self, stage, ok):
+        require(stage in PREFLIGHT_IDENTITIES and type(ok) is bool)
+        self.emit(stage, "ok" if ok else "failed")
+        require(ok, "identity")
+
     def action(self, stage, function):
         try:
             result = function()
@@ -203,22 +210,22 @@ class Harness:
         self.command(["systemd-detect-virt", "--vm"])
         import pwd
         import grp
-        for lookup in (pwd.getpwnam, grp.getgrnam):
+        for stage, lookup in (("preflight-user-absent", pwd.getpwnam), ("preflight-group-absent", grp.getgrnam)):
+            absent = False
             try:
                 lookup(self.user)
             except KeyError:
-                pass
-            else:
-                raise Failure("identity")
-        require(not os.path.lexists("/var/lib/systemd/credential.secret"), "identity")
+                absent = True
+            self.preflight_identity(stage, absent)
+        self.preflight_identity("preflight-host-key-absent", not os.path.lexists("/var/lib/systemd/credential.secret"))
         require(self.binary.is_file() and os.access(self.binary, os.X_OK))
         if self.role == "a":
             require(not self.relay.exists())
         else:
             self.incoming, manifest = validate_relay(self.relay, self.sha)
             self.capture(b"".join(self.incoming.values()))
-            require(manifest["machine"] != Path("/etc/machine-id").read_text().strip() and
-                    manifest["boot"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip(), "identity")
+            self.preflight_identity("preflight-machine-distinct", manifest["machine"] != Path("/etc/machine-id").read_text().strip())
+            self.preflight_identity("preflight-boot-distinct", manifest["boot"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip())
 
     def provision(self):
         import pwd
