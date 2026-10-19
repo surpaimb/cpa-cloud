@@ -1,0 +1,218 @@
+# Two-VM synthetic v3 recovery acceptance
+
+2026-10-19. Independent acceptance slice on PR79 exact
+`286ba8f94cfdd9e90b9597e936a731e62d36bd76`, with its
+[same-VM contract](linux-systemd-backup-rehearsal-contract.md) and
+[ADR 0005](adr/0005-linux-systemd-backup-wrapping-key.md). Draft; production NO-GO.
+The current authorized increment also fixes Linux v3 production restore
+publication and adds deterministic regressions. It adds no rotation, custody,
+new recovery interface, dependency or feature enablement; v1/v2 are not refactored.
+
+## Frozen experiment
+
+Two separate fresh GitHub-hosted Ubuntu 24.04 VM jobs build the same asserted
+full source SHA: A uses native `ubuntu-24.04` amd64, B uses native
+`ubuntu-24.04-arm` arm64. Each compiles its own executable locally with the same
+Go version; neither an A binary nor a compiler/build cache is transferred to B.
+This is a same-source-version amd64-to-arm64 experiment, not proof of arbitrary
+architecture/OS compatibility. Kernel and Go host/target architecture are
+asserted before compilation. Fixed public runner records include only role,
+expected label/architecture and the observed numeric image version. Labels are
+not immutable image pins; exact source SHA and actual image evidence remain
+separate. Neither job restores caches or shares a disk, service, user
+directory, credential store, host encryption key, TPM state or system image.
+Both require systemd PID 1, VM detection, a previously absent fixed test
+user/group and unit names, and a previously absent systemd host key. Each invokes
+`systemd-creds setup` locally and uses explicit `--with-key=host` encryption.
+The manager's host key is never read/exported/copied/replaced by the fixture.
+
+`H_A` and `H_B` are different machine trust roots. `M1` is the same application
+installation key needed to decrypt the original database, and `W1` is its
+different backup wrapping key. A and B independently construct the same
+**public synthetic test vectors**, then pipe strict credential v1 JSON to their
+own local encryption tool. No plaintext credential file, secret argv/env,
+runtime credential export or reader override is used. This is a simulation of
+independent recovery provisioning, not a production recovery escrow mechanism.
+
+Each transient unit uses a fixed non-root identity, genuine
+`LoadCredentialEncrypted=`, a private network namespace, AF_UNIX-only socket
+creation, read-only system mounts except its owned temporary root, home
+protection, no capabilities/new privileges, core dumps disabled and bounded
+runtime. IPv4/IPv6 socket creation is tested for denial and the unit netns TCP,
+TCP6, UDP and UDP6 tables must contain no sockets. No listener, network worker
+or HTTP server is started; in-memory HTTP handlers do not bind sockets.
+API filesystems `/dev`, `/proc`, `/sys` and filesystem Unix sockets retain the
+same limitations described in PR79; no whole-host filesystem/IPC isolation,
+TPM/null-key policy or unswappable-memory guarantee is claimed.
+
+A initializes the real service, stores an encrypted synthetic record, an actual
+synthetic admin-session digest and a restricted employee/key policy, creates and
+verifies v3, then closes the service. Its unit must be stopped before relay
+publication. The source application version is the full asserted commit SHA;
+credential/binding format is v1 and backup format v3.
+
+The exact relay allowlist is `package.cpacb`, `binding.json`,
+`foreign-master.capsule`, `vm.json`. The first two are the synthetic encrypted
+package and non-secret installation binding. The capsule is A's encrypted
+installation credential, used **only** for B's activation-rejection negative.
+`vm.json` contains the source SHA, format versions and non-secret machine/boot
+identities; B must differ in both identities. No raw logs, database, host key,
+plaintext material, runtime directory or scanner oracle is uploaded. Every
+relay file must be a bounded single-link regular file; extra/missing files,
+symlinks, unexpected JSON fields, source/format drift or secret-encoding matches
+are failures. The transfer is a run-scoped artifact with one-day maximum
+retention, deleted and independently rechecked by a final cleanup job even when
+A/B fails. B downloads only that exact artifact from the same workflow run.
+
+B first restores into a new private directory using its locally encapsulated
+M1/W1 and unchanged production readers. Two further independent activations
+reopen the restored service, decrypt the original record, verify administrator
+state, file ownership/modes, restricted employee/key policy and rejection of
+the old admin session. Database session/OAuth rows must be cleared. These
+positives precede every negative. The closed positive directory is fingerprinted
+privately and must remain byte-identical after each negative.
+
+## Negative cases and required stages
+
+- A's capsule on B: manager `EXIT_CREDENTIALS` (243), application entry marker
+  absent; a generic application failure cannot pass this case.
+- Missing/wrong/swapped installation material; mismatched installation
+  instance/id/version; binding instance/id/version/canary mutations: installation
+  binding rejection, before creating/migrating a database or starting an App.
+- Missing/swapped wrapping material; equal installation/wrapping bytes under
+  different IDs; overlapping role IDs or wrong instance: provider admission
+  rejection before restore. Wrong wrapping bytes/id/version: package rejection.
+- Package header/ciphertext mutation and header/body truncation: package
+  authentication/format rejection before staging/publication.
+- At the existing final installation validator, replace staged binding bytes
+  on disk, or replace the credential-directory reference with an empty owned
+  directory. Delegate to the original validator; do not substitute a fake
+  credential reader or accept a fabricated mount. Binding-file replacement must
+  be rejected rather than publishing a changed file. The credential case proves
+  rejection of a changed credential source reference, not manager-mount mutation.
+- Replace the restore parent after initial binding validation: parent identity
+  rejection before the final validator/publication. Existing target: reject
+  without changing its public sentinel or any positive restored data.
+
+Test-only wrappers instrument existing validator boundaries and always delegate
+to the captured production validator. They never turn an invalid result into
+success. Every negative requires its exact reached stage, no final directory
+(except the preexisting sentinel case), no active worker/listener, and unchanged
+positive data. An unexpected successful publication is a hard failure, not a
+reason to weaken the test. The separately authorized production correction below
+retains this exact rejection and every existing positive and negative case.
+
+## Linux v3 authenticated publication correction
+
+The final validator must authenticate the actual staged binding, not merely the
+decoded in-memory package record. Staged creation and publication use held Linux
+directory/file descriptors, exclusive no-follow opens and fixed filenames.
+The parent namespace must be root/current-UID owned and not group/other writable
+unless sticky; otherwise another UID could exchange private directory names.
+Binding reads are bounded to 4096 bytes; regular type, exact private mode,
+effective UID/GID, single link, size and stable device/inode/content metadata are
+checked. Actual bytes must equal the package-authenticated binding exactly.
+The original installation/credential/canary validator still runs in its original
+order/count. Its return is followed by a same-handle content/identity check;
+callback replacement or same-inode rewriting must fail before a target exists.
+
+Publication does not rename files obtained by re-resolving staged paths. It
+creates a non-overwriting private target relative to the held parent and writes
+only the authenticated binding snapshot and the pinned **post-sanitization**
+database. It must never rebuild the database from the original package bytes,
+which would undo session/OAuth removal and paused-refresh state. Published file
+identities and binding bytes, parent/stage/target identity, cancellation and file/
+directory sync results are checked before success. Both files form the completed
+result; crash/power-loss atomicity beyond the existing private staging/sync
+contract is not claimed.
+
+Rollback and staged cleanup operate relative to held directories and recorded
+created-file identities. A replaced file/directory is not blindly deleted;
+incomplete cleanup remains a distinct joined error and cannot hide the original
+failure. A cleanup-only error after completed publication can leave a valid
+committed target and must not trigger an automatic restore retry. These bounded
+checks do not claim resistance to root or a completely compromised same-UID
+process continuously rewriting every object in the private namespace.
+
+Deterministic Linux tests cover pre-read, validator and publication handoffs,
+same-length in-place writes, same bytes/new inode, symlinks, missing/truncated/
+oversized bindings, mode/owner/link-count predicates, parent/stage/target
+replacement, non-overwrite, cancellation and I/O/sync failure. Both native VM
+jobs compile/run these public regressions before the unchanged real credential
+reader sequence. The root-owned public test process also exercises actual foreign
+owner mutation; ordinary unprivileged runs explicitly skip only that mutation.
+
+## Evidence and stop rules
+
+Only fixed source-owned stage/status categories leave the harness. Capture
+stdout/stderr and the exact unit invocation journal, including failed activation.
+Scan actual locally provisioned JSON/key bytes and public fixture sentinels in
+raw, hex, base64, escaped and decimal forms. Missing/failed journal collection,
+incomplete scan, unknown process/resource cleanup or relay deletion is failure.
+Original operation failure, content-match/completeness and A/B/relay cleanup are
+independent; a finally error must not erase the first failure. Failure still
+attempts all safe owned cleanup, without removing identities/data while a unit
+may be active. No raw diagnostics, paths, UIDs, key hashes, canary values or
+matched fragments are evidence output.
+
+The bounded preflight diagnostic extension emits only fixed `ok`/`failed`
+checkpoints for test-user absence, test-group absence, host-key absence, and
+(on B) distinct machine and boot identities. It reuses the existing lookups,
+host-key existence check and identity reads, preserving their order and
+short-circuit failure behavior. It never reads the host key or prints names,
+paths, identities or other raw values. Both distinct-identity requirements
+remain fail-closed; unreported later checkpoints are not proof of success.
+Public dummy/mock tests exercise each failure category without host inspection.
+
+Any failed positive, wrong negative stage, identity drift, unexpected socket or
+publication, incomplete scan or cleanup failure stops later cases. No automatic
+retry, weaker configuration, manual rerun/dispatch or secret regeneration after
+failure. Record the first natural run's red evidence and stop. Ordinary CI and
+original visible E/F review must refer to the exact new head/base, separately
+from prior PR79 evidence. Keep Draft; no merge, Ready, package or deployment.
+The bounded ARM-B attempt retains both different-machine and different-boot
+requirements and all prior host-key/VM/PID1 checks. Unsupported ARM execution,
+equal identity, failed positive/negative, incomplete scan or failed cleanup
+stops this attempt. Do not edit machine-id, fabricate identity, cycle runner
+labels, retry or manually rerun/dispatch to obtain a different environment.
+
+This proves at most synthetic same-version application recovery on independent
+VMs/host keys. M1→M2 rotation, historical-key retention/retirement, production
+custody, real escrow retrieval/disaster recovery, TPM/null-key attestation,
+scheduled retention, power-loss durability, RTO/RPO and rollout rollback remain
+separate, unverified gates.
+
+## Sources and provenance
+
+Independently authored 2026-10-19 from the project contracts and original F's
+read-only first-slice design. Project-owned PR79 test utilities are explicitly
+reused. No prohibited implementation, tests or documentation were copied/ported;
+no strict clean-room claim.
+
+The later preflight category extension and its public dummy tests are likewise
+independently authored from this project's existing predicates; no new dependency
+or external implementation is introduced.
+
+Public references inspected:
+
+- [systemd v255 credential encryption semantics](https://github.com/systemd/systemd/blob/v255/man/systemd-creds.xml)
+- [systemd v255 execution/credential loading](https://github.com/systemd/systemd/blob/v255/man/systemd.exec.xml)
+- [systemd v255 exit status definitions](https://github.com/systemd/systemd/blob/v255/src/shared/exit-status.h)
+- [GitHub workflow artifact transfer](https://docs.github.com/en/actions/tutorials/store-and-share-data)
+- [GitHub standard hosted runner labels and architectures](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+- [GitHub Ubuntu 24.04 ARM64 image metadata](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Arm64-Readme.md)
+- [Existing x/sys v0.36.0 Linux descriptor APIs](https://pkg.go.dev/golang.org/x/sys@v0.36.0/unix)
+
+The 2026-10-19 bounded ARM-B workflow selection and public source guards are
+independently authored. The last two public references were checked for runner
+availability/metadata only; no runner implementation is imported or copied.
+
+The Linux publication correction and its regressions are independently authored
+from this contract, project-owned file/backup formats and public descriptor APIs.
+They use the already locked x/sys dependency (BSD-3-Clause); no implementation
+source is copied and no dependency version changes.
+
+No new runtime dependency. systemd retains LGPL-2.1-or-later/component notices;
+Python standard library retains PSF terms. Existing Go libraries retain their
+licenses in [third-party notices](../THIRD_PARTY_NOTICES.md). Actions are pinned
+to immutable revisions. This fixture does not authorize release/distribution.
