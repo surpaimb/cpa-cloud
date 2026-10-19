@@ -172,3 +172,65 @@ rebound/removal/enumeration and partial constructor/thread-start cases are
 likewise declared controlled public negatives. Original 42 tests and 15 VM
 cases are retained. New natural exact-head CI and original E/F review are still
 required; the first unexpected new dedicated red freezes source again.
+
+## Sink-delivery and exit-class batch after C #2
+
+This separate bounded batch has the sole parent
+`38e3f96f16c1c17367e7d90d9415889fb20e7ffd`. Its natural C #2/run39271385533
+attempt1 remains FAILURE: 65/65 Linux public tests passed, but setup reported
+`c-setup-user-create-rejected`, content-clear=true, capture-complete=false,
+aggregate cleanup=false, and 0/15 final admissions. The underlying cause and
+possible partial helper effects remain unknown. Original E/F found one static
+P2: throwing diagnostic output could skip an owned cleaner and later cleanup
+or cover an earlier error. **That finding is not C #2's established cause.**
+
+Only fixture.py, test_channel.py and these C contract/provenance notes change.
+channel.py, receiver, C workflow, every PR88 file, product, helper arguments,
+UID selection, permissions, success exit gate, success-only ownership and the
+fifteen channel cases remain frozen. There are no new probes, lookups, deletion
+targets, retries, fallback behavior, stderr parsing or runtime permission fixes.
+
+- All diagnostic writes catch sink exceptions (including interruption-like
+  exceptions) without formatting them, and latch `delivery_failed`. Restored
+  output never clears this latch. Diagnostic labels and final reports have
+  finite source-owned whitelists. Even terminal fixed-error output cannot
+  expose a nested output exception or change its required nonzero outcome.
+- Outside cleanup, lost setup/acquired delivery prevents further acquisition;
+  an already acquired object is registered **before** this gate can reject.
+  Both pipe ends are registered before their first report. Cleanup output is
+  advisory: entered/result/consumed/acquired/release/exit and outer-finally
+  sink failure cannot skip the current or any later owned cleaner. Nested
+  helpers needed by an owned cleaner still run their unchanged operations;
+  delivery failure remains sticky globally and is checked at admission.
+- Ownership is still consumed before close. No consumed descriptor or stream
+  is retried, even when reporting its consumed/unconfirmed state fails.
+  Resources retains the original operation exception object at context exit,
+  its first category and separate fixed cleaner errors. `Resources.ok` is the
+  physical cleaner result; returned completeness and final admission also
+  require delivery. Sink-only loss is fixed `c-capture`, not a claimed physical
+  cleanup failure. An original operation error always takes precedence.
+- The user-create helper only classifies its **already observed** returncode,
+  after the unchanged successful-result ownership callback. Fixed classes
+  follow the documented shadow 4.13 useradd exit vocabulary: success,
+  password-file, syntax, option, uid-in-use, group-missing, name-in-use,
+  group-file, home and selinux; unlisted/invalid forms are unknown, negative
+  results are signal, and absent results are missing-result. No numeric exit,
+  signal, errno, identity, path or raw stderr is emitted. A class is the
+  helper's result vocabulary, **not verified root cause, absence of residue,
+  or permission to adopt/delete an unconfirmed identity**.
+
+The original 65 public tests and 15 VM cases are retained. New controlled public
+regressions cover output loss at acquisition/setup/entered/result/consumed,
+explicit release/context exit/outer finally, success and failed cleaners,
+sticky recovered output, no case admission, primary+cleaner+sink errors,
+both registered pipe ends and a reused public FD sentinel. Exit-class tests
+cover every documented class, unlisted values, signal, absent results and bait,
+and reuse a public helper's existing result without changing its call count,
+arguments, exit gate or success-only ownership. These are deterministic public
+adapters/return-shape tests, not actual output-device or kernel I/O faults,
+not real user-creation tests, and not an explanation of either historical red.
+
+Only the new natural exact-head C and seven old attempt1 regressions, followed
+by original E/F formal new-head review, may establish the next narrow result.
+The first unexpected dedicated red freezes this source again. All old C #1/#2
+and A3 red evidence remains intact. Draft / production NO-GO continues.

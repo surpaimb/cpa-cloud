@@ -68,3 +68,27 @@ Controlled public adapters, public sentinel reuse, and deterministic directory
 mutation tests are not presented as real kernel fault injection, production
 credential tests or the cause of the old red. Historical C #1 and PR87 red/green
 records remain distinct from every new-head natural run and formal review.
+
+## Sink-delivery and exit-class batch, 2026-10-19
+
+Independently authored from the bounded project contract and original E/F's
+static P2 review of parent `38e3f96f16c1c17367e7d90d9415889fb20e7ffd`.
+Only fixture.py, test_channel.py and these two notes change. channel.py,
+receiver/workflow and all PR88/product files stay byte-frozen. The finding is
+not asserted to be C #2's user-create rejection cause or proof about residue.
+
+Additional public primary documentation consulted:
+
+- [shadow 4.13 useradd exit-value manual](https://github.com/shadow-maint/shadow/blob/4.13/man/useradd.8.xml):
+  finite documented return classes, used only to label an already-observed
+  result; no implementation source, example or command was copied. Unmapped
+  distro/version values retain an unknown fallback rather than inferred cause.
+- [Python 3.12 Popen.returncode](https://docs.python.org/3.12/library/subprocess.html#subprocess.Popen.returncode):
+  absent result and POSIX negative signal-result semantics. No extra poll,
+  wait, process lookup or helper is introduced for this classification.
+
+New sink-failure, joint-error, resource/FD-sentinel and return-class public
+negatives are project-authored controlled tests, not real I/O fault injection,
+real identity provisioning, GNOME/Key acceptance or the cause of old failures.
+No new dependency or license change. Old test counts and red evidence remain
+historical; each new head requires fresh natural CI and formal review.

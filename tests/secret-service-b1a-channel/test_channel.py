@@ -275,6 +275,321 @@ class OwnershipRegressions(unittest.TestCase):
         self.assertEqual(stream.calls, 1)
 
 
+class DiagnosticDeliveryRegressions(unittest.TestCase):
+    def diagnostics(self, rejected):
+        lines = []
+        def sink(value):
+            lines.append(value)
+            if rejected(value):
+                raise OSError("public sink bait " + PUBLIC.decode())
+        return fixture.Diagnostics(sink=sink), lines
+
+    def test_acquired_sink_failure_still_cleans_owned_result(self):
+        diag, _ = self.diagnostics(lambda value: value.endswith("-acquired"))
+        owned, released = fixture.Resources(diag), []
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            with owned:
+                owned.own("root", "public", released.append)
+                self.fail("failed acquisition report allowed more setup")
+        self.assertEqual(released, ["public"])
+        self.assertTrue(owned.ok)  # physical result is separate from delivery
+        self.assertTrue(diag.delivery_failed)
+        self.assertFalse(owned.cleanup()[1])
+
+    def test_setup_entered_failure_blocks_new_acquisition_and_is_sticky(self):
+        diag, _ = self.diagnostics(lambda value: value == "c-setup-root-create-entered")
+        called = []
+        for _ in range(2):
+            with self.assertRaisesRegex(c.Failure, "c-capture"):
+                diag.run("root-create", lambda: called.append(True))
+        self.assertEqual(called, [])
+        self.assertTrue(diag.delivery_failed)
+
+    def test_direct_acquire_after_delivery_failure_does_not_call_factory(self):
+        diag, _ = self.diagnostics(lambda _: True)
+        diag.emit("c-cleanup-unit-not-acquired")
+        owned, called = fixture.Resources(diag), []
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            owned.acquire("root", lambda: called.append(True), lambda _: None)
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            owned.pipe_pair(lambda: called.append(True))
+        self.assertEqual(called, [])
+
+    def test_setup_rejected_sink_preserves_original_error_object(self):
+        diag, _ = self.diagnostics(lambda value: value.endswith("-rejected"))
+        primary = c.Failure("c-identity")
+        with self.assertRaises(c.Failure) as caught:
+            diag.run("user-create", lambda: (_ for _ in ()).throw(primary))
+        self.assertIs(caught.exception, primary)
+        self.assertTrue(diag.delivery_failed)
+
+    def test_setup_ok_sink_failure_cleans_prior_owned_result(self):
+        diag, _ = self.diagnostics(lambda value: value == "c-setup-root-create-ok")
+        released = []
+        owned = fixture.Resources(diag)
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            with owned:
+                diag.run("root-create", lambda: owned.own("root", "public", released.append))
+        self.assertEqual(released, ["public"])
+
+    def test_before_cleaner_sink_does_not_skip_any_cleaner(self):
+        diag, _ = self.diagnostics(lambda value: value == "c-cleanup-host-entered")
+        owned, released = fixture.Resources(diag), []
+        owned.own("root", "root", released.append)
+        owned.own("host", "host", released.append)
+        self.assertEqual(owned.cleanup(), ("c-capture", False))
+        self.assertEqual(released, ["host", "root"])
+        self.assertTrue(owned.ok)
+        self.assertEqual(owned.cleanup(), ("c-capture", False))
+        self.assertEqual(released, ["host", "root"])
+
+    def test_success_or_failure_result_sink_still_continues(self):
+        for fails in (False, True):
+            with self.subTest(cleaner_failure=fails):
+                suffix = "rejected" if fails else "ok"
+                diag, _ = self.diagnostics(lambda value: value == "c-cleanup-host-" + suffix)
+                owned, released = fixture.Resources(diag), []
+                owned.own("root", "root", released.append)
+                def cleaner(value):
+                    released.append(value)
+                    if fails:
+                        raise OSError("public cleaner bait " + PUBLIC.decode())
+                owned.own("host", "host", cleaner)
+                first, complete = owned.cleanup("c-identity")
+                self.assertEqual(first, "c-identity")
+                self.assertFalse(complete)
+                self.assertEqual(released, ["host", "root"])
+                self.assertEqual(owned.ok, not fails)
+                self.assertTrue(diag.delivery_failed)
+
+    def test_consumed_result_sink_never_retries_close(self):
+        for confirmed in (False, True):
+            with self.subTest(confirmed=confirmed):
+                diag, _ = self.diagnostics(lambda value: "-consumed-" in value)
+                owned, released = fixture.Resources(diag), []
+                owner = c.OwnedFD(-1)
+                owner.consumed, owner.confirmed = True, confirmed
+                owned.own("root", "root", released.append)
+                owned.own("input-write", owner, lambda _: self.fail("consumed FD retried"))
+                self.assertFalse(owned.cleanup("c-identity")[1])
+                self.assertEqual(released, ["root"])
+                self.assertEqual(owned.ok, confirmed)
+                self.assertTrue(diag.delivery_failed)
+
+    def test_explicit_release_sink_error_consumes_once_and_keeps_other_owner(self):
+        diag, _ = self.diagnostics(lambda value: value == "c-cleanup-host-entered")
+        owned, released = fixture.Resources(diag), []
+        root, host = object(), object()
+        owned.own("root", root, lambda _: released.append("root"))
+        owned.own("host", host, lambda _: released.append("host"))
+        self.assertEqual(owned.release(host, "c-identity"), ("c-identity", False))
+        self.assertEqual(owned.cleanup(), ("c-identity", False))
+        self.assertEqual(released, ["host", "root"])
+
+    def test_exit_primary_cleaner_and_sink_failures_preserve_primary_object(self):
+        diag, _ = self.diagnostics(lambda value: value.startswith("c-cleanup-host-") and not value.endswith("-acquired"))
+        owned, released = fixture.Resources(diag), []
+        primary = c.Failure("c-identity")
+        with self.assertRaises(c.Failure) as caught:
+            with owned:
+                owned.own("root", "root", released.append)
+                def bad(value):
+                    released.append(value)
+                    raise RuntimeError("public cleaner bait " + PUBLIC.decode())
+                owned.own("host", "host", bad)
+                raise primary
+        self.assertIs(caught.exception, primary)
+        self.assertIs(owned.primary, primary)
+        self.assertEqual(owned.cleaner_errors, ["c-cleanup"])
+        self.assertTrue(diag.delivery_failed)
+        self.assertEqual(released, ["host", "root"])
+
+    def test_exit_without_primary_refuses_delivery_failure_after_physical_success(self):
+        diag, _ = self.diagnostics(lambda value: value == "c-cleanup-root-ok")
+        owned, released = fixture.Resources(diag), []
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            with owned:
+                owned.own("root", "root", released.append)
+        self.assertTrue(owned.ok)
+        self.assertEqual(released, ["root"])
+
+    def test_outer_finally_cleanup_does_not_throw_before_action(self):
+        diag, _ = self.diagnostics(lambda value: value.startswith("c-cleanup-unit-"))
+        diag.report_sink = lambda _: None
+        released = []
+        first = "c-identity"
+        try:
+            pass
+        finally:
+            first, physical = fixture.diagnosed_cleanup(diag, first,
+                lambda: released.append("unit"), "unit")
+            first, second = fixture.diagnosed_cleanup(diag, first,
+                lambda: released.append("root"), "root")
+        self.assertEqual(first, "c-identity")
+        self.assertTrue(physical and second)
+        self.assertEqual(released, ["unit", "root"])
+        with self.assertRaisesRegex(c.Failure, "c-identity"):
+            fixture.finish_case(diag, "positive", first, True, True, True, True)
+
+    def test_nested_cleanup_setup_diagnostics_cannot_block_owned_cleaner(self):
+        diag, _ = self.diagnostics(lambda value: value == "c-cleanup-host-entered")
+        owned, released = fixture.Resources(diag), []
+        def cleaner(_):
+            with fixture.Resources(diag) as nested:
+                diag.run("helper-capture", lambda: nested.own("socket", "nested", released.append))
+            released.append("host")
+        owned.own("root", "root", released.append)
+        owned.own("host", "host", cleaner)
+        self.assertFalse(owned.cleanup()[1])
+        self.assertEqual(released, ["nested", "host", "root"])
+        self.assertTrue(owned.ok)
+
+    def test_pipe_pair_both_owned_before_first_acquired_report(self):
+        diag, _ = self.diagnostics(lambda value: value == "c-cleanup-input-read-acquired")
+        owned = fixture.Resources(diag)
+        pair = os.pipe()
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            with owned:
+                owned.pipe_pair(lambda: pair)
+        for fd in pair:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+        self.assertTrue(owned.ok)
+
+    def test_final_diagnostic_failure_never_admits_case_after_sink_recovers(self):
+        diag, lines = self.diagnostics(lambda value: value == "c-capture-complete")
+        reports = []
+        diag.report_sink = reports.append
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            fixture.finish_case(diag, "positive", None, True, True, True, True)
+        diag.emit("c-owned-cleanup-ok")  # later success cannot erase earlier loss
+        self.assertTrue(diag.delivery_failed)
+        self.assertFalse(any(line.startswith("CHECK C_CASE_") for line in reports))
+        self.assertTrue(all(line in fixture.DIAGNOSTICS for line in lines))
+
+    def test_report_sink_failure_sticky_and_no_raw_exception(self):
+        diag = fixture.Diagnostics(sink=lambda _: None,
+            report_sink=lambda _: (_ for _ in ()).throw(OSError(PUBLIC.decode())))
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            fixture.finish_case(diag, "positive", None, True, True, True, True)
+        diag.report_sink = lambda _: None
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            diag.require_delivery()
+
+    def test_final_case_output_is_finite_and_last(self):
+        lines, reports = [], []
+        diag = fixture.Diagnostics(sink=lines.append, report_sink=reports.append)
+        fixture.finish_case(diag, "positive", None, True, True, True, True)
+        self.assertEqual(reports, ["CHECK C_CASE_POSITIVE=true"])
+        self.assertEqual(lines, ["c-content-clear", "c-capture-complete", "c-owned-cleanup-ok"])
+        self.assertTrue(all(line in fixture.REPORTS for line in reports))
+        self.assertFalse(diag.delivery_failed)
+
+    def test_sink_base_exception_also_cannot_escape_or_skip_cleanup(self):
+        def interrupted(value):
+            if value.endswith("-entered"):
+                raise KeyboardInterrupt("public sink interruption bait")
+        diag = fixture.Diagnostics(sink=interrupted)
+        owned, released = fixture.Resources(diag), []
+        owned.own("root", "root", released.append)
+        self.assertEqual(owned.cleanup(), ("c-capture", False))
+        self.assertEqual(released, ["root"])
+        self.assertTrue(owned.ok)
+
+    def test_terminal_fallback_never_raises_or_formats_raw_error(self):
+        lines = []
+        fixture.failure_output(PUBLIC.decode(), sink=lines.append)
+        self.assertEqual(lines, ["FAIL: c-internal"])
+        fixture.failure_output("c-capture", sink=lambda _: (_ for _ in ()).throw(
+            OSError("public terminal sink bait " + PUBLIC.decode())))
+
+
+class UserCreateExitClasses(unittest.TestCase):
+    def test_documented_classes_are_finite_source_labels(self):
+        classes = {0: "success", 1: "password-file", 2: "syntax", 3: "option",
+                   4: "uid-in-use", 6: "group-missing", 9: "name-in-use",
+                   10: "group-file", 12: "home", 14: "selinux"}
+        for code, name in classes.items():
+            with self.subTest(exit_class=name):
+                fixed = fixture.user_create_exit_class(code)
+                self.assertEqual(fixed, "c-user-create-exit-" + name)
+                self.assertIn(fixed, fixture.DIAGNOSTICS)
+
+    def test_unknown_signal_missing_and_bait_never_form_dynamic_label(self):
+        class Bait:
+            def __str__(self):
+                raise AssertionError("public bait must not be formatted")
+            def __repr__(self):
+                raise RuntimeError("public bait must not be represented")
+        for value in (5, 19, 255, True, 0.0, PUBLIC, PUBLIC.decode(), Bait()):
+            self.assertEqual(fixture.user_create_exit_class(value), "c-user-create-exit-unknown")
+        self.assertEqual(fixture.user_create_exit_class(None), "c-user-create-exit-missing-result")
+        for value in (-1, -9, -999):
+            self.assertEqual(fixture.user_create_exit_class(value), "c-user-create-exit-signal")
+
+    def test_existing_helper_result_class_does_not_change_call_or_success_gate(self):
+        for code in (0, 2, 5):
+            lines, calls, owned = [], [], []
+            def factory(args, **kwargs):
+                calls.append((args, kwargs))
+                return subprocess.Popen(args, **kwargs)
+            commands = fixture.Commands(fixture.Diagnostics(sink=lines.append), process_factory=factory)
+            args = [sys.executable, "-c", "import sys; sys.exit(" + str(code) + ")"]
+            if code:
+                with self.assertRaisesRegex(c.Failure, "c-setup"):
+                    commands.run(args, user_create=True, owned_success=lambda: owned.append(True))
+            else:
+                self.assertEqual(commands.run(args, user_create=True,
+                    owned_success=lambda: owned.append(True)), (0, b""))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], args)
+            self.assertEqual(set(calls[0][1]), {"stdin", "stdout", "stderr", "env", "close_fds"})
+            self.assertEqual(calls[0][1]["stdin"], subprocess.DEVNULL)
+            self.assertEqual(owned, [True] if code == 0 else [])
+            self.assertIn(fixture.user_create_exit_class(code), lines)
+            self.assertTrue(all(line in fixture.DIAGNOSTICS for line in lines))
+
+    def test_missing_result_reports_fixed_label_and_preserves_popen_error(self):
+        primary = OSError("public popen bait " + PUBLIC.decode())
+        lines = []
+        def rejected(*args, **kwargs):
+            raise primary
+        commands = fixture.Commands(fixture.Diagnostics(sink=lines.append), process_factory=rejected)
+        with self.assertRaises(OSError) as caught:
+            commands.run(["public-unused"], user_create=True)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(lines, ["c-user-create-exit-missing-result"])
+
+    def test_result_report_failure_cleans_successfully_owned_resource(self):
+        released, lines = [], []
+        def sink(value):
+            lines.append(value)
+            if value.startswith("c-user-create-exit-"):
+                raise OSError("public result sink bait")
+        diag = fixture.Diagnostics(sink=sink)
+        owned, commands = fixture.Resources(diag), fixture.Commands(diag)
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            with owned:
+                commands.run([sys.executable, "-c", "pass"], user_create=True,
+                    owned_success=lambda: owned.own("user", "public", released.append))
+        self.assertEqual(released, ["public"])
+        self.assertTrue(owned.ok)
+        self.assertTrue(diag.delivery_failed)
+
+    def test_ownership_callback_primary_survives_result_sink_failure(self):
+        primary = c.Failure("c-identity")
+        def sink(value):
+            if value.startswith("c-user-create-exit-"):
+                raise OSError("public result sink bait")
+        def callback():
+            raise primary
+        commands = fixture.Commands(fixture.Diagnostics(sink=sink))
+        with self.assertRaises(c.Failure) as caught:
+            commands.run([sys.executable, "-c", "pass"], user_create=True, owned_success=callback)
+        self.assertIs(caught.exception, primary)
+        self.assertTrue(commands.diag.delivery_failed)
+
+
 @unittest.skipUnless(sys.platform == "linux", "Linux anonymous pipe/procfs required")
 class Pipes(unittest.TestCase):
     def setUp(self):
@@ -461,6 +776,49 @@ class Pipes(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "linux", "Linux FD/directory identity regressions")
 class SafetyRegressions(unittest.TestCase):
+    def test_consumed_reused_sentinel_survives_sink_and_cleanup_failure(self):
+        r, w = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        owner = c.OwnedFD(w)
+        replacements, released = [], []
+        def sink(value):
+            if "-consumed-" in value or value.endswith("-rejected"):
+                raise OSError("public sink bait")
+        diag = fixture.Diagnostics(sink=sink)
+        owned = fixture.Resources(diag)
+        primary = c.Failure("c-identity")
+        with tempfile.TemporaryFile() as sentinel:
+            sentinel.write(b"public-sentinel")
+            sentinel.flush()
+            def close_reuse(fd):
+                os.close(fd)
+                os.dup2(sentinel.fileno(), fd)
+                replacements.append(c.OwnedFD(fd))
+                raise OSError("public close-after-release bait")
+            def bad(_):
+                released.append("host")
+                raise OSError("public cleaner bait")
+            try:
+                with self.assertRaises(c.Failure) as caught:
+                    with owned:
+                        owned.own("root", None, lambda _: released.append("root"))
+                        owned.own("host", None, bad)
+                        owned.own("input-write", owner, lambda value: value.close())
+                        with self.assertRaises(OSError):
+                            owner.close(close_reuse)
+                        raise primary
+                self.assertIs(caught.exception, primary)
+                self.assertEqual(released, ["host", "root"])
+                self.assertTrue(diag.delivery_failed)
+                self.assertEqual(os.fstat(w).st_ino, os.fstat(sentinel.fileno()).st_ino)
+                os.lseek(w, 0, os.SEEK_SET)
+                self.assertEqual(os.read(w, 32), b"public-sentinel")
+                self.assertFalse(owned.cleanup()[1])
+                self.assertEqual(released, ["host", "root"])
+            finally:
+                os.close(r)
+                for replacement in replacements:
+                    replacement.close()
+
     def test_success_duplicate_and_guard_close_exactly_once(self):
         r, w = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
         owner = c.OwnedFD(w)

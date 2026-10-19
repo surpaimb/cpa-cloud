@@ -45,29 +45,86 @@ SETUP_STAGES = frozenset({"root-create", "root-mode", "host-create", "host-mode"
 CLEANUP_STAGES = frozenset({"root", "host", "socket", "user", "host-shm", "input-read", "input-write",
     "helper-process", "unit-runner", "receiver-process", "bus-process", "unit", "runner-wait",
     "journal", "public-state", "outer-files"})
+USER_CREATE_EXIT_CLASSES = {0: "success", 1: "password-file", 2: "syntax", 3: "option",
+    4: "uid-in-use", 6: "group-missing", 9: "name-in-use", 10: "group-file", 12: "home", 14: "selinux"}
+RESULT_DIAGNOSTICS = frozenset({"c-content-clear", "c-capture-complete", "c-owned-cleanup-ok"})
 DIAGNOSTICS = frozenset(
     ["c-setup-" + stage + "-" + status for stage in SETUP_STAGES for status in ("entered", "ok", "rejected")]
     + ["c-cleanup-" + stage + "-" + status for stage in CLEANUP_STAGES
-       for status in ("acquired", "entered", "ok", "rejected", "not-acquired", "consumed-confirmed", "consumed-unconfirmed")])
+       for status in ("acquired", "entered", "ok", "rejected", "not-acquired", "consumed-confirmed", "consumed-unconfirmed")]
+    + ["c-user-create-exit-" + name for name in (*USER_CREATE_EXIT_CLASSES.values(), "unknown", "signal", "missing-result")]
+    + list(LABELS | RESULT_DIAGNOSTICS))
+REPORTS = frozenset(["CHECK " + name + "=" + value
+    for name in ("C_CONTENT_CLEAR", "C_CAPTURE_COMPLETE", "C_OUTER_CLEANUP") for value in ("true", "false")]
+    + ["CHECK C_CASE_" + kind.upper().replace("-", "_") + "=true" for kind in CASES]
+    + ["PASS: synthetic receiver bytes/EOF; owned waits/closes; clear AND complete; no GNOME"])
+
+
+def user_create_exit_class(result):
+    """Only the already-observed useradd return result, never stderr or a probe.
+
+    Names describe documented result classes, NOT an independently verified
+    underlying cause or the absence of partially completed side effects.
+    """
+    if result is None:
+        name = "missing-result"
+    elif type(result) is not int:
+        name = "unknown"  # no conversion, formatting or equality on bait objects
+    elif result < 0:
+        name = "signal"
+    else:
+        name = USER_CREATE_EXIT_CLASSES.get(result, "unknown")
+    return "c-user-create-exit-" + name
 
 
 class Diagnostics:
-    def __init__(self, sink=None):
+    def __init__(self, sink=None, report_sink=None):
         self.sink = sink or (lambda value: print("FIXTURE_DIAGNOSTIC " + value, flush=True))
+        self.report_sink = report_sink or (lambda value: print(value, flush=True))
+        self.delivery_failed = False
+        self.cleanup_depth = 0
+
+    def _deliver(self, sink, value):
+        try:
+            sink(value)
+        except BaseException:
+            # Do not retain/format a raw sink exception. Loss is sticky even
+            # when the next write succeeds; delivery never controls a cleaner.
+            self.delivery_failed = True
 
     def emit(self, value):
         require(value in DIAGNOSTICS, "c-protocol")
-        self.sink(value)
+        self._deliver(self.sink, value)
+
+    def report(self, value):
+        require(value in REPORTS, "c-protocol")
+        self._deliver(self.report_sink, value)
+
+    def require_delivery(self):
+        require(not self.delivery_failed, "c-capture")
+
+    def setup_gate(self):
+        if not self.cleanup_depth:
+            self.require_delivery()
+
+    def cleaning(self, action):
+        self.cleanup_depth += 1
+        try:
+            return action()
+        finally:
+            self.cleanup_depth -= 1
 
     def run(self, stage, action):
         require(stage in SETUP_STAGES, "c-protocol")
         self.emit("c-setup-" + stage + "-entered")
+        self.setup_gate()  # refuse further acquisition after lost diagnostics
         try:
             result = action()
         except Exception:
             self.emit("c-setup-" + stage + "-rejected")
             raise
         self.emit("c-setup-" + stage + "-ok")
+        self.setup_gate()
         return result
 
 
@@ -77,14 +134,17 @@ class Resources:
         self.diag = diag or Diagnostics()
         self.entries = []
         self.ok, self.first = True, None
+        self.primary = None
+        self.cleaner_errors = []
 
     def __enter__(self):
         return self
 
     def __exit__(self, kind, error, traceback):
+        self.primary = error
         first = error.args[0] if isinstance(error, Failure) else ("c-internal" if error else None)
         first, ok = self.cleanup(first)
-        if error is None and not ok:
+        if error is None and (not self.ok or (not ok and not self.diag.cleanup_depth)):
             raise Failure(first)
         return False  # Never replace the original exception with cleanup failure.
 
@@ -92,10 +152,12 @@ class Resources:
         require(stage in CLEANUP_STAGES, "c-protocol")
         self.entries.append((stage, value, cleaner))
         self.diag.emit("c-cleanup-" + stage + "-acquired")
+        self.diag.setup_gate()
         return value
 
     def acquire(self, stage, factory, cleaner):
         require(stage in CLEANUP_STAGES, "c-protocol")
+        self.diag.setup_gate()
         value = factory()
         return self.own(stage, value, cleaner)
 
@@ -107,12 +169,14 @@ class Resources:
         return owner
 
     def pipe_pair(self, factory):
+        self.diag.setup_gate()
         raw = factory()
         read, write = OwnedFD(raw[0]), OwnedFD(raw[1])
         self.entries.extend((("input-read", read, lambda value: value.close()),
                              ("input-write", write, lambda value: value.close())))
         self.diag.emit("c-cleanup-input-read-acquired")
         self.diag.emit("c-cleanup-input-write-acquired")
+        self.diag.setup_gate()
         return read, write
 
     def _release(self, entry):
@@ -122,13 +186,16 @@ class Resources:
             if not value.confirmed:
                 self.ok = False
                 self.first = self.first or "c-close"
+                self.cleaner_errors.append("c-close")
             return  # never even call the closer with a consumed descriptor
         self.diag.emit("c-cleanup-" + stage + "-entered")
         try:
-            action(value)
+            self.diag.cleaning(lambda: action(value))
         except Exception as e:
             self.ok = False
-            self.first = self.first or (e.args[0] if isinstance(e, Failure) else "c-cleanup")
+            fixed = e.args[0] if isinstance(e, Failure) else "c-cleanup"
+            self.cleaner_errors.append(fixed)
+            self.first = self.first or fixed
             self.diag.emit("c-cleanup-" + stage + "-rejected")
         else:
             self.diag.emit("c-cleanup-" + stage + "-ok")
@@ -139,14 +206,19 @@ class Resources:
             if entry[1] is value:
                 del self.entries[index]
                 self._release(entry)
-                return self.first, self.ok
+                return self.result()
         raise Failure("c-cleanup")
 
     def cleanup(self, first=None):
         self.first = first or self.first
         while self.entries:
             self._release(self.entries.pop())
-        return self.first, self.ok
+        return self.result()
+
+    def result(self):
+        # self.ok is the physical cleaner result; delivery is independent.
+        return (self.first or ("c-capture" if self.diag.delivery_failed else None),
+                self.ok and not self.diag.delivery_failed)
 
 
 class ProcessOwner:
@@ -217,6 +289,45 @@ def cleanup_action(first, action):
         return first or (e.args[0] if isinstance(e, Failure) else "c-cleanup"), False
 
 
+def diagnosed_cleanup(diag, first, action, stage):
+    """Physical cleanup proceeds despite sink loss; no raw diagnostic escapes."""
+    require(stage in CLEANUP_STAGES, "c-protocol")
+    diag.emit("c-cleanup-" + stage + "-entered")
+    first, ok = cleanup_action(first, lambda: diag.cleaning(action))
+    diag.emit("c-cleanup-" + stage + ("-ok" if ok else "-rejected"))
+    return first, ok
+
+
+def finish_case(diag, kind, first, clear, complete, cleanup_ok, unit_stopped):
+    require(kind in CASES, "c-protocol")
+    complete &= not diag.delivery_failed
+    cleanup_ok &= complete
+    first = first or ("c-content" if not clear else None)
+    first = first or ("c-capture" if not complete else None)
+    first = first or ("c-cleanup" if not cleanup_ok or not unit_stopped else None)
+    if first:
+        diag.emit(first if first in LABELS else "c-internal")
+        diag.report("CHECK C_CONTENT_CLEAR=" + str(clear).lower())
+        diag.report("CHECK C_CAPTURE_COMPLETE=" + str(complete and not diag.delivery_failed).lower())
+        diag.report("CHECK C_OUTER_CLEANUP=" + str(cleanup_ok and unit_stopped and not diag.delivery_failed).lower())
+        raise Failure(first)
+    diag.emit("c-content-clear")
+    diag.emit("c-capture-complete")
+    diag.emit("c-owned-cleanup-ok")
+    diag.require_delivery()  # no case admission after any earlier lost report
+    diag.report("CHECK C_CASE_" + kind.upper().replace("-", "_") + "=true")
+    diag.require_delivery()  # a failed final case write also remains nonzero
+
+
+def failure_output(label, sink=None):
+    # Even the top-level fallback must not leak a nested BrokenPipe traceback.
+    try:
+        fixed = "FAIL: " + (label if label in LABELS else "c-internal")
+        (sink or (lambda value: print(value, file=sys.stderr, flush=True)))(fixed)
+    except BaseException:
+        pass
+
+
 def stop_child(process):
     try:
         if process.poll() is None:
@@ -240,7 +351,7 @@ class Commands:
         self.process_factory = process_factory or subprocess.Popen
         self.capture_factory = capture_factory
 
-    def run(self, args, timeout=10, check=True, owned_success=None):
+    def run(self, args, timeout=10, check=True, owned_success=None, user_create=False):
         # Every helper's two streams are registered before waiting. Names and
         # commands contain only public fixture metadata, never the oracle.
         self.number += 1
@@ -268,20 +379,24 @@ class Commands:
                 require(all(self.inventory[k][1] for k in (name + "-out", name + "-err")), "c-capture")
                 require(not check or code == 0, "c-setup")
         finally:
-            if owner:
-                for stream, result in owner.results.items():
-                    self.inventory[name + "-" + stream] = result
-                # A side-effecting setup helper can have completed successfully
-                # before Capture initialization fails. Reuse ONLY its already
-                # observed exit result to register that confirmed resource.
-                # No lookup, helper, retry or inference from stderr is added.
-                if owned_success is not None and owner.process.returncode == 0:
-                    pending = sys.exc_info()[1]
-                    try:
+            pending = sys.exc_info()[1]
+            try:
+                if owner:
+                    for stream, result in owner.results.items():
+                        self.inventory[name + "-" + stream] = result
+                    # Preserve the original success-only ownership gate, before
+                    # reporting its result. No new poll/wait/lookup is performed.
+                    if owned_success is not None and owner.process.returncode == 0:
                         owned_success()
-                    except Exception:
-                        if pending is None:
-                            raise
+            except Exception:
+                if pending is None:
+                    raise
+            finally:
+                reporting_pending = sys.exc_info()[1]
+                if user_create:
+                    self.diag.emit(user_create_exit_class(owner.process.returncode if owner else None))
+                    if reporting_pending is None:
+                        self.diag.setup_gate()
         return code, self.inventory[name + "-out"][0]
 
 
@@ -468,6 +583,7 @@ def inside(path):
         first = "c-internal"
     finally:
         first, _ = resources.cleanup(first)
+        first = first or ("c-capture" if diag.delivery_failed else None)
         for prefix, owner in (("receiver", child_owner), ("bus", bus_owner)):
             if owner:
                 for name, result in owner.results.items():
@@ -630,7 +746,7 @@ def one_case(kind):
         diag.run("user-create", lambda: commands.run(
             ["useradd", "--system", "--uid", str(selected_uid), "--user-group", "--no-create-home",
              "--shell", "/usr/sbin/nologin", "-K", "CREATE_MAIL_SPOOL=no", user],
-            owned_success=lambda: resources.own("user", user, remove_user)))
+            owned_success=lambda: resources.own("user", user, remove_user), user_create=True))
         created = True
         ident = diag.run("user-identity", lambda: pwd.getpwnam(user))
         diag.run("user-identity", lambda: require(ident.pw_uid == selected_uid and ident.pw_gid != 0, "c-setup"))
@@ -763,10 +879,8 @@ def one_case(kind):
         cleanup_ok = True
         def cleanup(action, stage):
             nonlocal first, cleanup_ok
-            diag.emit("c-cleanup-" + stage + "-entered")
-            first, ok = cleanup_action(first, action)
+            first, ok = diagnosed_cleanup(diag, first, action, stage)
             cleanup_ok &= ok
-            diag.emit("c-cleanup-" + stage + ("-ok" if ok else "-rejected"))
         pending_fds = (read_fd, write_fd)
         read_fd = write_fd = None
         for fd in pending_fds:
@@ -876,23 +990,8 @@ def one_case(kind):
             partial_clear, partial_complete = scan(oracle[:-1], inventory, expected_inventory)
             clear &= partial_clear
             complete &= partial_complete
-        if not clear:
-            first = first or "c-content"
-        if not complete:
-            first = first or "c-capture"
-        if not cleanup_ok:
-            first = first or "c-cleanup"
         # Oracle is retained until ALL stop/wait/capture/scan/cleanup actions.
-        if first:
-            print("FIXTURE_DIAGNOSTIC " + (first if first in LABELS else "c-internal"), flush=True)
-            print("CHECK C_CONTENT_CLEAR=" + str(clear).lower(), flush=True)
-            print("CHECK C_CAPTURE_COMPLETE=" + str(complete).lower(), flush=True)
-            print("CHECK C_OUTER_CLEANUP=" + str(cleanup_ok and unit_stopped).lower(), flush=True)
-            raise Failure(first)
-        print("CHECK C_CASE_" + kind.upper().replace("-", "_") + "=true", flush=True)
-        print("FIXTURE_DIAGNOSTIC c-content-clear", flush=True)
-        print("FIXTURE_DIAGNOSTIC c-capture-complete", flush=True)
-        print("FIXTURE_DIAGNOSTIC c-owned-cleanup-ok", flush=True)
+        finish_case(diag, kind, first, clear, complete, cleanup_ok, unit_stopped)
 
 
 def main():
@@ -910,7 +1009,8 @@ def main():
     # The dedicated workflow installs D-Bus only, never GNOME/Secret Service.
     for kind in CASES:
         one_case(kind)
-    print("PASS: synthetic receiver bytes/EOF; owned waits/closes; clear AND complete; no GNOME", flush=True)
+    diag.report("PASS: synthetic receiver bytes/EOF; owned waits/closes; clear AND complete; no GNOME")
+    diag.require_delivery()
 
 
 if __name__ == "__main__":
@@ -927,8 +1027,8 @@ if __name__ == "__main__":
             require(len(sys.argv) == 1, "c-setup")
             main()
     except Failure as e:
-        print("FAIL: " + e.args[0], file=sys.stderr)
+        failure_output(e.args[0])
         sys.exit(1)
     except Exception:
-        print("FAIL: c-internal", file=sys.stderr)
+        failure_output("c-internal")
         sys.exit(1)
