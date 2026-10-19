@@ -53,6 +53,13 @@ impl SyntheticRootApproval {
             root: root.to_path_buf(),
         }
     }
+
+    // Only the explicitly invoked A3 Linux test may cross the sibling-module
+    // fixture boundary. Production still has no approval constructor.
+    #[cfg(target_os = "linux")]
+    pub(in crate::live) fn for_a3_test(root: &Path) -> Self {
+        Self::for_test(root)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
