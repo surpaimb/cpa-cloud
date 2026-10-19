@@ -32,6 +32,8 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 		return 2, errors.New("a subcommand is required")
 	}
 	switch args[0] {
+	case "systemd-v3-verify", "systemd-v3-restore":
+		return runSystemdV3(ctx, args[0], args[1:], stdout)
 	case "key-export":
 		return runKeyExport(ctx, args[1:], stdin, stdout)
 	case "key-verify":
@@ -160,6 +162,7 @@ func bytesTrimOneLineEnding(data []byte) []byte {
 func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: cpa-cloud-backup <create|verify|restore|key-export|key-verify|key-import> [options]")
 	fmt.Fprintln(w, "The backup or recovery password is read only from stdin.")
+	fmt.Fprintln(w, "Explicit Linux offline recovery: systemd-v3-verify | systemd-v3-restore (fixed recovery unit; no stdin).")
 }
 
 func wipe(data []byte) {

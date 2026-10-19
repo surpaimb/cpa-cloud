@@ -15,7 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var errSystemdRestoreCleanup = errors.New("Linux v3 restore cleanup incomplete")
+var errSystemdRestoreCleanup = ErrSystemdRestoreCleanupIncomplete
 
 type systemdPublishOps struct {
 	// Per-operation seams for deterministic tests, never global mutable hooks.
