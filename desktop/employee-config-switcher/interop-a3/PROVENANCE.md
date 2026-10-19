@@ -62,3 +62,20 @@ digit-bearing A3 tags remain intact; unknown text is never relayed.
 The change and public dummy tests are independently authored from the original
 visible E/F bounded contract and these standard-library API references. No new
 dependency/license change, production capability or strict clean-room claim.
+
+## Independently bounded initial-publish return-point tags — 2026-10-19
+
+Ten initial-publish-reachable RecoveryConflict return points receive typed,
+cfg(test)-only A3 tags, directly after their unchanged original predicates.
+A default-off, same-thread initial-call scope uses standard-library
+[thread-local storage](https://doc.rust-lang.org/std/macro.thread_local.html),
+[Cell](https://doc.rust-lang.org/std/cell/struct.Cell.html) and
+[Drop](https://doc.rust-lang.org/std/ops/trait.Drop.html). It requires the existing
+A3 enable gate, preserves the first point and restores scope on return/unwind.
+Only fixed tags are written, best effort; no path or observed value is carried.
+Original metadata/xattr/namespace reads, short-circuit checks, returns and
+publication operations are not repeated, reordered or weakened. Source
+equivalence guards bind all ten points; public dummy reporting tests are not
+new filesystem fault injections or durable/crash acceptance. Independently
+authored from E/F's bounded contract; standard library only, no dependency or
+license change, production capability or strict clean-room claim.

@@ -531,6 +531,13 @@ mod platform {
         path::Component,
     };
 
+    // A3_INITIAL_PUBLISH_IMPORT_START
+    #[cfg(test)]
+    use super::super::linux_secret_service::a3_fixture::{
+        journal_conflict, journal_initial_scope, JournalConflictPoint,
+    };
+    // A3_INITIAL_PUBLISH_IMPORT_END
+
     #[cfg(test)]
     struct BeforePublishLockBarrier {
         barrier: std::sync::Arc<std::sync::Barrier>,
@@ -597,6 +604,8 @@ mod platform {
         root: &Path,
         sequence: &RecoveryKeyCleanupSequence,
     ) -> Result<(), CleanupJournalError> {
+        #[cfg(test)]
+        let _a3_initial_publish = journal_initial_scope();
         publish_event(root, sequence, PublishExpectation::Initial)
     }
 
@@ -624,6 +633,8 @@ mod platform {
         if root_identity.device != sequence.root_device()
             || root_identity.inode != sequence.root_inode()
         {
+            #[cfg(test)]
+            journal_conflict(JournalConflictPoint::RootBinding);
             return Err(CleanupJournalError::RecoveryConflict(root.to_path_buf()));
         }
         let directory_path = root.join(CLEANUP_DIRECTORY);
@@ -732,7 +743,11 @@ mod platform {
         match open_private_file_at(directory.as_raw_fd(), OsStr::new(&final_name), &final_path) {
             Err(CleanupJournalError::Io { source, .. })
                 if source.kind() == io::ErrorKind::NotFound => {}
-            Ok(_) => return Err(CleanupJournalError::RecoveryConflict(final_path)),
+            Ok(_) => {
+                #[cfg(test)]
+                journal_conflict(JournalConflictPoint::FinalObjectPresent);
+                return Err(CleanupJournalError::RecoveryConflict(final_path));
+            }
             Err(error) => return Err(error),
         }
         let mut file =
@@ -758,6 +773,8 @@ mod platform {
         let reopened =
             open_private_file_at(directory.as_raw_fd(), OsStr::new(&final_name), &final_path)?;
         if identity(&reopened).map_err(|source| io_error(&final_path, source))? != file_identity {
+            #[cfg(test)]
+            journal_conflict(JournalConflictPoint::PublishedFileRebound);
             return Err(CleanupJournalError::RecoveryConflict(final_path));
         }
         let rebound = open_private_directory_at(
@@ -768,6 +785,8 @@ mod platform {
         if identity(&rebound).map_err(|source| io_error(&directory_path, source))?
             != directory_identity
         {
+            #[cfg(test)]
+            journal_conflict(JournalConflictPoint::PublishedDirectoryRebound);
             return Err(CleanupJournalError::RecoveryConflict(
                 directory_path.to_path_buf(),
             ));
@@ -859,6 +878,8 @@ mod platform {
             }
             let reopened = open_private_file_at(directory.as_raw_fd(), name, &path)?;
             if identity(&reopened).map_err(|source| io_error(&path, source))? != opened_identity {
+                #[cfg(test)]
+                journal_conflict(JournalConflictPoint::LoadedFileRebound);
                 return Err(CleanupJournalError::RecoveryConflict(path));
             }
             reopened
@@ -951,6 +972,8 @@ mod platform {
             .map_err(|source| io_error(root, source))?;
         let names_after = read_directory_names(&directory, &directory_path)?;
         if names_before != names_after {
+            #[cfg(test)]
+            journal_conflict(JournalConflictPoint::NamespaceSnapshot);
             return Err(CleanupJournalError::RecoveryConflict(
                 directory_path.to_path_buf(),
             ));
@@ -964,6 +987,8 @@ mod platform {
         if identity(&rebound).map_err(|source| io_error(&directory_path, source))?
             != directory_identity
         {
+            #[cfg(test)]
+            journal_conflict(JournalConflictPoint::LoadedDirectoryRebound);
             return Err(CleanupJournalError::RecoveryConflict(
                 directory_path.to_path_buf(),
             ));
@@ -1138,6 +1163,8 @@ mod platform {
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.mode() & 0o7777 != 0o700
         {
+            #[cfg(test)]
+            journal_conflict(JournalConflictPoint::PrivateDirectoryAdmission);
             return Err(CleanupJournalError::RecoveryConflict(display.to_path_buf()));
         }
         require_no_posix_acl(file, display)
@@ -1149,6 +1176,8 @@ mod platform {
                 libc::fgetxattr(file.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0)
             };
             if result >= 0 {
+                #[cfg(test)]
+                journal_conflict(JournalConflictPoint::PosixAclPresent);
                 return Err(CleanupJournalError::RecoveryConflict(display.to_path_buf()));
             }
             let source = io::Error::last_os_error();
@@ -1182,6 +1211,8 @@ mod platform {
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.mode() & 0o7777 != 0o600
         {
+            #[cfg(test)]
+            journal_conflict(JournalConflictPoint::PrivateFileAdmission);
             return Err(CleanupJournalError::RecoveryConflict(display.to_path_buf()));
         }
         require_no_posix_acl(file, display)

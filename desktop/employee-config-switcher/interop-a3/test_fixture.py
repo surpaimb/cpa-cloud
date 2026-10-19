@@ -46,12 +46,13 @@ def writer_normalized_tree():
 
 def without_crash_command(tree):
     """Freeze all parent source outside the expressly authorized diagnostics."""
-    additions = {"CRASH_SCHEMA", "CRASH_DIAGNOSTICS", "crash_result", "fixed_child_failures", "JOURNAL_FAILURES"}
+    additions = {"CRASH_SCHEMA", "CRASH_DIAGNOSTICS", "crash_result", "fixed_child_failures", "JOURNAL_FAILURES", "JOURNAL_POINT_FAILURES"}
     tree.body = [node for node in tree.body if not (
         isinstance(node, ast.FunctionDef) and node.name in additions or
         isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in additions for target in node.targets) or
         isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and isinstance(node.value, ast.Name)
-        and (node.target.id, node.value.id) in (("DIAGNOSTICS", "CRASH_DIAGNOSTICS"), ("RUST_FAILURES", "JOURNAL_FAILURES")))]
+        and (node.target.id, node.value.id) in (("DIAGNOSTICS", "CRASH_DIAGNOSTICS"), ("RUST_FAILURES", "JOURNAL_FAILURES"),
+                                              ("RUST_FAILURES", "JOURNAL_POINT_FAILURES")))]
     owner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Children")
     owner.body = [node for node in owner.body if not (isinstance(node, ast.FunctionDef) and node.name == "command")]
     return tree
@@ -348,9 +349,9 @@ class FixtureTests(unittest.TestCase):
     def test_journal_batch_freezes_parent_except_fixed_labels_and_noncrash_filter(self):
         tree = ast.parse((HERE / "fixture.py").read_text())
         tree.body = [node for node in tree.body if not (
-            isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "JOURNAL_FAILURES" for target in node.targets) or
+            isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in ("JOURNAL_FAILURES", "JOURNAL_POINT_FAILURES") for target in node.targets) or
             isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "RUST_FAILURES"
-            and isinstance(node.value, ast.Name) and node.value.id == "JOURNAL_FAILURES")]
+            and isinstance(node.value, ast.Name) and node.value.id in ("JOURNAL_FAILURES", "JOURNAL_POINT_FAILURES"))]
         condition = ast.dump(ast.parse("status != 0 and not crash", mode="eval").body)
         new = ast.parse('for fixed in fixed_child_failures(content):\n    print("FIXTURE_DIAGNOSTIC " + fixed, flush=True)').body[0]
         old = ast.parse('tokens = set(re.findall(rb"[a-z][a-z-]*", content))\nfor fixed in RUST_FAILURES + volatile.PANICS:\n    if fixed.encode() in tokens:\n        print("FIXTURE_DIAGNOSTIC " + fixed, flush=True)').body
@@ -363,6 +364,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_journal_result_diagnostics_are_the_only_rust_source_change(self):
         source = (LIVE / "linux_secret_service_a3_fixture.rs").read_text()
+        source = re.sub(r"// A3_JOURNAL_POINTS_START\n[\s\S]*?// A3_JOURNAL_POINTS_END\n\n", "", source)
         pattern = r"// A3_JOURNAL_DIAGNOSTICS_START\n([\s\S]*?)// A3_JOURNAL_DIAGNOSTICS_END\n\n"
         regions = re.findall(pattern, source)
         self.assertEqual(len(regions), 1)
@@ -392,6 +394,66 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(families, set(re.findall(r"CleanupJournalError::([A-Z][A-Za-z0-9_]*)", helpers)))
         self.assertEqual(len(f.JOURNAL_FAILURES), 39)
         self.assertEqual(len(set(f.JOURNAL_FAILURES)), 39)
+
+    def test_point_batch_freezes_entire_parent_supervisor_except_static_tags(self):
+        tree = ast.parse((HERE / "fixture.py").read_text())
+        tree.body = [node for node in tree.body if not (
+            isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "JOURNAL_POINT_FAILURES" for target in node.targets) or
+            isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "RUST_FAILURES"
+            and isinstance(node.value, ast.Name) and node.value.id == "JOURNAL_POINT_FAILURES")]
+        self.assertEqual(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest(),
+                         "0305c697ecbf5d9f969e8ccf87323f6b5e863a05105b34db189007b102e40351")
+
+    def test_each_initial_return_point_is_bound_without_changing_predicates_or_io(self):
+        source = (LIVE / "cleanup_journal.rs").read_text()
+        points = re.findall(r"^[ ]*#\[cfg\(test\)\]\n[ ]*journal_conflict\(JournalConflictPoint::([A-Za-z]+)\);\n", source, re.M)
+        expected = {
+            "publish_event": ("pub(super) fn load(", ["RootBinding", "FinalObjectPresent", "PublishedFileRebound", "PublishedDirectoryRebound"]),
+            "load_locked": ("fn open_root(", ["LoadedFileRebound", "NamespaceSnapshot", "LoadedDirectoryRebound"]),
+            "verify_private_directory": ("fn require_no_posix_acl(", ["PrivateDirectoryAdmission"]),
+            "require_no_posix_acl": ("fn lock_exclusive(", ["PosixAclPresent"]),
+            "verify_private_file": ("fn set_mode(", ["PrivateFileAdmission"]),
+        }
+        self.assertEqual(len(points), 10)
+        self.assertEqual(len(set(points)), 10)
+        for name, (end, values) in expected.items():
+            start = source.index("fn " + name + "(")
+            body = source[start:source.index(end, start)]
+            self.assertEqual(re.findall(r"journal_conflict\(JournalConflictPoint::([A-Za-z]+)\)", body), values)
+        imports = r"    // A3_INITIAL_PUBLISH_IMPORT_START\n[\s\S]*?    // A3_INITIAL_PUBLISH_IMPORT_END\n\n"
+        self.assertEqual(len(re.findall(imports, source)), 1)
+        normalized = re.sub(imports, "", source)
+        scope = r"^        #\[cfg\(test\)\]\n        let _a3_initial_publish = journal_initial_scope\(\);\n"
+        self.assertEqual(len(re.findall(scope, normalized, re.M)), 1)
+        normalized = re.sub(scope, "", normalized, flags=re.M)
+        normalized = re.sub(r"^[ ]*#\[cfg\(test\)\]\n[ ]*journal_conflict\(JournalConflictPoint::[A-Za-z]+\);\n", "", normalized, flags=re.M)
+        arm = '''            Ok(_) => {
+                return Err(CleanupJournalError::RecoveryConflict(final_path));
+            }'''
+        self.assertEqual(normalized.count(arm), 1)
+        normalized = normalized.replace(arm, "            Ok(_) => return Err(CleanupJournalError::RecoveryConflict(final_path)),")
+        self.assertEqual(hashlib.sha256(normalized.encode()).hexdigest(),
+                         "28de114b7883c779fa43db54cbdabe936dab5b6ed965fcc052207db8ac52b2c2")
+        driver = (LIVE / "linux_secret_service_a3_fixture.rs").read_text()
+        region = r"// A3_JOURNAL_POINTS_START\n([\s\S]*?)// A3_JOURNAL_POINTS_END\n\n"
+        sections = re.findall(region, driver)
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(hashlib.sha256(re.sub(region, "", driver).encode()).hexdigest(),
+                         "67f0a8466c5dfb150582fa789c44e7ba3cdd1db085325f7ce2936819e3b18eb4")
+        helpers = sections[0].split("#[cfg(test)]")[0]
+        for forbidden in ("fs::", "fgetxattr(", ".metadata(", ".read(", ".display(", "raw_os_error(", "format!", "std::env", "Path"):
+            self.assertNotIn(forbidden, helpers)
+        self.assertIn("Cell::new(false)", helpers)
+        self.assertIn("Cell::new(None)", helpers)
+        self.assertIn("if !ENABLED.with(Cell::get) || !JOURNAL_INITIAL_ACTIVE.with(Cell::get)", helpers)
+        self.assertIn('let _ = writeln!(io::stderr(), "{label}");', helpers)
+        self.assertIn("std::marker::PhantomData<std::rc::Rc<()>>", helpers)
+
+    def test_point_whitelist_transports_all_known_tags_and_no_unknown_text(self):
+        self.assertEqual(len(f.JOURNAL_POINT_FAILURES), 10)
+        self.assertEqual(len(set(f.JOURNAL_POINT_FAILURES)), 10)
+        payload = b"DO-NOT-PRINT " + b" ".join(value.encode() for value in f.JOURNAL_POINT_FAILURES) + b" a3-journal-point-unknown"
+        self.assertEqual(set(f.fixed_child_failures(payload)), set(f.JOURNAL_POINT_FAILURES))
 
 
 class WriterTests(unittest.TestCase):

@@ -117,6 +117,14 @@ JOURNAL_FAILURES = (
     "a3-journal-io-unexpected-eof", "a3-journal-io-out-of-memory", "a3-journal-io-other", "a3-journal-io-unlisted",
 )
 RUST_FAILURES += JOURNAL_FAILURES
+JOURNAL_POINT_FAILURES = (
+    "a3-journal-point-root-binding", "a3-journal-point-final-object-present",
+    "a3-journal-point-published-file-rebound", "a3-journal-point-published-directory-rebound",
+    "a3-journal-point-loaded-file-rebound", "a3-journal-point-namespace-snapshot",
+    "a3-journal-point-loaded-directory-rebound", "a3-journal-point-private-directory-admission",
+    "a3-journal-point-posix-acl-present", "a3-journal-point-private-file-admission",
+)
+RUST_FAILURES += JOURNAL_POINT_FAILURES
 VERIFIER_FAILURES = {10: "identity", 11: "bus", 12: "invocation", 13: "work", 14: "directory", 15: "mode",
     20: "session", 21: "policy", 30: "reference", 31: "search", 32: "absence-cardinality",
     33: "collection-absence", 34: "present-cardinality", 35: "item", 36: "attributes", 37: "key-oracle",

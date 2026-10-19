@@ -220,6 +220,250 @@ mod journal_diagnostic_tests {
 }
 // A3_JOURNAL_DIAGNOSTICS_END
 
+// A3_JOURNAL_POINTS_START
+// Independently authored default-off A3 initial-publish return-point tracing.
+// Static unit variants carry no metadata/path; no predicate is re-evaluated.
+// https://doc.rust-lang.org/std/macro.thread_local.html
+// https://doc.rust-lang.org/std/ops/trait.Drop.html
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JournalConflictPoint {
+    RootBinding,
+    FinalObjectPresent,
+    PublishedFileRebound,
+    PublishedDirectoryRebound,
+    LoadedFileRebound,
+    NamespaceSnapshot,
+    LoadedDirectoryRebound,
+    PrivateDirectoryAdmission,
+    PosixAclPresent,
+    PrivateFileAdmission,
+}
+
+impl JournalConflictPoint {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RootBinding => "a3-journal-point-root-binding",
+            Self::FinalObjectPresent => "a3-journal-point-final-object-present",
+            Self::PublishedFileRebound => "a3-journal-point-published-file-rebound",
+            Self::PublishedDirectoryRebound => "a3-journal-point-published-directory-rebound",
+            Self::LoadedFileRebound => "a3-journal-point-loaded-file-rebound",
+            Self::NamespaceSnapshot => "a3-journal-point-namespace-snapshot",
+            Self::LoadedDirectoryRebound => "a3-journal-point-loaded-directory-rebound",
+            Self::PrivateDirectoryAdmission => "a3-journal-point-private-directory-admission",
+            Self::PosixAclPresent => "a3-journal-point-posix-acl-present",
+            Self::PrivateFileAdmission => "a3-journal-point-private-file-admission",
+        }
+    }
+}
+
+thread_local! {
+    static JOURNAL_INITIAL_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static JOURNAL_FIRST_POINT: Cell<Option<JournalConflictPoint>> = const { Cell::new(None) };
+}
+
+pub(crate) struct JournalInitialScope {
+    previous: bool,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+pub(crate) fn journal_initial_scope() -> JournalInitialScope {
+    let enabled = ENABLED.with(Cell::get);
+    let previous = JOURNAL_INITIAL_ACTIVE.with(|value| value.replace(value.get() || enabled));
+    if enabled && !previous {
+        JOURNAL_FIRST_POINT.with(|value| value.set(None));
+    }
+    JournalInitialScope {
+        previous,
+        _thread: std::marker::PhantomData,
+    }
+}
+
+impl Drop for JournalInitialScope {
+    fn drop(&mut self) {
+        JOURNAL_INITIAL_ACTIVE.with(|value| value.set(self.previous));
+    }
+}
+
+fn journal_point_to_emit(point: JournalConflictPoint) -> Option<&'static str> {
+    if !ENABLED.with(Cell::get) || !JOURNAL_INITIAL_ACTIVE.with(Cell::get) {
+        return None;
+    }
+    JOURNAL_FIRST_POINT.with(|first| {
+        if first.get().is_some() {
+            None
+        } else {
+            first.set(Some(point));
+            Some(point.label())
+        }
+    })
+}
+
+pub(crate) fn journal_conflict(point: JournalConflictPoint) {
+    if let Some(label) = journal_point_to_emit(point) {
+        // Best effort: a diagnostic write error must not replace the original Err.
+        let _ = writeln!(io::stderr(), "{label}");
+    }
+}
+
+#[cfg(test)]
+mod journal_point_tests {
+    use super::*;
+
+    struct Reset {
+        enabled: bool,
+        active: bool,
+        first: Option<JournalConflictPoint>,
+    }
+
+    impl Reset {
+        fn new(enabled: bool) -> Self {
+            Self {
+                enabled: ENABLED.with(|value| value.replace(enabled)),
+                active: JOURNAL_INITIAL_ACTIVE.with(|value| value.replace(false)),
+                first: JOURNAL_FIRST_POINT.with(|value| value.replace(None)),
+            }
+        }
+    }
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            JOURNAL_FIRST_POINT.with(|value| value.set(self.first));
+            JOURNAL_INITIAL_ACTIVE.with(|value| value.set(self.active));
+            ENABLED.with(|value| value.set(self.enabled));
+        }
+    }
+
+    #[test]
+    fn journal_points_require_both_a3_enable_and_initial_scope() {
+        let _reset = Reset::new(false);
+        journal_conflict(JournalConflictPoint::RootBinding);
+        {
+            let _scope = journal_initial_scope();
+            assert_eq!(
+                journal_point_to_emit(JournalConflictPoint::RootBinding),
+                None
+            );
+        }
+        ENABLED.with(|value| value.set(true));
+        assert_eq!(
+            journal_point_to_emit(JournalConflictPoint::RootBinding),
+            None
+        );
+        assert_eq!(JOURNAL_FIRST_POINT.with(Cell::get), None);
+    }
+
+    #[test]
+    fn every_initial_return_point_has_one_fixed_label_and_no_payload() {
+        let _reset = Reset::new(true);
+        let cases = [
+            (
+                JournalConflictPoint::RootBinding,
+                "a3-journal-point-root-binding",
+            ),
+            (
+                JournalConflictPoint::FinalObjectPresent,
+                "a3-journal-point-final-object-present",
+            ),
+            (
+                JournalConflictPoint::PublishedFileRebound,
+                "a3-journal-point-published-file-rebound",
+            ),
+            (
+                JournalConflictPoint::PublishedDirectoryRebound,
+                "a3-journal-point-published-directory-rebound",
+            ),
+            (
+                JournalConflictPoint::LoadedFileRebound,
+                "a3-journal-point-loaded-file-rebound",
+            ),
+            (
+                JournalConflictPoint::NamespaceSnapshot,
+                "a3-journal-point-namespace-snapshot",
+            ),
+            (
+                JournalConflictPoint::LoadedDirectoryRebound,
+                "a3-journal-point-loaded-directory-rebound",
+            ),
+            (
+                JournalConflictPoint::PrivateDirectoryAdmission,
+                "a3-journal-point-private-directory-admission",
+            ),
+            (
+                JournalConflictPoint::PosixAclPresent,
+                "a3-journal-point-posix-acl-present",
+            ),
+            (
+                JournalConflictPoint::PrivateFileAdmission,
+                "a3-journal-point-private-file-admission",
+            ),
+        ];
+        for (point, label) in cases {
+            let _scope = journal_initial_scope();
+            assert_eq!(journal_point_to_emit(point), Some(label));
+            assert_eq!(journal_point_to_emit(point), None);
+            assert_eq!(JOURNAL_FIRST_POINT.with(Cell::get), Some(point));
+        }
+    }
+
+    #[test]
+    fn journal_first_point_is_sticky_across_nested_scope_but_resets_for_new_call() {
+        let _reset = Reset::new(true);
+        {
+            let _scope = journal_initial_scope();
+            assert_eq!(
+                journal_point_to_emit(JournalConflictPoint::RootBinding),
+                Some("a3-journal-point-root-binding")
+            );
+            {
+                let _nested = journal_initial_scope();
+                assert_eq!(
+                    journal_point_to_emit(JournalConflictPoint::PrivateFileAdmission),
+                    None
+                );
+            }
+            assert!(JOURNAL_INITIAL_ACTIVE.with(Cell::get));
+            assert_eq!(
+                JOURNAL_FIRST_POINT.with(Cell::get),
+                Some(JournalConflictPoint::RootBinding)
+            );
+        }
+        assert!(!JOURNAL_INITIAL_ACTIVE.with(Cell::get));
+        assert_eq!(
+            journal_point_to_emit(JournalConflictPoint::NamespaceSnapshot),
+            None
+        );
+        let _next = journal_initial_scope();
+        assert_eq!(
+            journal_point_to_emit(JournalConflictPoint::NamespaceSnapshot),
+            Some("a3-journal-point-namespace-snapshot")
+        );
+    }
+
+    #[test]
+    fn journal_scope_restores_on_unwind_without_losing_first_point() {
+        let _reset = Reset::new(true);
+        let result = std::panic::catch_unwind(|| {
+            let _scope = journal_initial_scope();
+            assert_eq!(
+                journal_point_to_emit(JournalConflictPoint::PosixAclPresent),
+                Some("a3-journal-point-posix-acl-present")
+            );
+            panic!("PUBLIC_DUMMY_SCOPE_UNWIND");
+        });
+        assert!(result.is_err());
+        assert!(!JOURNAL_INITIAL_ACTIVE.with(Cell::get));
+        assert_eq!(
+            JOURNAL_FIRST_POINT.with(Cell::get),
+            Some(JournalConflictPoint::PosixAclPresent)
+        );
+        assert_eq!(
+            journal_point_to_emit(JournalConflictPoint::PrivateFileAdmission),
+            None
+        );
+    }
+}
+// A3_JOURNAL_POINTS_END
+
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     static DELETE_SENDS: Cell<usize> = const { Cell::new(0) };
