@@ -56,7 +56,10 @@ DIAGNOSTICS = frozenset(
     + ["c-user-create-exit-" + name for name in (*USER_CREATE_EXIT_CLASSES.values(), "unknown", "signal", "missing-result")]
     + list(LABELS | RESULT_DIAGNOSTICS)
     + ["c-helper-evidence-stop", "c-helper-observation-unknown", "c-helper-source-unknown",
-       "c-helper-readonly-cleanup-ok", "c-helper-readonly-cleanup-rejected"])
+       "c-helper-readonly-cleanup-ok", "c-helper-readonly-cleanup-rejected",
+       "c-runtime-evidence-stop", "c-runtime-prerequisite-unknown", "c-runtime-source-match",
+       "c-runtime-source-rejected", "c-runtime-source-unknown", "c-runtime-external-unknown",
+       "c-runtime-readonly-cleanup-ok", "c-runtime-readonly-cleanup-rejected"])
 REPORTS = frozenset(["CHECK " + name + "=" + value
     for name in ("C_CONTENT_CLEAR", "C_CAPTURE_COMPLETE", "C_OUTER_CLEANUP") for value in ("true", "false")]
     + ["CHECK C_CASE_" + kind.upper().replace("-", "_") + "=true" for kind in CASES]
@@ -87,6 +90,7 @@ class Diagnostics:
         self.delivery_failed = False
         self.cleanup_depth = 0
         self.helper_evidence_attempted = False
+        self.runtime_helper_attempts, self.runtime_hook_attempts = set(), set()
 
     def _deliver(self, sink, value):
         try:
@@ -483,13 +487,31 @@ def stable(s):
             s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
 
-APPROVED_HELPER_SOURCES = ()  # NO approval in this batch, including observed hashes.
+APPROVED_HELPER_SOURCES = ()  # Historical C #5 interface never approves observations.
+# Pre-reviewed official publication profile, NOT a runtime execution allowlist.
+# Original .deb SHA256 139b51228c8065eefa3051f649d8480eb986f1cf629448e49d2eaf9813318412;
+# signed noble-updates Packages/Sources and build28578437: see PROVENANCE.md.
+# userdel/groupdel were mechanically hashed from that same authenticated .deb,
+# not learned from the runner. No binary/source implementation is imported.
+UBUNTU_SOURCE_VERSION = "1:4.13+dfsg1-4ubuntu3.2"
+UBUNTU_HELPER_SHA256 = (
+    ("useradd", "cf687323ab26e097237f5e106bf2a461f699840489ffe97871ca8111a2a220bd"),
+    ("userdel", "c7b1b5a0df79fefc5f758fef348c351370f6aa4e03bd4c89378d7464368034cc"),
+    ("groupdel", "70a1f44dc280ae371557dff117d1e64b6aed74aa55d2ac80dea618634970669b"))
+UBUNTU_HOOK_PATHS = tuple((role, "/etc/shadow-maint/" + role + ".d") for role in
+    ("useradd-pre", "useradd-post", "userdel-pre", "userdel-post"))
+RUNTIME_HOOK_ENTRY_LIMIT, RUNTIME_HOOK_SECONDS = 256, 2.0
 
 
 class EvidenceOS:
     open, stat, fstat = staticmethod(os.open), staticmethod(os.stat), staticmethod(os.fstat)
     read, close = staticmethod(os.read), staticmethod(close_checked)
     scandir, which = staticmethod(os.scandir), staticmethod(shutil.which)
+    now = staticmethod(time.monotonic)
+
+    @staticmethod
+    def flags(directory):
+        return os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | (os.O_DIRECTORY if directory else 0)
 
 
 class EvidenceFiles:
@@ -497,6 +519,7 @@ class EvidenceFiles:
     def __init__(self, ops=None):
         self.ops, self.held, self.seen, self.absent = ops if ops is not None else EvidenceOS(), [], {}, set()
         self.clean, self.first = True, None
+        self.edges, self.missing_edges = [], {}
 
     def hold(self, path, directory=False, missing=False):
         require(self.clean, "c-close")  # no new acquisition after unconfirmed close
@@ -512,13 +535,15 @@ class EvidenceFiles:
             except FileNotFoundError:
                 if missing and index == len(parts) - 1:
                     self.absent.add(current)
+                    self.missing_edges[current] = (parent, part)
                     return None
                 raise
             require((stat.S_ISDIR(before.st_mode) if is_dir else stat.S_ISREG(before.st_mode))
                     and before.st_uid == 0 and not before.st_mode & 0o022, "c-scan")
-            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | (os.O_DIRECTORY if is_dir else 0)
+            flags = self.ops.flags(is_dir)
             owner = OwnedFD(self.ops.open(part, flags, **kwargs))
             self.held.append((owner, stable(before)))  # before any subsequent failure
+            self.edges.append((owner, parent, part, stable(before)))
             require(stable(self.ops.fstat(owner.fileno())) == stable(before), "c-scan")
             require(current not in self.seen or self.seen[current] == stable(before), "c-scan")
             self.seen[current] = stable(before)
@@ -543,6 +568,8 @@ class EvidenceFiles:
     def close_to(self, mark=0):
         while len(self.held) > mark:
             owner, _ = self.held.pop()  # consumption precedes OS close; never retry
+            self.edges = [edge for edge in self.edges if edge[0] is not owner]
+            self.missing_edges = {path: edge for path, edge in self.missing_edges.items() if edge[0] is not owner}
             try:
                 owner.close(self.ops.close)
             except BaseException as error:
@@ -569,11 +596,22 @@ class EvidenceFiles:
             self.close_to(mark)
 
     def recheck(self):
+        # Recheck held edges relative to the original held parents, never by
+        # following a replacement ancestor. Closed metadata snapshots below
+        # are also rechecked; no future check-to-exec guarantee is claimed.
+        for owner, parent, part, before in self.edges:
+            kwargs = {} if parent is None else {"dir_fd": parent.fileno()}
+            require(stable(self.ops.stat(part, follow_symlinks=False, **kwargs)) == before, "c-scan")
         for path, before in self.seen.items():
             require(stable(self.ops.stat(path, follow_symlinks=False)) == before, "c-scan")
         for path in self.absent:
+            edge = self.missing_edges.get(path)
             try:
-                self.ops.stat(path, follow_symlinks=False)
+                if edge is None:
+                    self.ops.stat(path, follow_symlinks=False)
+                else:
+                    parent, part = edge
+                    self.ops.stat(part, dir_fd=parent.fileno(), follow_symlinks=False)
             except FileNotFoundError:
                 continue
             raise Failure("c-scan")
@@ -637,30 +675,34 @@ def dpkg_identity(files, path, digest):
 
 
 class HelperProbe:
-    def __init__(self, ops=None, package_reader=None):
+    def __init__(self, ops=None, package_reader=None, role="useradd"):
+        require(type(role) is str and role in dict(UBUNTU_HELPER_SHA256), "c-protocol")
+        self.role = role
         self.files = EvidenceFiles(ops)
         self.package_reader = package_reader if package_reader is not None else dpkg_identity
         self.result, self.first, self.clean = {}, None, True
 
     def collect(self):
         try:
-            path = self.files.ops.which("useradd", path=SAFE["PATH"])
+            path = self.files.ops.which(self.role, path=SAFE["PATH"])
             require(path is not None, "c-scan")
             owner = self.files.hold(path)
             require(self.files.ops.fstat(owner.fileno()).st_mode & 0o111, "c-scan")
             raw = self.files.bytes(owner, 8388608)
-            self.result.update(path_class="/usr/sbin/useradd" if path == "/usr/sbin/useradd" else "other",
+            self.result.update(path_class="/usr/sbin/" + self.role if path == "/usr/sbin/" + self.role else "other",
                                sha256=hashlib.sha256(raw).hexdigest(), stability="stable")
             package, version, arch, binding = self.package_reader(self.files, path,
                 hashlib.md5(raw, usedforsecurity=False).hexdigest())
+            require(self.files.clean, "c-close")
             self.result.update(package=package, version=version, arch=arch, package_binding=binding)
-            # No allowlist: no proven patch/build/branch or complete hook set.
-            # Do not infer hooks or read defaults; never approve the observation.
+            # This collector observes only. The outer batch separately compares
+            # the pre-reviewed profile; never approve or update from observation.
         except BaseException as error:
             self.first = self.first or error
         return self.result
 
     def recheck(self):
+        require(self.files.clean, "c-close")
         self.files.recheck()
 
     def close(self):
@@ -684,7 +726,8 @@ def evidence_payload(data):
 
 
 def emit_helper_evidence(diag, data):
-    require(not diag.helper_evidence_attempted, "c-protocol")
+    require(not diag.helper_evidence_attempted and not diag.runtime_helper_attempts
+            and not diag.runtime_hook_attempts, "c-protocol")
     diag.helper_evidence_attempted = True
     line = "HELPER_EVIDENCE " + json.dumps(evidence_payload(data), sort_keys=True, separators=(",", ":"))
     require(len(line) <= 768, "c-protocol")
@@ -695,7 +738,10 @@ def helper_evidence_preflight(diag, probe=None):
     if probe is None:
         require(sys.platform == "linux" and os.geteuid() == 0 and os.environ.get("GITHUB_ACTIONS") == "true"
                 and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "c-setup")
-        probe = HelperProbe()
+        # Real entry points use the new pre-reviewed runtime-metadata batch.
+        # The optional old probe interface remains only for retained C #5
+        # controlled public tests, and still unconditionally refuses execution.
+        return runtime_prerequisites_preflight(diag)
     data, first = {}, None
     try:
         data = probe.collect()
@@ -722,6 +768,220 @@ def helper_evidence_preflight(diag, probe=None):
         raise first
     diag.require_delivery()
     raise Failure("c-scan" if first or not probe.clean else "c-setup")
+
+
+def helper_source_status(role, data):
+    """Compare fixed expectations; observed source/approval fields are ignored."""
+    if type(data) is not dict or type(role) is not str or role not in dict(UBUNTU_HELPER_SHA256):
+        return "unknown"
+    keys = ("path_class", "package", "version", "arch", "sha256", "stability", "package_binding")
+    if any(type(data.get(key)) is not str or data[key] == "unknown" for key in keys):
+        return "unknown"
+    expected = ("/usr/sbin/"+role, "passwd", UBUNTU_SOURCE_VERSION, "amd64",
+                dict(UBUNTU_HELPER_SHA256)[role], "stable", "match")
+    return "published-match" if tuple(data[key] for key in keys) == expected else "rejected"
+
+
+class HookProbe:
+    """Metadata only, complete bounded enumeration; all descriptors retained."""
+    def __init__(self, role, ops=None):
+        require(type(role) is str and role in dict(UBUNTU_HOOK_PATHS), "c-protocol")
+        self.role, self.path = role, dict(UBUNTU_HOOK_PATHS)[role]
+        self.files, self.owner = EvidenceFiles(ops), None
+        self.state, self.first, self.clean = "unknown", None, True
+
+    def scan(self):
+        entries, first, count = None, None, 0
+        deadline = self.files.ops.now() + RUNTIME_HOOK_SECONDS
+        try:
+            entries = self.files.ops.scandir(self.owner.fileno())
+            for _ in entries:
+                count += 1  # never inspect, format, read or execute an entry
+                require(count <= RUNTIME_HOOK_ENTRY_LIMIT and self.files.ops.now() <= deadline, "c-scan")
+            require(self.files.ops.now() <= deadline, "c-scan")  # EOF, not an early empty claim
+        except BaseException as error:
+            first = error
+        finally:
+            if entries is not None:
+                closing, entries = entries, None  # consume before close, no retry
+                try:
+                    closing.close()
+                except BaseException as error:
+                    self.files.clean = False
+                    self.files.first = self.files.first or error
+                    first = first or error
+        if first is not None:
+            raise first
+        return "nonempty" if count else "empty"
+
+    def collect(self):
+        try:
+            self.owner = self.files.hold(self.path, directory=True, missing=True)
+            self.state = "absent" if self.owner is None else self.scan()
+            self.files.recheck()
+        except BaseException as error:
+            self.first, self.state = self.first or error, "unknown"
+        return self.state
+
+    def recheck(self):
+        try:
+            require(self.first is None and self.files.clean, "c-scan")
+            self.files.recheck()
+            if self.owner is not None:
+                require(self.scan() == self.state, "c-scan")
+                self.files.recheck()
+        except BaseException as error:
+            self.first, self.state = self.first or error, "unknown"
+        return self.state
+
+    def close(self):
+        self.files.close_to()
+        self.clean, self.first = self.files.clean, self.first or self.files.first
+        if not self.clean:
+            self.state = "unknown"
+
+
+class RuntimePrerequisiteBatch:
+    """No acquisition can authorize execution; this batch always stops."""
+    def __init__(self, helper_factory=None, hook_factory=None):
+        self.helper_factory = helper_factory if helper_factory is not None else lambda role: HelperProbe(role=role)
+        self.hook_factory = hook_factory if hook_factory is not None else HookProbe
+        self.helpers, self.hooks = {}, {}
+        self.helper_results = {role: {} for role, _ in UBUNTU_HELPER_SHA256}
+        self.hook_results = {role: "unknown" for role, _ in UBUNTU_HOOK_PATHS}
+        self.attempted, self.closed, self.clean, self.first = False, False, True, None
+
+    def collect(self):
+        if self.attempted:
+            return  # no second acquisition, fallback or self-updating profile
+        self.attempted = True
+        try:
+            for role, _ in UBUNTU_HELPER_SHA256:
+                probe = self.helper_factory(role)
+                self.helpers[role] = probe  # retain before any collect failure
+                self.helper_results[role] = probe.collect()
+                if probe.first is not None:
+                    raise probe.first
+                try:
+                    probe.recheck()  # before any source-specific hook inspection
+                except BaseException:
+                    self.helper_results[role].update(stability="changed", sha256="unknown")
+                    raise
+                require(helper_source_status(role, self.helper_results[role]) == "published-match", "c-scan")
+            # Never inspect guessed hook paths before every actual candidate
+            # is bound to the exact independently pre-reviewed publication.
+            for role, _ in UBUNTU_HOOK_PATHS:
+                probe = self.hook_factory(role)
+                self.hooks[role] = probe
+                self.hook_results[role] = probe.collect()
+                if probe.first is not None:
+                    raise probe.first
+                require(self.hook_results[role] in ("absent", "empty"), "c-scan")
+        except BaseException as error:
+            self.first = self.first or error
+
+    def recheck(self):
+        require(not self.closed, "c-scan")
+        for role, probe in self.helpers.items():
+            try:
+                probe.recheck()
+            except BaseException as error:
+                self.first = self.first or error
+                self.helper_results[role].update(stability="changed", sha256="unknown")
+        for role, probe in self.hooks.items():
+            self.hook_results[role] = probe.recheck()
+            self.first = self.first or probe.first
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True  # consumed even after a close failure or sink loss
+        for role, probe in reversed(tuple(self.hooks.items())):
+            try:
+                probe.close()
+            except BaseException as error:
+                probe.clean, self.first = False, self.first or error
+            if not probe.clean:
+                self.clean, self.hook_results[role] = False, "unknown"
+            self.first = self.first or probe.first
+        for role, probe in reversed(tuple(self.helpers.items())):
+            try:
+                probe.close()
+            except BaseException as error:
+                probe.clean, self.first = False, self.first or error
+            if not probe.clean:
+                self.clean = False
+                self.helper_results[role].update(stability="unknown", sha256="unknown")
+            self.first = self.first or probe.first
+
+
+def emit_runtime_helper(diag, role, data):
+    require(not diag.helper_evidence_attempted and type(role) is str and role in dict(UBUNTU_HELPER_SHA256)
+            and role not in diag.runtime_helper_attempts, "c-protocol")
+    diag.runtime_helper_attempts.add(role)  # consumed before formatting/delivery
+    data = data if type(data) is dict else {}
+    record = {"role": role, "version": "unknown", "arch": "unknown", "sha256": "unknown",
+              "stability": "unknown", "package_binding": "unknown",
+              "source": helper_source_status(role, data), "precondition": "unknown"}
+    patterns = {"version": r"[0-9][A-Za-z0-9.+:~\-]{0,127}", "arch": r"[a-z0-9][a-z0-9-]{0,31}",
+                "sha256": r"[a-f0-9]{64}"}
+    enums = {"stability": ("stable", "changed"), "package_binding": ("match", "mismatch")}
+    for key in (*patterns, *enums):
+        value = data.get(key)
+        if type(value) is str and ((key in patterns and re.fullmatch(patterns[key], value)) or
+                                  (key in enums and value in enums[key])):
+            record[key] = value
+    line = "RUNTIME_HELPER_EVIDENCE " + json.dumps(record, sort_keys=True, separators=(",", ":"))
+    require(line.isascii() and len(line) <= 768, "c-protocol")
+    diag._deliver(diag.report_sink, line)
+
+
+def emit_hook_evidence(diag, role, state):
+    require(not diag.helper_evidence_attempted and type(role) is str and role in dict(UBUNTU_HOOK_PATHS)
+            and role not in diag.runtime_hook_attempts, "c-protocol")
+    diag.runtime_hook_attempts.add(role)
+    state = state if type(state) is str and state in ("absent", "empty", "nonempty") else "unknown"
+    line = "HOOK_EVIDENCE " + json.dumps({"role": role, "state": state, "precondition": "unknown"},
+                                        sort_keys=True, separators=(",", ":"))
+    require(line.isascii() and len(line) <= 768, "c-protocol")
+    diag._deliver(diag.report_sink, line)
+
+
+def runtime_prerequisites_preflight(diag, batch=None):
+    if batch is None:
+        require(sys.platform == "linux" and os.geteuid() == 0 and os.environ.get("GITHUB_ACTIONS") == "true"
+                and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "c-setup")
+        batch = RuntimePrerequisiteBatch()
+    try:
+        diag.require_delivery()
+        batch.collect()
+        batch.recheck()
+    except BaseException as error:
+        batch.first = batch.first or error
+    finally:
+        try:
+            batch.close()
+        except BaseException as error:
+            batch.clean, batch.first = False, batch.first or error
+    # Only after all closes are attempted. A failed sink cannot skip cleanup,
+    # retry a consumed role/descriptor, expose a raw error or authorize a case.
+    for role, _ in UBUNTU_HELPER_SHA256:
+        emit_runtime_helper(diag, role, batch.helper_results[role])
+    for role, _ in UBUNTU_HOOK_PATHS:
+        emit_hook_evidence(diag, role, batch.hook_results[role])
+    sources = [helper_source_status(role, batch.helper_results[role]) for role, _ in UBUNTU_HELPER_SHA256]
+    diag.emit("c-runtime-source-" + ("match" if all(value == "published-match" for value in sources)
+                                  else "rejected" if "rejected" in sources else "unknown"))
+    diag.emit("c-runtime-readonly-cleanup-" + ("ok" if batch.clean else "rejected"))
+    diag.emit("c-runtime-external-unknown")  # caches/tally/ZSys/USERDEL_CMD/libs/exec binding
+    diag.emit("c-runtime-prerequisite-unknown")
+    diag.emit("c-runtime-evidence-stop")
+    if isinstance(batch.first, Failure):
+        raise batch.first
+    if batch.first is not None or not batch.clean:
+        raise Failure("c-scan") from None
+    diag.require_delivery()
+    raise Failure("c-setup")  # unconditional predeclared stop, NEVER C PASS
 
 
 class ScanOps:

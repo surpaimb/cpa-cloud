@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import channel as c
 import fixture
@@ -737,6 +738,394 @@ class HelperEvidenceRegressions(unittest.TestCase):
         self.assertNotIn("finish_case", calls)
 
 
+class RuntimePublicOS:
+    """POSIX metadata/iterator return-shape model, never the host filesystem.
+
+    Ownership and injected failures here are public controlled inputs, not
+    real fault injection or a relaxation of runtime EvidenceOS predicates.
+    """
+    def __init__(self):
+        from types import SimpleNamespace
+        self.namespace = SimpleNamespace
+        self.nodes, self.fds, self.events = {}, {}, []
+        self.clock, self.next_fd, self.next_inode = 0.0, 50, 100
+        self.scan_action, self.close_action = None, None
+        self.iterator_closes, self.reads = 0, 0
+        for path in ("/", "/etc", "/etc/shadow-maint"):
+            self.add(path)
+
+    def add(self, path, mode=stat.S_IFDIR | 0o755, uid=0):
+        self.next_inode += 1
+        self.nodes[path] = self.namespace(st_dev=1, st_ino=self.next_inode,
+            st_uid=uid, st_gid=0, st_mode=mode, st_nlink=1, st_size=0,
+            st_mtime_ns=self.next_inode, st_ctime_ns=self.next_inode)
+        parent = path.rsplit("/", 1)[0] or "/"
+        if parent in self.nodes and parent != path:
+            self.nodes[parent].st_mtime_ns += 1
+            self.nodes[parent].st_ctime_ns += 1
+
+    def resolve(self, name, dir_fd=None):
+        return name if name.startswith("/") else self.fds[dir_fd][0].rstrip("/") + "/" + name
+
+    def stat(self, name, follow_symlinks=False, dir_fd=None):
+        if follow_symlinks: raise AssertionError("public nofollow assertion")
+        path = self.resolve(name, dir_fd)
+        self.events.append(("stat", path))
+        if path not in self.nodes: raise FileNotFoundError("public absent")
+        return self.namespace(**vars(self.nodes[path]))
+
+    def fstat(self, fd):
+        return self.namespace(**vars(self.fds[fd][1]))
+
+    def open(self, name, flags, dir_fd=None):
+        self.assert_flags = flags
+        if not flags & 0x100 or not flags & 0x200:
+            raise AssertionError("public flags assertion")
+        path = self.resolve(name, dir_fd)
+        node = self.nodes[path]
+        if stat.S_ISLNK(node.st_mode): raise OSError("public symlink")
+        self.next_fd += 1
+        self.fds[self.next_fd] = (path, node)
+        self.events.append(("open", path))
+        return self.next_fd
+
+    @staticmethod
+    def flags(directory): return 0x100 | 0x200 | (0x400 if directory else 0)
+
+    def close(self, fd):
+        path, _ = self.fds.pop(fd)  # public close-after-release model
+        self.events.append(("close", path))
+        if self.close_action: self.close_action(path)
+
+    def now(self):
+        self.clock += 0.001
+        return self.clock
+
+    def read(self, *args):
+        self.reads += 1
+        raise AssertionError("hook content must not be read")
+
+    def scandir(self, fd):
+        fs, path = self, self.fds[fd][0]
+        names = [name for name in self.nodes
+                 if name != path and name.rsplit("/", 1)[0] == path]
+        index, closed = 0, False
+        class Entries:
+            def __iter__(self): return self
+            def __next__(self):
+                nonlocal index
+                if fs.scan_action: fs.scan_action(path, index, "next")
+                if index == len(names): raise StopIteration
+                index += 1
+                return object()  # no name/type/executable-bit inspection
+            def close(self):
+                nonlocal closed
+                if closed: raise AssertionError("public iterator double-close")
+                closed = True
+                fs.iterator_closes += 1
+                if fs.scan_action: fs.scan_action(path, index, "close")
+        return Entries()
+
+
+class RuntimePrerequisiteRegressions(unittest.TestCase):
+    def hook_path(self, role="useradd-pre"):
+        return "/etc/shadow-maint/" + role + ".d"
+
+    def batch(self, fs=None, changes=None, recheck_error=None, close_error=None):
+        fs = fs or RuntimePublicOS()
+        events = []
+        changes = changes or {}
+        def helper(role):
+            class BoundPublicProbe:
+                first, clean = None, True
+                def collect(self):
+                    self.result = dict(path_class="/usr/sbin/" + role, package="passwd",
+                        version=fixture.UBUNTU_SOURCE_VERSION, arch="amd64",
+                        sha256=dict(fixture.UBUNTU_HELPER_SHA256)[role],
+                        stability="stable", package_binding="match")
+                    self.result.update(changes.get(role, {}))
+                    return self.result
+                def recheck(self):
+                    if role == "userdel" and recheck_error: raise recheck_error
+                def close(self):
+                    events.append(("closed", role))
+                    if role == "userdel" and close_error:
+                        self.clean, self.first = False, close_error
+            return BoundPublicProbe()
+        batch = fixture.RuntimePrerequisiteBatch(helper_factory=helper,
+            hook_factory=lambda role: fixture.HookProbe(role, ops=fs))
+        return batch, fs, events
+
+    def stopped(self, batch, sink=None):
+        reports, labels, after = [], [], []
+        diag = fixture.Diagnostics(sink=labels.append, report_sink=sink or reports.append)
+        with mock.patch.object(fixture.Commands, "run") as commands, \
+             mock.patch.object(fixture.subprocess, "Popen") as popen:
+            with self.assertRaises(c.Failure) as caught:
+                fixture.runtime_prerequisites_preflight(diag, batch)
+                after.extend(("user-create", "unit"))
+        self.assertEqual(commands.call_count, 0)
+        self.assertEqual(popen.call_count, 0)
+        self.assertEqual(after, [])
+        self.assertFalse(any("C_CASE" in line or line.startswith("PASS:") for line in reports))
+        return diag, reports, labels, caught.exception
+
+    def test_predeclared_profile_matches_only_three_exact_published_identities(self):
+        self.assertEqual(fixture.UBUNTU_SOURCE_VERSION, "1:4.13+dfsg1-4ubuntu3.2")
+        self.assertEqual(fixture.UBUNTU_HELPER_SHA256, (
+            ("useradd", "cf687323ab26e097237f5e106bf2a461f699840489ffe97871ca8111a2a220bd"),
+            ("userdel", "c7b1b5a0df79fefc5f758fef348c351370f6aa4e03bd4c89378d7464368034cc"),
+            ("groupdel", "70a1f44dc280ae371557dff117d1e64b6aed74aa55d2ac80dea618634970669b")))
+        batch, fs, _ = self.batch()
+        _, reports, labels, error = self.stopped(batch)
+        self.assertEqual(error.args, ("c-setup",))
+        self.assertEqual(len(reports), 7)
+        self.assertIn("c-runtime-source-match", labels)
+        self.assertEqual(fs.reads, 0)
+        for role, digest in fixture.UBUNTU_HELPER_SHA256:
+            record = next(json.loads(line.split(" ", 1)[1]) for line in reports
+                          if line.startswith("RUNTIME_HELPER_EVIDENCE ") and '"role":"'+role+'"' in line)
+            self.assertEqual(record["sha256"], digest)
+            self.assertEqual(record["source"], "published-match")
+            self.assertEqual(record["precondition"], "unknown")
+        self.assertEqual(fs.fds, {})
+
+    def test_helper_replacement_version_arch_or_package_mismatch_never_self_approves(self):
+        for role in ("useradd", "userdel", "groupdel"):
+            for change in ({"sha256": "0"*64}, {"version": "9:future"},
+                           {"arch": "arm64"}, {"package": "other"},
+                           {"package_binding": "mismatch"}, {"path_class": "/sbin/"+role}):
+                batch, fs, _ = self.batch(changes={role: change})
+                _, reports, labels, _ = self.stopped(batch)
+                self.assertIn("c-runtime-source-rejected", labels)
+                self.assertFalse(any(event[0] == "open" for event in fs.events))
+                records = [json.loads(line.split(" ", 1)[1]) for line in reports]
+                self.assertFalse(any(record.get("state") in ("absent", "empty") for record in records))
+
+    def test_missing_hook_ancestor_is_unknown_not_four_absent_leaves(self):
+        batch, fs, _ = self.batch()
+        del fs.nodes["/etc/shadow-maint"]
+        _, reports, _, _ = self.stopped(batch)
+        hooks = [json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE ")]
+        self.assertTrue(all(record["state"] == "unknown" for record in hooks))
+        self.assertEqual(fs.fds, {})
+
+    def test_absent_leaf_requires_complete_safe_existing_parent_chain(self):
+        batch, fs, _ = self.batch()
+        _, reports, _, _ = self.stopped(batch)
+        hooks = [json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE ")]
+        self.assertEqual([record["state"] for record in hooks], ["absent"]*4)
+        self.assertEqual(fs.fds, {})
+
+    def test_empty_hooks_are_enumerated_to_eof_and_rechecked_without_content_reads(self):
+        batch, fs, _ = self.batch()
+        for role, _ in fixture.UBUNTU_HOOK_PATHS: fs.add(self.hook_path(role))
+        _, reports, _, _ = self.stopped(batch)
+        hooks = [json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE ")]
+        self.assertEqual([record["state"] for record in hooks], ["empty"]*4)
+        self.assertGreaterEqual(fs.iterator_closes, 8)
+        self.assertEqual(fs.reads, 0)
+
+    def test_every_nonempty_entry_type_refuses_without_reading_names_or_contents(self):
+        for mode in (stat.S_IFREG | 0o600, stat.S_IFREG | 0o644, stat.S_IFDIR | 0o755,
+                     stat.S_IFLNK | 0o777, stat.S_IFIFO | 0o600):
+            batch, fs, _ = self.batch()
+            fs.add(self.hook_path())
+            fs.add(self.hook_path()+"/public.nonexecuting~", mode)
+            _, reports, _, _ = self.stopped(batch)
+            first_hook = next(json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE "))
+            self.assertEqual(first_hook["state"], "nonempty")
+            self.assertEqual(fs.reads, 0)
+            self.assertNotIn("public.nonexecuting", "\n".join(reports))
+
+    def test_hook_or_ancestor_symlink_unsafe_owner_or_permissions_refuse(self):
+        for path in ("/etc", "/etc/shadow-maint", self.hook_path()):
+            for mode, uid in ((stat.S_IFLNK | 0o777, 0), (stat.S_IFDIR | 0o777, 0),
+                              (stat.S_IFDIR | 0o755, 1)):
+                batch, fs, _ = self.batch()
+                fs.add(path, mode, uid)
+                _, reports, _, _ = self.stopped(batch)
+                first_hook = next(json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE "))
+                self.assertEqual(first_hook["state"], "unknown")
+                self.assertEqual(fs.fds, {})
+
+    def test_unreadable_or_interrupted_scan_never_certifies_empty(self):
+        for error in (PermissionError("public unreadable"), OSError("public scan interruption"),
+                      KeyboardInterrupt("public scan interruption")):
+            batch, fs, _ = self.batch()
+            fs.add(self.hook_path())
+            fs.scan_action = lambda *args, error=error: (_ for _ in ()).throw(error)
+            _, reports, _, _ = self.stopped(batch)
+            first_hook = next(json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE "))
+            self.assertEqual(first_hook["state"], "unknown")
+            self.assertEqual(fs.fds, {})
+
+    def test_nonempty_scan_interruption_is_unknown_not_successful_complete_scan(self):
+        batch, fs, _ = self.batch()
+        fs.add(self.hook_path())
+        fs.add(self.hook_path()+"/public-first", stat.S_IFREG | 0o600)
+        def interrupt(path, index, phase):
+            if index == 1 and phase == "next": raise OSError("public interrupted after entry")
+        fs.scan_action = interrupt
+        _, reports, _, _ = self.stopped(batch)
+        first_hook = next(json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE "))
+        self.assertEqual(first_hook["state"], "unknown")
+
+    def test_entry_cap_and_deadline_fail_closed(self):
+        for overflow in (True, False):
+            batch, fs, _ = self.batch()
+            fs.add(self.hook_path())
+            if overflow:
+                for n in range(fixture.RUNTIME_HOOK_ENTRY_LIMIT+1):
+                    fs.add(self.hook_path()+"/public-"+str(n), stat.S_IFREG | 0o600)
+            else:
+                def elapsed(*args): fs.clock += fixture.RUNTIME_HOOK_SECONDS + 1
+                fs.scan_action = elapsed
+            _, reports, _, _ = self.stopped(batch)
+            first_hook = next(json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE "))
+            self.assertEqual(first_hook["state"], "unknown")
+
+    def test_rebound_directory_or_post_check_added_entry_invalidates_evidence(self):
+        for rebound in (True, False):
+            batch, fs, _ = self.batch()
+            fs.add(self.hook_path())
+            def change(path, index, phase):
+                if path == self.hook_path() and phase == "close":
+                    fs.scan_action = None
+                    fs.add(path if rebound else path+"/public-late", stat.S_IFDIR | 0o755)
+            fs.scan_action = change
+            _, reports, _, _ = self.stopped(batch)
+            first_hook = next(json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE "))
+            self.assertEqual(first_hook["state"], "unknown")
+
+    def test_absent_leaf_created_before_final_recheck_is_unknown(self):
+        batch, fs, _ = self.batch()
+        batch.collect()
+        fs.add(self.hook_path())
+        _, reports, _, _ = self.stopped(batch)
+        first_hook = next(json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE "))
+        self.assertEqual(first_hook["state"], "unknown")
+
+    def test_cleanup_helper_recheck_failure_preserves_first_and_revokes_source_match(self):
+        primary = c.Failure("c-identity")
+        batch, fs, _ = self.batch(recheck_error=primary, close_error=OSError("public helper close"))
+        _, reports, labels, error = self.stopped(batch)
+        self.assertIs(error, primary)
+        self.assertIn("c-runtime-readonly-cleanup-rejected", labels)
+        record = next(json.loads(line.split(" ", 1)[1]) for line in reports
+                      if line.startswith("RUNTIME_HELPER_EVIDENCE ") and '"role":"userdel"' in line)
+        self.assertEqual(record["source"], "unknown")
+        self.assertEqual(record["sha256"], "unknown")
+        self.assertEqual(fs.fds, {})
+
+    def test_hook_fd_close_failure_consumes_once_and_all_other_closes_continue(self):
+        batch, fs, _ = self.batch()
+        fs.add(self.hook_path())
+        def fail(path):
+            if path == self.hook_path(): raise OSError("public close-after-release")
+        fs.close_action = fail
+        _, reports, labels, _ = self.stopped(batch)
+        self.assertIn("c-runtime-readonly-cleanup-rejected", labels)
+        first_hook = next(json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE "))
+        self.assertEqual(first_hook["state"], "unknown")
+        count = len(fs.events)
+        batch.close()
+        self.assertEqual(len(fs.events), count)
+        self.assertEqual(fs.fds, {})
+
+    def test_iterator_close_failure_keeps_primary_and_refuses_complete_empty(self):
+        batch, fs, _ = self.batch()
+        fs.add(self.hook_path())
+        primary = c.Failure("c-identity")
+        def fail(path, index, phase):
+            if phase == "next": raise primary
+            raise OSError("public iterator close")
+        fs.scan_action = fail
+        _, reports, labels, error = self.stopped(batch)
+        self.assertIs(error, primary)
+        self.assertIn("c-runtime-readonly-cleanup-rejected", labels)
+        self.assertEqual(fs.fds, {})
+
+    def test_output_loss_is_sticky_bounded_once_and_only_after_all_closes(self):
+        batch, fs, events = self.batch()
+        attempts = []
+        def sink(line):
+            self.assertEqual(fs.fds, {})
+            self.assertEqual(len(events), 3)
+            attempts.append(line)
+            if len(attempts) == 1: raise KeyboardInterrupt("public sink loss")
+        diag, _, _, error = self.stopped(batch, sink)
+        self.assertTrue(diag.delivery_failed)
+        self.assertEqual(error.args, ("c-capture",))
+        self.assertEqual(len(attempts), 7)
+        for line in attempts:
+            self.assertLessEqual(len(line), 768)
+            self.assertTrue(line.isascii())
+            self.assertNotIn("/", line)
+        with self.assertRaises(c.Failure):
+            fixture.emit_runtime_helper(diag, "useradd", {})
+        with self.assertRaises(c.Failure):
+            fixture.emit_hook_evidence(diag, "useradd-pre", "empty")
+        self.assertEqual(len(attempts), 7)
+
+    def test_joint_operation_scan_close_and_sink_errors_never_cover_first(self):
+        primary = c.Failure("c-identity")
+        batch, fs, _ = self.batch(recheck_error=primary, close_error=OSError("public close"))
+        def sink(line): raise OSError("public output")
+        diag, _, _, error = self.stopped(batch, sink)
+        self.assertIs(error, primary)
+        self.assertTrue(diag.delivery_failed)
+        self.assertFalse(batch.clean)
+        self.assertEqual(fs.fds, {})
+
+    def test_structured_payload_never_trusts_supplied_source_or_arbitrary_fields(self):
+        reports = []
+        diag = fixture.Diagnostics(sink=lambda _: None, report_sink=reports.append)
+        fixture.emit_runtime_helper(diag, "useradd", dict(source="published-match",
+            package="BAD/path", version="X"*1000, arch="bad/arch", sha256=PUBLIC.decode(),
+            path_class="/private/public-bait", precondition="satisfied"))
+        record = json.loads(reports[0].split(" ", 1)[1])
+        self.assertEqual(record["source"], "unknown")
+        self.assertEqual(record["precondition"], "unknown")
+        self.assertTrue(all(record[key] == "unknown" for key in ("version", "arch", "sha256")))
+        self.assertNotIn("/private", reports[0])
+        self.assertNotIn(PUBLIC.decode(), reports[0])
+
+    def test_runtime_gate_has_no_execution_or_default_config_probe_call(self):
+        for target in (fixture.runtime_prerequisites_preflight, fixture.RuntimePrerequisiteBatch,
+                       fixture.HookProbe):
+            tree = ast.parse(inspect.getsource(target))
+            calls = [node.func.attr for node in ast.walk(tree)
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)]
+            self.assertFalse(set(calls) & {"Popen", "run", "system", "execv", "execve", "read_text"})
+        self.assertIn("runtime_prerequisites_preflight", inspect.getsource(fixture.helper_evidence_preflight))
+
+    def test_prior_sink_loss_blocks_new_metadata_acquisition_but_closes_owned_batch(self):
+        batch, fs, _ = self.batch()
+        reports = []
+        diag = fixture.Diagnostics(sink=lambda _: None, report_sink=reports.append)
+        diag.delivery_failed = True
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            fixture.runtime_prerequisites_preflight(diag, batch)
+        self.assertEqual(batch.helpers, {})
+        self.assertEqual(fs.events, [])
+        self.assertEqual(len(reports), 7)
+        self.assertTrue(batch.closed)
+
+    def test_output_schemas_cannot_mix_historical_and_new_exceptions(self):
+        for historical_first in (True, False):
+            reports = []
+            diag = fixture.Diagnostics(sink=lambda _: None, report_sink=reports.append)
+            if historical_first:
+                fixture.emit_helper_evidence(diag, {})
+                with self.assertRaises(c.Failure): fixture.emit_runtime_helper(diag, "useradd", {})
+                with self.assertRaises(c.Failure): fixture.emit_hook_evidence(diag, "useradd-pre", "empty")
+            else:
+                fixture.emit_runtime_helper(diag, "useradd", {})
+                with self.assertRaises(c.Failure): fixture.emit_helper_evidence(diag, {})
+            self.assertEqual(len(reports), 1)
+
+
 class RawHelperHandoffRegressions(unittest.TestCase):
     class Stream:
         def __init__(self, fail=False):
@@ -1000,6 +1389,28 @@ class EvidenceFileRegressions(unittest.TestCase):
             created.append(True)
         self.assertEqual(created, [])
         self.assertEqual(json.loads(reports[0].removeprefix("HELPER_EVIDENCE "))["sha256"], "unknown")
+
+    def test_cleanup_helper_held_fd_and_path_replacement_refuse_without_execution(self):
+        for role in ("userdel", "groupdel"):
+            with tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                path = self.helper(root)
+                ops = self.ops(path)
+                probe = fixture.HelperProbe(role=role, ops=ops(), package_reader=lambda *args:
+                    ("passwd", "1:4.13+dfsg1-4ubuntu3.2", "amd64", "match"))
+                with mock.patch.object(fixture.Commands, "run") as commands, \
+                     mock.patch.object(fixture.subprocess, "Popen") as popen:
+                    result = probe.collect()
+                    self.assertEqual(ops.selected, [(role, fixture.SAFE["PATH"])])
+                    self.assertEqual(result["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+                    path.rename(root / "old-public-helper")
+                    path.write_bytes(b"public-replacement-never-executed")
+                    path.chmod(0o755)
+                    with self.assertRaises(c.Failure): probe.recheck()
+                    probe.close()
+                self.assertEqual(commands.call_count, 0)
+                self.assertEqual(popen.call_count, 0)
+                self.assertEqual(probe.files.held, [])
 
     def test_final_symlink_and_parent_symlink_refused(self):
         with tempfile.TemporaryDirectory() as name:

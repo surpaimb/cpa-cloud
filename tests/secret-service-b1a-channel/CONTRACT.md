@@ -371,3 +371,145 @@ adapters, not real I/O faults or actual user provisioning. Existing scan/cleanup
 bounds are not relaxed. New natural CI and original E/F review are evidence
 only; a later parameter correction needs its own separate contract. Preserve
 C #1-#4, all A3 reds and historical results; Draft / production NO-GO continues.
+
+## Source-bound runtime prerequisite evidence batch, 2026-10-20
+
+Sole parent `e589b3c6db012eebc141c1b01740ab09c1cb9627`, stacked base PR88
+`598845e71b54cfc6c8597d7493d2e061d339572c`. C #5/run39293405907 remains its
+predeclared intentional FAILURE: 118/118 native public tests, one original
+helper record, source/hooks/precondition unknown, 0/15 admissions. That record
+and C #1-#4/A3 red history are not reinterpreted. Original E/F independently
+reviewed the subsequent read-only Ubuntu publication/build audit at 0/0/0;
+that narrow source-association GO is not C execution or production approval.
+
+Only fixture.py, test_channel.py and these two notes change. channel.py,
+receiver/workflow, all PR88/old-regression/product files and pins are frozen.
+Legacy argv (including -K), UID selection, permissions, success gate and business
+resource ownership are unchanged and unreachable. Neither local verification
+nor this gate invokes useradd/userdel/groupdel, hooks, fixture acceptance,
+service/unit creation, package install, defaults/config probes or a new process.
+The unchanged existing VM guard remains. Both real entry points still call the
+mandatory gate, which now selects this batch; the old optional probe/serializer
+interfaces remain solely for retained controlled C #5 tests and still stop.
+The two structured exceptions cannot be mixed in one Diagnostics instance.
+
+### Pre-reviewed publication profile, never observation-driven approval
+
+The fixed profile is passwd `1:4.13+dfsg1-4ubuntu3.2`, `amd64`, published source
+shadow of the same version. Its official .deb SHA-256 is
+`139b51228c8065eefa3051f649d8480eb986f1cf629448e49d2eaf9813318412`.
+The separately authenticated archive/source/build chain and exact URLs are in
+[provenance](PROVENANCE.md). The expected helper fingerprints were mechanically
+extracted from regular members of that same .deb, outside the worktree, without
+installing/executing them; useradd also equals the C #5 observed fingerprint.
+
+| Fixed role / selected category | Pre-reviewed complete SHA-256 |
+| --- | --- |
+| useradd / /usr/sbin/useradd | `cf687323ab26e097237f5e106bf2a461f699840489ffe97871ca8111a2a220bd` |
+| userdel / /usr/sbin/userdel | `c7b1b5a0df79fefc5f758fef348c351370f6aa4e03bd4c89378d7464368034cc` |
+| groupdel / /usr/sbin/groupdel | `70a1f44dc280ae371557dff117d1e64b6aed74aa55d2ac80dea618634970669b` |
+
+Each actual SAFE-PATH candidate independently needs nofollow/root-owned/safely
+nonwritable parent chain, held regular executable FD, full <=8 MiB bytes plus
+EOF, exact package/version/architecture and dpkg metadata consistency, and
+stable FD/path snapshots. Held edges are rechecked relative to original held
+parent FDs as well as metadata snapshots. The package MD5 comparison is still
+only metadata consistency; the fixed SHA-256 is the publication comparison.
+Source comparison ignores supplied source/approval fields and cannot add or
+update an expectation. Each helper is rechecked before source-specific hook
+inspection and all are rechecked again before close/output. A mismatch or
+unknown stops further collection; unvisited roles remain unknown. Failed read,
+drift or close cannot certify source evidence. No check-to-exec binding exists.
+
+This profile establishes official published-byte/source association only.
+Official build28578437's .changes/.buildinfo match the same package hash, its
+24-patch series matches the strictly reconstructed source view, and its log
+records account-tools-setuid disabled, nscd/sssd enabled. No independently
+reproducible rebuild or runtime-loaded-library attestation was performed;
+individual uploader/build-record signatures were not independently verified.
+
+### Complete fixed hook set and conservative metadata predicate
+
+Only after all three selected helpers match that pre-reviewed publication may
+the gate inspect the exact source-derived four directories:
+
+- `/etc/shadow-maint/useradd-pre.d`
+- `/etc/shadow-maint/useradd-post.d`
+- `/etc/shadow-maint/userdel-pre.d`
+- `/etc/shadow-maint/userdel-post.d`
+
+Each component is nofollow, a root-owned directory without group/other write,
+held by an FD, and stable before/after checking. Only a missing final leaf under
+a completely verified existing parent chain may be `absent`. Missing `/etc`,
+`/etc/shadow-maint` or another ancestor is **unknown**, never generalized ENOENT
+success. An existing leaf can be `empty` only after explicit enumeration to EOF,
+iterator-close confirmation, stable held/path/parent checks and another complete
+enumeration at final recheck. Limits are 256 entries and a two-second cooperative
+enumeration clock bound; this does not claim interruption of a blocked kernel
+operation or immunity to malicious root. Any nonempty entry counts regardless
+of executable bit, suffix or type; no entry name/type/content is read or emitted.
+Over-limit, unreadable, interrupted, linked, rebound, changed, late-added,
+unconfirmed-close or otherwise incomplete evidence is rejected/unknown.
+
+The source's own run_parts silently accepts enumeration failure; its behavior
+is not reused as this predicate. useradd's --system skips its built-in mailbox
+call, not pre/post hooks. Main-account writes precede the post hook, so post
+failure is not rollback. The profile and empty hooks cannot approve broader
+effects: nscd/sss_cache, pam_tally2, ZSys, USERDEL_CMD, loaded dependencies,
+environment/defaults, privileged concurrent mutation and check-to-exec binding
+remain separately **unknown**. In particular plain userdel for the frozen
+UID>=1000 range may enter Ubuntu's ZSys branch even without -r; that child output
+is discarded and its result is not a success gate. Binding userdel's published
+bytes does not authorize executing it or prove full cleanup capture/success.
+No defaults/configuration or external helper is probed in this batch.
+
+### Explicit bounded non-secret diagnostics and unconditional stop
+
+At most three `RUNTIME_HELPER_EVIDENCE ` lines (one per fixed helper role) and
+four `HOOK_EVIDENCE ` lines (one per fixed hook role), each <=768 ASCII, may be
+published, only after every acquired read FD/iterator has had its close attempt.
+Fields are only fixed role, filtered version/architecture/whole-helper SHA-256
+and fixed enum states. No raw path, entry, UID/PID/inode/handle, configuration,
+exception, stderr, credential, secret or arbitrary-file digest is permitted.
+The source state `published-match` is only the exact static profile comparison;
+every record's `precondition` remains unknown. No observed field can approve
+itself. Missing/unvisited/invalid fields are unknown, not silently truncated.
+
+Role attempts are consumed before delivery. Output loss is sticky, never
+retried, cannot skip physical cleanup or enable acquisition, and never replaces
+an earlier fixed operation Failure. FD/iterator ownership is consumed before
+close; failed close is not retried, other acquired closes continue. Iterator
+scan and close errors stay distinct; the first operation error is retained.
+`c-runtime-readonly-cleanup-ok` covers these acquired read resources only, not
+legacy C aggregate cleanup. No C_CONTENT_CLEAR/C_CAPTURE_COMPLETE/C_OUTER_CLEANUP
+or C_CASE acceptance is borrowed or emitted by this gate.
+
+**Regardless of all observations, this batch raises before user-create.**
+`c-runtime-evidence-stop` and the mandatory nonzero outcome are predeclared;
+matched profiles/absent-or-empty hooks still do not run any of fifteen cases.
+Unknown/rejected observations retain their fixed refusal and are reported, not
+repaired. A public-test, sink, capture/close or other unexpected failure freezes
+the source; no patch, second commit/push, rerun or dispatch follows it. Only
+natural same-head C plus seven old pull_request/attempt1 regressions are
+observed. Old history remains intact. Original E/F formal new-head review and
+a separate future contract are required; Draft / production NO-GO persists.
+
+The original 118 test names/bodies remain, including C #5's 18 regressions.
+New independent public metadata/iterator models cover the fixed profile,
+ancestor versus leaf absence, empty/any nonempty, links/unsafe metadata,
+unreadable/interrupted/over-limit/deadline scans, drift/rebind/late entries,
+cleanup-helper replacement, consumed close, combined first-error/sink failure,
+bounded one-shot schemas and mandatory zero helper execution/unit/C_CASE.
+These are controlled return shapes/interleavings, not real fault injection,
+real user provisioning or accepted Linux VM scenarios. Platform skips are
+not execution, and local Windows results are not Linux acceptance.
+
+Local bounded Windows verification for this batch: C **140 = 96 PASS + 44 Linux
+skips** (original 118 test bodies unchanged, 22 new tests). With the unchanged
+old public suites: **285 = 223 PASS + 62 skips** (B0 portable9, preflight8,
+volatile16, A2 29+1 skip, A3 65+17 skips). Source AST verification preserved 55
+legacy functions, fixed argv/UID/success/ownership paths, channel/receiver/workflow
+and all files outside the four-file scope. Syntax, exact profile versus the
+authenticated .deb receipt, historical document prefixes, relative links and
+git whitespace checks passed. No local Linux VM acceptance, user/unit creation,
+full product build or packaging was run. New natural CI remains separate.
