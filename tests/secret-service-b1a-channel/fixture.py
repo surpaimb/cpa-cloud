@@ -501,6 +501,9 @@ UBUNTU_HELPER_SHA256 = (
 UBUNTU_HOOK_PATHS = tuple((role, "/etc/shadow-maint/" + role + ".d") for role in
     ("useradd-pre", "useradd-post", "userdel-pre", "userdel-post"))
 RUNTIME_HOOK_ENTRY_LIMIT, RUNTIME_HOOK_SECONDS = 256, 2.0
+HOOK_STAGES = frozenset({"unvisited", "parent-missing", "leaf-missing", "linked",
+    "enumeration-incomplete", "drift", "close-failed", "complete-empty", "nonempty", "unknown"})
+HOOK_CLEANUP_STATES = frozenset({"unvisited", "not-acquired", "confirmed", "unconfirmed", "unknown"})
 
 
 class EvidenceOS:
@@ -520,6 +523,12 @@ class EvidenceFiles:
         self.ops, self.held, self.seen, self.absent = ops if ops is not None else EvidenceOS(), [], {}, set()
         self.clean, self.first = True, None
         self.edges, self.missing_edges = [], {}
+        self.refusal_stage = None
+        self.fd_acquired, self.fd_close_failed = False, False
+
+    def note_refusal(self, stage):
+        if self.refusal_stage is None:
+            self.refusal_stage = stage  # fixed classification, not a new predicate
 
     def hold(self, path, directory=False, missing=False):
         require(self.clean, "c-close")  # no new acquisition after unconfirmed close
@@ -537,14 +546,23 @@ class EvidenceFiles:
                     self.absent.add(current)
                     self.missing_edges[current] = (parent, part)
                     return None
+                self.note_refusal("parent-missing" if index < len(parts)-1 else "unknown")
                 raise
+            if stat.S_ISLNK(before.st_mode):
+                self.note_refusal("linked")  # only the already obtained nofollow mode
             require((stat.S_ISDIR(before.st_mode) if is_dir else stat.S_ISREG(before.st_mode))
                     and before.st_uid == 0 and not before.st_mode & 0o022, "c-scan")
             flags = self.ops.flags(is_dir)
             owner = OwnedFD(self.ops.open(part, flags, **kwargs))
             self.held.append((owner, stable(before)))  # before any subsequent failure
+            self.fd_acquired = True
             self.edges.append((owner, parent, part, stable(before)))
-            require(stable(self.ops.fstat(owner.fileno())) == stable(before), "c-scan")
+            held = stable(self.ops.fstat(owner.fileno()))
+            if held != stable(before):
+                self.note_refusal("drift")
+            require(held == stable(before), "c-scan")
+            if current in self.seen and self.seen[current] != stable(before):
+                self.note_refusal("drift")
             require(current not in self.seen or self.seen[current] == stable(before), "c-scan")
             self.seen[current] = stable(before)
             parent = owner
@@ -574,6 +592,8 @@ class EvidenceFiles:
                 owner.close(self.ops.close)
             except BaseException as error:
                 self.clean, self.first = False, self.first or error
+                self.fd_close_failed = True
+                self.note_refusal("close-failed")
 
     def read(self, path, limit):
         mark = len(self.held)
@@ -601,9 +621,23 @@ class EvidenceFiles:
         # are also rechecked; no future check-to-exec guarantee is claimed.
         for owner, parent, part, before in self.edges:
             kwargs = {} if parent is None else {"dir_fd": parent.fileno()}
-            require(stable(self.ops.stat(part, follow_symlinks=False, **kwargs)) == before, "c-scan")
+            try:
+                after = stable(self.ops.stat(part, follow_symlinks=False, **kwargs))
+            except FileNotFoundError:
+                self.note_refusal("drift")
+                raise
+            if after != before:
+                self.note_refusal("drift")
+            require(after == before, "c-scan")
         for path, before in self.seen.items():
-            require(stable(self.ops.stat(path, follow_symlinks=False)) == before, "c-scan")
+            try:
+                after = stable(self.ops.stat(path, follow_symlinks=False))
+            except FileNotFoundError:
+                self.note_refusal("drift")
+                raise
+            if after != before:
+                self.note_refusal("drift")
+            require(after == before, "c-scan")
         for path in self.absent:
             edge = self.missing_edges.get(path)
             try:
@@ -614,9 +648,13 @@ class EvidenceFiles:
                     self.ops.stat(part, dir_fd=parent.fileno(), follow_symlinks=False)
             except FileNotFoundError:
                 continue
+            self.note_refusal("drift")  # a formerly absent leaf was observed present
             raise Failure("c-scan")
         for owner, before in self.held:
-            require(stable(self.ops.fstat(owner.fileno())) == before, "c-scan")
+            after = stable(self.ops.fstat(owner.fileno()))
+            if after != before:
+                self.note_refusal("drift")
+            require(after == before, "c-scan")
 
     def empty_directory(self, path):
         mark = len(self.held)
@@ -789,37 +827,54 @@ class HookProbe:
         self.role, self.path = role, dict(UBUNTU_HOOK_PATHS)[role]
         self.files, self.owner = EvidenceFiles(ops), None
         self.state, self.first, self.clean = "unknown", None, True
+        self.visited, self.close_finished, self.first_stage = False, False, None
+        self.iterator_acquired, self.iterator_pending, self.iterator_close_failed = False, False, False
+
+    def note_refusal(self, stage):
+        if self.first_stage is None:
+            self.first_stage = stage  # unknown is sticky too; no later error overwrites it
 
     def scan(self):
         entries, first, count = None, None, 0
         deadline = self.files.ops.now() + RUNTIME_HOOK_SECONDS
         try:
             entries = self.files.ops.scandir(self.owner.fileno())
+            self.iterator_acquired |= entries is not None
+            self.iterator_pending = entries is not None
             for _ in entries:
                 count += 1  # never inspect, format, read or execute an entry
                 require(count <= RUNTIME_HOOK_ENTRY_LIMIT and self.files.ops.now() <= deadline, "c-scan")
             require(self.files.ops.now() <= deadline, "c-scan")  # EOF, not an early empty claim
         except BaseException as error:
             first = error
+            self.note_refusal("enumeration-incomplete")
         finally:
             if entries is not None:
                 closing, entries = entries, None  # consume before close, no retry
+                self.iterator_pending = False
                 try:
                     closing.close()
                 except BaseException as error:
                     self.files.clean = False
                     self.files.first = self.files.first or error
+                    self.iterator_close_failed = True
+                    if first is None:
+                        self.note_refusal("close-failed")
                     first = first or error
         if first is not None:
             raise first
         return "nonempty" if count else "empty"
 
     def collect(self):
+        self.visited = True
         try:
             self.owner = self.files.hold(self.path, directory=True, missing=True)
             self.state = "absent" if self.owner is None else self.scan()
             self.files.recheck()
+            if self.state == "nonempty":
+                self.note_refusal("nonempty")
         except BaseException as error:
+            self.note_refusal(self.files.refusal_stage or "unknown")
             self.first, self.state = self.first or error, "unknown"
         return self.state
 
@@ -828,17 +883,34 @@ class HookProbe:
             require(self.first is None and self.files.clean, "c-scan")
             self.files.recheck()
             if self.owner is not None:
-                require(self.scan() == self.state, "c-scan")
+                checked = self.scan()
+                if checked != self.state:
+                    self.note_refusal("drift")
+                require(checked == self.state, "c-scan")
                 self.files.recheck()
         except BaseException as error:
+            self.note_refusal(self.files.refusal_stage or "unknown")
             self.first, self.state = self.first or error, "unknown"
         return self.state
 
     def close(self):
         self.files.close_to()
+        self.close_finished = True
         self.clean, self.first = self.files.clean, self.first or self.files.first
         if not self.clean:
+            self.note_refusal("close-failed" if self.files.fd_close_failed or self.iterator_close_failed else "unknown")
             self.state = "unknown"
+
+    def classification(self):
+        # Only retained outcomes/ownership flags, never another stat/scan/close.
+        if not self.visited:
+            return {"stage": "unvisited", "fd_cleanup": "unvisited", "iterator_cleanup": "unvisited"}
+        stage = self.first_stage or {"absent": "leaf-missing", "empty": "complete-empty"}.get(self.state, "unknown")
+        fd = ("not-acquired" if not self.files.fd_acquired else
+              "confirmed" if self.close_finished and not self.files.fd_close_failed else "unconfirmed")
+        iterator = ("not-acquired" if not self.iterator_acquired else
+                    "confirmed" if not self.iterator_pending and not self.iterator_close_failed else "unconfirmed")
+        return {"stage": stage, "fd_cleanup": fd, "iterator_cleanup": iterator}
 
 
 class RuntimePrerequisiteBatch:
@@ -936,13 +1008,18 @@ def emit_runtime_helper(diag, role, data):
     diag._deliver(diag.report_sink, line)
 
 
-def emit_hook_evidence(diag, role, state):
+def emit_hook_evidence(diag, role, state, classification=None):
     require(not diag.helper_evidence_attempted and type(role) is str and role in dict(UBUNTU_HOOK_PATHS)
             and role not in diag.runtime_hook_attempts, "c-protocol")
     diag.runtime_hook_attempts.add(role)
     state = state if type(state) is str and state in ("absent", "empty", "nonempty") else "unknown"
-    line = "HOOK_EVIDENCE " + json.dumps({"role": role, "state": state, "precondition": "unknown"},
-                                        sort_keys=True, separators=(",", ":"))
+    classification = classification if type(classification) is dict else {}
+    record = {"role": role, "state": state, "precondition": "unknown"}
+    for key, allowed in (("stage", HOOK_STAGES), ("fd_cleanup", HOOK_CLEANUP_STATES),
+                         ("iterator_cleanup", HOOK_CLEANUP_STATES)):
+        value = classification.get(key)
+        record[key] = value if type(value) is str and value in allowed else "unknown"
+    line = "HOOK_EVIDENCE " + json.dumps(record, sort_keys=True, separators=(",", ":"))
     require(line.isascii() and len(line) <= 768, "c-protocol")
     diag._deliver(diag.report_sink, line)
 
@@ -968,7 +1045,10 @@ def runtime_prerequisites_preflight(diag, batch=None):
     for role, _ in UBUNTU_HELPER_SHA256:
         emit_runtime_helper(diag, role, batch.helper_results[role])
     for role, _ in UBUNTU_HOOK_PATHS:
-        emit_hook_evidence(diag, role, batch.hook_results[role])
+        probe = batch.hooks.get(role)
+        classification = probe.classification() if probe is not None else {
+            "stage": "unvisited", "fd_cleanup": "unvisited", "iterator_cleanup": "unvisited"}
+        emit_hook_evidence(diag, role, batch.hook_results[role], classification)
     sources = [helper_source_status(role, batch.helper_results[role]) for role, _ in UBUNTU_HELPER_SHA256]
     diag.emit("c-runtime-source-" + ("match" if all(value == "published-match" for value in sources)
                                   else "rejected" if "rejected" in sources else "unknown"))

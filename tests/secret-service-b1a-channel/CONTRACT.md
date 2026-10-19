@@ -513,3 +513,83 @@ and all files outside the four-file scope. Syntax, exact profile versus the
 authenticated .deb receipt, historical document prefixes, relative links and
 git whitespace checks passed. No local Linux VM acceptance, user/unit creation,
 full product build or packaging was run. New natural CI remains separate.
+
+## Hook result phase classification only, 2026-10-20
+
+Sole parent `27627098d5da6d6c492913b519287fe5d9248880`; stacked base PR88
+`598845e71b54cfc6c8597d7493d2e061d339572c`. Historical C #6/run39304355838
+remains its declared pre-create FAILURE: 140/140 native public tests, three
+published-match helper records, four hook-state unknown records, fixed c-scan,
+readonly-cleanup-ok, 0/15 and no C_CASE. Those four old unknowns do not say which
+roles were visited, absent, empty or why any check refused. **This new diagnostic
+classification cannot retroactively fill those gaps or explain C #1-#4.** Root
+confirmed original E/F 0/0/0 for that precise metadata-only head, not C acceptance;
+the old seven natural regressions later succeeded, including Code #485, and do
+not cover the new candidate or override either old/new C red.
+
+Only the four C files change again. channel.py, receiver, workflow, all PR88
+files, product, pins and all historical evidence stay frozen. No I/O/probe,
+lookup/configuration read, retry, scan, execution or cleanup call is added. The
+existing safety predicates, result gates, helper argv, UID/permissions, bounded
+output and unconditional pre-user-create stop are unchanged. Classification
+uses existing stat/held/scan/close outcomes and control-flow position only;
+where a comparison previously used a call inline, its one existing result is
+retained, not reacquired. No useradd/userdel/groupdel/hook, acceptance fixture,
+unit/service or defaults probe runs locally. Natural CI executes only the
+unchanged workflow and its still-mandatory pre-create evidence gate.
+
+The same four HOOK_EVIDENCE records gain only three finite enum fields. Maximum
+three helper/four hook records, <=768 ASCII each, consumed-before-delivery and
+sticky sink loss remain unchanged. The role/state/precondition fields retain
+their old meanings; precondition is always unknown. No raw path/entry, errno,
+exception, numeric identity, credential, secret or extra content is disclosed.
+
+| stage | Retained observation, never a new admission |
+| --- | --- |
+| unvisited | No hook collection was entered; not visited-unknown or checked-absent |
+| parent-missing | The existing component stat reported a missing non-final ancestor |
+| leaf-missing | Existing nofollow missing-leaf result under the original verified held parent chain |
+| linked | Already obtained nofollow component mode was a symlink; no link target probe |
+| enumeration-incomplete | Existing scandir/iteration/EOF/bound check did not complete, regardless of exception text/type |
+| drift | Existing before/after identity comparison failed, or a previously seen object disappeared/formerly absent leaf appeared |
+| close-failed | An existing close confirmation failed, with no earlier classified refusal |
+| complete-empty | Existing bounded EOF, checks and recheck established the old empty state, not execution approval |
+| nonempty | Existing complete enumeration/checks reached the old nonempty refusal |
+| unknown | Existing data cannot prove a narrower phase; no errno/message/configuration inference |
+
+The first refusal stage is sticky, including unknown. Later drift, close or
+output errors cannot overwrite the original stage or operation error. Thus
+scan failure plus iterator-close loss stays enumeration-incomplete; an unknown
+metadata refusal plus close loss stays unknown. Parent-missing never becomes
+leaf-missing/absent, and a FileNotFoundError from enumeration is not a missing
+leaf observation. Later unvisited roles are reported as unvisited, not four
+invented scans or absence claims.
+
+`fd_cleanup` and `iterator_cleanup` independently report unvisited/not-acquired/
+confirmed/unconfirmed/unknown from retained acquisition and existing close
+attempts. A confirmed FD close does not certify enumeration completeness or
+an iterator's close; an iterator-close error does not fabricate a physical FD
+close failure. Confirmed refers only to the applicable acquired read resource,
+not legacy user/unit cleanup, whole-system absence of residue or C acceptance.
+Close ownership is still consumed once and all original other closes continue.
+
+Source publication profile and the exact four hook paths are unchanged. Cache/
+tally/ZSys/USERDEL_CMD, dynamic dependencies, privileged drift/check-to-exec
+remain unknown and hard-blocked. Even all published matches and empty hooks
+cannot return from this gate. Fifteen scenarios remain unexecuted/unaccepted.
+First unexpected natural red freezes source; no patch/second commit/push,
+dispatch/rerun, Ready/merge/tag/package/deploy. Natural exact-head C plus seven
+old workflows are recorded at actual states, followed by original E/F formal
+new-head review and another explicit contract; production remains NO-GO.
+
+Independent public controlled tests precede implementation and cover all enum
+classes, joint first-error/close/sink losses, unsafe/unknown metadata, temporal
+drift, physical-versus-evidence close confirmation, one-shot limits and zero
+creation/unit/C_CASE. The original 140 test bodies remain unchanged. Local
+Windows C **154 = 110 PASS + 44 Linux skips**; combined unchanged public suites
+**299 = 237 PASS + 62 skips**. Controlled old/new complete I/O traces match in
+17 public scenarios; static I/O/execution call sites, arguments and counts
+match the parent, with 68 frozen functions retained. These are modeled return
+shapes/interleavings, not actual I/O fault injection or Linux VM acceptance.
+Syntax, relative links/history prefixes/four-file scope and whitespace checks
+are verified separately; skipped is not execution.

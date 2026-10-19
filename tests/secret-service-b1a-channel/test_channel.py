@@ -1126,6 +1126,190 @@ class RuntimePrerequisiteRegressions(unittest.TestCase):
             self.assertEqual(len(reports), 1)
 
 
+class HookStageRegressions(unittest.TestCase):
+    # Reuse the independently authored public model, not runtime OS metadata.
+    batch = RuntimePrerequisiteRegressions.batch
+    stopped = RuntimePrerequisiteRegressions.stopped
+    hook_path = RuntimePrerequisiteRegressions.hook_path
+
+    def hooks(self, reports):
+        return [json.loads(line.split(" ", 1)[1]) for line in reports if line.startswith("HOOK_EVIDENCE ")]
+
+    def test_unvisited_is_not_visited_unknown_and_never_claims_cleanup(self):
+        batch, fs, _ = self.batch(changes={"userdel": {"sha256": "0"*64}})
+        _, reports, _, _ = self.stopped(batch)
+        for item in self.hooks(reports):
+            self.assertEqual((item["state"], item["stage"], item["fd_cleanup"], item["iterator_cleanup"]),
+                             ("unknown", "unvisited", "unvisited", "unvisited"))
+        self.assertEqual(fs.events, [])
+
+    def test_parent_missing_is_not_leaf_absence_and_later_roles_stay_unvisited(self):
+        for parent in ("/etc", "/etc/shadow-maint"):
+            batch, fs, _ = self.batch()
+            del fs.nodes[parent]
+            _, reports, _, _ = self.stopped(batch)
+            items = self.hooks(reports)
+            self.assertEqual((items[0]["state"], items[0]["stage"]), ("unknown", "parent-missing"))
+            self.assertEqual(items[0]["fd_cleanup"], "confirmed")
+            self.assertEqual(items[0]["iterator_cleanup"], "not-acquired")
+            self.assertTrue(all(item["stage"] == "unvisited" for item in items[1:]))
+            self.assertEqual(fs.fds, {})
+
+    def test_verified_leaf_missing_remains_absent_not_parent_missing(self):
+        batch, fs, _ = self.batch()
+        _, reports, _, error = self.stopped(batch)
+        self.assertEqual(error.args, ("c-setup",))
+        for item in self.hooks(reports):
+            self.assertEqual((item["state"], item["stage"], item["fd_cleanup"], item["iterator_cleanup"]),
+                             ("absent", "leaf-missing", "confirmed", "not-acquired"))
+
+    def test_complete_empty_keeps_scan_and_fd_confirmation_distinct(self):
+        batch, fs, _ = self.batch()
+        for role, _ in fixture.UBUNTU_HOOK_PATHS: fs.add(self.hook_path(role))
+        _, reports, _, _ = self.stopped(batch)
+        for item in self.hooks(reports):
+            self.assertEqual((item["state"], item["stage"], item["fd_cleanup"], item["iterator_cleanup"]),
+                             ("empty", "complete-empty", "confirmed", "confirmed"))
+        self.assertEqual(fs.reads, 0)
+
+    def test_link_class_uses_observed_mode_not_raw_error_or_link_target_probe(self):
+        for target in ("/etc", "/etc/shadow-maint", self.hook_path()):
+            batch, fs, _ = self.batch()
+            fs.add(target, stat.S_IFLNK | 0o777)
+            _, reports, _, _ = self.stopped(batch)
+            item = self.hooks(reports)[0]
+            self.assertEqual((item["state"], item["stage"]), ("unknown", "linked"))
+            self.assertFalse(any(event == ("open", target) for event in fs.events))
+
+    def test_unproven_metadata_error_stays_unknown_without_errno_inference(self):
+        batch, fs, _ = self.batch()
+        original = fs.stat
+        def denied(name, **kwargs):
+            if name == "shadow-maint": raise PermissionError("public secret-looking bait")
+            return original(name, **kwargs)
+        fs.stat = denied
+        _, reports, _, _ = self.stopped(batch)
+        self.assertEqual(self.hooks(reports)[0]["stage"], "unknown")
+        self.assertNotIn("secret-looking", "\n".join(reports))
+
+    def test_incomplete_enumeration_and_joint_iterator_close_preserve_primary_stage(self):
+        for failed_close in (False, True):
+            batch, fs, _ = self.batch()
+            fs.add(self.hook_path())
+            primary = c.Failure("c-identity")
+            def reject(path, index, phase):
+                if phase == "next": raise primary
+                if failed_close: raise OSError("public iterator close")
+            fs.scan_action = reject
+            _, reports, _, error = self.stopped(batch)
+            self.assertIs(error, primary)
+            item = self.hooks(reports)[0]
+            self.assertEqual(item["stage"], "enumeration-incomplete")
+            self.assertEqual(item["fd_cleanup"], "confirmed")
+            self.assertEqual(item["iterator_cleanup"], "unconfirmed" if failed_close else "confirmed")
+            self.assertEqual(fs.iterator_closes, 1)
+            self.assertEqual(fs.fds, {})
+
+    def test_observed_before_after_rebind_or_late_entry_is_drift(self):
+        for rebound in (False, True):
+            batch, fs, _ = self.batch()
+            fs.add(self.hook_path())
+            def changed(path, index, phase):
+                if path == self.hook_path() and phase == "close":
+                    fs.scan_action = None
+                    fs.add(path if rebound else path+"/public-late")
+            fs.scan_action = changed
+            _, reports, _, _ = self.stopped(batch)
+            self.assertEqual(self.hooks(reports)[0]["stage"], "drift")
+
+    def test_previously_missing_leaf_now_present_is_drift_without_new_probe(self):
+        batch, fs, _ = self.batch()
+        batch.collect()
+        fs.add(self.hook_path())
+        _, reports, _, _ = self.stopped(batch)
+        item = self.hooks(reports)[0]
+        self.assertEqual((item["state"], item["stage"]), ("unknown", "drift"))
+
+    def test_close_only_failure_is_classified_without_reclosing_any_descriptor(self):
+        batch, fs, _ = self.batch()
+        fs.add(self.hook_path())
+        def fail(path):
+            if path == self.hook_path(): raise OSError("public close after release")
+        fs.close_action = fail
+        _, reports, _, _ = self.stopped(batch)
+        item = self.hooks(reports)[0]
+        self.assertEqual((item["stage"], item["fd_cleanup"], item["iterator_cleanup"]),
+                         ("close-failed", "unconfirmed", "confirmed"))
+        before = list(fs.events)
+        batch.close()
+        self.assertEqual(fs.events, before)
+        self.assertEqual(fs.fds, {})
+
+    def test_iterator_only_close_loss_does_not_fabricate_fd_close_loss(self):
+        batch, fs, _ = self.batch()
+        fs.add(self.hook_path())
+        def failed(path, index, phase):
+            if phase == "close": raise OSError("public iterator close only")
+        fs.scan_action = failed
+        _, reports, labels, _ = self.stopped(batch)
+        item = self.hooks(reports)[0]
+        self.assertEqual((item["stage"], item["fd_cleanup"], item["iterator_cleanup"]),
+                         ("close-failed", "confirmed", "unconfirmed"))
+        self.assertIn("c-runtime-readonly-cleanup-rejected", labels)
+        self.assertEqual(fs.iterator_closes, 1)
+        self.assertEqual(fs.fds, {})
+
+    def test_missing_error_during_enumeration_is_not_reclassified_as_absent_leaf(self):
+        batch, fs, _ = self.batch()
+        fs.add(self.hook_path())
+        def failed(*args): raise FileNotFoundError("public scan-phase absence")
+        fs.scan_action = failed
+        _, reports, _, _ = self.stopped(batch)
+        item = self.hooks(reports)[0]
+        self.assertEqual((item["state"], item["stage"]), ("unknown", "enumeration-incomplete"))
+        self.assertEqual(fs.fds, {})
+
+    def test_original_nonempty_or_unknown_refusal_survives_close_and_sink_errors(self):
+        for unknown in (False, True):
+            batch, fs, _ = self.batch()
+            fs.add(self.hook_path())
+            if unknown:
+                original = fs.stat
+                def denied(name, **kwargs):
+                    if name == "useradd-pre.d": raise PermissionError("public metadata refusal")
+                    return original(name, **kwargs)
+                fs.stat = denied
+            else:
+                fs.add(self.hook_path()+"/public-nonexecuting", stat.S_IFREG | 0o600)
+            fs.close_action = lambda path: (_ for _ in ()).throw(OSError("public close"))
+            attempted = []
+            def sink(line):
+                attempted.append(line)
+                raise OSError("public sink loss")
+            diag, _, _, error = self.stopped(batch, sink)
+            self.assertTrue(diag.delivery_failed)
+            item = self.hooks(attempted)[0]
+            self.assertEqual(item["stage"], "unknown" if unknown else "nonempty")
+            self.assertEqual(item["fd_cleanup"], "unconfirmed")
+            self.assertEqual(error.args, ("c-scan",))
+            self.assertEqual(fs.fds, {})
+
+    def test_fixed_stage_schema_ignores_arbitrary_fields_and_does_not_expand_output_budget(self):
+        reports = []
+        diag = fixture.Diagnostics(sink=lambda _: None, report_sink=reports.append)
+        fixture.emit_hook_evidence(diag, "useradd-pre", "unknown",
+            {"stage": "/private/bait", "fd_cleanup": "wrong", "iterator_cleanup": "wrong", "path": PUBLIC})
+        item = self.hooks(reports)[0]
+        self.assertEqual((item["stage"], item["fd_cleanup"], item["iterator_cleanup"]),
+                         ("unknown", "unknown", "unknown"))
+        self.assertLessEqual(len(reports[0]), 768)
+        self.assertTrue(reports[0].isascii())
+        self.assertNotIn("/private", reports[0])
+        self.assertNotIn(PUBLIC.decode(), reports[0])
+        with self.assertRaises(c.Failure): fixture.emit_hook_evidence(diag, "useradd-pre", "empty")
+        self.assertEqual(len(reports), 1)
+
+
 class RawHelperHandoffRegressions(unittest.TestCase):
     class Stream:
         def __init__(self, fail=False):

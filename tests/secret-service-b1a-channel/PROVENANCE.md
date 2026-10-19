@@ -235,3 +235,30 @@ public test bodies remain; new public metadata/iterator/sink/close adapters are
 controlled regressions rather than actual I/O faults or user/unit execution.
 No old C/A3 red is erased or explained retroactively. Natural same-head evidence
 and original E/F formal review are required; production remains NO-GO.
+
+## Existing hook-result stage diagnostics only, 2026-10-20
+
+Independently project-authored from the root's bounded contract on sole parent
+`27627098d5da6d6c492913b519287fe5d9248880`. Only fixture.py, test_channel.py and
+these two notes change. The earlier source profile, Ubuntu archive/build facts,
+existing predicates/argv/UID/success/ownership, channel/receiver/workflow and
+all PR88/product/pin/history files remain unchanged. No external implementation,
+binary or new third-party dependency is added. Existing license terms remain.
+
+Classification consumes the original component position, nofollow mode,
+before/after comparison, enumeration outcome and consumed close confirmation.
+It does not inspect error text/errno, look up paths again or add an I/O/config/
+probe/retry/execution. Missing ancestors and missing verified leaves retain
+different stages; scan-phase exceptions do not assert leaf absence. Unknown
+remains unknown, and original operation/refusal survives later cleanup/output
+loss. FD and iterator confirmations stay separate, never imply legacy aggregate
+cleanup or a checked role that was unvisited. The output stays within four
+existing bounded hook records with finite enums only; helper limits unchanged.
+
+Interface basis remains the previously cited Python 3.12 nofollow/scandir/close
+contracts and this project's explicit metadata-only fail-closed contract.
+Public phase/iterator/metadata/sink adapters and old/new I/O-trace comparison
+are independently authored controlled regressions, not a real kernel fault,
+real user/unit operation or cause of historical C #1-#6 red. The old 140 test
+bodies and 68 frozen functions are retained. A new natural head has its own
+attempt1 evidence and formal original E/F review; no broader GO is inferred.
