@@ -44,3 +44,27 @@ without changing any old workflow. This is not release, package or deployment
 authorization. No real credential/configuration, official client or provider is
 used. Report B0 no-secret, C synthetic-password and A2/A3 synthetic-secret as
 separate evidence classes; do not erase PR87's historical seven reds.
+
+## Safety/diagnostic follow-up, 2026-10-19
+
+The bounded independently authored repair touches only channel.py, fixture.py,
+test_channel.py and these C contract/provenance notes. Original E/F static
+findings are project review inputs, not borrowed implementation and not proof
+of C #1's original runtime cause. No new third-party dependency or old-file,
+receiver/workflow/pin/policy/product change is introduced.
+
+Additional primary behavior references, consulted 2026-10-19:
+
+- [Linux close(2)](https://man7.org/linux/man-pages/man2/close.2.html): a failure
+  does not justify retrying a descriptor number that may already be reused.
+  This Linux-only acceptance records consumption separately from confirmation;
+  it does not assert a universal non-Linux close-error rule.
+- [Python 3.12 directory APIs](https://docs.python.org/3.12/library/os.html#os.scandir):
+  explicit scandir/held-directory operations and exceptions, rather than
+  os.walk's default ignored enumeration failures. No manual example or upstream
+  implementation was copied or translated.
+
+Controlled public adapters, public sentinel reuse, and deterministic directory
+mutation tests are not presented as real kernel fault injection, production
+credential tests or the cause of the old red. Historical C #1 and PR87 red/green
+records remain distinct from every new-head natural run and formal review.

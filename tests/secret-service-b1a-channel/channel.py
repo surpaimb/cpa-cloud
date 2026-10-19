@@ -48,12 +48,16 @@ def validate(value):
 
 
 def pipe_identity(fd):
+    if isinstance(fd, OwnedFD):
+        fd = fd.fileno()
     s = os.fstat(fd)
     require(stat.S_ISFIFO(s.st_mode) and stat.S_IMODE(s.st_mode) == 0o600, "c-pipe")
     return s.st_dev, s.st_ino, s.st_uid, s.st_gid, s.st_mode
 
 
 def close_checked(fd):
+    if isinstance(fd, OwnedFD):
+        return fd.close()
     try:
         os.close(fd)
         try:
@@ -66,6 +70,42 @@ def close_checked(fd):
         raise
     except OSError:
         raise Failure("c-close") from None
+
+
+class OwnedFD:
+    """Consume ownership BEFORE close; an error never authorizes FD retry."""
+    def __init__(self, fd):
+        self.value = fd
+        self.consumed = False
+        self.confirmed = False
+
+    def fileno(self):
+        require(not self.consumed, "c-close")
+        return self.value
+
+    def close(self, close=None):
+        if self.consumed:
+            require(self.confirmed, "c-close")
+            return
+        self.consumed = True
+        (close or close_checked)(self.value)
+        self.confirmed = True
+
+
+class OwnedStream:
+    def __init__(self, stream):
+        self.stream = stream
+        self.consumed = False
+        self.confirmed = False
+
+    def close(self):
+        if self.consumed:
+            require(self.confirmed, "c-close")
+            return
+        self.consumed = True
+        self.stream.close()
+        require(self.stream.closed, "c-close")
+        self.confirmed = True
 
 
 @dataclass(frozen=True)
@@ -111,12 +151,28 @@ class SystemIO:
 
 class OneShot:
     def __init__(self, fd, target, purpose, deadline, io=None):
-        self.fd, self.target, self.purpose = fd, target, purpose
+        self.owner = fd if isinstance(fd, OwnedFD) else OwnedFD(fd)
+        self.target, self.purpose = target, purpose
         self.deadline, self.io = deadline, io or SystemIO()
         self.used = False
-        self.closed = False
-        require(re.fullmatch(r"[0-9a-f]{32}", purpose) is not None, "c-protocol")
-        require(pipe_identity(fd) == target.pipe and not os.get_inheritable(fd), "c-pipe")
+        try:
+            self.fd = self.owner.fileno()
+            require(re.fullmatch(r"[0-9a-f]{32}", purpose) is not None, "c-protocol")
+            require(pipe_identity(self.fd) == target.pipe and not os.get_inheritable(self.fd), "c-pipe")
+        except Exception:
+            try:
+                self.owner.close(self.io.close)
+            except Exception:
+                pass  # original constructor rejection remains first; owner stays red
+            raise
+
+    @property
+    def consumed(self):
+        return self.owner.consumed
+
+    @property
+    def closed(self):
+        return self.owner.confirmed
 
     def send(self, value, purpose):
         require(not self.used, "c-reused")
@@ -142,8 +198,7 @@ class OneShot:
             first = e
         finally:
             try:
-                self.io.close(self.fd)
-                self.closed = True
+                self.owner.close(self.io.close)
             except Exception:
                 if first is None:
                     first = Failure("c-close")
@@ -178,11 +233,21 @@ def read_line(fd, deadline, limit=4096):
 
 
 class Capture:
-    def __init__(self, stream, limit=CAPTURE_LIMIT):
-        self.stream, self.limit = stream, limit
+    def __init__(self, stream, limit=CAPTURE_LIMIT, start=True):
+        self.owner = stream if isinstance(stream, OwnedStream) else OwnedStream(stream)
+        self.stream, self.limit = self.owner.stream, limit
         self.data, self.eof, self.overflow, self.error = bytearray(), False, False, False
+        self.finished = None
         self.thread = threading.Thread(target=self._read, daemon=True)
-        self.thread.start()
+        if start:
+            self.start()
+
+    def start(self):
+        try:
+            self.thread.start()
+        except Exception:
+            self.error = True
+            raise
 
     def _read(self):
         try:
@@ -198,16 +263,20 @@ class Capture:
             self.error = True
 
     def finish(self):
-        self.thread.join(3)
+        if self.finished is not None:
+            return self.finished
+        if self.thread.ident is not None:
+            self.thread.join(3)
         complete = self.eof and not self.thread.is_alive() and not self.overflow and not self.error
         # Never close/reuse an FD under a still-blocked reader. That is an
         # incomplete capture, not successful closure; acceptance must fail.
         if not self.thread.is_alive():
             try:
-                self.stream.close()
+                self.owner.close()
             except Exception:
                 complete = False
-        return bytes(self.data), complete
+        self.finished = (bytes(self.data), complete)
+        return self.finished
 
 
 def scan(value, inventory, expected):

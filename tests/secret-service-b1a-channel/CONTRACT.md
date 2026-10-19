@@ -121,3 +121,54 @@ No migration/product enablement. Revert these added files to remove C. P still
 needs its own contract for GNOME 46.1 nonempty stdin consumption, protected
 collection creation/unlock and persistent reopen. Later Key/provider/recovery,
 real configurations and production remain unimplemented/unverified here.
+
+## Bounded safety/diagnostic follow-up to C #1
+
+The original exact head `3f0554a538d40d0621dca9d982bcf19f663f0824` remains a red
+historical snapshot: natural C #1/run39262864298 failed with fixed `c-setup`,
+content-clear=true, capture-complete=false, aggregate cleanup=false and zero
+final case admissions. The original visible E/F independently found three P2
+defects (incomplete directory enumeration, partial-acquisition cleanup, and
+retrying a consumed FD number), plus coarse setup reporting. These static
+findings **do not identify C #1's underlying setup cause or physical residue**.
+
+This follow-up changes only channel.py, fixture.py, test_channel.py and necessary
+C contract/provenance. Receiver, dedicated workflow, shared supervisor, the old
+seven workflows, pins/policy, UID/permissions, payload/receipt protocol, fifteen
+cases, send count and deadlines remain unchanged. No setup command, probe,
+retry, permission repair or behavior fallback is added by diagnostics.
+
+- Resource guards exist before the first directory/socket/Popen acquisition.
+  Successful results are registered immediately, before chmod, the next
+  directory, Capture allocation or thread start. Raw Popen streams have an
+  owner before Capture is initialized; a retained Capture is registered before
+  starting its reader. Partial failures stop/wait and close all confirmed-owned
+  objects, continue other cleanup, and preserve the original first error.
+  A side-effecting user-creation helper's **already observed successful exit**
+  also registers its owned identity if capture initialization failed; this adds
+  no lookup, command, retry or inference from raw stderr. Unconfirmed resources
+  are not adopted or deleted.
+- FD/stream records distinguish **consumed ownership** from **confirmed close**.
+  Cleanup candidates are removed/consumed before close. Even if close reports
+  failure after the kernel released/reused the number, no upper cleanup retries
+  that old number; its unconfirmed state remains red. Constructor rejection,
+  send rejection, success and duplicate all share this ownership record.
+- Root lstat, nofollow held-directory FD, bounded explicit scandir enumeration
+  and before/after identity/content checks replace os.walk's silent errors.
+  Missing, wrong-type/symlink, unvisited, rebound, disappeared or enumeration-
+  error roots/subtrees are incomplete; a real empty directory can be complete.
+  FIFO, hardlink, overflow, inventory, read and close refusal gates remain.
+- Diagnostics publish only a finite source-owned whitelist: setup
+  entered/ok/rejected and acquired cleanup action/result/consumed-confirmation
+  states. Existing return values/predicates are reused, not probed again. Bait,
+  raw exception/stderr, path/identity/errno, password and derived values are not
+  relayed. Not-acquired/missing capture cannot become green.
+
+Public regressions were added before repair. Deterministic close-after-release
+adapters use dup2 to reuse the exact number for a **public sentinel**, then run
+full guard cleanup and prove that sentinel was not closed. They are synthetic
+return-shape/interleaving tests, not actual kernel I/O-fault injection. Directory
+rebound/removal/enumeration and partial constructor/thread-start cases are
+likewise declared controlled public negatives. Original 42 tests and 15 VM
+cases are retained. New natural exact-head CI and original E/F review are still
+required; the first unexpected new dedicated red freezes source again.

@@ -139,10 +139,147 @@ class Validation(unittest.TestCase):
             fixture.stop_child(Child())
 
 
+class OwnershipRegressions(unittest.TestCase):
+    def test_second_directory_failure_cleans_first(self):
+        released = []
+        owned = fixture.Resources(fixture.Diagnostics(sink=lambda _: None))
+        with self.assertRaisesRegex(c.Failure, "c-setup"):
+            with owned:
+                owned.acquire("root", lambda: "public-root", lambda value: released.append(value))
+                def rejected():
+                    raise c.Failure("c-setup")
+                owned.acquire("host", rejected, lambda value: released.append("unowned"))
+        self.assertEqual(released, ["public-root"])
+
+    def test_post_acquire_mode_or_socket_failure_still_cleans(self):
+        for stage in ("root", "host", "socket"):
+            released = []
+            owned = fixture.Resources(fixture.Diagnostics(sink=lambda _: None))
+            with self.assertRaisesRegex(c.Failure, "c-isolation"):
+                with owned:
+                    owned.acquire(stage, lambda: "public", lambda value: released.append(value))
+                    raise c.Failure("c-isolation")
+            self.assertEqual(released, ["public"])
+
+    def test_cleanup_continues_and_keeps_first(self):
+        actions = []
+        owned = fixture.Resources(fixture.Diagnostics(sink=lambda _: None))
+        owned.own("root", "public", lambda _: actions.append("root"))
+        def bad(_):
+            actions.append("host")
+            raise OSError("public bait " + PUBLIC.decode())
+        owned.own("host", "public", bad)
+        self.assertEqual(owned.cleanup("c-identity"), ("c-identity", False))
+        self.assertEqual(actions, ["host", "root"])
+
+    def test_acquisition_failure_never_takes_unconfirmed_object(self):
+        actions = []
+        owned = fixture.Resources(fixture.Diagnostics(sink=lambda _: None))
+        def bad():
+            raise OSError("public object not acquired")
+        with self.assertRaises(OSError):
+            owned.acquire("socket", bad, lambda _: actions.append("unowned"))
+        self.assertEqual(owned.cleanup(), (None, True))
+        self.assertEqual(actions, [])
+
+    def test_popen_capture_constructor_failure_is_guarded(self):
+        owned = fixture.Resources(fixture.Diagnostics(sink=lambda _: None))
+        owner = None
+        def bad_capture(*args, **kwargs):
+            raise RuntimeError("public capture initialization bait")
+        with self.assertRaises(RuntimeError):
+            with owned:
+                owner = owned.process("helper-process", lambda: subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(2)"], stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE), capture_factory=bad_capture)
+                owner.capture("out")
+        self.assertIsNotNone(owner.process.poll())
+        self.assertTrue(owner.streams["out"].consumed and owner.streams["out"].confirmed)
+        self.assertTrue(owner.streams["err"].consumed and owner.streams["err"].confirmed)
+
+    def test_diagnostic_whitelist_and_bait(self):
+        lines = []
+        diag = fixture.Diagnostics(sink=lines.append)
+        with self.assertRaises(OSError):
+            diag.run("user-create", lambda: (_ for _ in ()).throw(OSError(PUBLIC.decode())))
+        self.assertTrue(lines)
+        self.assertTrue(all(line in fixture.DIAGNOSTICS for line in lines))
+        self.assertFalse(any(PUBLIC.decode() in line for line in lines))
+        before = list(lines)
+        with self.assertRaises(c.Failure):
+            diag.run(PUBLIC.decode(), lambda: None)
+        self.assertEqual(lines, before)
+
+    def test_capture_start_failure_keeps_stream_owner(self):
+        class Partial(c.Capture):
+            def start(self):
+                super().start()
+                raise RuntimeError("public start bait")
+        owned = fixture.Resources(fixture.Diagnostics(sink=lambda _: None))
+        owner = None
+        with self.assertRaises(RuntimeError):
+            with owned:
+                owner = owned.process("helper-process", lambda: subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(2)"], stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE), capture_factory=Partial)
+                owner.capture("out")
+        self.assertTrue(owner.captures["out"].error)
+        self.assertTrue(all(value.consumed and value.confirmed for value in owner.streams.values()))
+        self.assertFalse(owner.results["out"][1])
+
+    def test_popen_failure_not_registered_as_acquired(self):
+        lines = []
+        owned = fixture.Resources(fixture.Diagnostics(sink=lines.append))
+        def rejected():
+            raise OSError("public popen bait")
+        with self.assertRaises(OSError):
+            owned.process("helper-process", rejected)
+        self.assertEqual(owned.cleanup(), (None, True))
+        self.assertEqual(lines, [])
+
+    def test_successful_helper_resource_owned_despite_capture_failure(self):
+        box, released = [], []
+        def factory(*args, **kwargs):
+            process = subprocess.Popen(*args, **kwargs)
+            box.append(process)
+            return process
+        def bad_capture(*args, **kwargs):
+            box[0].wait(timeout=2)  # deterministic public helper completed first
+            raise RuntimeError("public capture bait")
+        owned = fixture.Resources(fixture.Diagnostics(sink=lambda _: None))
+        commands = fixture.Commands(owned.diag, factory, bad_capture)
+        with self.assertRaises(RuntimeError):
+            with owned:
+                commands.run([sys.executable, "-c", "pass"], owned_success=lambda:
+                    owned.own("user", "public-resource", lambda value: released.append(value)))
+        self.assertEqual(released, ["public-resource"])
+        self.assertEqual(box[0].returncode, 0)
+        self.assertFalse(all(ok for _, ok in commands.inventory.values()))
+
+    def test_stream_close_consumed_before_error(self):
+        class Stream:
+            closed = False
+            calls = 0
+            def close(self):
+                self.calls += 1
+                self.closed = True
+                raise OSError("public released stream bait")
+        stream = Stream()
+        owner = c.OwnedStream(stream)
+        with self.assertRaises(OSError):
+            owner.close()
+        self.assertTrue(owner.consumed)
+        self.assertFalse(owner.confirmed)
+        with self.assertRaises(c.Failure):
+            owner.close()
+        self.assertEqual(stream.calls, 1)
+
+
 @unittest.skipUnless(sys.platform == "linux", "Linux anonymous pipe/procfs required")
 class Pipes(unittest.TestCase):
     def setUp(self):
         self.r, self.w = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        self.writer = c.OwnedFD(self.w)
         self.target = c.Target(os.getpid(), os.getuid(), "public", (1, 2), c.pipe_identity(self.w), b"public")
         self.closed = False
         self.neighbor_r, self.neighbor_w = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
@@ -155,14 +292,16 @@ class Pipes(unittest.TestCase):
         self.io = IO()
 
     def tearDown(self):
-        for fd in (self.r, self.w, self.neighbor_r, self.neighbor_w):
+        if not self.writer.consumed:
+            self.writer.close()
+        for fd in (self.r, self.neighbor_r, self.neighbor_w):
             try:
                 os.close(fd)
             except OSError:
                 pass
 
     def sender(self, io=None, target=None, deadline=None):
-        return c.OneShot(self.w, target or self.target, PURPOSE, deadline or time.monotonic() + 2, io or self.io)
+        return c.OneShot(self.writer, target or self.target, PURPOSE, deadline or time.monotonic() + 2, io or self.io)
 
     def unchanged(self):
         self.assertEqual(os.read(self.r, 256), b"")  # rejected sender closed: EOF, no bytes
@@ -303,7 +442,7 @@ class Pipes(unittest.TestCase):
             target = c.observe(child.pid)
             self.assertEqual(target.pid, hello["pid"])
             self.assertEqual(target.pipe, c.pipe_identity(self.w))
-            c.OneShot(self.w, target, purpose, time.monotonic() + 3).send(oracle, purpose)
+            c.OneShot(self.writer, target, purpose, time.monotonic() + 3).send(oracle, purpose)
             raw, err = child.communicate(timeout=3)
             self.assertEqual(child.returncode, 0)
             self.assertTrue(err == b"", "unexpected fixed receiver error")
@@ -318,6 +457,178 @@ class Pipes(unittest.TestCase):
         with self.assertRaisesRegex(c.Failure, "c-wait"):
             commands.run([sys.executable, "-c", "import time; time.sleep(2)"], timeout=.05)
         self.assertTrue(all(complete for _, complete in commands.inventory.values()))
+
+
+@unittest.skipUnless(sys.platform == "linux", "Linux FD/directory identity regressions")
+class SafetyRegressions(unittest.TestCase):
+    def test_success_duplicate_and_guard_close_exactly_once(self):
+        r, w = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        owner = c.OwnedFD(w)
+        target = c.Target(os.getpid(), os.getuid(), "public", (1, 2), c.pipe_identity(w), b"public")
+        calls = []
+        class IO(c.SystemIO):
+            identity = staticmethod(lambda _: target)
+            @staticmethod
+            def close(fd):
+                calls.append(True)
+                c.close_checked(fd)
+        owned = fixture.Resources(fixture.Diagnostics(sink=lambda _: None))
+        owned.own("input-write", owner, lambda value: value.close())
+        try:
+            sender = c.OneShot(owner, target, PURPOSE, time.monotonic() + 2, IO())
+            sender.send(PUBLIC, PURPOSE)
+            with self.assertRaisesRegex(c.Failure, "c-reused"):
+                sender.send(PUBLIC, PURPOSE)
+            self.assertTrue(owner.consumed and owner.confirmed)
+            self.assertEqual(owned.cleanup(), (None, True))
+            self.assertEqual(calls, [True])
+            self.assertEqual(os.read(r, 256), PUBLIC)
+            self.assertEqual(os.read(r, 1), b"")
+        finally:
+            os.close(r)
+
+    def test_constructor_close_reuse_not_retried(self):
+        r, w = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        owner = c.OwnedFD(w)
+        target = c.Target(0, 0, "public", (0, 0), (0, 0, 0, 0, 0), b"public")
+        replacement = []
+        with tempfile.TemporaryFile() as sentinel:
+            class IO(c.SystemIO):
+                @staticmethod
+                def close(fd):
+                    os.close(fd)
+                    os.dup2(sentinel.fileno(), fd)
+                    replacement.append(c.OwnedFD(fd))
+                    raise OSError("public close-after-release bait")
+            owned = fixture.Resources(fixture.Diagnostics(sink=lambda _: None))
+            owned.own("input-write", owner, lambda value: value.close())
+            try:
+                with self.assertRaisesRegex(c.Failure, "c-pipe"):
+                    c.OneShot(owner, target, PURPOSE, time.monotonic() + 2, IO())
+                self.assertEqual(owned.cleanup("c-pipe"), ("c-pipe", False))
+                self.assertEqual(os.fstat(w).st_ino, os.fstat(sentinel.fileno()).st_ino)
+            finally:
+                os.close(r)
+                for value in replacement:
+                    value.close()
+
+    def test_close_released_then_reused_sentinel_not_reclosed(self):
+        r, w = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        original = c.OwnedFD(w)
+        replacement = []
+        target = c.Target(os.getpid(), os.getuid(), "public", (1, 2), c.pipe_identity(w), b"public")
+        with tempfile.TemporaryFile() as sentinel:
+            sentinel.write(b"public-sentinel")
+            sentinel.flush()
+            class IO(c.SystemIO):
+                identity = staticmethod(lambda _: target)
+                @staticmethod
+                def close(fd):
+                    os.close(fd)
+                    os.dup2(sentinel.fileno(), fd)
+                    replacement.append(c.OwnedFD(fd))  # new, unrelated ownership
+                    raise OSError("public synthetic close-after-release fault")
+            owned = fixture.Resources(fixture.Diagnostics(sink=lambda _: None))
+            continued = []
+            owned.own("root", None, lambda _: continued.append(True))
+            owned.own("input-write", original, lambda fd: fd.close())
+            try:
+                with self.assertRaisesRegex(c.Failure, "c-empty"):
+                    c.OneShot(original, target, PURPOSE, time.monotonic() + 2, IO()).send(b"", PURPOSE)
+                self.assertTrue(original.consumed)
+                self.assertFalse(original.confirmed)
+                self.assertEqual(owned.cleanup("c-empty"), ("c-empty", False))
+                self.assertEqual(continued, [True])
+                self.assertEqual(os.fstat(w).st_ino, os.fstat(sentinel.fileno()).st_ino)
+                os.lseek(w, 0, os.SEEK_SET)
+                self.assertEqual(os.read(w, 32), b"public-sentinel")
+            finally:
+                os.close(r)
+                for fd in replacement:
+                    fd.close()
+
+    def test_constructor_rejection_consumes_shared_owner(self):
+        r, w = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        owner = c.OwnedFD(w)
+        target = c.Target(0, 0, "public", (0, 0), (0, 0, 0, 0, 0), b"public")
+        try:
+            with self.assertRaisesRegex(c.Failure, "c-pipe"):
+                c.OneShot(owner, target, PURPOSE, time.monotonic() + 2)
+            self.assertTrue(owner.consumed and owner.confirmed)
+            owner.close()  # bookkeeping only, not an OS close retry
+        finally:
+            os.close(r)
+
+    def test_missing_root_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as name:
+            _, complete = fixture.snapshot_private([Path(name) / "missing"], os.getuid())
+            self.assertFalse(complete)
+
+    def test_no_visited_root_is_incomplete(self):
+        self.assertEqual(fixture.snapshot_private([], os.getuid()), (b"", False))
+
+    def test_root_enumeration_rejection_incomplete(self):
+        with tempfile.TemporaryDirectory() as name:
+            class Ops(fixture.ScanOps):
+                @staticmethod
+                def scandir(fd):
+                    raise PermissionError("public enumeration refusal")
+            self.assertFalse(fixture.snapshot_private([Path(name)], os.getuid(), ops=Ops())[1])
+
+    def test_file_root_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "public"
+            path.write_bytes(b"public")
+            self.assertFalse(fixture.snapshot_private([path], os.getuid())[1])
+
+    def test_symlink_root_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name)
+            (path / "real").mkdir()
+            (path / "link").symlink_to(path / "real", target_is_directory=True)
+            self.assertFalse(fixture.snapshot_private([path / "link"], os.getuid())[1])
+
+    def test_real_empty_root_is_complete(self):
+        with tempfile.TemporaryDirectory() as name:
+            self.assertEqual(fixture.snapshot_private([Path(name)], os.getuid()), (b"", True))
+
+    def test_root_rebound_during_enumeration_incomplete(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "root"
+            path.mkdir()
+            class Ops(fixture.ScanOps):
+                @staticmethod
+                def scandir(fd):
+                    iterator = os.scandir(fd)
+                    path.rename(Path(name) / "old")
+                    path.mkdir()
+                    return iterator
+            self.assertFalse(fixture.snapshot_private([path], os.getuid(), ops=Ops())[1])
+
+    def test_subtree_enumeration_error_incomplete(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name)
+            (path / "child").mkdir()
+            inode = (path / "child").stat().st_ino
+            class Ops(fixture.ScanOps):
+                @staticmethod
+                def scandir(fd):
+                    if os.fstat(fd).st_ino == inode:
+                        raise OSError("public enumeration bait")
+                    return os.scandir(fd)
+            self.assertFalse(fixture.snapshot_private([path], os.getuid(), ops=Ops())[1])
+
+    def test_file_disappears_after_stat_incomplete(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name)
+            (path / "public").write_bytes(b"public")
+            class Ops(fixture.ScanOps):
+                @staticmethod
+                def open(value, flags, **kwargs):
+                    if value == "public":
+                        os.unlink(value, dir_fd=kwargs["dir_fd"])
+                    return os.open(value, flags, **kwargs)
+            self.assertFalse(fixture.snapshot_private([path], os.getuid(), ops=Ops())[1])
 
 
 if __name__ == "__main__":
