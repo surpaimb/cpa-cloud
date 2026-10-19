@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Independent A3 supervisor extension. Explicit disposable Linux invocation only."""
 import importlib.util
+import errno
 import hashlib
 import json
 import os
@@ -132,6 +133,42 @@ DIAGNOSTICS = tuple("a3-" + key + "-" + value for key in FIELDS for value in STA
     "a3-first-" + v for v in ("metadata", "isolation", "bus-start", "bus-ready", "service-start", "service-ready",
                              "sequence", "runtime") + LABELS) + ("a3-first-none",)
 
+# New bounded evidence-reader batch, 2026-10-19. Independently authored from
+# E/F's contract and Python 3.12 os.open / Linux open(2), not old-run inference:
+# https://docs.python.org/3.12/library/os.html#os.open
+# https://man7.org/linux/man-pages/man2/open.2.html
+SAMPLE_ROLES = {"sent.key": "sample-original-key", "sent.envelope": "sample-original-envelope",
+    "duplicate.sent.key": "sample-duplicate-key", "duplicate.sent.envelope": "sample-duplicate-envelope",
+    **{role + "/" + name: "sample-" + role + "-" + kind for role in ("neighbor", "target")
+       for name, kind in (("sent.key", "key"), ("sent.envelope", "envelope"), ("old.sample", "old"), ("new.sample", "new"))}}
+LOG_ROLES = {"bus.log": "bus", "keyring.log": "keyring",
+             **{"child-" + label + ".log": "child-" + label for label in LABELS}}
+EVIDENCE_ROLES = tuple(SAMPLE_ROLES.values()) + tuple(prefix + role for prefix in ("log-", "completion-")
+    for role in LOG_ROLES.values()) + ("pipe-unit", "journal-unit", "content-scan")
+OPEN_RESULTS = ("ok", "missing", "denied", "nofollow", "not-directory", "failed")
+IO_STAGES = ("parent-stat", "parent-close", "leaf-stat", "buffer-open", "read", "post-stat", "buffer-close", "leaf-close")
+CHECK_STAGES = ("parent-kind", "parent-owner", "parent-group", "parent-mode", "leaf-kind", "leaf-owner",
+    "leaf-group", "leaf-links", "leaf-mode", "leaf-size", "leaf-length", "read-length", "post-binding",
+    "marker-value", "inner-marker", "journal-nonempty")
+EVIDENCE_PAIRS = tuple((stage, result) for stage in ("parent-open", "leaf-open") for result in OPEN_RESULTS) + tuple(
+    (stage, result) for stage in IO_STAGES for result in ("ok", "failed")) + tuple(
+    (stage, result) for stage in CHECK_STAGES for result in ("ok", "rejected")) + (
+    ("reader", "ok"), ("reader", "missing"), ("reader", "denied"), ("reader", "failed"),
+    ("integrity", "complete"), ("integrity", "incomplete"), ("pipe-capture", "ok"), ("pipe-capture", "incomplete"),
+    ("journal-cursor", "ok"), ("journal-cursor", "missing"), ("journal-command", "ok"), ("journal-command", "failed"),
+    ("journal-capture", "ok"), ("journal-capture", "incomplete"),
+    ("content", "clear"), ("content", "matched"), ("content", "failed"))
+INTEGRITY_CATEGORIES = ("samples", "logs", "completions", "pipe", "journal", "inner")
+EVIDENCE_SCOPES = ("inner", "outer")
+EVIDENCE_LABELS = tuple("a3-evidence-" + scope + "-" + role + "-" + stage + "-" + result
+    for scope in EVIDENCE_SCOPES for role in EVIDENCE_ROLES for stage, result in EVIDENCE_PAIRS)
+EVIDENCE_FIRST_LABELS = tuple("a3-first-evidence-" + scope + "-" + role + "-" + stage + "-" + result
+    for scope in EVIDENCE_SCOPES for role in EVIDENCE_ROLES for stage, result in EVIDENCE_PAIRS
+    if result not in ("ok", "complete", "clear")) + tuple("a3-first-evidence-" + scope + "-none" for scope in EVIDENCE_SCOPES)
+DIAGNOSTICS += EVIDENCE_LABELS + EVIDENCE_FIRST_LABELS + tuple(
+    "a3-evidence-summary-" + scope + "-" + category + "-" + result for scope in EVIDENCE_SCOPES
+    for category in INTEGRITY_CATEGORIES for result in ("not-reached", "complete", "incomplete"))
+
 
 def labels(case):
     if case == "exact":
@@ -171,9 +208,35 @@ def mark_complete(work, name):
 
 
 class Report:
-    def __init__(self):
+    def __init__(self, evidence_scope="inner"):
+        require(evidence_scope in EVIDENCE_SCOPES, "a3-category-invalid")
         self.states = {key: "not-reached" for key in FIELDS}
         self.first = None
+        self.evidence_scope = evidence_scope
+        self.evidence_events = {}
+        self.first_evidence = None
+        self.integrity = {category: "not-reached" for category in INTEGRITY_CATEGORIES}
+
+    def evidence(self, role, stage, result):
+        require(role in EVIDENCE_ROLES and (stage, result) in EVIDENCE_PAIRS, "a3-category-invalid")
+        key = (role, stage)
+        if self.evidence_events.get(key, "ok") in ("ok", "complete", "clear"):
+            self.evidence_events[key] = result
+        if result not in ("ok", "complete", "clear") and self.first_evidence is None:
+            self.first_evidence = (role, stage, result)
+
+    def category(self, category, complete):
+        require(category in INTEGRITY_CATEGORIES, "a3-category-invalid")
+        if self.integrity[category] != "incomplete":
+            self.integrity[category] = "complete" if complete else "incomplete"
+
+    def emit_evidence(self):
+        for (role, stage), result in self.evidence_events.items():
+            print("FIXTURE_DIAGNOSTIC a3-evidence-" + self.evidence_scope + "-" + role + "-" + stage + "-" + result, flush=True)
+        for category, result in self.integrity.items():
+            print("FIXTURE_DIAGNOSTIC a3-evidence-summary-" + self.evidence_scope + "-" + category + "-" + result, flush=True)
+        suffix = "-".join(self.first_evidence) if self.first_evidence else "none"
+        print("FIXTURE_DIAGNOSTIC a3-first-evidence-" + self.evidence_scope + "-" + suffix, flush=True)
 
     def set(self, key, value):
         require(key in FIELDS and value in STATES, "a3-category-invalid")
@@ -197,52 +260,153 @@ class Report:
                 print("FIXTURE_DIAGNOSTIC a3-" + key + "-" + value, flush=True)
         if not outer:
             print("FIXTURE_DIAGNOSTIC a3-first-" + (self.first or "none"), flush=True)
+            self.emit_evidence()
 
 
-def private_read(path, uid, gid, length=None):
-    # Reject a replaced/symlink role directory before opening any leaf. The
-    # work root itself cannot be renamed by the fixture UID (root-owned parent).
-    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    try:
-        info = os.fstat(parent)
-        require(stat.S_ISDIR(info.st_mode) and info.st_uid == uid and info.st_gid == gid
-                and stat.S_IMODE(info.st_mode) == 0o700, "a3-private-parent")
-        descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
-    finally:
-        os.close(parent)
-    with os.fdopen(descriptor, "rb") as stream:
-        a = os.fstat(stream.fileno())
-        require(stat.S_ISREG(a.st_mode) and a.st_uid == uid and a.st_gid == gid and a.st_nlink == 1
-                and stat.S_IMODE(a.st_mode) == 0o600 and 0 <= a.st_size <= 4 * 1024 * 1024
-                and (length is None or a.st_size == length), "a3-private-file")
-        value = stream.read(a.st_size + 1)
-        b = os.fstat(stream.fileno())
-        require(len(value) == a.st_size and (a.st_dev, a.st_ino, a.st_mode, a.st_uid, a.st_gid, a.st_size, a.st_nlink)
-                == (b.st_dev, b.st_ino, b.st_mode, b.st_uid, b.st_gid, b.st_size, b.st_nlink), "a3-private-changed")
+class EvidenceReadFailure(base.PreflightFailure):
+    def __init__(self, stage, result):
+        self.stage, self.result = stage, result
+        super().__init__("a3-evidence-read-failed")
+
+
+def private_read(path, uid, gid, length=None, *, trace=None):
+    """One open/read per registered artifact; fixed diagnostics reuse results.
+
+    O_NONBLOCK fixes the independent FIFO-before-fstat static defect. It is not
+    evidence about the historical red and is not a regular-file I/O deadline.
+    """
+    def event(stage, result):
+        if trace is not None:
+            trace(stage, result)
+
+    def failure(stage, result):
+        event(stage, result)
+        raise EvidenceReadFailure(stage, result) from None
+
+    def call(stage, action):
+        try:
+            value = action()
+        except Exception as error:
+            result = "failed"
+            if stage in ("parent-open", "leaf-open"):
+                if isinstance(error, FileNotFoundError):
+                    result = "missing"
+                elif isinstance(error, PermissionError):
+                    result = "denied"
+                elif isinstance(error, OSError) and error.errno == errno.ELOOP:
+                    result = "nofollow"
+                elif isinstance(error, OSError) and error.errno == errno.ENOTDIR:
+                    result = "not-directory"
+            failure(stage, result)
+        event(stage, "ok")
         return value
+
+    def check(stage, predicate):
+        if not predicate:
+            failure(stage, "rejected")
+        event(stage, "ok")
+
+    parent = descriptor = stream = None
+    primary, value = None, None
+    try:
+        parent = call("parent-open", lambda: os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC))
+        info = call("parent-stat", lambda: os.fstat(parent))
+        check("parent-kind", stat.S_ISDIR(info.st_mode))
+        check("parent-owner", info.st_uid == uid)
+        check("parent-group", info.st_gid == gid)
+        check("parent-mode", stat.S_IMODE(info.st_mode) == 0o700)
+        descriptor = call("leaf-open", lambda: os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent))
+        owned_parent, parent = parent, None  # A close error never retries a possibly reused fd.
+        call("parent-close", lambda: os.close(owned_parent))
+        a = call("leaf-stat", lambda: os.fstat(descriptor))
+        check("leaf-kind", stat.S_ISREG(a.st_mode))  # Reject FIFO before wrap/read.
+        check("leaf-owner", a.st_uid == uid)
+        check("leaf-group", a.st_gid == gid)
+        check("leaf-links", a.st_nlink == 1)
+        check("leaf-mode", stat.S_IMODE(a.st_mode) == 0o600)
+        check("leaf-size", 0 <= a.st_size <= 4 * 1024 * 1024)
+        check("leaf-length", length is None or a.st_size == length)
+        # Explicit descriptor ownership makes failed wrap/close paths close
+        # each fd once, without another open, stat, secret read or close retry.
+        stream = call("buffer-open", lambda: os.fdopen(descriptor, "rb", closefd=False))
+        value = call("read", lambda: stream.read(a.st_size + 1))
+        b = call("post-stat", lambda: os.fstat(descriptor))
+        check("read-length", len(value) == a.st_size)
+        check("post-binding", (a.st_dev, a.st_ino, a.st_mode, a.st_uid, a.st_gid, a.st_size, a.st_nlink)
+              == (b.st_dev, b.st_ino, b.st_mode, b.st_uid, b.st_gid, b.st_size, b.st_nlink))
+    except EvidenceReadFailure as error:
+        primary = error
+    finally:
+        for stage, owned, close in (("buffer-close", stream, lambda: stream.close()),
+                                    ("leaf-close", descriptor, lambda: os.close(descriptor)),
+                                    ("parent-close", parent, lambda: os.close(parent))):
+            if owned is not None:
+                try:
+                    call(stage, close)
+                except EvidenceReadFailure as error:
+                    if primary is None:
+                        primary = error
+    if primary is not None:
+        raise primary from None
+    event("reader", "ok")
+    return value
 
 
 def scan_all(work, case, uid, gid, extra, report):
-    secrets, outputs, complete = [], list(extra), True
+    secrets, outputs = [], list(extra)
+    samples_ok = logs_ok = completions_ok = True
+
+    def read(role, path, length=None):
+        try:
+            value = private_read(path, uid, gid, length, trace=lambda stage, result: report.evidence(role, stage, result))
+        except EvidenceReadFailure as error:
+            report.evidence(role, error.stage, error.result)
+        except FileNotFoundError:
+            report.evidence(role, "reader", "missing")
+        except PermissionError:
+            report.evidence(role, "reader", "denied")
+        except Exception:
+            report.evidence(role, "reader", "failed")
+        else:
+            return value, True
+        report.evidence(role, "integrity", "incomplete")
+        return None, False
+
     for name, length in samples(case):
-        try:
-            secrets.append(private_read(work / name, uid, gid, length))
-        except Exception:
-            complete = False
+        role = SAMPLE_ROLES[name]
+        value, ok = read(role, work / name, length)
+        samples_ok = samples_ok and ok
+        if ok:
+            secrets.append(value)
+            report.evidence(role, "integrity", "complete")
     for name in log_names(case):
-        try:
-            outputs.append(private_read(work / name, uid, gid))
-        except Exception:
-            complete = False
-        try:
-            require(private_read(work / (name + ".complete"), uid, gid, 9) == b"complete\n", "a3-incomplete-log")
-        except Exception:
-            complete = False
+        role = "log-" + LOG_ROLES[name]
+        value, ok = read(role, work / name)
+        logs_ok = logs_ok and ok
+        if ok:
+            outputs.append(value)
+            report.evidence(role, "integrity", "complete")
+        role = "completion-" + LOG_ROLES[name]
+        value, ok = read(role, work / (name + ".complete"), 9)
+        if ok:
+            ok = value == b"complete\n"
+            report.evidence(role, "marker-value", "ok" if ok else "rejected")
+            report.evidence(role, "integrity", "complete" if ok else "incomplete")
+        completions_ok = completions_ok and ok
+    report.category("samples", samples_ok)
+    report.category("logs", logs_ok)
+    report.category("completions", completions_ok)
     try:
         volatile.reject_secret_output(secrets, outputs)
         report.set("scan-content", "clear")
-    except Exception:
+        report.evidence("content-scan", "content", "clear")
+    except base.PreflightFailure:
         report.set("scan-content", "matched")
+        report.evidence("content-scan", "content", "matched")
+    except Exception:
+        report.set("scan-content", "failed")
+        report.evidence("content-scan", "content", "failed")
+    complete = samples_ok and logs_ok and completions_ok
     report.set("scan-completeness", "complete" if complete else "incomplete")
     return complete and report.states["scan-completeness"] == "complete" and report.states["scan-content"] == "clear"
 
@@ -304,15 +468,36 @@ class Fixture(a2.Fixture):
     def after_unit(self, metadata, captured, complete):
         # Called only AFTER the exact owned unit AND cgroup are stopped.
         self.verify_unit_stopped(metadata)
-        require(self.cursor is not None, "a3-journal-cursor")
-        journal = base.run(["journalctl", "--no-pager", "--all", "--output=cat", "--unit=" + base.UNIT,
-                            "--after-cursor=" + self.cursor], check=False)
-        evidence = Report()
+        evidence = Report("outer")
+        journal_bytes, journal_ok = b"", False
+        evidence.evidence("journal-unit", "journal-cursor", "ok" if self.cursor is not None else "missing")
+        if self.cursor is not None:
+            try:
+                journal = base.run(["journalctl", "--no-pager", "--all", "--output=cat", "--unit=" + base.UNIT,
+                                    "--after-cursor=" + self.cursor], check=False)
+            except subprocess.TimeoutExpired as error:
+                journal_bytes = error.stdout or b""
+                evidence.evidence("journal-unit", "journal-capture", "incomplete")
+            except Exception:
+                evidence.evidence("journal-unit", "journal-command", "failed")
+            else:
+                journal_bytes = journal.stdout
+                evidence.evidence("journal-unit", "journal-capture", "ok")
+                evidence.evidence("journal-unit", "journal-command", "ok" if journal.returncode == 0 else "failed")
+                evidence.evidence("journal-unit", "journal-nonempty", "ok" if bool(journal_bytes.strip()) else "rejected")
+                journal_ok = journal.returncode == 0 and bool(journal_bytes.strip())
         ok = scan_all(Path(metadata["work"]), self.case, metadata["uid"], metadata["gid"],
-                      (captured, journal.stdout), evidence)
+                      (captured, journal_bytes), evidence)
         # Complete process pipe capture and an actual nonempty current-unit
         # journal are mandatory, not content-clear fallbacks.
-        ok = ok and complete and journal.returncode == 0 and bool(journal.stdout.strip()) and b"A3_SCAN_OK\n" in captured
+        evidence.evidence("pipe-unit", "pipe-capture", "ok" if complete else "incomplete")
+        inner_ok = b"A3_SCAN_OK\n" in captured
+        evidence.evidence("pipe-unit", "inner-marker", "ok" if inner_ok else "rejected")
+        evidence.category("pipe", complete)
+        evidence.category("journal", journal_ok)
+        evidence.category("inner", inner_ok)
+        ok = ok and complete and journal_ok and inner_ok
+        evidence.emit_evidence()
         print("FIXTURE_DIAGNOSTIC a3-scan-content-" + evidence.states["scan-content"], flush=True)
         print("FIXTURE_DIAGNOSTIC a3-scan-completeness-" + ("complete" if ok else "incomplete"), flush=True)
         require(ok, "a3-unit-evidence-incomplete")
