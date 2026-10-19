@@ -102,6 +102,21 @@ RUST_FAILURES = (
     "a3-workspace-remove",
     "a3-wrong-identity",
 )
+JOURNAL_FAILURES = (
+    "a3-journal-family-unsupported-platform", "a3-journal-family-invalid-root", "a3-journal-family-invalid-metadata",
+    "a3-journal-family-corrupt", "a3-journal-family-incomplete-write", "a3-journal-family-missing",
+    "a3-journal-family-already-exists", "a3-journal-family-too-many", "a3-journal-family-recovery-conflict",
+    "a3-journal-family-cleanup", "a3-journal-family-workspace-removal", "a3-journal-family-workspace-retirement",
+    "a3-journal-family-completion-tombstone", "a3-journal-family-io",
+    "a3-journal-io-not-found", "a3-journal-io-permission-denied", "a3-journal-io-already-exists",
+    "a3-journal-io-would-block", "a3-journal-io-not-a-directory", "a3-journal-io-is-a-directory",
+    "a3-journal-io-directory-not-empty", "a3-journal-io-read-only-filesystem", "a3-journal-io-invalid-input",
+    "a3-journal-io-invalid-data", "a3-journal-io-timed-out", "a3-journal-io-write-zero", "a3-journal-io-storage-full",
+    "a3-journal-io-quota-exceeded", "a3-journal-io-file-too-large", "a3-journal-io-resource-busy", "a3-journal-io-deadlock",
+    "a3-journal-io-crosses-devices", "a3-journal-io-too-many-links", "a3-journal-io-interrupted", "a3-journal-io-unsupported",
+    "a3-journal-io-unexpected-eof", "a3-journal-io-out-of-memory", "a3-journal-io-other", "a3-journal-io-unlisted",
+)
+RUST_FAILURES += JOURNAL_FAILURES
 VERIFIER_FAILURES = {10: "identity", 11: "bus", 12: "invocation", 13: "work", 14: "directory", 15: "mode",
     20: "session", 21: "policy", 30: "reference", 31: "search", 32: "absence-cardinality",
     33: "collection-absence", 34: "present-cardinality", 35: "item", 36: "attributes", 37: "key-oracle",
@@ -722,10 +737,8 @@ class Children:
                 fully_captured = True  # EOF was drained and wait completed.
                 phase = "result"
                 if status != 0 and not crash:
-                    tokens = set(re.findall(rb"[a-z][a-z-]*", content))
-                    for fixed in RUST_FAILURES + volatile.PANICS:
-                        if fixed.encode() in tokens:
-                            print("FIXTURE_DIAGNOSTIC " + fixed, flush=True)
+                    for fixed in fixed_child_failures(content):
+                        print("FIXTURE_DIAGNOSTIC " + fixed, flush=True)
                     if args[0] == self.m["a3_verifier"]:
                         print("FIXTURE_DIAGNOSTIC a3-verifier-" + VERIFIER_FAILURES.get(status, "unknown") + "-failed", flush=True)
                 if crash:

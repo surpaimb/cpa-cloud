@@ -47,3 +47,18 @@ observation, not by itself proof of a particular underlying product fault.
 No raw output/status, new secret read, service call, dependency, license change,
 business fix or changed SIGKILL/cleanup acceptance predicate is introduced.
 Public dummy control-flow tests do not perform a real CPA crash experiment.
+
+## Independently bounded journal error-family diagnostics — 2026-10-19
+
+The existing cfg(test) A3 call site classifies only its single returned
+CleanupJournalError, using fixed error-family tags and a predeclared whitelist
+of [Rust io::ErrorKind categories](https://doc.rust-lang.org/std/io/enum.ErrorKind.html).
+Unlike [Result::expect](https://doc.rust-lang.org/std/result/enum.Result.html#method.expect),
+the error path does not format the error's Debug/Display, paths or raw OS codes;
+it retains a fixed panic and unchanged failure gate. The actual Result is not
+retried or replaced; the business journal implementation is unchanged.
+Non-crash parent capture reuses the existing fixed whitelist helper so existing
+digit-bearing A3 tags remain intact; unknown text is never relayed.
+The change and public dummy tests are independently authored from the original
+visible E/F bounded contract and these standard-library API references. No new
+dependency/license change, production capability or strict clean-room claim.

@@ -46,12 +46,12 @@ def writer_normalized_tree():
 
 def without_crash_command(tree):
     """Freeze all parent source outside the expressly authorized diagnostics."""
-    additions = {"CRASH_SCHEMA", "CRASH_DIAGNOSTICS", "crash_result", "fixed_child_failures"}
+    additions = {"CRASH_SCHEMA", "CRASH_DIAGNOSTICS", "crash_result", "fixed_child_failures", "JOURNAL_FAILURES"}
     tree.body = [node for node in tree.body if not (
         isinstance(node, ast.FunctionDef) and node.name in additions or
         isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in additions for target in node.targets) or
-        isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "DIAGNOSTICS"
-        and isinstance(node.value, ast.Name) and node.value.id == "CRASH_DIAGNOSTICS")]
+        isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and isinstance(node.value, ast.Name)
+        and (node.target.id, node.value.id) in (("DIAGNOSTICS", "CRASH_DIAGNOSTICS"), ("RUST_FAILURES", "JOURNAL_FAILURES")))]
     owner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Children")
     owner.body = [node for node in owner.body if not (isinstance(node, ast.FunctionDef) and node.name == "command")]
     return tree
@@ -345,6 +345,54 @@ class FixtureTests(unittest.TestCase):
         expected = ast.parse('require(killed and ready_seen and status == -signal.SIGKILL, "a3-crash-not-observed")', mode="eval").body
         self.assertEqual([ast.dump(node) for node in gates], [ast.dump(expected)])
 
+    def test_journal_batch_freezes_parent_except_fixed_labels_and_noncrash_filter(self):
+        tree = ast.parse((HERE / "fixture.py").read_text())
+        tree.body = [node for node in tree.body if not (
+            isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "JOURNAL_FAILURES" for target in node.targets) or
+            isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "RUST_FAILURES"
+            and isinstance(node.value, ast.Name) and node.value.id == "JOURNAL_FAILURES")]
+        condition = ast.dump(ast.parse("status != 0 and not crash", mode="eval").body)
+        new = ast.parse('for fixed in fixed_child_failures(content):\n    print("FIXTURE_DIAGNOSTIC " + fixed, flush=True)').body[0]
+        old = ast.parse('tokens = set(re.findall(rb"[a-z][a-z-]*", content))\nfor fixed in RUST_FAILURES + volatile.PANICS:\n    if fixed.encode() in tokens:\n        print("FIXTURE_DIAGNOSTIC " + fixed, flush=True)').body
+        branches = [node for node in ast.walk(tree) if isinstance(node, ast.If) and ast.dump(node.test) == condition]
+        self.assertEqual(len(branches), 1)
+        self.assertEqual(ast.dump(branches[0].body[0]), ast.dump(new))
+        branches[0].body = old + branches[0].body[1:]
+        self.assertEqual(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest(),
+                         "c90cb8fe9573be237572c4723c5486313f1ff65b1822f67652c8a258c6a59c0b")
+
+    def test_journal_result_diagnostics_are_the_only_rust_source_change(self):
+        source = (LIVE / "linux_secret_service_a3_fixture.rs").read_text()
+        pattern = r"// A3_JOURNAL_DIAGNOSTICS_START\n([\s\S]*?)// A3_JOURNAL_DIAGNOSTICS_END\n\n"
+        regions = re.findall(pattern, source)
+        self.assertEqual(len(regions), 1)
+        helpers = regions[0].split("#[cfg(test)]")[0]
+        for forbidden in (".expect(", "{:?}", "{error", "format!", ".display(", ".to_string(", ".raw_os_error(",
+                          "fs::", "metadata(", "read(", "set_permissions("):
+            self.assertNotIn(forbidden, helpers)
+        self.assertIn("source.kind()", helpers)
+        self.assertIn("match result", helpers)
+        self.assertIn("Ok(value) => value", helpers)
+        self.assertIn('panic!("a3-journal-create")', helpers)
+        self.assertEqual(source.count("create_durable_cleanup_journal("), 1)
+        normalized = re.sub(pattern, "", source)
+        new = '''            let mut cleanup = a3_journal_result(create_durable_cleanup_journal(
+                &root,
+                receipt.into_terminal_handoff(),
+            ));'''
+        old = '''            let mut cleanup =
+                create_durable_cleanup_journal(&root, receipt.into_terminal_handoff())
+                    .expect("a3-journal-create");'''
+        self.assertEqual(normalized.count(new), 1)
+        normalized = normalized.replace(new, old)
+        self.assertEqual(hashlib.sha256(normalized.encode()).hexdigest(),
+                         "2cd74d2b84ee4ac7ab4743662ee76384d6c215083247a7b990947a39aa927005")
+        enum_source = (LIVE / "cleanup_journal.rs").read_text().split("pub enum CleanupJournalError {", 1)[1].split("pub struct DurableCleanupJournal", 1)[0]
+        families = set(re.findall(r"^    ([A-Z][A-Za-z0-9_]*) *(?:[,({])", enum_source, re.M))
+        self.assertEqual(families, set(re.findall(r"CleanupJournalError::([A-Z][A-Za-z0-9_]*)", helpers)))
+        self.assertEqual(len(f.JOURNAL_FAILURES), 39)
+        self.assertEqual(len(set(f.JOURNAL_FAILURES)), 39)
+
 
 class WriterTests(unittest.TestCase):
     @contextlib.contextmanager
@@ -542,7 +590,7 @@ class CrashControlTests(unittest.TestCase):
 
     def run_case(self, *, ready_seen=True, boundary_seen=True, status=None, kill_error=None,
                  owned_error=None, wait_error=None, capture_error=None, close_error=None,
-                 extra=b"DO-NOT-PRINT public-private-path", nested_failure=False):
+                 extra=b"DO-NOT-PRINT public-private-path", nested_failure=False, crash=True, prior_first=False):
         payload = (b"A3_SNAPSHOT_READY\n" if ready_seen else b"") + (b"A3_BOUNDARY terminal\n" if boundary_seen else b"") + extra
         with WriterTests.environment(self, close_error=close_error) as env:
             process = mock.Mock()
@@ -556,6 +604,11 @@ class CrashControlTests(unittest.TestCase):
             if capture_error:
                 selector.select.side_effect = [[object()], capture_error]
             report = f.Report()
+            if prior_first:
+                try:
+                    report.run("snapshot-target", lambda: (_ for _ in ()).throw(ValueError("DO-NOT-PRINT")))
+                except ValueError:
+                    pass
             metadata = dict(work="public-dummy", a3_case="complete-terminal", uid=1, gid=1,
                             a3_verifier="public-verifier", cpa="public-cpa")
             children = f.Children(metadata, {}, mock.Mock(), report)
@@ -568,7 +621,8 @@ class CrashControlTests(unittest.TestCase):
                     f.os, "read", side_effect=[payload, b""]) as read, mock.patch.object(f.os, "fsync"), mock.patch.object(
                     f.base, "owned_process", side_effect=owned_error) as owned, mock.patch.object(f, "mark_complete") as signed, contextlib.redirect_stdout(output):
                 try:
-                    result = children.command("start", ["public-cpa"], mode="durable-start", crash="terminal", ready=ready)
+                    result = children.command("start" if crash else "setup", ["public-cpa"],
+                        mode="durable-start" if crash else None, crash="terminal" if crash else None, ready=ready if crash else None)
                 except Exception as error:
                     failure = error
             labels = [line.removeprefix("FIXTURE_DIAGNOSTIC ") for line in output.getvalue().splitlines()]
@@ -582,7 +636,8 @@ class CrashControlTests(unittest.TestCase):
             self.assertLessEqual(process.wait.call_count, 1)
             self.assertLessEqual(process.kill.call_count, 1)
             return types.SimpleNamespace(result=result, error=failure, labels=labels, report=report,
-                killed=process.kill.call_count, owned=owned.call_count, waited=process.wait.call_count, signed=signed.call_count)
+                killed=process.kill.call_count, owned=owned.call_count, waited=process.wait.call_count,
+                signed=signed.call_count, reads=read.call_count)
 
     def assert_result(self, case, result):
         self.assertEqual([label for label in case.labels if label.startswith("a3-crash-result-")], ["a3-crash-result-" + result])
@@ -667,6 +722,32 @@ class CrashControlTests(unittest.TestCase):
             self.assertIn(value, f.CRASH_SCHEMA[field])
         with self.assertRaises(f.base.PreflightFailure):
             f.crash_result(False, False, False, None, False, "DO-NOT-PRINT")
+
+    def test_noncrash_existing_digit_labels_and_new_journal_families_are_not_split(self):
+        case = self.run_case(crash=False, ready_seen=False, boundary_seen=False, status=123456789,
+            extra=b"DO-NOT-PRINT public-private-path a3-journal-create a3-journal-family-io a3-journal-io-permission-denied a3-unregistered-tag")
+        self.assertIsNotNone(case.error)
+        self.assertEqual(case.report.first, "setup")
+        self.assertEqual(set(case.labels), {"a3-journal-create", "a3-journal-family-io", "a3-journal-io-permission-denied"})
+        self.assertEqual((case.reads, case.waited, case.killed, case.signed), (2, 1, 0, 1))
+
+    def test_noncrash_unknown_labels_do_not_escape_or_override_first_fault(self):
+        case = self.run_case(crash=False, ready_seen=False, boundary_seen=False, status=123456789, prior_first=True,
+            extra=b"DO-NOT-PRINT a3-unregistered-tag PUBLIC_RAW_EXCEPTION")
+        self.assertIsNotNone(case.error)
+        self.assertEqual(case.report.first, "snapshot-target")
+        self.assertEqual(case.labels, [])
+        self.assertEqual((case.reads, case.waited, case.killed), (2, 1, 0))
+
+    def test_noncrash_success_and_missing_expected_marker_keep_original_judgment(self):
+        for valid in (True, False):
+            with self.subTest(valid=valid):
+                case = self.run_case(crash=False, ready_seen=False, boundary_seen=False, status=0,
+                    extra=(b"A3_LIBSECRET_OK\n" if valid else b"") + b"DO-NOT-PRINT a3-journal-create")
+                self.assertEqual(case.error is None, valid)
+                self.assertEqual(case.report.first, None if valid else "setup")
+                self.assertEqual(case.labels, [])
+                self.assertEqual((case.reads, case.waited, case.killed, case.signed), (2, 1, 0, 1))
 
 
 class ReaderTests(unittest.TestCase):

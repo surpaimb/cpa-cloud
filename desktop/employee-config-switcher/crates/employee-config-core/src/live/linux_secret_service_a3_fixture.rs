@@ -17,6 +17,209 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
 };
 
+// A3_JOURNAL_DIAGNOSTICS_START
+// Independently authored bounded Result-only diagnostics, 2026-10-19.
+// This entire driver is cfg(test). Never format an error or inspect the FS.
+// https://doc.rust-lang.org/std/io/enum.ErrorKind.html
+// https://doc.rust-lang.org/std/result/enum.Result.html#method.expect
+use crate::live::cleanup_journal::CleanupJournalError;
+
+fn journal_io_label(kind: io::ErrorKind) -> &'static str {
+    match kind {
+        io::ErrorKind::NotFound => "a3-journal-io-not-found",
+        io::ErrorKind::PermissionDenied => "a3-journal-io-permission-denied",
+        io::ErrorKind::AlreadyExists => "a3-journal-io-already-exists",
+        io::ErrorKind::WouldBlock => "a3-journal-io-would-block",
+        io::ErrorKind::NotADirectory => "a3-journal-io-not-a-directory",
+        io::ErrorKind::IsADirectory => "a3-journal-io-is-a-directory",
+        io::ErrorKind::DirectoryNotEmpty => "a3-journal-io-directory-not-empty",
+        io::ErrorKind::ReadOnlyFilesystem => "a3-journal-io-read-only-filesystem",
+        io::ErrorKind::InvalidInput => "a3-journal-io-invalid-input",
+        io::ErrorKind::InvalidData => "a3-journal-io-invalid-data",
+        io::ErrorKind::TimedOut => "a3-journal-io-timed-out",
+        io::ErrorKind::WriteZero => "a3-journal-io-write-zero",
+        io::ErrorKind::StorageFull => "a3-journal-io-storage-full",
+        io::ErrorKind::QuotaExceeded => "a3-journal-io-quota-exceeded",
+        io::ErrorKind::FileTooLarge => "a3-journal-io-file-too-large",
+        io::ErrorKind::ResourceBusy => "a3-journal-io-resource-busy",
+        io::ErrorKind::Deadlock => "a3-journal-io-deadlock",
+        io::ErrorKind::CrossesDevices => "a3-journal-io-crosses-devices",
+        io::ErrorKind::TooManyLinks => "a3-journal-io-too-many-links",
+        io::ErrorKind::Interrupted => "a3-journal-io-interrupted",
+        io::ErrorKind::Unsupported => "a3-journal-io-unsupported",
+        io::ErrorKind::UnexpectedEof => "a3-journal-io-unexpected-eof",
+        io::ErrorKind::OutOfMemory => "a3-journal-io-out-of-memory",
+        io::ErrorKind::Other => "a3-journal-io-other",
+        _ => "a3-journal-io-unlisted",
+    }
+}
+
+fn journal_error_labels(error: &CleanupJournalError) -> (&'static str, Option<&'static str>) {
+    let family = match error {
+        CleanupJournalError::UnsupportedPlatform => "a3-journal-family-unsupported-platform",
+        CleanupJournalError::InvalidRoot(_) => "a3-journal-family-invalid-root",
+        CleanupJournalError::InvalidMetadata => "a3-journal-family-invalid-metadata",
+        CleanupJournalError::Corrupt => "a3-journal-family-corrupt",
+        CleanupJournalError::IncompleteWrite(_) => "a3-journal-family-incomplete-write",
+        CleanupJournalError::Missing(_) => "a3-journal-family-missing",
+        CleanupJournalError::AlreadyExists(_) => "a3-journal-family-already-exists",
+        CleanupJournalError::TooMany => "a3-journal-family-too-many",
+        CleanupJournalError::RecoveryConflict(_) => "a3-journal-family-recovery-conflict",
+        CleanupJournalError::Cleanup(_) => "a3-journal-family-cleanup",
+        CleanupJournalError::WorkspaceRemoval(_) => "a3-journal-family-workspace-removal",
+        CleanupJournalError::WorkspaceRetirement(_) => "a3-journal-family-workspace-retirement",
+        CleanupJournalError::CompletionTombstone(_) => "a3-journal-family-completion-tombstone",
+        CleanupJournalError::Io { source, .. } => {
+            return (
+                "a3-journal-family-io",
+                Some(journal_io_label(source.kind())),
+            );
+        }
+    };
+    (family, None)
+}
+
+fn a3_journal_result<T>(result: Result<T, CleanupJournalError>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            let (family, kind) = journal_error_labels(&error);
+            eprintln!("{family}");
+            if let Some(kind) = kind {
+                eprintln!("{kind}");
+            }
+            // Preserve failure, without expect's Debug of the original Err.
+            panic!("a3-journal-create");
+        }
+    }
+}
+
+#[cfg(test)]
+mod journal_diagnostic_tests {
+    use super::*;
+
+    struct NoFormat;
+    impl std::fmt::Debug for NoFormat {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("PUBLIC_ERROR_DEBUG_MUST_NOT_RUN");
+        }
+    }
+    impl std::fmt::Display for NoFormat {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("PUBLIC_ERROR_DISPLAY_MUST_NOT_RUN");
+        }
+    }
+    impl std::error::Error for NoFormat {}
+
+    #[test]
+    fn fixed_journal_error_families_ignore_all_payloads() {
+        let path = PathBuf::from("PUBLIC_DO_NOT_PRINT_PATH");
+        let cases = vec![
+            (CleanupJournalError::UnsupportedPlatform, "a3-journal-family-unsupported-platform"),
+            (CleanupJournalError::InvalidRoot(path.clone()), "a3-journal-family-invalid-root"),
+            (CleanupJournalError::InvalidMetadata, "a3-journal-family-invalid-metadata"),
+            (CleanupJournalError::Corrupt, "a3-journal-family-corrupt"),
+            (CleanupJournalError::IncompleteWrite(path.clone()), "a3-journal-family-incomplete-write"),
+            (CleanupJournalError::Missing(tx(0x91)), "a3-journal-family-missing"),
+            (CleanupJournalError::AlreadyExists(tx(0x91)), "a3-journal-family-already-exists"),
+            (CleanupJournalError::TooMany, "a3-journal-family-too-many"),
+            (CleanupJournalError::RecoveryConflict(path.clone()), "a3-journal-family-recovery-conflict"),
+            (CleanupJournalError::Cleanup(crate::live::recovery_key::RecoveryKeyCleanupError::InvalidTerminal), "a3-journal-family-cleanup"),
+            (CleanupJournalError::WorkspaceRemoval(crate::live::workspace_removal::WorkspaceRemovalError::UnsupportedPlatform), "a3-journal-family-workspace-removal"),
+            (CleanupJournalError::WorkspaceRetirement(crate::live::workspace_retirement::WorkspaceRetirementError::UnsupportedPlatform), "a3-journal-family-workspace-retirement"),
+            (CleanupJournalError::CompletionTombstone(crate::live::completion_tombstone::CompletionTombstoneError::UnsupportedPlatform), "a3-journal-family-completion-tombstone"),
+            (CleanupJournalError::Io { path, source: io::Error::new(io::ErrorKind::PermissionDenied, NoFormat) }, "a3-journal-family-io"),
+        ];
+        for (error, expected) in cases {
+            let labels = journal_error_labels(&error);
+            assert_eq!(labels.0, expected);
+            assert_eq!(labels.1.is_some(), expected == "a3-journal-family-io");
+        }
+    }
+
+    #[test]
+    fn fixed_journal_io_whitelist_and_fallback_never_format_error() {
+        let cases = [
+            (io::ErrorKind::NotFound, "a3-journal-io-not-found"),
+            (
+                io::ErrorKind::PermissionDenied,
+                "a3-journal-io-permission-denied",
+            ),
+            (io::ErrorKind::AlreadyExists, "a3-journal-io-already-exists"),
+            (io::ErrorKind::WouldBlock, "a3-journal-io-would-block"),
+            (
+                io::ErrorKind::NotADirectory,
+                "a3-journal-io-not-a-directory",
+            ),
+            (io::ErrorKind::IsADirectory, "a3-journal-io-is-a-directory"),
+            (
+                io::ErrorKind::DirectoryNotEmpty,
+                "a3-journal-io-directory-not-empty",
+            ),
+            (
+                io::ErrorKind::ReadOnlyFilesystem,
+                "a3-journal-io-read-only-filesystem",
+            ),
+            (io::ErrorKind::InvalidInput, "a3-journal-io-invalid-input"),
+            (io::ErrorKind::InvalidData, "a3-journal-io-invalid-data"),
+            (io::ErrorKind::TimedOut, "a3-journal-io-timed-out"),
+            (io::ErrorKind::WriteZero, "a3-journal-io-write-zero"),
+            (io::ErrorKind::StorageFull, "a3-journal-io-storage-full"),
+            (io::ErrorKind::QuotaExceeded, "a3-journal-io-quota-exceeded"),
+            (io::ErrorKind::FileTooLarge, "a3-journal-io-file-too-large"),
+            (io::ErrorKind::ResourceBusy, "a3-journal-io-resource-busy"),
+            (io::ErrorKind::Deadlock, "a3-journal-io-deadlock"),
+            (
+                io::ErrorKind::CrossesDevices,
+                "a3-journal-io-crosses-devices",
+            ),
+            (io::ErrorKind::TooManyLinks, "a3-journal-io-too-many-links"),
+            (io::ErrorKind::Interrupted, "a3-journal-io-interrupted"),
+            (io::ErrorKind::Unsupported, "a3-journal-io-unsupported"),
+            (io::ErrorKind::UnexpectedEof, "a3-journal-io-unexpected-eof"),
+            (io::ErrorKind::OutOfMemory, "a3-journal-io-out-of-memory"),
+            (io::ErrorKind::Other, "a3-journal-io-other"),
+            (io::ErrorKind::ConnectionRefused, "a3-journal-io-unlisted"),
+        ];
+        for (kind, expected) in cases {
+            let error = CleanupJournalError::Io {
+                path: PathBuf::from("PUBLIC_DO_NOT_PRINT_PATH"),
+                source: io::Error::new(kind, NoFormat),
+            };
+            assert_eq!(
+                journal_error_labels(&error),
+                ("a3-journal-family-io", Some(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn same_result_preserves_success_and_panics_with_only_fixed_payload() {
+        struct NotDebug(u8);
+        let value = Box::new(NotDebug(7));
+        let address = &*value as *const NotDebug;
+        let value = a3_journal_result(Ok(value));
+        assert!(std::ptr::eq(address, &*value));
+        assert_eq!(value.0, 7);
+        let calls = Cell::new(0);
+        let result: Result<(), CleanupJournalError> = (|| {
+            calls.set(calls.get() + 1);
+            Err(CleanupJournalError::Io {
+                path: PathBuf::from("PUBLIC_DO_NOT_PRINT_PATH"),
+                source: io::Error::new(io::ErrorKind::PermissionDenied, NoFormat),
+            })
+        })();
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a3_journal_result(result)));
+        match outcome {
+            Err(payload) => assert_eq!(payload.downcast_ref::<&str>(), Some(&"a3-journal-create")),
+            Ok(()) => panic!("PUBLIC_EXPECTED_FIXED_FAILURE"),
+        }
+        assert_eq!(calls.get(), 1);
+    }
+}
+// A3_JOURNAL_DIAGNOSTICS_END
+
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     static DELETE_SENDS: Cell<usize> = const { Cell::new(0) };
@@ -501,9 +704,10 @@ fn isolated_item_delete_and_cleanup() {
                 .read_exact(&mut release)
                 .expect("a3-ready-release");
             assert_eq!(release, [b'c'], "a3-ready-release");
-            let mut cleanup =
-                create_durable_cleanup_journal(&root, receipt.into_terminal_handoff())
-                    .expect("a3-journal-create");
+            let mut cleanup = a3_journal_result(create_durable_cleanup_journal(
+                &root,
+                receipt.into_terminal_handoff(),
+            ));
             checkpoint("terminal");
             if case == "cross-root" || case == "cross-reference" {
                 let other = work.join("other-transaction");
