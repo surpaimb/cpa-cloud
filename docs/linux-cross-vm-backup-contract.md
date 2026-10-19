@@ -10,7 +10,15 @@ production rotation, custody, recovery interface, dependency or feature enableme
 ## Frozen experiment
 
 Two separate fresh GitHub-hosted Ubuntu 24.04 VM jobs build the same asserted
-full source SHA. Neither job restores caches or shares a disk, service, user
+full source SHA: A uses native `ubuntu-24.04` amd64, B uses native
+`ubuntu-24.04-arm` arm64. Each compiles its own executable locally with the same
+Go version; neither an A binary nor a compiler/build cache is transferred to B.
+This is a same-source-version amd64-to-arm64 experiment, not proof of arbitrary
+architecture/OS compatibility. Kernel and Go host/target architecture are
+asserted before compilation. Fixed public runner records include only role,
+expected label/architecture and the observed numeric image version. Labels are
+not immutable image pins; exact source SHA and actual image evidence remain
+separate. Neither job restores caches or shares a disk, service, user
 directory, credential store, host encryption key, TPM state or system image.
 Both require systemd PID 1, VM detection, a previously absent fixed test
 user/group and unit names, and a previously absent systemd host key. Each invokes
@@ -120,6 +128,11 @@ retry, weaker configuration, manual rerun/dispatch or secret regeneration after
 failure. Record the first natural run's red evidence and stop. Ordinary CI and
 original visible E/F review must refer to the exact new head/base, separately
 from prior PR79 evidence. Keep Draft; no merge, Ready, package or deployment.
+The bounded ARM-B attempt retains both different-machine and different-boot
+requirements and all prior host-key/VM/PID1 checks. Unsupported ARM execution,
+equal identity, failed positive/negative, incomplete scan or failed cleanup
+stops this attempt. Do not edit machine-id, fabricate identity, cycle runner
+labels, retry or manually rerun/dispatch to obtain a different environment.
 
 This proves at most synthetic same-version application recovery on independent
 VMs/host keys. M1→M2 rotation, historical-key retention/retirement, production
@@ -144,6 +157,12 @@ Public references inspected:
 - [systemd v255 execution/credential loading](https://github.com/systemd/systemd/blob/v255/man/systemd.exec.xml)
 - [systemd v255 exit status definitions](https://github.com/systemd/systemd/blob/v255/src/shared/exit-status.h)
 - [GitHub workflow artifact transfer](https://docs.github.com/en/actions/tutorials/store-and-share-data)
+- [GitHub standard hosted runner labels and architectures](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+- [GitHub Ubuntu 24.04 ARM64 image metadata](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Arm64-Readme.md)
+
+The 2026-10-19 bounded ARM-B workflow selection and public source guards are
+independently authored. The last two public references were checked for runner
+availability/metadata only; no runner implementation is imported or copied.
 
 No new runtime dependency. systemd retains LGPL-2.1-or-later/component notices;
 Python standard library retains PSF terms. Existing Go libraries retain their

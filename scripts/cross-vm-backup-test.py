@@ -259,6 +259,27 @@ class CrossVMTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", source)
         self.assertNotIn("upload-artifact@", source.split("  restore-b:", 1)[1])
 
+    def test_workflow_native_amd64_to_arm64_and_bounded_public_image_evidence(self):
+        source = (HERE.parent / ".github/workflows/cross-vm-backup.yml").read_text()
+        a = source.split("  source-a:\n", 1)[1].split("  restore-b:\n", 1)[0]
+        b = source.split("  restore-b:\n", 1)[1].split("  relay-cleanup:\n", 1)[0]
+        for role, job, runner, arch, uname in (("a", a, "ubuntu-24.04", "amd64", "x86_64"),
+                                             ("b", b, "ubuntu-24.04-arm", "arm64", "aarch64")):
+            self.assertIn("runs-on: " + runner + "\n", job)
+            self.assertIn('test "$(uname -m)" = ' + uname, job)
+            self.assertIn('test "$(go env GOHOSTARCH)" = ' + arch, job)
+            self.assertIn('test "$(go env GOARCH)" = ' + arch, job)
+            self.assertIn('[[ "${ImageVersion:-}" =~ ^[0-9]{8}\\.[0-9]+\\.[0-9]+$ ]]', job)
+            self.assertIn("printf 'CROSSVM_RUNNER " + role + " " + arch + " " + runner + " %s\\n'", job)
+            self.assertIn('go test -c -tags cpacloud_systemd_acceptance,cpacloud_crossvm_acceptance -o "$RUNNER_TEMP/cross-vm.test" ./internal/service', job)
+            for forbidden in ("GOARCH=", "GOOS=", "actions/cache@", "qemu", "machine-id --", "dbus-uuidgen"):
+                self.assertNotIn(forbidden, job)
+        upload = a.split("      - name: Transfer only", 1)[1].split("      - name: A local relay cleanup", 1)[0]
+        self.assertNotIn("cross-vm.test", upload)
+        for value, valid in (("20261019.1.0", True), ("20261019.142.1", True), ("", False),
+                             ("private-untrusted-value", False), ("20261019.1.0\\nprivate-value", False)):
+            self.assertEqual(bool(re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", value)), valid)
+
     def test_contract_links_and_all_shell_invocations_are_argument_lists(self):
         doc = HERE.parent / "docs/linux-cross-vm-backup-contract.md"
         for target in re.findall(r"\]\(([^)]+)\)", doc.read_text()):

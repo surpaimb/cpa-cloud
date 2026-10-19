@@ -42,7 +42,13 @@ jobs:
           go-version: '1.26.8'
           cache: false
       - name: Public fixture tests and tagged compilation
+        shell: bash
         run: |
+          test "$(uname -m)" = x86_64
+          test "$(go env GOHOSTARCH)" = amd64
+          test "$(go env GOARCH)" = amd64
+          [[ "${ImageVersion:-}" =~ ^[0-9]{8}\.[0-9]+\.[0-9]+$ ]]
+          printf 'CROSSVM_RUNNER a amd64 ubuntu-24.04 %s\n' "$ImageVersion"
           python3 -B scripts/cross-vm-backup-test.py
           go test -c -tags cpacloud_systemd_acceptance,cpacloud_crossvm_acceptance -o "$RUNNER_TEMP/cross-vm.test" ./internal/service
       - name: A local provisioning, real activation, closed v3 source and allowlisted relay
@@ -67,7 +73,7 @@ jobs:
 
   restore-b:
     needs: source-a
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -82,7 +88,14 @@ jobs:
           go-version: '1.26.8'
           cache: false
       - name: Compile independently on B
-        run: go test -c -tags cpacloud_systemd_acceptance,cpacloud_crossvm_acceptance -o "$RUNNER_TEMP/cross-vm.test" ./internal/service
+        shell: bash
+        run: |
+          test "$(uname -m)" = aarch64
+          test "$(go env GOHOSTARCH)" = arm64
+          test "$(go env GOARCH)" = arm64
+          [[ "${ImageVersion:-}" =~ ^[0-9]{8}\.[0-9]+\.[0-9]+$ ]]
+          printf 'CROSSVM_RUNNER b arm64 ubuntu-24.04-arm %s\n' "$ImageVersion"
+          go test -c -tags cpacloud_systemd_acceptance,cpacloud_crossvm_acceptance -o "$RUNNER_TEMP/cross-vm.test" ./internal/service
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: cross-vm-${{ github.run_id }}-${{ github.run_attempt }}
