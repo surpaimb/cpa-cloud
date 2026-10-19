@@ -1207,6 +1207,8 @@ impl SecretServiceBackend for DbusBackend {
     }
 
     fn delete_item(&mut self, handle: &str) -> Result<(), BackendError> {
+        #[cfg(test)]
+        a3_fixture::delete_send();
         let proxy = self
             .connection
             .with_proxy(SERVICE_NAME, handle, DBUS_TIMEOUT);
@@ -1240,6 +1242,10 @@ fn validate_secret_transfer(
 #[cfg(test)]
 #[path = "linux_secret_service_fixture.rs"]
 mod real_fixture;
+
+#[cfg(test)]
+#[path = "linux_secret_service_a3_fixture.rs"]
+pub(crate) mod a3_fixture;
 
 #[cfg(test)]
 mod tests {

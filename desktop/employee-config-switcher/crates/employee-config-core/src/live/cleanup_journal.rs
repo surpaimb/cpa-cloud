@@ -167,6 +167,8 @@ impl DurableCleanupJournal {
         let _verified = verify_workspace_removal(&self.root, &authorization)?;
         let previous = self.sequence.clone();
         self.sequence.delete_key(provider)?;
+        #[cfg(all(test, target_os = "linux"))]
+        super::linux_secret_service::a3_fixture::checkpoint("deleted-before-confirm");
         self.persist_or_restore(previous)
     }
 

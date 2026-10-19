@@ -250,6 +250,7 @@ def outer(fixture=None):
     shm_host = Path("/dev/shm") / (root.name + ".host")
     shm_unit = Path("/dev/shm") / (root.name + ".unit")
     sockets, created_user, started = [], False, False
+    unit_capture, unit_capture_complete = b"", False
     try:
         run(["useradd", "--system", "--user-group", "--no-create-home", "--shell", "/usr/sbin/nologin", USER])
         created_user = True
@@ -311,8 +312,11 @@ def outer(fixture=None):
         args += ["/usr/bin/env", "-i"] + [key + "=" + value for key, value in environment.items()]
         script = root / ("run.py" if fixture is None else "interop.py")
         args += ["/usr/bin/python3", str(script), "--inside", str(metadata_path)]
+        if fixture is not None and hasattr(fixture, "before_unit"):
+            fixture.before_unit(metadata)
         started = True
         result = run(args, timeout=110, check=False)
+        unit_capture, unit_capture_complete = result.stdout, True
         # Never relay raw daemon, D-Bus, GLib, journal or child process output.
         always_diagnostics = fixture is not None and getattr(fixture, "diagnostics_always", False)
         if always_diagnostics:
@@ -355,7 +359,8 @@ def outer(fixture=None):
                 print("CHECK " + marker + "=true", flush=True)
         if diagnostic:
             diagnostic("operation", "ok")
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as failure:
+        unit_capture = failure.stdout or b""
         if diagnostic:
             diagnostic("operation", "timeout")
         raise
@@ -372,8 +377,15 @@ def outer(fixture=None):
                 run(["systemctl", "stop", UNIT], check=False)
                 state = run(["systemctl", "show", UNIT, "--property=ActiveState", "--value"], check=False).stdout.strip()
                 require(state in (b"inactive", b"failed"), "cleanup-unit-active")
+                if fixture is not None and hasattr(fixture, "verify_unit_stopped"):
+                    fixture.verify_unit_stopped(metadata)
                 unit_stopped = True
             actions.append(("unit", unit_cleanup))
+            if fixture is not None and hasattr(fixture, "after_unit"):
+                def unit_evidence():
+                    require(unit_stopped, "cleanup-unit-active")
+                    fixture.after_unit(metadata, unit_capture, unit_capture_complete)
+                actions.append(("unit-evidence", unit_evidence))
         for server in sockets:
             actions.append(("sockets", server.close))
         if created_user:

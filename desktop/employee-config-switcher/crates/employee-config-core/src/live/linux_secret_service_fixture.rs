@@ -129,7 +129,7 @@ fn reopen_trace_defaults_to_not_reached_and_uses_only_fixed_statuses() {
     REOPEN_TRACE.with(|state| assert!(state.borrow().is_none()));
 }
 
-fn enable_diagnostics(work: &Path) {
+pub(super) fn enable_diagnostics(work: &Path) {
     stage("diagnostic-root", false);
     let approval =
         open_approved_directory(work, false).unwrap_or_else(|_| panic!("diagnostic-root-failed"));

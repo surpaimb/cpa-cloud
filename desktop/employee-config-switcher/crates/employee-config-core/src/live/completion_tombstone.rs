@@ -983,6 +983,8 @@ mod platform {
                 .sync_all()
                 .map_err(|source| io_error(root, source))?;
             fail_removal_at(fault, RemovalFault::AfterIntentDurable, &deleting_path)?;
+            #[cfg(test)]
+            super::super::linux_secret_service::a3_fixture::checkpoint("tombstone-intent");
             let deleting_file = open_private_file_at(
                 directory.as_raw_fd(),
                 OsStr::new(&deleting_name),
