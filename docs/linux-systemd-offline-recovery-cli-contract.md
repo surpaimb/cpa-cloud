@@ -57,6 +57,13 @@ wrapping reader/角色独立性 wrapping；包认证/完整性 package；目标/
 发布器拒绝 restore；关闭/残留/已提交清理异常 cleanup；上下文取消 cancelled。
 cleanup 可与先前失败共同发生，输出独立固定 cleanup 行，不掩盖首个失败；成功行须在全部清理后才输出。
 
+F 在旧头 `af44a89bac3d6c6e9c6db101a1b0db42587c007b` 的正式静审发现组合错误会被 cleanup 提前返回掩盖。
+有界更正：保留恢复 API 的完成 Info 与错误，未获 v3 完成 Info 时先报告 restore/cancelled，再独立追加 cleanup；
+仅完成发布后发生的清理错误只报 cleanup。嵌套的取消原因仍用 `errors.Is` 判定，不按目标存在或原始错误文本猜测。
+新组合错误只含固定阶段，不保留原始错误链；新增代表底层联合返回形态的分类回归，不能称作新增真实 I/O 故障注入。
+依据为本项目恢复返回协议及 [Go errors.Is/Join 文档](https://pkg.go.dev/errors)（2026-10-19 查阅）；无新增依赖。
+凭据 reader、发布/回滚、旧口令 CLI、双 VM 合同及首次红灯停止规则均不变。
+
 任一正例失败、负例错误阶段、意外监听/发布、扫描命中/不完整或清理失败：保留第一次自然专项红灯，
 停止后续案例，不修补/重跑/dispatch/换 runner。回报新 head/base、首红及独立清理状态供原 E/F 只读诊断。
 全绿也仅停 Draft，等待原可见 E/F 对新精确 head/base 正式复审；无 Ready/merge/tag/package/deploy。

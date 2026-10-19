@@ -357,15 +357,9 @@ func Run(ctx context.Context, o Options) (retErr error) {
 		if targetAbsent(parent, o.Target) != nil {
 			return Failure("target")
 		}
-		_, err = backup.RestoreWithKeyMaterial(ctx, copyPath, o.Target, material)
+		restored, err := backup.RestoreWithKeyMaterial(ctx, copyPath, o.Target, material)
 		if err != nil {
-			if errors.Is(err, backup.ErrSystemdRestoreCleanupIncomplete) {
-				return Failure("cleanup")
-			}
-			if ctx.Err() != nil {
-				return Failure("cancelled")
-			}
-			return Failure("restore")
+			return classifyRestoreFailure(restored, err, ctx.Err())
 		}
 	}
 	if ctx.Err() != nil {
