@@ -190,6 +190,102 @@ def log_names(case):
     return ("bus.log", "keyring.log") + tuple("child-" + v + ".log" for v in labels(case))
 
 
+# Independent writer-only batch, 2026-10-19: Python 3.12 os.open/write/fstat
+# and Linux open(2), not an inference about either historical red's mode value.
+# https://docs.python.org/3.12/library/os.html#os.open
+# https://man7.org/linux/man-pages/man2/open.2.html
+# Standard library only; no new dependency or third-party implementation.
+class PrivateLogWriter:
+    """Exclusive private, unbuffered log; never repair rejected metadata.
+
+    The caller still owns EOF/wait, flush/fsync, close, then completion signing.
+    Only existing source-owned failure labels leave this boundary.
+    """
+    def __init__(self, path, uid, gid):
+        self._fd, self._binding, self._started, self._failed = None, None, False, False
+        self._uid, self._gid = uid, gid
+        try:
+            self._fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        except Exception:
+            self._abort("a3-private-create")
+        self._verify()
+
+    @property
+    def closed(self):
+        return self._fd is None
+
+    def _abort(self, label):
+        self._failed = True
+        descriptor, self._fd = self._fd, None
+        if descriptor is not None:
+            try:
+                os.close(descriptor)  # Never retry an fd after a close error.
+            except Exception:
+                pass
+        raise base.PreflightFailure(label) from None
+
+    def _verify(self):
+        if self.closed or self._failed:
+            self._abort("a3-private-write")
+        try:
+            info = os.fstat(self._fd)
+        except Exception:
+            self._abort("a3-private-metadata")
+        if not (stat.S_ISREG(info.st_mode) and info.st_uid == self._uid and info.st_gid == self._gid
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1
+                and (self._started or info.st_size == 0)):
+            self._abort("a3-private-metadata")
+        binding = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink)
+        if self._binding is not None and binding != self._binding:
+            self._abort("a3-private-metadata")
+        self._binding = binding
+
+    def write(self, value):
+        self._verify()
+        try:
+            count = os.write(self._fd, value)
+        except Exception:
+            self._abort("a3-private-write")
+        if count != len(value):
+            self._abort("a3-private-write")  # No retry or completion on a short write.
+        self._started = True
+        self._verify()
+        return count
+
+    def flush(self):
+        # os.write has no Python buffer; the existing caller fsync is retained.
+        self._verify()
+
+    def fileno(self):
+        self._verify()  # Also before Popen receives this exact fd.
+        self._started = True
+        return self._fd
+
+    def close(self):
+        if self.closed:
+            if self._failed:
+                raise base.PreflightFailure("a3-private-write") from None
+            return
+        self._verify()
+        descriptor, self._fd = self._fd, None
+        try:
+            os.close(descriptor)
+        except Exception:
+            self._failed = True
+            raise base.PreflightFailure("a3-private-write") from None
+
+    def __enter__(self):
+        self._verify()
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        self.close()
+
+
+def private_log(path, uid, gid):
+    return PrivateLogWriter(path, uid, gid)
+
+
 def mark_complete(work, name):
     descriptor = os.open(work / (name + ".complete"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     with os.fdopen(descriptor, "wb") as stream:
@@ -518,7 +614,7 @@ class Children:
             if mode:
                 environment.update(CPA_A3_MODE=mode, CPA_A3_CASE=self.m["a3_case"], CPA_A3_CRASH=crash or "")
             path = self.work / ("child-" + label + ".log")
-            handle = path.open("xb")
+            handle = private_log(path, self.m["uid"], self.m["gid"])
             self.handles[label] = handle
             process = subprocess.Popen(args, env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT)
@@ -616,7 +712,7 @@ def sequence(m, environment, identity, report, children):
     children.command("policy", [m["a3_verifier"], "policy"])
     if case == "duplicate":
         path = Path(m["work"]) / "child-duplicate-sequence.log"
-        with path.open("xb") as log:
+        with private_log(path, m["uid"], m["gid"]) as log:
             class Capture(list):
                 def append(self, value):
                     super().append(value)
@@ -693,7 +789,7 @@ def inside(metadata_path):
         environment = dict(os.environ)
 
         def start(name, args):
-            handle = (work / (name + ".log")).open("xb")
+            handle = private_log(work / (name + ".log"), m["uid"], m["gid"])
             handles[name] = handle
             process = subprocess.Popen(args, env=environment, stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT)
             processes[name] = process

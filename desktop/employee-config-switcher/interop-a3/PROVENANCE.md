@@ -21,3 +21,17 @@ pins and package copyright evidence remain authoritative: dbus-daemon
 GLib/GIO/libsecret retain LGPL-2.1-or-later; daemon components retain their
 existing package-specific licenses. Python uses its standard library. No new
 dependency, third-party implementation or distribution is introduced.
+
+## Independently bounded private-log writer batch — 2026-10-19
+
+The common private-log writer and its public dummy regressions are independently
+authored from the original visible E/F writer-only contract and
+[Python 3.12 os.open/write/fstat](https://docs.python.org/3.12/library/os.html#os.open),
+[Python raw I/O](https://docs.python.org/3.12/library/io.html#io.RawIOBase) and
+[Linux open(2)](https://man7.org/linux/man-pages/man2/open.2.html).
+Only the three A3 log creation sites use this helper. The reader, fixed labels,
+registration sets, business and owned-cleanup gates remain unchanged. Neither
+historical red is used to infer an actual numeric file mode or its origin.
+Tests exercise this actual writer rather than a substitute log creator.
+Only Python's existing standard library is used; no dependency or license
+change, copied third-party implementation or strict clean-room claim is added.

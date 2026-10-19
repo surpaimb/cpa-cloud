@@ -23,6 +23,27 @@ spec.loader.exec_module(f)
 LIVE = HERE.parent / "crates/employee-config-core/src/live"
 
 
+def writer_normalized_tree():
+    """Only the three authorized opener substitutions normalize to old source."""
+    tree = ast.parse((HERE / "fixture.py").read_text())
+    pairs = (("private_log(path, self.m['uid'], self.m['gid'])", "path.open('xb')"),
+             ("private_log(path, m['uid'], m['gid'])", "path.open('xb')"),
+             ("private_log(work / (name + '.log'), m['uid'], m['gid'])", "(work / (name + '.log')).open('xb')"))
+    allowed = {ast.dump(ast.parse(new, mode="eval").body): ast.parse(old, mode="eval").body for new, old in pairs}
+    seen = []
+    class Normalize(ast.NodeTransformer):
+        def visit_Call(self, node):
+            key = ast.dump(node)
+            if key in allowed:
+                seen.append(key)
+                return allowed[key]
+            return self.generic_visit(node)
+    tree = Normalize().visit(tree)
+    if len(seen) != 3 or len(set(seen)) != 3:
+        raise AssertionError("writer-only-three-exact-call-sites")
+    return tree
+
+
 class FixtureTests(unittest.TestCase):
     def test_case_matrix_is_bounded_and_sequential(self):
         self.assertEqual(len(f.CASES), 27)
@@ -271,8 +292,8 @@ class FixtureTests(unittest.TestCase):
         self.assertLess(at, source.index('run(["userdel", USER])', at))
         self.assertLess(source.index('actions.append(("unit-evidence", unit_evidence))'), source.index('run(["userdel", USER])'))
 
-    def test_new_batch_does_not_change_business_or_capture_writer_flow(self):
-        tree = ast.parse((HERE / "fixture.py").read_text())
+    def test_historical_business_and_capture_flow_except_three_writer_calls(self):
+        tree = writer_normalized_tree()
         expected = {"mark_complete": "edc4a3394a6454dd581193a7d10f8b5dcf27c765b12d99bd26857a56c8f0d30a",
             "Children": "8852f8dc187afea55d1f3750c857de2ff67d63e0212d8cdfe211fbc9f1f75a3c",
             "sequence": "f911d61405158a5c9713d194fce4a9eb0cb255d8e561cdf11caf39b5962f42ca",
@@ -287,6 +308,200 @@ class FixtureTests(unittest.TestCase):
                 nodes["Fixture." + node.name] = node
         for name, digest in expected.items():
             self.assertEqual(hashlib.sha256(ast.dump(nodes[name], include_attributes=False).encode()).hexdigest(), digest, name)
+
+    def test_writer_batch_freezes_entire_parent_module_except_helper_and_three_calls(self):
+        tree = writer_normalized_tree()
+        tree.body = [node for node in tree.body if not (isinstance(node, (ast.ClassDef, ast.FunctionDef))
+                     and node.name in ("PrivateLogWriter", "private_log"))]
+        self.assertEqual(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest(),
+                         "7aadb4bfa707f55313195f1f044c2f451bbe0c5e4b9e427c9cfe5b74e8c1a0de")
+
+
+class WriterTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def environment(self, *, changes=None, states=None, open_error=None, write_result=None, close_error=None):
+        info = types.SimpleNamespace(st_mode=f.stat.S_IFREG | 0o600, st_uid=1, st_gid=1,
+                                     st_nlink=1, st_size=0, st_dev=2, st_ino=3)
+        info.__dict__.update(changes or {})
+        with contextlib.ExitStack() as stack:
+            for name, flag in (("O_NOFOLLOW", 0x20000), ("O_CLOEXEC", 0x40000)):
+                stack.enter_context(mock.patch.object(f.os, name, getattr(f.os, name, flag), create=True))
+            opened = stack.enter_context(mock.patch.object(f.os, "open", return_value=31, side_effect=open_error))
+            stated = stack.enter_context(mock.patch.object(f.os, "fstat", return_value=info, side_effect=states))
+            written = stack.enter_context(mock.patch.object(f.os, "write", side_effect=write_result or (lambda fd, value: len(value))))
+            closed = stack.enter_context(mock.patch.object(f.os, "close", side_effect=close_error))
+            yield types.SimpleNamespace(info=info, opened=opened, stated=stated, written=written, closed=closed)
+
+    def test_actual_writer_validates_same_fd_before_write_and_handoff(self):
+        with self.environment() as env:
+            log = f.private_log(Path("DO-NOT-PRINT"), 1, 1)
+            self.assertEqual(env.stated.call_count, 1)
+            self.assertEqual(env.written.call_count, 0)
+            self.assertEqual(env.opened.call_args.args[2], 0o600)
+            flags = env.opened.call_args.args[1]
+            for bit in (os.O_WRONLY, os.O_CREAT, os.O_EXCL, getattr(os, "O_NOFOLLOW", 0x20000), getattr(os, "O_CLOEXEC", 0x40000)):
+                self.assertTrue(flags & bit)
+            self.assertEqual(log.write(b"public"), 6)
+            log.flush()
+            self.assertEqual(log.fileno(), 31)
+            log.close()
+            log.close()
+            self.assertTrue(log.closed)
+            self.assertEqual(env.opened.call_count, 1)
+            self.assertEqual(env.written.call_args_list, [mock.call(31, b"public")])
+            self.assertTrue(all(call == mock.call(31) for call in env.stated.call_args_list))
+            self.assertEqual(env.closed.call_args_list, [mock.call(31)])
+
+    def test_invalid_admission_closes_without_write_or_handoff(self):
+        for changes in (dict(st_mode=f.stat.S_IFIFO | 0o600), dict(st_uid=2), dict(st_gid=2),
+                        dict(st_mode=f.stat.S_IFREG | 0o644), dict(st_nlink=2), dict(st_size=1)):
+            with self.subTest(changes=changes), self.environment(changes=changes) as env:
+                with self.assertRaises(f.base.PreflightFailure) as error:
+                    f.private_log(Path("DO-NOT-PRINT"), 1, 1)
+                self.assertEqual(str(error.exception), "a3-private-metadata")
+                self.assertEqual(env.written.call_count, 0)
+                self.assertEqual(env.closed.call_args_list, [mock.call(31)])
+
+    def test_exclusive_open_and_io_errors_are_fixed_and_never_retried(self):
+        with self.environment(open_error=FileExistsError("DO-NOT-PRINT")) as env:
+            with self.assertRaises(f.base.PreflightFailure) as error:
+                f.private_log(Path("DO-NOT-PRINT"), 1, 1)
+            self.assertEqual(str(error.exception), "a3-private-create")
+            self.assertEqual(env.stated.call_count, 0)
+            self.assertEqual(env.closed.call_count, 0)
+        for result in ((lambda fd, value: 1), OSError("DO-NOT-PRINT")):
+            with self.subTest(short=callable(result)), self.environment(write_result=result) as env:
+                log = f.private_log(Path("DO-NOT-PRINT"), 1, 1)
+                with self.assertRaises(f.base.PreflightFailure) as error:
+                    log.write(b"public")
+                self.assertEqual(str(error.exception), "a3-private-write")
+                self.assertTrue(log.closed)
+                self.assertEqual(env.written.call_count, 1)
+                self.assertEqual(env.closed.call_count, 1)
+                with self.assertRaises(f.base.PreflightFailure):
+                    log.fileno()
+                self.assertEqual(env.closed.call_count, 1)
+
+    def test_close_failure_is_sticky_and_fd_is_not_retried(self):
+        with self.environment(close_error=OSError("DO-NOT-PRINT")) as env:
+            log = f.private_log(Path("DO-NOT-PRINT"), 1, 1)
+            for action in (log.close, log.close, log.flush, log.fileno):
+                with self.assertRaises(f.base.PreflightFailure) as error:
+                    action()
+                self.assertEqual(str(error.exception), "a3-private-write")
+                self.assertTrue(error.exception.__suppress_context__)
+            self.assertEqual(env.closed.call_count, 1)
+
+    def test_identity_change_before_handoff_or_after_write_fails_closed(self):
+        base_info = dict(st_mode=f.stat.S_IFREG | 0o600, st_uid=1, st_gid=1,
+                         st_nlink=1, st_size=0, st_dev=2, st_ino=3)
+        for field, value in (("st_uid", 2), ("st_gid", 2), ("st_ino", 4), ("st_dev", 4),
+                             ("st_nlink", 2), ("st_mode", f.stat.S_IFREG | 0o644)):
+            for after_write in (False, True):
+                with self.subTest(field=field, after_write=after_write):
+                    initial = types.SimpleNamespace(**base_info)
+                    changed = types.SimpleNamespace(**(base_info | {field: value}))
+                    with self.environment(states=[initial] * (2 if after_write else 1) + [changed]) as env:
+                        log = f.private_log(Path("DO-NOT-PRINT"), 1, 1)
+                        with self.assertRaises(f.base.PreflightFailure) as error:
+                            log.write(b"public") if after_write else log.fileno()
+                        self.assertEqual(str(error.exception), "a3-private-metadata")
+                        self.assertTrue(log.closed)
+                        self.assertEqual(env.written.call_count, int(after_write))
+                        self.assertEqual(env.closed.call_count, 1)
+
+    def test_actual_child_capture_completion_requires_eof_wait_sync_and_close(self):
+        for fault in (None, "short-write", "sync", "close"):
+            with self.subTest(fault=fault), self.environment(write_result=(lambda fd, value: 1) if fault == "short-write" else None,
+                    close_error=OSError("DO-NOT-PRINT") if fault == "close" else None) as env:
+                process = mock.Mock()
+                process.wait.return_value = 0
+                process.poll.return_value = 0
+                selector = mock.Mock()
+                selector.get_map.side_effect = [True, True, False]
+                selector.select.return_value = [object()]
+                metadata = dict(work="public-dummy", a3_case="exact", uid=1, gid=1,
+                                a3_verifier="public-verifier", cpa="public-cpa")
+                children = f.Children(metadata, {}, mock.Mock(), f.Report())
+                with mock.patch.object(f.subprocess, "Popen", return_value=process), mock.patch.object(
+                        f.selectors, "DefaultSelector", return_value=selector), mock.patch.object(
+                        f.os, "read", side_effect=[b"A3_LIBSECRET_OK\n", b""]), mock.patch.object(
+                        f.os, "fsync", side_effect=OSError("DO-NOT-PRINT") if fault == "sync" else None) as sync, mock.patch.object(f, "mark_complete") as signed:
+                    if fault == "short-write":
+                        with self.assertRaises(f.base.PreflightFailure):
+                            children.command("setup", ["public-verifier"])
+                    else:
+                        children.command("setup", ["public-verifier"])
+                    self.assertEqual(signed.call_count, int(fault is None))
+                    self.assertTrue(children.handles["setup"].closed)
+                    self.assertEqual(env.closed.call_count, 1)
+                    if signed.called:
+                        self.assertTrue(selector.unregister.called)
+                        self.assertTrue(process.wait.called)
+                        self.assertTrue(sync.called)
+                    else:
+                        self.assertNotEqual(children.report.states["handles"], "ok")
+
+    def test_actual_duplicate_capture_only_signs_after_successful_sync_and_close(self):
+        for fault in (None, "short-write", "sync", "close"):
+            with self.subTest(fault=fault), self.environment(write_result=(lambda fd, value: 1) if fault == "short-write" else None,
+                    close_error=OSError("DO-NOT-PRINT") if fault == "close" else None) as env:
+                children = mock.Mock()
+                children.cpa.return_value = b"A3_DELETE_SEND_ZERO\n"
+                metadata = dict(work="public-dummy", a3_case="duplicate", uid=1, gid=1,
+                                verifier="public-verifier", a3_verifier="public-a3-verifier", a2_helper="public-a2-helper")
+                def capture(m, environment, values, identity, report):
+                    values.append(b"public-duplicate")
+                with mock.patch.object(f.a2, "cases", side_effect=capture), mock.patch.object(
+                        f.os, "fsync", side_effect=OSError("DO-NOT-PRINT") if fault == "sync" else None) as sync, mock.patch.object(
+                        f, "mark_complete") as signed, contextlib.redirect_stdout(io.StringIO()):
+                    if fault:
+                        with self.assertRaises((f.base.PreflightFailure, OSError)):
+                            f.sequence(metadata, {}, mock.Mock(), f.Report(), children)
+                    else:
+                        f.sequence(metadata, {}, mock.Mock(), f.Report(), children)
+                    self.assertEqual(signed.call_count, int(fault is None))
+                    self.assertEqual(children.cpa.call_count, int(fault is None))
+                    self.assertEqual(env.closed.call_count, 1)
+                    if signed.called:
+                        self.assertTrue(sync.called)
+
+    def test_actual_daemon_openers_validate_before_handoff_and_close_before_signing(self):
+        # Entire inside flow is mocked public control traffic, not a daemon run.
+        for fault in (None, "short-write", "close"):
+            with self.subTest(fault=fault), self.environment(write_result=(lambda fd, value: 1) if fault == "short-write" else None,
+                    close_error=OSError("DO-NOT-PRINT") if fault == "close" else None) as env:
+                processes, logs = [], []
+                def launch(args, **kwargs):
+                    log = kwargs["stdout"]
+                    self.assertEqual(log.fileno(), 31)
+                    self.assertFalse(log.closed)
+                    logs.append(log)
+                    process = mock.Mock()
+                    process.poll.return_value = None
+                    processes.append(process)
+                    return process
+                def stop(process):
+                    process.poll.return_value = 0
+                def sign(work, name):
+                    self.assertTrue(all(process.poll() == 0 for process in processes))
+                    self.assertTrue(all(log.closed for log in logs))
+                metadata = dict(work="public-dummy", a3_case="exact", uid=1, gid=1, bus_config="public-policy", observer="public-observer",
+                    a3_samples=[list(value) for value in f.samples("exact")], a3_logs=list(f.log_names("exact")),
+                    a3_completions=[name + ".complete" for name in f.log_names("exact")])
+                with mock.patch.object(f.Path, "read_text", return_value="public-json"), mock.patch.object(f.json, "loads", return_value=metadata), mock.patch.object(
+                        f.base, "verify_isolation"), mock.patch.object(f.base, "owned_process"), mock.patch.object(f.Path, "exists", return_value=True), mock.patch.object(
+                        f.base, "run", return_value=types.SimpleNamespace(returncode=0, stdout=b"PREFLIGHT_LIBSECRET_OK\n")), mock.patch.object(
+                        f.subprocess, "Popen", side_effect=launch), mock.patch.object(f.a2, "stop", side_effect=stop), mock.patch.object(f, "sequence"), mock.patch.object(
+                        f, "scan_all", return_value=True), mock.patch.object(f.os, "fsync"), mock.patch.object(f, "mark_complete", side_effect=sign) as signed, contextlib.redirect_stdout(io.StringIO()):
+                    if fault:
+                        with self.assertRaises(f.base.PreflightFailure):
+                            f.inside("public-metadata")
+                    else:
+                        f.inside("public-metadata")
+                self.assertEqual(len(logs), 2)
+                self.assertEqual(signed.call_count, 0 if fault else 2)
+                self.assertEqual(env.closed.call_count, 2)
 
 
 class ReaderTests(unittest.TestCase):
@@ -432,7 +647,11 @@ class LinuxReaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name, value, length in (("sample", b"public-dummy", 12), ("log", b"", None)):
-                self.write(root / name, value)
+                if name == "log":
+                    with f.private_log(root / name, os.geteuid(), os.getegid()) as log:
+                        log.write(value)
+                else:
+                    self.write(root / name, value)
                 self.assertEqual(f.private_read(root / name, os.geteuid(), os.getegid(), length), value)
 
     def test_real_missing_mode_and_length_classification(self):
@@ -486,7 +705,8 @@ class LinuxReaderTests(unittest.TestCase):
                         self.write(root / name, b"q" * length)
                 for name in f.log_names("exact"):
                     if name != missing:
-                        self.write(root / name, b"")
+                        with f.private_log(root / name, os.geteuid(), os.getegid()):
+                            pass
                     if name + ".complete" != missing:
                         if name + ".complete" == bad:
                             self.write(root / (name + ".complete"), b"badmark!\n")
@@ -505,11 +725,83 @@ class LinuxReaderTests(unittest.TestCase):
         import os
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "public.log"
-            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.close(descriptor)
+            with f.private_log(path, os.geteuid(), os.getegid()):
+                pass
             self.assertEqual(f.private_read(path, os.geteuid(), os.getegid()), b"")
             with self.assertRaises(f.base.PreflightFailure):
                 f.private_read(path, os.geteuid(), os.getegid(), 32)
+
+
+@unittest.skipUnless(sys.platform == "linux", "Linux actual-writer filesystem tests not executed here")
+class LinuxWriterTests(unittest.TestCase):
+    def test_actual_writer_to_reader_under_different_creation_environments(self):
+        for mask in (0, 0o022, 0o077, 0o777):
+            with self.subTest(mask=mask), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "public.log"
+                previous = os.umask(mask)
+                try:
+                    if mask == 0o777:
+                        with self.assertRaises(f.base.PreflightFailure):
+                            f.private_log(path, os.geteuid(), os.getegid())
+                        continue  # Refuse, never repair this deliberately unsafe creation.
+                    log = f.private_log(path, os.geteuid(), os.getegid())
+                finally:
+                    os.umask(previous)
+                with log:
+                    log.write(b"public-dummy")
+                    log.flush()
+                    os.fsync(log.fileno())
+                self.assertTrue(log.closed)
+                f.mark_complete(path.parent, path.name)
+                self.assertEqual(f.private_read(path, os.geteuid(), os.getegid()), b"public-dummy")
+                self.assertEqual(f.private_read(path.with_name(path.name + ".complete"), os.geteuid(), os.getegid(), 9), b"complete\n")
+
+    def test_all_case_registered_logs_use_actual_writer_then_strict_scan(self):
+        for case in f.CASES:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for role in ("target", "neighbor"):
+                    (root / role).mkdir(mode=0o700)
+                for name, length in f.samples(case):
+                    LinuxReaderTests.write(root / name, b"q" * length)
+                for index, name in enumerate(f.log_names(case)):
+                    with f.private_log(root / name, os.geteuid(), os.getegid()) as log:
+                        log.write(b"public-output" if index % 2 else b"")
+                        log.flush()
+                        os.fsync(log.fileno())
+                    f.mark_complete(root, name)
+                report = f.Report()
+                self.assertTrue(f.scan_all(root, case, os.geteuid(), os.getegid(), (), report))
+                self.assertEqual([report.integrity[k] for k in ("samples", "logs", "completions")], ["complete"] * 3)
+
+    def test_public_child_receives_validated_actual_writer_fd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "public.log"
+            with f.private_log(path, os.geteuid(), os.getegid()) as log:
+                process = subprocess.Popen([sys.executable, "-B", "-c", "import os; os.write(1,b'public-child')"],
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+                self.assertEqual(process.wait(timeout=3), 0)
+                log.flush()
+                os.fsync(log.fileno())
+            f.mark_complete(path.parent, path.name)
+            self.assertEqual(f.private_read(path, os.geteuid(), os.getegid()), b"public-child")
+
+    def test_existing_symlink_fifo_and_post_creation_hardlink_fail_without_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "public.log"
+            log = f.private_log(path, os.geteuid(), os.getegid())
+            os.link(path, root / "public.alias")
+            with self.assertRaises(f.base.PreflightFailure):
+                log.write(b"public")
+            self.assertTrue(log.closed)
+            self.assertFalse((root / "public.log.complete").exists())
+            (root / "public.link").symlink_to(path)
+            os.mkfifo(root / "public.fifo", 0o600)
+            for name in ("public.log", "public.link", "public.fifo"):
+                with self.subTest(name=name), self.assertRaises(f.base.PreflightFailure):
+                    f.private_log(root / name, os.geteuid(), os.getegid())
+            self.assertEqual(path.stat().st_size, 0)
 
 
 if __name__ == "__main__":
