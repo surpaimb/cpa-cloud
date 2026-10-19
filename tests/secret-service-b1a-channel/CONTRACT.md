@@ -291,3 +291,83 @@ red. New natural exact-head C plus seven old first-attempt regressions and
 original E/F formal new-head review remain required. The first unexpected
 dedicated red freezes the new source. C #1/#2/#3 and all A3 history is preserved;
 Draft / production NO-GO remains.
+
+## C-only identity evidence batch: intentional stop, never user creation
+
+Sole parent `8f09f7f402e4acb38bcd4033787d31ac45d367e9`. C #4
+run39283788825 attempt1 remains FAILURE: 100/100 Linux public tests passed,
+fixed exit-option then user-create rejection, 0/15 admissions. Original E/F
+closed its static handoff P2, not the runtime setup failure. Public -K versus
+CREATE_MAIL_SPOOL configuration-domain mismatch is not an established cause.
+This batch changes only fixture.py, test_channel.py and these two notes.
+channel/receiver/workflow, every PR88/product/old-regression file remain frozen.
+
+**This is an intentional evidence-collection stop, not C acceptance.** Both the
+workflow main and direct legacy case entry unconditionally enter the new gate;
+no path returns from that gate. It never invokes useradd, including help,
+version or -D, creates/deletes users/groups, starts an isolated unit, reads or
+changes defaults, executes hooks, installs/downloads/replaces helpers or starts
+a new diagnostic process. Existing disposable-runner/root/systemd/VM guards
+remain. Legacy argv, UID selection, no-home/nologin, exit-class/success gate,
+raw record/ownership and fifteen scenario code are retained but unreachable.
+No C_CASE or C PASS is emitted. A red with the declared stop is expected; a
+public-test, sink/capture/cleanup or other unexpected red freezes source.
+
+Trust boundary: disposable runner root and OS are trusted. This is not defense
+against malicious root, remote attestation or a changed check-to-exec scheme.
+The original SAFE PATH is used for the same POSIX executable lookup. The
+selected absolute object is held read-only; each path component is nofollow,
+root-owned, group/other nonwritable, directory or final regular executable.
+Held/path dev/ino/mode/owner/group/nlink/size/mtime/ctime identities must remain
+stable. Complete bounded bytes (8 MiB maximum, exact size and EOF) produce the
+helper's full SHA-256; partial reads, replacement or ambiguous/unsafe objects
+cannot produce approved evidence. The object is never executed or substituted
+into the unchanged legacy argv, and no future execution binding is claimed.
+
+No dpkg subprocess is launched. Bounded nofollow/stable reads of only
+/var/lib/dpkg/status and installed-package .list metadata in its info directory
+identify exactly one owning package, installed status, complete version and
+architecture. Only that owner's .md5sums is read for the helper-byte comparison;
+MD5 is internal dpkg metadata consistency, not a cryptographic approval or
+source/build proof. SHA-256 is computed only over the selected helper, never
+an arbitrary file/configuration. Limits: status 16 MiB; individual list/sums
+4 MiB; aggregate lists 64 MiB; complete directory enumeration <=65,536 names.
+Invalid/ambiguous/changed/incomplete metadata is unknown or mismatch and red.
+
+There is **no pre-reviewed allowlist**. Observed path/package/version/hash does
+not approve itself. Patched implementation/build conditions, no-mailbox branch
+and complete hook-path set are therefore unknown; no guessed upstream-4.13
+hook directories or defaults are inspected. The reusable empty-directory
+predicate accepts only a completely checked empty held directory or absent
+leaf under checked parents, using nofollow/stable FD checks. Symlink, rebound,
+unreadable, enumeration failure, nonempty or unknown cannot pass. It is exercised
+only by controlled public fixtures in this batch, never used to infer a complete
+runtime hook inventory without a proven source binding.
+
+### Narrow non-secret output exception
+
+One `HELPER_EVIDENCE ` JSON line, <=768 ASCII characters, is expressly allowed:
+path class only `/usr/sbin/useradd`, `other` or `unknown`; filtered package name
+(<=64 ASCII), full version (<=128) and architecture (<=32); complete 64 lower-
+hex helper SHA-256 or unknown; fixed stability/binding/source/hooks/precondition
+enums. Invalid fields are unknown, never truncated or formatted from arbitrary
+objects. Source/hooks/precondition are always unknown in this no-allowlist batch.
+No raw path, inode/UID/PID/handle, config, hook name/content, stderr, exception,
+user, credential/secret or arbitrary-file digest is exposed. This exception is
+not permission to add data to old diagnostics. All other output remains fixed.
+The single attempt is consumed before delivery; sink loss stays sticky and no
+fallback/retry is attempted. FDs are consumed before close; every acquired
+descriptor is attempted once, other closes continue, and first operation versus
+cleanup/delivery errors stay separate. Failed close cannot certify evidence.
+
+New public negatives precede implementation and retain original 100 test names.
+They cover unknown/changed identity, package checksum mismatch/ambiguous owner,
+unknown source/precondition, hook nonempty/error/symlink/rebound, post-check
+drift, incomplete reads, failed sink/cleanup and public FD reuse. Every refusal
+asserts no creation/admission; source AST checks both real entry gates. Linux
+temp tests explicitly adapt ownership/directory metadata for public fixtures;
+the real EvidenceOS does not alter these predicates. These are controlled
+adapters, not real I/O faults or actual user provisioning. Existing scan/cleanup
+bounds are not relaxed. New natural CI and original E/F review are evidence
+only; a later parameter correction needs its own separate contract. Preserve
+C #1-#4, all A3 reds and historical results; Draft / production NO-GO continues.

@@ -6,6 +6,7 @@ modified. See CONTRACT.md for the narrower acceptance claim.
 """
 import base64
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -53,7 +54,9 @@ DIAGNOSTICS = frozenset(
     + ["c-cleanup-" + stage + "-" + status for stage in CLEANUP_STAGES
        for status in ("acquired", "entered", "ok", "rejected", "not-acquired", "consumed-confirmed", "consumed-unconfirmed")]
     + ["c-user-create-exit-" + name for name in (*USER_CREATE_EXIT_CLASSES.values(), "unknown", "signal", "missing-result")]
-    + list(LABELS | RESULT_DIAGNOSTICS))
+    + list(LABELS | RESULT_DIAGNOSTICS)
+    + ["c-helper-evidence-stop", "c-helper-observation-unknown", "c-helper-source-unknown",
+       "c-helper-readonly-cleanup-ok", "c-helper-readonly-cleanup-rejected"])
 REPORTS = frozenset(["CHECK " + name + "=" + value
     for name in ("C_CONTENT_CLEAR", "C_CAPTURE_COMPLETE", "C_OUTER_CLEANUP") for value in ("true", "false")]
     + ["CHECK C_CASE_" + kind.upper().replace("-", "_") + "=true" for kind in CASES]
@@ -83,6 +86,7 @@ class Diagnostics:
         self.report_sink = report_sink or (lambda value: print(value, flush=True))
         self.delivery_failed = False
         self.cleanup_depth = 0
+        self.helper_evidence_attempted = False
 
     def _deliver(self, sink, value):
         try:
@@ -479,6 +483,247 @@ def stable(s):
             s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
 
+APPROVED_HELPER_SOURCES = ()  # NO approval in this batch, including observed hashes.
+
+
+class EvidenceOS:
+    open, stat, fstat = staticmethod(os.open), staticmethod(os.stat), staticmethod(os.fstat)
+    read, close = staticmethod(os.read), staticmethod(close_checked)
+    scandir, which = staticmethod(os.scandir), staticmethod(shutil.which)
+
+
+class EvidenceFiles:
+    """Root/OS trusted; nofollow read snapshots, not a check-to-exec claim."""
+    def __init__(self, ops=None):
+        self.ops, self.held, self.seen, self.absent = ops if ops is not None else EvidenceOS(), [], {}, set()
+        self.clean, self.first = True, None
+
+    def hold(self, path, directory=False, missing=False):
+        require(self.clean, "c-close")  # no new acquisition after unconfirmed close
+        require(type(path) is str and path.startswith("/") and not any(p in ("", ".", "..") for p in path[1:].split("/")), "c-scan")
+        parent, current = None, ""
+        parts = ["/"] + path[1:].split("/")
+        for index, part in enumerate(parts):
+            current = "/" if index == 0 else current.rstrip("/") + "/" + part
+            is_dir = index < len(parts) - 1 or directory
+            kwargs = {} if parent is None else {"dir_fd": parent.fileno()}
+            try:
+                before = self.ops.stat(part, follow_symlinks=False, **kwargs)
+            except FileNotFoundError:
+                if missing and index == len(parts) - 1:
+                    self.absent.add(current)
+                    return None
+                raise
+            require((stat.S_ISDIR(before.st_mode) if is_dir else stat.S_ISREG(before.st_mode))
+                    and before.st_uid == 0 and not before.st_mode & 0o022, "c-scan")
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | (os.O_DIRECTORY if is_dir else 0)
+            owner = OwnedFD(self.ops.open(part, flags, **kwargs))
+            self.held.append((owner, stable(before)))  # before any subsequent failure
+            require(stable(self.ops.fstat(owner.fileno())) == stable(before), "c-scan")
+            require(current not in self.seen or self.seen[current] == stable(before), "c-scan")
+            self.seen[current] = stable(before)
+            parent = owner
+        return parent
+
+    def bytes(self, owner, limit):
+        before = self.ops.fstat(owner.fileno())
+        require(stat.S_ISREG(before.st_mode) and 0 <= before.st_size <= limit, "c-scan")
+        chunks, count = [], 0
+        while True:
+            raw = self.ops.read(owner.fileno(), min(65536, limit - count + 1))
+            require(type(raw) is bytes, "c-scan")
+            if not raw:
+                break
+            chunks.append(raw)
+            count += len(raw)
+            require(count <= limit, "c-scan")
+        require(count == before.st_size and stable(self.ops.fstat(owner.fileno())) == stable(before), "c-scan")
+        return b"".join(chunks)
+
+    def close_to(self, mark=0):
+        while len(self.held) > mark:
+            owner, _ = self.held.pop()  # consumption precedes OS close; never retry
+            try:
+                owner.close(self.ops.close)
+            except BaseException as error:
+                self.clean, self.first = False, self.first or error
+
+    def read(self, path, limit):
+        mark = len(self.held)
+        try:
+            return self.bytes(self.hold(path), limit)
+        finally:
+            self.close_to(mark)
+
+    def names(self, path):
+        mark = len(self.held)
+        try:
+            owner = self.hold(path, directory=True)
+            names = []
+            with self.ops.scandir(owner.fileno()) as entries:
+                for entry in entries:
+                    require(len(names) < 65536, "c-scan")
+                    names.append(entry.name)
+            return names
+        finally:
+            self.close_to(mark)
+
+    def recheck(self):
+        for path, before in self.seen.items():
+            require(stable(self.ops.stat(path, follow_symlinks=False)) == before, "c-scan")
+        for path in self.absent:
+            try:
+                self.ops.stat(path, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            raise Failure("c-scan")
+        for owner, before in self.held:
+            require(stable(self.ops.fstat(owner.fileno())) == before, "c-scan")
+
+    def empty_directory(self, path):
+        mark = len(self.held)
+        try:
+            owner = self.hold(path, directory=True, missing=True)
+            state = "absent"
+            if owner is not None:
+                state = "empty"
+                with self.ops.scandir(owner.fileno()) as entries:
+                    for _ in entries:
+                        state = "nonempty"
+                        break  # refusal needs no successful empty-directory claim
+            self.recheck()
+        except BaseException as error:
+            self.first = self.first or error
+            state = "unknown"
+        finally:
+            self.close_to(mark)
+        return state if self.clean else "unknown"
+
+
+def dpkg_identity(files, path, digest):
+    status = files.read("/var/lib/dpkg/status", 16777216).decode("utf-8")
+    owners, total = [], 0
+    for name in files.names("/var/lib/dpkg/info"):
+        if not name.endswith(".list"):
+            continue
+        require(re.fullmatch(r"[a-z0-9][a-z0-9+.-]{0,63}(?::[a-z0-9-]{1,32})?\.list", name) is not None, "c-scan")
+        raw = files.read("/var/lib/dpkg/info/" + name, 4194304)
+        total += len(raw)
+        require(total <= 67108864, "c-scan")
+        if path.encode("utf-8") in raw.splitlines():
+            owners.append(name[:-5])
+    require(len(owners) == 1, "c-scan")
+    stem = owners[0]
+    package, _, qualifier = stem.partition(":")
+    records = []
+    for block in status.split("\n\n"):
+        fields = {}
+        for line in block.splitlines():
+            if line and not line[0].isspace() and ": " in line:
+                key, value = line.split(": ", 1)
+                require(key not in fields, "c-scan")
+                fields[key] = value
+        if fields.get("Package") == package and (not qualifier or fields.get("Architecture") == qualifier):
+            records.append(fields)
+    require(len(records) == 1 and records[0].get("Status") == "install ok installed", "c-scan")
+    version, arch = records[0].get("Version"), records[0].get("Architecture")
+    require(type(version) is str and re.fullmatch(r"[0-9][A-Za-z0-9.+:~\-]{0,127}", version)
+            and type(arch) is str and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", arch), "c-scan")
+    sums = files.read("/var/lib/dpkg/info/" + stem + ".md5sums", 4194304).decode("ascii")
+    expected = [line[:32] for line in sums.splitlines()
+                if re.fullmatch(r"[a-f0-9]{32}  " + re.escape(path[1:]), line)]
+    require(len(expected) == 1, "c-scan")
+    return package, version, arch, "match" if expected[0] == digest else "mismatch"
+
+
+class HelperProbe:
+    def __init__(self, ops=None, package_reader=None):
+        self.files = EvidenceFiles(ops)
+        self.package_reader = package_reader if package_reader is not None else dpkg_identity
+        self.result, self.first, self.clean = {}, None, True
+
+    def collect(self):
+        try:
+            path = self.files.ops.which("useradd", path=SAFE["PATH"])
+            require(path is not None, "c-scan")
+            owner = self.files.hold(path)
+            require(self.files.ops.fstat(owner.fileno()).st_mode & 0o111, "c-scan")
+            raw = self.files.bytes(owner, 8388608)
+            self.result.update(path_class="/usr/sbin/useradd" if path == "/usr/sbin/useradd" else "other",
+                               sha256=hashlib.sha256(raw).hexdigest(), stability="stable")
+            package, version, arch, binding = self.package_reader(self.files, path,
+                hashlib.md5(raw, usedforsecurity=False).hexdigest())
+            self.result.update(package=package, version=version, arch=arch, package_binding=binding)
+            # No allowlist: no proven patch/build/branch or complete hook set.
+            # Do not infer hooks or read defaults; never approve the observation.
+        except BaseException as error:
+            self.first = self.first or error
+        return self.result
+
+    def recheck(self):
+        self.files.recheck()
+
+    def close(self):
+        self.files.close_to()
+        self.clean, self.first = self.files.clean, self.first or self.files.first
+
+
+def evidence_payload(data):
+    data = data if type(data) is dict else {}
+    result = {key: "unknown" for key in ("path_class", "package", "version", "arch", "sha256",
+        "stability", "package_binding", "source", "hooks", "precondition")}
+    patterns = {"package": r"[a-z0-9][a-z0-9+.-]{0,63}", "version": r"[0-9][A-Za-z0-9.+:~\-]{0,127}",
+                "arch": r"[a-z0-9][a-z0-9-]{0,31}", "sha256": r"[a-f0-9]{64}"}
+    enums = {"path_class": ("/usr/sbin/useradd", "other"), "stability": ("stable", "changed"),
+             "package_binding": ("match", "mismatch")}
+    for key, value in data.items():
+        if type(key) is str and type(value) is str and ((key in patterns and re.fullmatch(patterns[key], value)) or
+                                  (key in enums and value in enums[key])):
+            result[key] = value
+    return result  # source/precondition always unknown; no self-approval path
+
+
+def emit_helper_evidence(diag, data):
+    require(not diag.helper_evidence_attempted, "c-protocol")
+    diag.helper_evidence_attempted = True
+    line = "HELPER_EVIDENCE " + json.dumps(evidence_payload(data), sort_keys=True, separators=(",", ":"))
+    require(len(line) <= 768, "c-protocol")
+    diag._deliver(diag.report_sink, line)  # narrowly approved non-secret exception
+
+
+def helper_evidence_preflight(diag, probe=None):
+    if probe is None:
+        require(sys.platform == "linux" and os.geteuid() == 0 and os.environ.get("GITHUB_ACTIONS") == "true"
+                and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "c-setup")
+        probe = HelperProbe()
+    data, first = {}, None
+    try:
+        data = probe.collect()
+        first = probe.first
+        probe.recheck()
+    except BaseException as error:
+        first = first or error
+        data.update(stability="changed", sha256="unknown")
+    finally:
+        try:
+            probe.close()
+        except BaseException as error:
+            first, probe.clean = first or error, False
+    first = first or probe.first
+    if not probe.clean:
+        data.update(stability="unknown", sha256="unknown")
+    emit_helper_evidence(diag, data)
+    diag.emit("c-helper-readonly-cleanup-" + ("ok" if probe.clean else "rejected"))
+    diag.emit("c-helper-source-unknown")
+    if first:
+        diag.emit("c-helper-observation-unknown")
+    diag.emit("c-helper-evidence-stop")
+    if isinstance(first, Failure):
+        raise first
+    diag.require_delivery()
+    raise Failure("c-scan" if first or not probe.clean else "c-setup")
+
+
 class ScanOps:
     lstat = staticmethod(os.lstat)
     stat = staticmethod(os.stat)
@@ -712,6 +957,7 @@ class ShortIO(SystemIO):
 
 
 def one_case(kind):
+    helper_evidence_preflight(Diagnostics())  # mandatory C-only stop; no user creation
     import grp
     import pwd
     diag = Diagnostics()
@@ -1067,11 +1313,7 @@ def main():
     os.umask(0o077)
     commands = Commands(diag)
     diag.run("vm-check", lambda: commands.run(["systemd-detect-virt", "--vm"]))
-    # The dedicated workflow installs D-Bus only, never GNOME/Secret Service.
-    for kind in CASES:
-        one_case(kind)
-    diag.report("PASS: synthetic receiver bytes/EOF; owned waits/closes; clear AND complete; no GNOME")
-    diag.require_delivery()
+    helper_evidence_preflight(diag)  # this batch cannot enter any of the 15 cases
 
 
 if __name__ == "__main__":

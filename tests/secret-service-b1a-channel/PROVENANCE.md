@@ -110,3 +110,39 @@ written here, distinguish physical cleanup from incomplete capture/delivery,
 and are not real kernel/output I/O-fault or real-user provisioning evidence.
 No new dependency or license change. All old red evidence remains historical;
 new source requires its own natural CI and formal E/F review.
+
+## C-only helper identity evidence / intentional stop, 2026-10-20
+
+Independently authored from the root-approved evidence-only contract on sole
+parent `8f09f7f402e4acb38bcd4033787d31ac45d367e9`. No user is created by this
+batch. Only fixture.py, test_channel.py and these notes change. Existing argv,
+channel/receiver/workflow, product, PR88/old regressions and trust boundary stay
+unchanged. Root/OS are trusted; observed identity is not source approval and
+does not identify the cause of old exit-option failures. Prior public research
+does not support a strict clean-room claim.
+
+Primary documentation consulted 2026-10-20, used as interface facts, not copied
+implementation:
+
+- [Python 3.12 shutil.which](https://docs.python.org/3.12/library/shutil.html#shutil.which)
+  and [Popen](https://docs.python.org/3.12/library/subprocess.html#subprocess.Popen):
+  explicit POSIX PATH lookup for an unqualified executable and an independent
+  read-only selection, not a new execution or check-to-exec guarantee.
+- [Python 3.12 os](https://docs.python.org/3.12/library/os.html): nofollow held
+  directory/file APIs, complete bounded reads and stable metadata snapshots.
+- [dpkg-query database description](https://manpages.debian.org/bookworm/dpkg/dpkg-query.1.en.html)
+  and [dpkg database/files](https://manpages.debian.org/bookworm/dpkg/dpkg.1.en.html):
+  installed status, ownership lists and metadata consistency, not a package
+  source/build or binary-authenticity assertion. No dpkg/helper process is run.
+
+The contract's one bounded structured non-secret OS-helper identity exception
+is new and explicit; it does not authorize config/hook/raw path/identity/secret
+output or arbitrary-file digests. SHA-256 is the entire selected helper;
+internal MD5 only compares its bytes to dpkg's recorded checksum, with no
+self-approval. No pre-reviewed allowlist exists, so source/no-mailbox/hooks
+remain unknown. No old implementation source was used as a template or ported.
+No new dependency: Python stdlib remains PSF-2.0; installed OS component licenses
+and existing package provenance retain their own terms. No package is added or
+distributed. Public metadata adapters and FD-reuse tests are not real fault
+injection or credential tests. Expected natural red is an intentional stop,
+not retrospectively called PASS; old C/A3 red history remains distinct.

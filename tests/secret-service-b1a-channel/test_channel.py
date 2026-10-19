@@ -5,6 +5,10 @@ import json
 import os
 from pathlib import Path
 import secrets
+import hashlib
+import stat
+import ast
+import inspect
 import subprocess
 import sys
 import tempfile
@@ -590,6 +594,149 @@ class UserCreateExitClasses(unittest.TestCase):
         self.assertTrue(commands.diag.delivery_failed)
 
 
+class HelperEvidenceRegressions(unittest.TestCase):
+    def record(self, **changes):
+        result = dict(path_class="/usr/sbin/useradd", package="passwd", version="1:4.13+fixture-1",
+                      arch="amd64", sha256="a" * 64, stability="stable", package_binding="match",
+                      source="unknown", hooks="unknown", precondition="unknown")
+        result.update(changes)
+        return result
+
+    def test_every_observation_stops_before_user_creation_and_never_self_approves(self):
+        for changes in ({}, {"stability": "changed"}, {"package_binding": "mismatch"},
+                        {"path_class": "unknown"}, {"hooks": "nonempty"}, {"hooks": "unknown"},
+                        {"precondition": "unknown"}, {"source": "approved", "precondition": "satisfied"}):
+            lines, reports, created, cleaned = [], [], [], []
+            data = self.record(**changes)
+            class Probe:
+                first = None
+                clean = True
+                def __bool__(self): return False  # never fall back to real OS
+                def collect(self):
+                    return data
+                def recheck(self):
+                    pass
+                def close(self):
+                    cleaned.append(True)
+            diag = fixture.Diagnostics(sink=lines.append, report_sink=reports.append)
+            with self.assertRaisesRegex(c.Failure, "c-setup"):
+                fixture.helper_evidence_preflight(diag, Probe())
+                created.append(True)
+            self.assertEqual(created, [])
+            self.assertEqual(cleaned, [True])
+            self.assertEqual(len(reports), 1)
+            payload = json.loads(reports[0].removeprefix("HELPER_EVIDENCE "))
+            self.assertEqual(payload["source"], "unknown")
+            self.assertEqual(payload["precondition"], "unknown")
+            self.assertIn("c-helper-evidence-stop", lines)
+            self.assertFalse(any("C_CASE_" in line or line.startswith("PASS:") for line in reports))
+
+    def test_structured_exception_is_bounded_filtered_and_once_only(self):
+        reports = []
+        diag = fixture.Diagnostics(sink=lambda _: None, report_sink=reports.append)
+        data = self.record(package="BAD/path\n" + PUBLIC.decode(), version="x" * 1000,
+                           arch="unsafe/arch", sha256=PUBLIC.decode(), path_class="/private/bait")
+        fixture.emit_helper_evidence(diag, data)
+        self.assertLessEqual(len(reports[0]), 768)
+        self.assertNotIn(PUBLIC.decode(), reports[0])
+        self.assertNotIn("/private/bait", reports[0])
+        payload = json.loads(reports[0].removeprefix("HELPER_EVIDENCE "))
+        self.assertTrue(all(payload[key] == "unknown" for key in ("package", "version", "arch", "sha256", "path_class")))
+        with self.assertRaises(c.Failure):
+            fixture.emit_helper_evidence(diag, self.record())
+        self.assertEqual(len(reports), 1)
+
+    def test_sink_failure_is_sticky_and_cleanup_precedes_the_only_attempt(self):
+        events, created = [], []
+        data = self.record()
+        class Probe:
+            first = None
+            clean = True
+            def collect(self): return data
+            def recheck(self): pass
+            def close(self): events.append("closed")
+        def bad_sink(_):
+            events.append("report")
+            raise OSError("public output bait")
+        diag = fixture.Diagnostics(sink=lambda _: None, report_sink=bad_sink)
+        with self.assertRaisesRegex(c.Failure, "c-capture"):
+            fixture.helper_evidence_preflight(diag, Probe())
+            created.append(True)
+        self.assertEqual(events, ["closed", "report"])
+        self.assertEqual(created, [])
+        self.assertTrue(diag.delivery_failed)
+
+    def test_drift_and_cleanup_failure_do_not_replace_primary_or_create(self):
+        primary, created, closed = c.Failure("c-identity"), [], []
+        data = self.record()
+        class Probe:
+            first = primary
+            clean = False
+            def collect(self): return data
+            def recheck(self): raise c.Failure("c-scan")
+            def close(self): closed.append(True)
+        reports, lines = [], []
+        diag = fixture.Diagnostics(sink=lines.append, report_sink=reports.append)
+        with self.assertRaises(c.Failure) as caught:
+            fixture.helper_evidence_preflight(diag, Probe())
+            created.append(True)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(created, [])
+        self.assertEqual(closed, [True])
+        self.assertIn("c-helper-readonly-cleanup-rejected", lines)
+        self.assertEqual(json.loads(reports[0].removeprefix("HELPER_EVIDENCE "))["sha256"], "unknown")
+
+    def package_files(self, extra_owner=False, checksum="match", installed=True):
+        digest = hashlib.md5(b"public-helper", usedforsecurity=False).hexdigest()
+        data = {"/var/lib/dpkg/status": ("Package: passwd\nStatus: " +
+            ("install ok installed" if installed else "deinstall ok config-files") +
+            "\nVersion: 1:4.13+fixture-1\nArchitecture: amd64\n\n").encode(),
+            "/var/lib/dpkg/info/passwd.list": b"/usr/sbin/useradd\n",
+            "/var/lib/dpkg/info/passwd.md5sums": ((digest if checksum == "match" else "0" * 32) +
+                "  usr/sbin/useradd\n").encode()}
+        names = ["passwd.list", "passwd.md5sums"]
+        if extra_owner:
+            names.append("other.list")
+            data["/var/lib/dpkg/info/other.list"] = b"/usr/sbin/useradd\n"
+        class Files:
+            def names(self, path): return names
+            def read(self, path, limit):
+                value = data[path]
+                c.require(len(value) <= limit, "c-scan")
+                return value
+        return Files(), digest
+
+    def test_dpkg_metadata_match_is_observation_not_approval(self):
+        files, digest = self.package_files()
+        self.assertEqual(fixture.dpkg_identity(files, "/usr/sbin/useradd", digest),
+                         ("passwd", "1:4.13+fixture-1", "amd64", "match"))
+
+    def test_dpkg_checksum_mismatch_and_ambiguous_owner_refuse(self):
+        files, digest = self.package_files(checksum="mismatch")
+        self.assertEqual(fixture.dpkg_identity(files, "/usr/sbin/useradd", digest)[3], "mismatch")
+        for kwargs in ({"extra_owner": True}, {"installed": False}):
+            files, digest = self.package_files(**kwargs)
+            with self.assertRaises(c.Failure):
+                fixture.dpkg_identity(files, "/usr/sbin/useradd", digest)
+
+    def test_unknown_hook_or_source_cannot_gain_approval(self):
+        payload = fixture.evidence_payload(self.record(source="approved", hooks="empty", precondition="satisfied"))
+        self.assertEqual(payload["source"], "unknown")
+        self.assertEqual(payload["precondition"], "unknown")
+        self.assertEqual(payload["hooks"], "unknown")
+        self.assertEqual(fixture.APPROVED_HELPER_SOURCES, ())
+
+    def test_all_real_entrypoints_stop_before_legacy_user_create_and_cases(self):
+        main = ast.parse(inspect.getsource(fixture.main))
+        case = ast.parse(inspect.getsource(fixture.one_case)).body[0]
+        self.assertIsInstance(case.body[0], ast.Expr)
+        self.assertEqual(case.body[0].value.func.id, "helper_evidence_preflight")
+        calls = [node.func.id for node in ast.walk(main) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+        self.assertIn("helper_evidence_preflight", calls)
+        self.assertNotIn("one_case", calls)
+        self.assertNotIn("finish_case", calls)
+
+
 class RawHelperHandoffRegressions(unittest.TestCase):
     class Stream:
         def __init__(self, fail=False):
@@ -784,6 +931,220 @@ class RawHelperHandoffRegressions(unittest.TestCase):
         self.assertEqual((process.polls, process.waits), (1, 1))
         self.assertEqual((process.stdout.calls, process.stderr.calls), (1, 1))
         self.assertEqual(callbacks, [True])
+
+
+@unittest.skipUnless(sys.platform == "linux", "Linux held nofollow evidence regressions")
+class EvidenceFileRegressions(unittest.TestCase):
+    def ops(self, helper):
+        # Explicit controlled metadata adapter for public temp fixtures only.
+        # Real runtime EvidenceOS never rewrites owner or directory permissions.
+        from types import SimpleNamespace
+        class PublicOps(fixture.EvidenceOS):
+            reads = 0
+            selected = []
+            @staticmethod
+            def public(raw):
+                values = {name: getattr(raw, name) for name in (
+                    "st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink",
+                    "st_size", "st_mtime_ns", "st_ctime_ns")}
+                values["st_uid"] = 0
+                if stat.S_ISDIR(values["st_mode"]):
+                    values["st_mode"] &= ~0o022
+                return SimpleNamespace(**values)
+            @staticmethod
+            def stat(*args, **kwargs): return PublicOps.public(os.stat(*args, **kwargs))
+            @staticmethod
+            def fstat(fd): return PublicOps.public(os.fstat(fd))
+            @staticmethod
+            def which(command, path):
+                PublicOps.selected.append((command, path))
+                return str(helper)
+            @staticmethod
+            def read(fd, count):
+                PublicOps.reads += 1
+                return os.read(fd, count)
+        return PublicOps
+
+    def helper(self, root):
+        path = root / "public-helper"
+        path.write_bytes(b"public-helper-never-executed")
+        path.chmod(0o755)
+        return path
+
+    def probe(self, path, ops=None):
+        return fixture.HelperProbe(ops=(ops or self.ops(path))(),
+            package_reader=lambda *args: ("passwd", "1:4.13+fixture-1", "amd64", "match"))
+
+    def test_whole_stable_object_hash_same_path_environment_no_execution(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = self.helper(Path(name))
+            ops = self.ops(path)
+            probe = self.probe(path, ops)
+            result = probe.collect()
+            probe.recheck()
+            probe.close()
+            self.assertIsNone(probe.first)
+            self.assertTrue(probe.clean)
+            self.assertEqual(ops.selected, [("useradd", fixture.SAFE["PATH"])])
+            self.assertEqual(result["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+            self.assertEqual(fixture.evidence_payload(result)["source"], "unknown")
+
+    def test_unknown_identity_no_create(self):
+        class Missing(fixture.EvidenceOS):
+            which = staticmethod(lambda *args, **kwargs: None)
+        probe = fixture.HelperProbe(ops=Missing())
+        reports, created = [], []
+        with self.assertRaises(c.Failure):
+            fixture.helper_evidence_preflight(fixture.Diagnostics(sink=lambda _: None,
+                report_sink=reports.append), probe)
+            created.append(True)
+        self.assertEqual(created, [])
+        self.assertEqual(json.loads(reports[0].removeprefix("HELPER_EVIDENCE "))["sha256"], "unknown")
+
+    def test_final_symlink_and_parent_symlink_refused(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            path = self.helper(root)
+            leaf = root / "leaf-link"
+            leaf.symlink_to(path)
+            parent = root / "parent-link"
+            parent.symlink_to(root, target_is_directory=True)
+            for candidate in (leaf, parent / path.name):
+                probe = self.probe(candidate)
+                self.assertNotIn("sha256", probe.collect())
+                probe.close()
+                self.assertIsNotNone(probe.first)
+
+    def test_wrong_owner_or_writable_or_nonexecutable_object_refused(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = self.helper(Path(name))
+            for mode in (0o777, 0o644):
+                path.chmod(mode)
+                probe = self.probe(path)
+                self.assertNotIn("sha256", probe.collect())
+                probe.close()
+                self.assertIsNotNone(probe.first)
+            path.chmod(0o755)
+            base = self.ops(path)
+            class WrongOwner(base):
+                @staticmethod
+                def stat(*args, **kwargs):
+                    result = base.stat(*args, **kwargs)
+                    if stat.S_ISREG(result.st_mode): result.st_uid = 1
+                    return result
+            probe = self.probe(path, WrongOwner)
+            self.assertNotIn("sha256", probe.collect())
+            probe.close()
+
+    def test_short_read_never_reports_partial_fingerprint(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = self.helper(Path(name))
+            class Short(self.ops(path)):
+                read = staticmethod(lambda *args: b"")
+            probe = self.probe(path, Short)
+            self.assertNotIn("sha256", probe.collect())
+            probe.close()
+            self.assertIsNotNone(probe.first)
+
+    def test_post_check_object_replacement_refuses_and_cleans(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            path = self.helper(root)
+            reports, created = [], []
+            base = self.probe(path)
+            class Rebound:
+                first = None
+                clean = True
+                def collect(self): return base.collect()
+                def recheck(self):
+                    path.rename(root / "old-public")
+                    path.write_bytes(b"public-replacement")
+                    path.chmod(0o755)
+                    base.recheck()
+                def close(self):
+                    base.close()
+                    self.clean = base.clean
+            with self.assertRaises(c.Failure):
+                fixture.helper_evidence_preflight(fixture.Diagnostics(sink=lambda _: None,
+                    report_sink=reports.append), Rebound())
+                created.append(True)
+            self.assertEqual(created, [])
+            payload = json.loads(reports[0].removeprefix("HELPER_EVIDENCE "))
+            self.assertEqual((payload["stability"], payload["sha256"]), ("changed", "unknown"))
+            self.assertEqual(base.files.held, [])
+
+    def test_hook_missing_or_empty_requires_complete_stable_parent_and_fd(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            empty = root / "empty"
+            empty.mkdir()
+            files = fixture.EvidenceFiles(self.ops(root / "unused")())
+            self.assertEqual(files.empty_directory(str(root / "absent")), "absent")
+            self.assertEqual(files.empty_directory(str(empty)), "empty")
+            self.assertEqual(files.held, [])
+            self.assertTrue(files.clean)
+
+    def test_hook_nonempty_symlink_or_enumeration_failure_refused(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            nonempty = root / "nonempty"
+            nonempty.mkdir()
+            (nonempty / "public-hook-never-executed").write_bytes(b"public")
+            link = root / "link"
+            link.symlink_to(nonempty, target_is_directory=True)
+            files = fixture.EvidenceFiles(self.ops(root / "unused")())
+            self.assertEqual(files.empty_directory(str(nonempty)), "nonempty")
+            self.assertEqual(files.empty_directory(str(link)), "unknown")
+            class Unreadable(self.ops(root / "unused")):
+                @staticmethod
+                def scandir(fd): raise PermissionError("public enumeration refusal")
+            broken = fixture.EvidenceFiles(Unreadable())
+            self.assertEqual(broken.empty_directory(str(nonempty)), "unknown")
+            self.assertEqual(broken.held, [])
+
+    def test_hook_rebind_during_enumeration_never_accepts_empty(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            path = root / "hook-dir"
+            path.mkdir()
+            class Rebound(self.ops(root / "unused")):
+                @staticmethod
+                def scandir(fd):
+                    entries = os.scandir(fd)
+                    path.rename(root / "old-dir")
+                    path.mkdir()
+                    return entries
+            files = fixture.EvidenceFiles(Rebound())
+            self.assertEqual(files.empty_directory(str(path)), "unknown")
+            self.assertEqual(files.held, [])
+
+    def test_evidence_close_after_release_never_retries_reused_sentinel(self):
+        with tempfile.TemporaryDirectory() as name, tempfile.TemporaryFile() as sentinel:
+            path = self.helper(Path(name))
+            sentinel.write(b"public-evidence-sentinel")
+            sentinel.flush()
+            replacements, calls = [], []
+            class Released(self.ops(path)):
+                @staticmethod
+                def close(fd):
+                    calls.append(fd)
+                    os.close(fd)
+                    if not replacements:
+                        os.dup2(sentinel.fileno(), fd)
+                        replacements.append(c.OwnedFD(fd))
+                        raise OSError("public close-after-release refusal")
+            probe = self.probe(path, Released)
+            with self.assertRaises(c.Failure):
+                fixture.helper_evidence_preflight(fixture.Diagnostics(sink=lambda _: None,
+                    report_sink=lambda _: None), probe)
+            fd = replacements[0].fileno()
+            before = list(calls)
+            probe.close()
+            self.assertEqual(calls, before)
+            self.assertEqual(calls.count(fd), 1)
+            os.lseek(fd, 0, os.SEEK_SET)
+            self.assertEqual(os.read(fd, 64), b"public-evidence-sentinel")
+            replacements[0].close()
 
 
 @unittest.skipUnless(sys.platform == "linux", "Linux anonymous pipe/procfs required")
