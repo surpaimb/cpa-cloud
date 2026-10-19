@@ -46,16 +46,70 @@ def writer_normalized_tree():
 
 def without_crash_command(tree):
     """Freeze all parent source outside the expressly authorized diagnostics."""
-    additions = {"CRASH_SCHEMA", "CRASH_DIAGNOSTICS", "crash_result", "fixed_child_failures", "JOURNAL_FAILURES", "JOURNAL_POINT_FAILURES"}
+    additions = {"CRASH_SCHEMA", "CRASH_DIAGNOSTICS", "crash_result", "fixed_child_failures", "JOURNAL_FAILURES", "JOURNAL_POINT_FAILURES", "JOURNAL_ACL_FAILURES"}
     tree.body = [node for node in tree.body if not (
         isinstance(node, ast.FunctionDef) and node.name in additions or
         isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in additions for target in node.targets) or
         isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and isinstance(node.value, ast.Name)
         and (node.target.id, node.value.id) in (("DIAGNOSTICS", "CRASH_DIAGNOSTICS"), ("RUST_FAILURES", "JOURNAL_FAILURES"),
-                                              ("RUST_FAILURES", "JOURNAL_POINT_FAILURES")))]
+                                              ("RUST_FAILURES", "JOURNAL_POINT_FAILURES"), ("RUST_FAILURES", "JOURNAL_ACL_FAILURES")))]
     owner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Children")
     owner.body = [node for node in owner.body if not (isinstance(node, ast.FunctionDef) and node.name == "command")]
     return tree
+
+
+def without_acl_parent(tree):
+    """The only new parent operations are a static tuple and whitelist append."""
+    tree.body = [node for node in tree.body if not (
+        isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "JOURNAL_ACL_FAILURES" for target in node.targets) or
+        isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "RUST_FAILURES"
+        and isinstance(node.value, ast.Name) and node.value.id == "JOURNAL_ACL_FAILURES")]
+    return tree
+
+
+def without_acl_driver(source):
+    region = r"// A3_ACL_DETAILS_START\n[\s\S]*?// A3_ACL_DETAILS_END\n\n"
+    if len(re.findall(region, source)) != 1:
+        raise AssertionError("one-acl-detail-region")
+    return re.sub(region, "", source)
+
+
+def without_acl_core(source):
+    """Restore only the exact authorized cfg(test) additions to the #6 source."""
+    imports = r"    // A3_ACL_DETAILS_IMPORT_START\n[\s\S]*?    // A3_ACL_DETAILS_IMPORT_END\n\n"
+    if len(re.findall(imports, source)) != 1:
+        raise AssertionError("one-acl-detail-import")
+    source = re.sub(imports, "", source)
+    for name in ("verify_private_directory", "require_no_posix_acl", "verify_private_file"):
+        new = f'''    fn {name}(
+        file: &File,
+        display: &Path,
+        #[cfg(test)] role: JournalAclRole,
+    ) -> Result<(), CleanupJournalError> {{'''
+        old = f"    fn {name}(file: &File, display: &Path) -> Result<(), CleanupJournalError> {{"
+        if source.count(new) != 1:
+            raise AssertionError("one-acl-detail-parameter-" + name)
+        source = source.replace(new, old)
+    call = (r"(verify_private_(?:directory|file)|require_no_posix_acl)\(\n"
+            r" +([&a-z_]+),\n +([&a-z_]+),\n +#\[cfg\(test\)\]\n"
+            r" +(?:JournalAclRole::[A-Za-z]+|role),\n +\)")
+    if len(re.findall(call, source)) != 9:
+        raise AssertionError("nine-acl-detail-arguments")
+    source = re.sub(call, r"\1(\2, \3)", source)
+    new = '''                #[cfg(test)]
+                {
+                    let attribute = if name == c"system.posix_acl_access" {
+                        JournalAclAttribute::Access
+                    } else {
+                        JournalAclAttribute::Default
+                    };
+                    journal_acl_conflict(role, attribute, result == 0);
+                }'''
+    old = '''                #[cfg(test)]
+                journal_conflict(JournalConflictPoint::PosixAclPresent);'''
+    if source.count(new) != 1:
+        raise AssertionError("one-acl-detail-branch")
+    return source.replace(new, old)
 
 
 class FixtureTests(unittest.TestCase):
@@ -347,7 +401,7 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual([ast.dump(node) for node in gates], [ast.dump(expected)])
 
     def test_journal_batch_freezes_parent_except_fixed_labels_and_noncrash_filter(self):
-        tree = ast.parse((HERE / "fixture.py").read_text())
+        tree = without_acl_parent(ast.parse((HERE / "fixture.py").read_text()))
         tree.body = [node for node in tree.body if not (
             isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in ("JOURNAL_FAILURES", "JOURNAL_POINT_FAILURES") for target in node.targets) or
             isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "RUST_FAILURES"
@@ -363,7 +417,7 @@ class FixtureTests(unittest.TestCase):
                          "c90cb8fe9573be237572c4723c5486313f1ff65b1822f67652c8a258c6a59c0b")
 
     def test_journal_result_diagnostics_are_the_only_rust_source_change(self):
-        source = (LIVE / "linux_secret_service_a3_fixture.rs").read_text()
+        source = without_acl_driver((LIVE / "linux_secret_service_a3_fixture.rs").read_text())
         source = re.sub(r"// A3_JOURNAL_POINTS_START\n[\s\S]*?// A3_JOURNAL_POINTS_END\n\n", "", source)
         pattern = r"// A3_JOURNAL_DIAGNOSTICS_START\n([\s\S]*?)// A3_JOURNAL_DIAGNOSTICS_END\n\n"
         regions = re.findall(pattern, source)
@@ -396,7 +450,7 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(len(set(f.JOURNAL_FAILURES)), 39)
 
     def test_point_batch_freezes_entire_parent_supervisor_except_static_tags(self):
-        tree = ast.parse((HERE / "fixture.py").read_text())
+        tree = without_acl_parent(ast.parse((HERE / "fixture.py").read_text()))
         tree.body = [node for node in tree.body if not (
             isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "JOURNAL_POINT_FAILURES" for target in node.targets) or
             isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "RUST_FAILURES"
@@ -405,7 +459,7 @@ class FixtureTests(unittest.TestCase):
                          "0305c697ecbf5d9f969e8ccf87323f6b5e863a05105b34db189007b102e40351")
 
     def test_each_initial_return_point_is_bound_without_changing_predicates_or_io(self):
-        source = (LIVE / "cleanup_journal.rs").read_text()
+        source = without_acl_core((LIVE / "cleanup_journal.rs").read_text())
         points = re.findall(r"^[ ]*#\[cfg\(test\)\]\n[ ]*journal_conflict\(JournalConflictPoint::([A-Za-z]+)\);\n", source, re.M)
         expected = {
             "publish_event": ("pub(super) fn load(", ["RootBinding", "FinalObjectPresent", "PublishedFileRebound", "PublishedDirectoryRebound"]),
@@ -434,7 +488,7 @@ class FixtureTests(unittest.TestCase):
         normalized = normalized.replace(arm, "            Ok(_) => return Err(CleanupJournalError::RecoveryConflict(final_path)),")
         self.assertEqual(hashlib.sha256(normalized.encode()).hexdigest(),
                          "28de114b7883c779fa43db54cbdabe936dab5b6ed965fcc052207db8ac52b2c2")
-        driver = (LIVE / "linux_secret_service_a3_fixture.rs").read_text()
+        driver = without_acl_driver((LIVE / "linux_secret_service_a3_fixture.rs").read_text())
         region = r"// A3_JOURNAL_POINTS_START\n([\s\S]*?)// A3_JOURNAL_POINTS_END\n\n"
         sections = re.findall(region, driver)
         self.assertEqual(len(sections), 1)
@@ -454,6 +508,61 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(len(set(f.JOURNAL_POINT_FAILURES)), 10)
         payload = b"DO-NOT-PRINT " + b" ".join(value.encode() for value in f.JOURNAL_POINT_FAILURES) + b" a3-journal-point-unknown"
         self.assertEqual(set(f.fixed_child_failures(payload)), set(f.JOURNAL_POINT_FAILURES))
+
+    def test_acl_details_freeze_core_io_predicates_returns_and_static_call_roles(self):
+        source = (LIVE / "cleanup_journal.rs").read_text()
+        normalized = without_acl_core(source)
+        self.assertEqual(hashlib.sha256(normalized.encode()).hexdigest(),
+                         "6f718d12669f45fcc2f5f9df6c356126b724ba845700a50e24dff532caeb406e")
+        roles = {
+            "publish_event": ("pub(super) fn load(", ["PendingFile"]),
+            "load_locked": ("fn open_root(", ["CleanupDirectory"]),
+            "open_root": ("fn open_or_create_private_directory(", ["RootDirectory"]),
+            "open_or_create_private_directory": ("fn open_private_directory_at(", ["CleanupDirectory"]),
+            "open_private_directory_at": ("fn open_directory_at(", ["CleanupDirectory"]),
+            "create_private_file_at": ("fn open_private_file_at(", ["PendingFile"]),
+            "open_private_file_at": ("fn open_file_at(", ["EventFile"]),
+        }
+        for name, (end, expected) in roles.items():
+            start = source.index("fn " + name + "(")
+            body = source[start:source.index(end, start)]
+            self.assertEqual(re.findall(r"#\[cfg\(test\)\]\n +JournalAclRole::([A-Za-z]+)", body), expected)
+        body = source.split("    fn require_no_posix_acl(", 1)[1].split("    fn lock_exclusive(", 1)[0]
+        self.assertEqual(body.count("libc::fgetxattr("), 1)
+        self.assertIn('for name in [c"system.posix_acl_access", c"system.posix_acl_default"]', body)
+        self.assertIn("std::ptr::null_mut(), 0)", body)
+        self.assertIn("if result >= 0 {", body)
+        self.assertIn("journal_acl_conflict(role, attribute, result == 0);", body)
+        self.assertIn("if source.raw_os_error() != Some(libc::ENODATA)", body)
+
+    def test_acl_details_freeze_rust_driver_except_typed_fixed_reporter_and_tests(self):
+        source = (LIVE / "linux_secret_service_a3_fixture.rs").read_text()
+        self.assertEqual(hashlib.sha256(without_acl_driver(source).encode()).hexdigest(),
+                         "d9e5cc9168ee2c196c7f7ba9c39337af2a50d47b6f266fa622a0ad3ceb3bd72c")
+        region = source.split("// A3_ACL_DETAILS_START\n", 1)[1].split("// A3_ACL_DETAILS_END", 1)[0]
+        helpers = region.split("#[cfg(test)]")[0]
+        for forbidden in ("fs::", "fgetxattr(", "metadata(", ".read(", ".display(", "raw_os_error(", "format!", "std::env", "Path", "i64", "isize", "usize"):
+            self.assertNotIn(forbidden, helpers)
+        self.assertIn("role: JournalAclRole", helpers)
+        self.assertIn("attribute: JournalAclAttribute", helpers)
+        self.assertIn("is_zero: bool", helpers)
+        self.assertEqual(helpers.count("journal_point_to_emit(JournalConflictPoint::PosixAclPresent)?"), 1)
+        self.assertIn('let _ = writeln!(io::stderr(), "{label}");', helpers)
+        self.assertEqual(set(re.findall(r'"(a3-[a-z-]+)"', helpers)), set(f.JOURNAL_ACL_FAILURES))
+        for name in ("acl_details_cover_all_roles_attributes_and_nonnegative_shapes",
+                     "acl_details_are_default_off_and_require_initial_scope",
+                     "acl_details_share_first_fault_with_other_points_and_nested_calls",
+                     "acl_details_remain_same_thread_and_scope_restores_on_unwind"):
+            self.assertIn("fn " + name + "()", region)
+
+    def test_acl_details_freeze_parent_and_relay_only_eight_fixed_labels(self):
+        tree = without_acl_parent(ast.parse((HERE / "fixture.py").read_text()))
+        self.assertEqual(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest(),
+                         "406c4359ad1fb0e8a74f027b6710323fdb4301c9a8eb5269222704175ce483ff")
+        self.assertEqual(len(f.JOURNAL_ACL_FAILURES), 8)
+        self.assertEqual(len(set(f.JOURNAL_ACL_FAILURES)), 8)
+        payload = b"DO-NOT-PRINT /private/dummy 123456 a3-acl-result-123456 " + b" ".join(value.encode() for value in f.JOURNAL_ACL_FAILURES)
+        self.assertEqual(set(f.fixed_child_failures(payload)), set(f.JOURNAL_ACL_FAILURES))
 
 
 class WriterTests(unittest.TestCase):

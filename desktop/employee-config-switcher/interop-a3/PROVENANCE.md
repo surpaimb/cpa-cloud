@@ -79,3 +79,22 @@ equivalence guards bind all ten points; public dummy reporting tests are not
 new filesystem fault injections or durable/crash acceptance. Independently
 authored from E/F's bounded contract; standard library only, no dependency or
 license change, production capability or strict clean-room claim.
+
+## Independently bounded ACL query detail tags — 2026-10-19
+
+This separate batch classifies only the existing initial-publish
+[`fgetxattr(fd, name, NULL, 0)` result](https://man7.org/linux/man-pages/man2/getxattr.2.html)
+after the original nonnegative rejection branch has been entered. Four static
+verification-call roles (root directory, cleanup directory, pending file, event
+file), access/default attribute kind, and a zero/nonzero bit select eight fixed
+labels. No ACL value, actual length, path, identity or raw OS number is read or
+reported. Only [cfg(test)](https://doc.rust-lang.org/reference/conditional-compilation.html)
+parameters/arguments transport the role; the existing default-off same-thread
+initial scope and sticky first-point reporter remain authoritative.
+Removing these diagnostic additions restores the prior source byte-for-byte;
+guards also freeze all parent operations except the static whitelist append.
+Public dummy unit/controller/relay tests are not filesystem ACL fault injection,
+inheritance experiments, diagnosis of any historical run, or durable acceptance.
+No environment/ACL/ancestor modification, retry, dependency/license change,
+copied implementation or strict clean-room claim is introduced. Independently
+authored from the original visible E/F bounded contract and public APIs above.

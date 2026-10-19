@@ -464,6 +464,258 @@ mod journal_point_tests {
 }
 // A3_JOURNAL_POINTS_END
 
+// A3_ACL_DETAILS_START
+// Independently authored A3 detail tags for the original nonnegative ACL branch.
+// Roles are static at verification call sites, never derived from a path/fd.
+// Only two unit enums and a zero/nonzero bit reach this reporter; no ACL value,
+// actual length or errno is carried. It shares the existing first-point gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JournalAclRole {
+    RootDirectory,
+    CleanupDirectory,
+    PendingFile,
+    EventFile,
+}
+
+impl JournalAclRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RootDirectory => "a3-acl-role-root-directory",
+            Self::CleanupDirectory => "a3-acl-role-cleanup-directory",
+            Self::PendingFile => "a3-acl-role-pending-file",
+            Self::EventFile => "a3-acl-role-event-file",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JournalAclAttribute {
+    Access,
+    Default,
+}
+
+impl JournalAclAttribute {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Access => "a3-acl-attribute-access",
+            Self::Default => "a3-acl-attribute-default",
+        }
+    }
+}
+
+fn journal_acl_labels_to_emit(
+    role: JournalAclRole,
+    attribute: JournalAclAttribute,
+    is_zero: bool,
+) -> Option<[&'static str; 4]> {
+    let point = journal_point_to_emit(JournalConflictPoint::PosixAclPresent)?;
+    Some([
+        point,
+        role.label(),
+        attribute.label(),
+        if is_zero {
+            "a3-acl-result-zero"
+        } else {
+            "a3-acl-result-nonzero"
+        },
+    ])
+}
+
+pub(crate) fn journal_acl_conflict(
+    role: JournalAclRole,
+    attribute: JournalAclAttribute,
+    is_zero: bool,
+) {
+    if let Some(labels) = journal_acl_labels_to_emit(role, attribute, is_zero) {
+        for label in labels {
+            // Best effort, as before: no write result can replace the original Err.
+            let _ = writeln!(io::stderr(), "{label}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod journal_acl_tests {
+    use super::*;
+
+    struct Reset {
+        enabled: bool,
+        active: bool,
+        first: Option<JournalConflictPoint>,
+    }
+
+    impl Reset {
+        fn new(enabled: bool) -> Self {
+            Self {
+                enabled: ENABLED.with(|value| value.replace(enabled)),
+                active: JOURNAL_INITIAL_ACTIVE.with(|value| value.replace(false)),
+                first: JOURNAL_FIRST_POINT.with(|value| value.replace(None)),
+            }
+        }
+    }
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            JOURNAL_FIRST_POINT.with(|value| value.set(self.first));
+            JOURNAL_INITIAL_ACTIVE.with(|value| value.set(self.active));
+            ENABLED.with(|value| value.set(self.enabled));
+        }
+    }
+
+    #[test]
+    fn acl_details_cover_all_roles_attributes_and_nonnegative_shapes() {
+        let _reset = Reset::new(true);
+        let roles = [
+            (JournalAclRole::RootDirectory, "a3-acl-role-root-directory"),
+            (
+                JournalAclRole::CleanupDirectory,
+                "a3-acl-role-cleanup-directory",
+            ),
+            (JournalAclRole::PendingFile, "a3-acl-role-pending-file"),
+            (JournalAclRole::EventFile, "a3-acl-role-event-file"),
+        ];
+        let attributes = [
+            (JournalAclAttribute::Access, "a3-acl-attribute-access"),
+            (JournalAclAttribute::Default, "a3-acl-attribute-default"),
+        ];
+        let shapes = [
+            (true, "a3-acl-result-zero"),
+            (false, "a3-acl-result-nonzero"),
+        ];
+        for (role, role_label) in roles {
+            for (attribute, attribute_label) in attributes {
+                for (is_zero, shape_label) in shapes {
+                    let _scope = journal_initial_scope();
+                    assert_eq!(
+                        journal_acl_labels_to_emit(role, attribute, is_zero),
+                        Some([
+                            "a3-journal-point-posix-acl-present",
+                            role_label,
+                            attribute_label,
+                            shape_label,
+                        ])
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn acl_details_are_default_off_and_require_initial_scope() {
+        let _reset = Reset::new(false);
+        journal_acl_conflict(
+            JournalAclRole::RootDirectory,
+            JournalAclAttribute::Access,
+            true,
+        );
+        {
+            let _scope = journal_initial_scope();
+            assert_eq!(
+                journal_acl_labels_to_emit(
+                    JournalAclRole::RootDirectory,
+                    JournalAclAttribute::Access,
+                    true
+                ),
+                None
+            );
+        }
+        ENABLED.with(|value| value.set(true));
+        assert_eq!(
+            journal_acl_labels_to_emit(
+                JournalAclRole::EventFile,
+                JournalAclAttribute::Default,
+                false
+            ),
+            None
+        );
+        assert_eq!(JOURNAL_FIRST_POINT.with(Cell::get), None);
+    }
+
+    #[test]
+    fn acl_details_share_first_fault_with_other_points_and_nested_calls() {
+        let _reset = Reset::new(true);
+        {
+            let _scope = journal_initial_scope();
+            assert!(journal_point_to_emit(JournalConflictPoint::RootBinding).is_some());
+            assert_eq!(
+                journal_acl_labels_to_emit(
+                    JournalAclRole::RootDirectory,
+                    JournalAclAttribute::Access,
+                    true
+                ),
+                None
+            );
+        }
+        let _scope = journal_initial_scope();
+        assert!(journal_acl_labels_to_emit(
+            JournalAclRole::PendingFile,
+            JournalAclAttribute::Default,
+            false
+        )
+        .is_some());
+        {
+            let _nested = journal_initial_scope();
+            assert_eq!(
+                journal_acl_labels_to_emit(
+                    JournalAclRole::EventFile,
+                    JournalAclAttribute::Access,
+                    true
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            journal_point_to_emit(JournalConflictPoint::NamespaceSnapshot),
+            None
+        );
+        assert_eq!(
+            JOURNAL_FIRST_POINT.with(Cell::get),
+            Some(JournalConflictPoint::PosixAclPresent)
+        );
+    }
+
+    #[test]
+    fn acl_details_remain_same_thread_and_scope_restores_on_unwind() {
+        let _reset = Reset::new(true);
+        let result = std::panic::catch_unwind(|| {
+            let _scope = journal_initial_scope();
+            assert_eq!(
+                std::thread::spawn(|| journal_acl_labels_to_emit(
+                    JournalAclRole::RootDirectory,
+                    JournalAclAttribute::Access,
+                    true
+                ))
+                .join()
+                .unwrap(),
+                None
+            );
+            assert_eq!(JOURNAL_FIRST_POINT.with(Cell::get), None);
+            assert!(journal_acl_labels_to_emit(
+                JournalAclRole::CleanupDirectory,
+                JournalAclAttribute::Default,
+                true
+            )
+            .is_some());
+            panic!("PUBLIC_DUMMY_ACL_UNWIND");
+        });
+        assert!(result.is_err());
+        assert!(!JOURNAL_INITIAL_ACTIVE.with(Cell::get));
+        assert_eq!(
+            journal_acl_labels_to_emit(
+                JournalAclRole::PendingFile,
+                JournalAclAttribute::Access,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            JOURNAL_FIRST_POINT.with(Cell::get),
+            Some(JournalConflictPoint::PosixAclPresent)
+        );
+    }
+}
+// A3_ACL_DETAILS_END
+
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     static DELETE_SENDS: Cell<usize> = const { Cell::new(0) };
