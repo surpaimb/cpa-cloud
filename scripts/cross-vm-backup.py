@@ -265,7 +265,7 @@ class Harness:
 
     def run_case(self, case, work, master="master-good", backup="backup-good"):
         require(case in CASES)
-        unit = self.user + "-" + case + ".service"
+        unit = getattr(self, "unit_prefix", self.user) + "-" + case + ".service"
         require(self.command(["systemctl", "show", unit, "--property=LoadState", "--value"], check=False).stdout.strip() == b"not-found", "identity")
         if not (work / "tmp").exists():
             private_dir(work / "tmp", self.identity)

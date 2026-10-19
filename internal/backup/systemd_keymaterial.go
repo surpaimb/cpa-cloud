@@ -33,6 +33,10 @@ const (
 
 var systemdKeyMaterialInfoPrefix = []byte("cpa-cloud/backup/v3/linux-systemd-credential/v1\x00")
 
+// ErrSystemdRestoreCleanupIncomplete may accompany a committed valid target.
+// Offline callers must not automatically retry restoration on this error.
+var ErrSystemdRestoreCleanupIncomplete = errors.New("Linux v3 restore cleanup incomplete")
+
 type systemdMasterBinding struct {
 	FormatVersion    uint64 `json:"format_version"`
 	ProviderKind     string `json:"provider_kind"`

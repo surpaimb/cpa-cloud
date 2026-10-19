@@ -1,0 +1,161 @@
+name: Linux systemd v3 offline CLI across independent VMs
+
+on:
+  pull_request:
+    paths:
+      - 'cmd/cpa-cloud-backup/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'scripts/offline-v3-cli*'
+      - 'scripts/cross-vm-backup*'
+      - 'scripts/smoke-linux-systemd-backup*'
+      - '.github/workflows/offline-v3-cli.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/cpa-cloud-backup/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'scripts/offline-v3-cli*'
+      - 'scripts/cross-vm-backup*'
+      - 'scripts/smoke-linux-systemd-backup*'
+      - '.github/workflows/offline-v3-cli.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-v3-cli-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source-a:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact source
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.8'
+          cache: false
+      - name: Independently compile actual CLI and retain native regressions
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          test "$(uname -m)" = x86_64
+          test "$(go env GOHOSTARCH)" = amd64
+          test "$(go env GOARCH)" = amd64
+          [[ "${ImageVersion:-}" =~ ^[0-9]{8}\.[0-9]+\.[0-9]+$ ]]
+          printf 'OFFLINEVM_RUNNER a amd64 ubuntu-24.04 %s\n' "$ImageVersion"
+          python3 -B scripts/cross-vm-backup-test.py
+          python3 -B scripts/offline-v3-cli-test.py
+          go test ./cmd/cpa-cloud-backup -count=1
+          go test -c -o "$RUNNER_TEMP/offline-publication.test" ./internal/backup
+          sudo "$RUNNER_TEMP/offline-publication.test" -test.run '^TestLinuxSystemd' -test.count=1 -test.v
+          go test -c -o "$RUNNER_TEMP/offline-admission.test" ./internal/offlinerecovery
+          sudo "$RUNNER_TEMP/offline-admission.test" -test.run '^TestOffline' -test.count=1 -test.v
+          go test -c -tags cpacloud_systemd_acceptance,cpacloud_crossvm_acceptance -o "$RUNNER_TEMP/offline-service.test" ./internal/service
+          go build -ldflags "-X main.version=$EXPECTED_HEAD" -o "$RUNNER_TEMP/cpa-cloud-backup" ./cmd/cpa-cloud-backup
+      - name: A synthetic source and four-file relay
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,RUNNER_TEMP python3 -B scripts/offline-v3-cli.py a "$RUNNER_TEMP/offline-service.test" "$RUNNER_TEMP/cpa-crossvm-relay" "$EXPECTED_HEAD" "$RUNNER_TEMP/cpa-cloud-backup"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: offline-v3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cpa-crossvm-relay/package.cpacb
+            ${{ runner.temp }}/cpa-crossvm-relay/binding.json
+            ${{ runner.temp }}/cpa-crossvm-relay/foreign-master.capsule
+            ${{ runner.temp }}/cpa-crossvm-relay/vm.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: A local relay cleanup
+        if: always()
+        run: python3 -B scripts/cross-vm-backup.py cleanup-relay "$RUNNER_TEMP/cpa-crossvm-relay"
+
+  restore-b:
+    needs: source-a
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact source
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.8'
+          cache: false
+      - name: Independently compile actual ARM CLI and retain native regressions
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          test "$(uname -m)" = aarch64
+          test "$(go env GOHOSTARCH)" = arm64
+          test "$(go env GOARCH)" = arm64
+          [[ "${ImageVersion:-}" =~ ^[0-9]{8}\.[0-9]+\.[0-9]+$ ]]
+          printf 'OFFLINEVM_RUNNER b arm64 ubuntu-24.04-arm %s\n' "$ImageVersion"
+          python3 -B scripts/offline-v3-cli-test.py
+          go test ./cmd/cpa-cloud-backup -count=1
+          go test -c -o "$RUNNER_TEMP/offline-publication.test" ./internal/backup
+          sudo "$RUNNER_TEMP/offline-publication.test" -test.run '^TestLinuxSystemd' -test.count=1 -test.v
+          go test -c -o "$RUNNER_TEMP/offline-admission.test" ./internal/offlinerecovery
+          sudo "$RUNNER_TEMP/offline-admission.test" -test.run '^TestOffline' -test.count=1 -test.v
+          go test -c -tags cpacloud_systemd_acceptance,cpacloud_crossvm_acceptance -o "$RUNNER_TEMP/offline-service.test" ./internal/service
+          go build -ldflags "-X main.version=$EXPECTED_HEAD" -o "$RUNNER_TEMP/cpa-cloud-backup" ./cmd/cpa-cloud-backup
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: offline-v3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cpa-crossvm-relay
+      - name: B actual CLI, independent reopens and first-failure-stopping negatives
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,RUNNER_TEMP python3 -B scripts/offline-v3-cli.py b "$RUNNER_TEMP/offline-service.test" "$RUNNER_TEMP/cpa-crossvm-relay" "$EXPECTED_HEAD" "$RUNNER_TEMP/cpa-cloud-backup"
+      - name: B local relay cleanup
+        if: always()
+        run: python3 -B scripts/cross-vm-backup.py cleanup-relay "$RUNNER_TEMP/cpa-crossvm-relay"
+
+  relay-cleanup:
+    needs: [source-a, restore-b]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Delete this exact run's relay and verify absence
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            try {
+              const name = 'offline-v3-' + context.runId + '-' + process.env.GITHUB_RUN_ATTEMPT;
+              const args = {owner: context.repo.owner, repo: context.repo.repo, run_id: context.runId, per_page: 100};
+              const before = await github.rest.actions.listWorkflowRunArtifacts(args);
+              if (before.data.total_count > 100) throw new Error();
+              const owned = before.data.artifacts.filter(a => a.name === name);
+              if (owned.length > 1) throw new Error();
+              for (const artifact of owned) {
+                await github.rest.actions.deleteArtifact({owner: context.repo.owner, repo: context.repo.repo, artifact_id: artifact.id});
+              }
+              const after = await github.rest.actions.listWorkflowRunArtifacts(args);
+              if (after.data.total_count > 100 || after.data.artifacts.some(a => a.name === name)) throw new Error();
+              core.info('OFFLINEVM_RELAY_CLEANUP ' + (owned.length ? 'ok' : 'not-created'));
+            } catch {
+              core.setFailed('OFFLINEVM_RELAY_CLEANUP failed');
+            }
