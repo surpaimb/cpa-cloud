@@ -44,6 +44,19 @@ def writer_normalized_tree():
     return tree
 
 
+def without_crash_command(tree):
+    """Freeze all parent source outside the expressly authorized diagnostics."""
+    additions = {"CRASH_SCHEMA", "CRASH_DIAGNOSTICS", "crash_result", "fixed_child_failures"}
+    tree.body = [node for node in tree.body if not (
+        isinstance(node, ast.FunctionDef) and node.name in additions or
+        isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in additions for target in node.targets) or
+        isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "DIAGNOSTICS"
+        and isinstance(node.value, ast.Name) and node.value.id == "CRASH_DIAGNOSTICS")]
+    owner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Children")
+    owner.body = [node for node in owner.body if not (isinstance(node, ast.FunctionDef) and node.name == "command")]
+    return tree
+
+
 class FixtureTests(unittest.TestCase):
     def test_case_matrix_is_bounded_and_sequential(self):
         self.assertEqual(len(f.CASES), 27)
@@ -293,9 +306,9 @@ class FixtureTests(unittest.TestCase):
         self.assertLess(source.index('actions.append(("unit-evidence", unit_evidence))'), source.index('run(["userdel", USER])'))
 
     def test_historical_business_and_capture_flow_except_three_writer_calls(self):
-        tree = writer_normalized_tree()
+        tree = without_crash_command(writer_normalized_tree())
         expected = {"mark_complete": "edc4a3394a6454dd581193a7d10f8b5dcf27c765b12d99bd26857a56c8f0d30a",
-            "Children": "8852f8dc187afea55d1f3750c857de2ff67d63e0212d8cdfe211fbc9f1f75a3c",
+            "Children": "efffdb22637d5c65d444747e1a8936c650bb435eb39b5cfb3a5e2ea8d1a6af00",
             "sequence": "f911d61405158a5c9713d194fce4a9eb0cb255d8e561cdf11caf39b5962f42ca",
             "inside": "f65d41fd5ef811699359ff4beb27b5d8f7190ab9e815bb938b9510b053f3555b",
             "outer": "900f9ecd41c60c6820fc1c475d75fe14bcb9dae954ab03ae9ca11eb846cab28e",
@@ -310,11 +323,27 @@ class FixtureTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(ast.dump(nodes[name], include_attributes=False).encode()).hexdigest(), digest, name)
 
     def test_writer_batch_freezes_entire_parent_module_except_helper_and_three_calls(self):
-        tree = writer_normalized_tree()
+        tree = without_crash_command(writer_normalized_tree())
         tree.body = [node for node in tree.body if not (isinstance(node, (ast.ClassDef, ast.FunctionDef))
                      and node.name in ("PrivateLogWriter", "private_log"))]
         self.assertEqual(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest(),
-                         "7aadb4bfa707f55313195f1f044c2f451bbe0c5e4b9e427c9cfe5b74e8c1a0de")
+                         "f399279f56fbf53a4b795a65bfd258135d032f4b05440472dec9ddb1731347e4")
+
+    def test_crash_batch_freezes_writer_reader_business_and_cleanup(self):
+        source = ast.parse((HERE / "fixture.py").read_text())
+        tree = without_crash_command(ast.parse((HERE / "fixture.py").read_text()))
+        self.assertEqual(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest(),
+                         "d5b5602a7f2720372c31280150783b6e89122a2c51fac09247e6c15fdc862629")
+        owner = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "Children")
+        command = next(node for node in owner.body if isinstance(node, ast.FunctionDef) and node.name == "command")
+        action = next(node for node in command.body if isinstance(node, ast.FunctionDef) and node.name == "action")
+        main_try = next(node for node in action.body if isinstance(node, ast.Try) and node.finalbody)
+        self.assertEqual(hashlib.sha256(ast.dump(ast.Module(body=main_try.finalbody, type_ignores=[]), include_attributes=False).encode()).hexdigest(),
+                         "6be3556bcd8260619ee1692893132c1cd4b2609f63372c3858a774dc6543700c")
+        gates = [node for node in ast.walk(command) if isinstance(node, ast.Call) and len(node.args) == 2
+                 and isinstance(node.args[1], ast.Constant) and node.args[1].value == "a3-crash-not-observed"]
+        expected = ast.parse('require(killed and ready_seen and status == -signal.SIGKILL, "a3-crash-not-observed")', mode="eval").body
+        self.assertEqual([ast.dump(node) for node in gates], [ast.dump(expected)])
 
 
 class WriterTests(unittest.TestCase):
@@ -502,6 +531,142 @@ class WriterTests(unittest.TestCase):
                 self.assertEqual(len(logs), 2)
                 self.assertEqual(signed.call_count, 0 if fault else 2)
                 self.assertEqual(env.closed.call_count, 2)
+
+
+class CrashControlTests(unittest.TestCase):
+    def setUp(self):
+        # Public control-flow model only: Windows has no real POSIX SIGKILL.
+        patch = mock.patch.object(f.signal, "SIGKILL", getattr(f.signal, "SIGKILL", 9), create=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def run_case(self, *, ready_seen=True, boundary_seen=True, status=None, kill_error=None,
+                 owned_error=None, wait_error=None, capture_error=None, close_error=None,
+                 extra=b"DO-NOT-PRINT public-private-path", nested_failure=False):
+        payload = (b"A3_SNAPSHOT_READY\n" if ready_seen else b"") + (b"A3_BOUNDARY terminal\n" if boundary_seen else b"") + extra
+        with WriterTests.environment(self, close_error=close_error) as env:
+            process = mock.Mock()
+            process.wait.return_value = status
+            process.wait.side_effect = wait_error
+            process.kill.side_effect = kill_error
+            process.poll.return_value = 0  # Cleanup is mocked; never signal a real process.
+            selector = mock.Mock()
+            selector.get_map.return_value = True
+            selector.select.return_value = [object()]
+            if capture_error:
+                selector.select.side_effect = [[object()], capture_error]
+            report = f.Report()
+            metadata = dict(work="public-dummy", a3_case="complete-terminal", uid=1, gid=1,
+                            a3_verifier="public-verifier", cpa="public-cpa")
+            children = f.Children(metadata, {}, mock.Mock(), report)
+            def ready():
+                if nested_failure:
+                    report.run("snapshot-target", lambda: (_ for _ in ()).throw(ValueError("DO-NOT-PRINT")))
+            output, result, failure = io.StringIO(), None, None
+            with mock.patch.object(f.subprocess, "Popen", return_value=process) as launched, mock.patch.object(
+                    f.selectors, "DefaultSelector", return_value=selector), mock.patch.object(
+                    f.os, "read", side_effect=[payload, b""]) as read, mock.patch.object(f.os, "fsync"), mock.patch.object(
+                    f.base, "owned_process", side_effect=owned_error) as owned, mock.patch.object(f, "mark_complete") as signed, contextlib.redirect_stdout(output):
+                try:
+                    result = children.command("start", ["public-cpa"], mode="durable-start", crash="terminal", ready=ready)
+                except Exception as error:
+                    failure = error
+            labels = [line.removeprefix("FIXTURE_DIAGNOSTIC ") for line in output.getvalue().splitlines()]
+            for label in labels:
+                self.assertIn(label, f.Fixture.diagnostics)
+            for private in ("DO-NOT-PRINT", "public-private-path", "123456789"):
+                self.assertNotIn(private, output.getvalue())
+            self.assertEqual(launched.call_count, 1)
+            self.assertEqual(env.opened.call_count, 1)
+            self.assertLessEqual(read.call_count, 2)  # No diagnostic reread of output.
+            self.assertLessEqual(process.wait.call_count, 1)
+            self.assertLessEqual(process.kill.call_count, 1)
+            return types.SimpleNamespace(result=result, error=failure, labels=labels, report=report,
+                killed=process.kill.call_count, owned=owned.call_count, waited=process.wait.call_count, signed=signed.call_count)
+
+    def assert_result(self, case, result):
+        self.assertEqual([label for label in case.labels if label.startswith("a3-crash-result-")], ["a3-crash-result-" + result])
+
+    def test_expected_sigkill_keeps_exact_gate_and_does_not_screen_error_tags(self):
+        case = self.run_case(status=-f.signal.SIGKILL, extra=b"DO-NOT-PRINT a3-journal-create\n")
+        self.assertIsNone(case.error)
+        self.assertIsNone(case.report.first)
+        self.assertEqual((case.owned, case.killed, case.waited, case.signed), (1, 1, 1, 1))
+        self.assert_result(case, "expected-sigkill")
+        self.assertIn("a3-crash-exit-sigkill", case.labels)
+        self.assertIn("a3-crash-rust-labels-not-screened", case.labels)
+        self.assertNotIn("a3-journal-create", case.labels)
+
+    def test_early_exit_without_boundary_retains_whitelist_and_complete_capture(self):
+        for status in (0, 123456789, -f.signal.SIGTERM, -f.signal.SIGKILL):
+            with self.subTest(status=status):
+                case = self.run_case(boundary_seen=False, status=status, extra=b"DO-NOT-PRINT a3-journal-create\nUNTRUSTED-a3-fake-tag")
+                self.assertIsNotNone(case.error)
+                self.assertEqual(case.report.first, "start")
+                self.assert_result(case, "early-exit")
+                self.assertIn("a3-crash-boundary-not-reached", case.labels)
+                self.assertIn("a3-crash-capture-eof-wait-complete", case.labels)
+                self.assertIn("a3-crash-rust-labels-present", case.labels)
+                self.assertIn("a3-journal-create", case.labels)
+                self.assertEqual((case.owned, case.killed, case.waited, case.signed), (0, 0, 1, 1))
+
+    def test_missing_ready_or_other_exit_never_becomes_expected_sigkill(self):
+        case = self.run_case(ready_seen=False, status=-f.signal.SIGKILL)
+        self.assertIsNotNone(case.error)
+        self.assert_result(case, "ready-not-seen")
+        for status, exit_class in ((0, "clean"), (123456789, "nonzero"), (-f.signal.SIGTERM, "other-signal")):
+            with self.subTest(exit_class=exit_class):
+                case = self.run_case(status=status)
+                self.assertIsNotNone(case.error)
+                self.assert_result(case, "other-exit")
+                self.assertIn("a3-crash-exit-" + exit_class, case.labels)
+                self.assertIn("a3-crash-kill-returned", case.labels)
+                self.assertIn("a3-crash-rust-labels-absent", case.labels)
+
+    def test_kill_identity_or_kill_exception_is_not_completed_and_not_retried(self):
+        for identity in (True, False):
+            with self.subTest(identity=identity):
+                kwargs = {"owned_error" if identity else "kill_error": OSError("DO-NOT-PRINT")}
+                case = self.run_case(status=-f.signal.SIGKILL, **kwargs)
+                self.assertIsNotNone(case.error)
+                self.assert_result(case, "kill-not-completed")
+                self.assertIn("a3-crash-boundary-seen", case.labels)
+                self.assertIn("a3-crash-kill-not-completed", case.labels)
+                self.assertIn("a3-crash-exit-not-observed", case.labels)
+                self.assertEqual((case.owned, case.killed, case.waited, case.signed), (1, 0 if identity else 1, 0, 0))
+
+    def test_wait_and_capture_failure_reuse_partial_memory_and_forbid_completion(self):
+        for phase, error in (("wait", subprocess.TimeoutExpired("DO-NOT-PRINT", 1)), ("wait", OSError("DO-NOT-PRINT")),
+                             ("capture", TimeoutError("DO-NOT-PRINT")), ("capture", OSError("DO-NOT-PRINT"))):
+            with self.subTest(phase=phase, kind=type(error).__name__):
+                case = self.run_case(status=-f.signal.SIGKILL, extra=b"DO-NOT-PRINT a3-journal-create\n", **{phase + "_error": error})
+                self.assertIsNotNone(case.error)
+                self.assert_result(case, phase + "-failed")
+                self.assertIn("a3-journal-create", case.labels)
+                self.assertIn("a3-crash-capture-incomplete", case.labels)
+                self.assertIn("a3-crash-exit-not-observed", case.labels)
+                self.assertEqual(case.signed, 0)
+                self.assertEqual(case.waited, int(phase == "wait"))
+
+    def test_nested_first_fault_and_crash_result_survive_cleanup_failure(self):
+        case = self.run_case(status=-f.signal.SIGKILL, nested_failure=True, close_error=OSError("DO-NOT-PRINT"))
+        self.assertIsNotNone(case.error)
+        self.assertEqual(case.report.first, "snapshot-target")
+        self.assert_result(case, "capture-failed")
+        self.assertEqual(case.report.states["handles"], "failed")
+        self.assertEqual(case.signed, 0)
+        case = self.run_case(status=-f.signal.SIGKILL, kill_error=OSError("DO-NOT-PRINT"), close_error=OSError("DO-NOT-PRINT"))
+        self.assertEqual(case.report.first, "start")
+        self.assert_result(case, "kill-not-completed")
+
+    def test_result_schema_has_no_raw_status_and_boundary_absence_is_explicit(self):
+        values = f.crash_result(False, False, False, None, False)
+        self.assertEqual(values["result"], "boundary-not-reached")
+        self.assertEqual(values["exit"], "not-observed")
+        for field, value in values.items():
+            self.assertIn(value, f.CRASH_SCHEMA[field])
+        with self.assertRaises(f.base.PreflightFailure):
+            f.crash_result(False, False, False, None, False, "DO-NOT-PRINT")
 
 
 class ReaderTests(unittest.TestCase):

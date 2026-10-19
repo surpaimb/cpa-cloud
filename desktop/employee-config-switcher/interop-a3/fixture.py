@@ -169,6 +169,53 @@ DIAGNOSTICS += EVIDENCE_LABELS + EVIDENCE_FIRST_LABELS + tuple(
     "a3-evidence-summary-" + scope + "-" + category + "-" + result for scope in EVIDENCE_SCOPES
     for category in INTEGRITY_CATEGORIES for result in ("not-reached", "complete", "incomplete"))
 
+# Independent bounded parent crash-result batch, 2026-10-19. Classify only
+# existing in-memory observations; never output raw status, text or identity.
+# https://docs.python.org/3.12/library/subprocess.html#subprocess.Popen.returncode
+CRASH_SCHEMA = {
+    "ready": ("seen", "not-seen"), "boundary": ("seen", "not-reached"),
+    "kill": ("returned", "not-completed"), "wait": ("returned", "not-completed"),
+    "capture": ("eof-wait-complete", "incomplete"),
+    "exit": ("not-observed", "clean", "nonzero", "sigkill", "other-signal"),
+    "result": ("expected-sigkill", "boundary-not-reached", "early-exit", "kill-not-completed",
+               "ready-not-seen", "other-exit", "wait-failed", "capture-failed"),
+    "rust-labels": ("not-screened", "present", "absent"),
+}
+CRASH_DIAGNOSTICS = tuple("a3-crash-" + field + "-" + value for field, values in CRASH_SCHEMA.items() for value in values)
+DIAGNOSTICS += CRASH_DIAGNOSTICS
+
+
+def crash_result(ready_seen, boundary_seen, killed, status, fully_captured, failed_phase=None):
+    require(failed_phase in (None, "capture", "kill", "wait"), "a3-category-invalid")
+    exit_class = ("not-observed" if status is None else "sigkill" if status == -signal.SIGKILL else
+                  "clean" if status == 0 else "other-signal" if status < 0 else "nonzero")
+    if failed_phase == "wait":
+        result = "wait-failed"
+    elif failed_phase == "kill":
+        result = "kill-not-completed"
+    elif failed_phase == "capture":
+        result = "capture-failed"
+    elif killed and ready_seen and status == -signal.SIGKILL:
+        result = "expected-sigkill"  # Same proof predicate as the unchanged gate.
+    elif not boundary_seen:
+        result = "boundary-not-reached" if status is None else "early-exit"
+    elif not killed:
+        result = "kill-not-completed"
+    elif not ready_seen:
+        result = "ready-not-seen"
+    else:
+        result = "other-exit"
+    return {"ready": "seen" if ready_seen else "not-seen", "boundary": "seen" if boundary_seen else "not-reached",
+            "kill": "returned" if killed else "not-completed", "wait": "returned" if status is not None else "not-completed",
+            "capture": "eof-wait-complete" if fully_captured else "incomplete", "exit": exit_class, "result": result}
+
+
+def fixed_child_failures(content):
+    # Reuse only captured bytes and the pre-existing source whitelist.
+    # Keep the digit inside existing a3-* labels; never widen the whitelist.
+    tokens = set(re.findall(rb"[a-z][a-z0-9-]*", content))
+    return tuple(fixed for fixed in RUST_FAILURES + volatile.PANICS if fixed.encode() in tokens)
+
 
 def labels(case):
     if case == "exact":
@@ -620,9 +667,29 @@ class Children:
                                        stderr=subprocess.STDOUT)
             self.processes[label] = process
             content, ready_seen, killed, fully_captured = bytearray(), False, False, False
-            selector = selectors.DefaultSelector()
-            selector.register(process.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + 30
+            boundary_seen, status, phase, crash_emitted = False, None, "capture", False
+
+            def emit_crash(failed_phase=None):
+                nonlocal crash_emitted
+                if not crash or crash_emitted:
+                    return
+                crash_emitted = True  # Cleanup or the following gate never overwrites this first result.
+                values = crash_result(ready_seen, boundary_seen, killed, status, fully_captured, failed_phase)
+                unexpected = values["result"] != "expected-sigkill"
+                fixed = fixed_child_failures(content) if unexpected else ()
+                values["rust-labels"] = ("present" if fixed else "absent") if unexpected else "not-screened"
+                for field, value in values.items():
+                    print("FIXTURE_DIAGNOSTIC a3-crash-" + field + "-" + value, flush=True)
+                for value in fixed:
+                    print("FIXTURE_DIAGNOSTIC " + value, flush=True)
+
+            try:
+                selector = selectors.DefaultSelector()
+                selector.register(process.stdout, selectors.EVENT_READ)
+                deadline = time.monotonic() + 30
+            except Exception:
+                emit_crash("capture")
+                raise
             try:
                 while selector.get_map():
                     remaining = deadline - time.monotonic()
@@ -645,11 +712,15 @@ class Children:
                         process.stdin.write(b"c")
                         process.stdin.flush()
                     if crash and not killed and ("A3_BOUNDARY " + crash + "\n").encode() in content:
+                        boundary_seen, phase = True, "kill"
                         base.owned_process(process.pid, self.m["cpa"], self.m["uid"])
                         process.kill()  # SIGKILL, exact owned child only.
                         killed = True
+                        phase = "capture"
+                phase = "wait"
                 status = process.wait(timeout=max(0.1, deadline - time.monotonic()))
                 fully_captured = True  # EOF was drained and wait completed.
+                phase = "result"
                 if status != 0 and not crash:
                     tokens = set(re.findall(rb"[a-z][a-z-]*", content))
                     for fixed in RUST_FAILURES + volatile.PANICS:
@@ -658,12 +729,16 @@ class Children:
                     if args[0] == self.m["a3_verifier"]:
                         print("FIXTURE_DIAGNOSTIC a3-verifier-" + VERIFIER_FAILURES.get(status, "unknown") + "-failed", flush=True)
                 if crash:
+                    emit_crash()
                     require(killed and ready_seen and status == -signal.SIGKILL, "a3-crash-not-observed")
                 else:
                     require(status == 0 and expected in content, "a3-child-failed")
                 require(not ready or ready_seen, "a3-ready-missing")
                 self.contents[label] = bytes(content)
                 return bytes(content)
+            except Exception:
+                emit_crash(phase if phase in ("capture", "kill", "wait") else None)
+                raise
             finally:
                 selector.close()
                 try:

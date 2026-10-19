@@ -35,3 +35,15 @@ historical red is used to infer an actual numeric file mode or its origin.
 Tests exercise this actual writer rather than a substitute log creator.
 Only Python's existing standard library is used; no dependency or license
 change, copied third-party implementation or strict clean-room claim is added.
+
+## Independently bounded parent crash-result diagnostics — 2026-10-19
+
+This batch is independently authored from the original visible E/F diagnostic
+contract and [Python 3.12 subprocess status/wait documentation](https://docs.python.org/3.12/library/subprocess.html#subprocess.Popen.returncode).
+It classifies only existing in-memory ready/boundary/kill/wait/capture results.
+Unexpected crash output is screened against the unchanged existing fixed Rust
+label whitelist; digit-bearing A3 labels are kept whole. A matched label is an
+observation, not by itself proof of a particular underlying product fault.
+No raw output/status, new secret read, service call, dependency, license change,
+business fix or changed SIGKILL/cleanup acceptance predicate is introduced.
+Public dummy control-flow tests do not perform a real CPA crash experiment.
