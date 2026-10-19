@@ -50,6 +50,8 @@ jobs:
           [[ "${ImageVersion:-}" =~ ^[0-9]{8}\.[0-9]+\.[0-9]+$ ]]
           printf 'CROSSVM_RUNNER a amd64 ubuntu-24.04 %s\n' "$ImageVersion"
           python3 -B scripts/cross-vm-backup-test.py
+          go test -c -o "$RUNNER_TEMP/cross-vm-publication.test" ./internal/backup
+          sudo "$RUNNER_TEMP/cross-vm-publication.test" -test.run '^TestLinuxSystemd' -test.count=1 -test.v
           go test -c -tags cpacloud_systemd_acceptance,cpacloud_crossvm_acceptance -o "$RUNNER_TEMP/cross-vm.test" ./internal/service
       - name: A local provisioning, real activation, closed v3 source and allowlisted relay
         env:
@@ -95,6 +97,8 @@ jobs:
           test "$(go env GOARCH)" = arm64
           [[ "${ImageVersion:-}" =~ ^[0-9]{8}\.[0-9]+\.[0-9]+$ ]]
           printf 'CROSSVM_RUNNER b arm64 ubuntu-24.04-arm %s\n' "$ImageVersion"
+          go test -c -o "$RUNNER_TEMP/cross-vm-publication.test" ./internal/backup
+          sudo "$RUNNER_TEMP/cross-vm-publication.test" -test.run '^TestLinuxSystemd' -test.count=1 -test.v
           go test -c -tags cpacloud_systemd_acceptance,cpacloud_crossvm_acceptance -o "$RUNNER_TEMP/cross-vm.test" ./internal/service
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:

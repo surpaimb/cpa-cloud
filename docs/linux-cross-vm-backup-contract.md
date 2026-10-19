@@ -4,8 +4,9 @@
 `286ba8f94cfdd9e90b9597e936a731e62d36bd76`, with its
 [same-VM contract](linux-systemd-backup-rehearsal-contract.md) and
 [ADR 0005](adr/0005-linux-systemd-backup-wrapping-key.md). Draft; production NO-GO.
-This adds tests, a restricted harness and natural PR CI only. It adds no
-production rotation, custody, recovery interface, dependency or feature enablement.
+The current authorized increment also fixes Linux v3 production restore
+publication and adds deterministic regressions. It adds no rotation, custody,
+new recovery interface, dependency or feature enablement; v1/v2 are not refactored.
 
 ## Frozen experiment
 
@@ -98,7 +99,48 @@ to the captured production validator. They never turn an invalid result into
 success. Every negative requires its exact reached stage, no final directory
 (except the preexisting sentinel case), no active worker/listener, and unchanged
 positive data. An unexpected successful publication is a hard failure, not a
-reason to weaken the test or repair production during this slice.
+reason to weaken the test. The separately authorized production correction below
+retains this exact rejection and every existing positive and negative case.
+
+## Linux v3 authenticated publication correction
+
+The final validator must authenticate the actual staged binding, not merely the
+decoded in-memory package record. Staged creation and publication use held Linux
+directory/file descriptors, exclusive no-follow opens and fixed filenames.
+The parent namespace must be root/current-UID owned and not group/other writable
+unless sticky; otherwise another UID could exchange private directory names.
+Binding reads are bounded to 4096 bytes; regular type, exact private mode,
+effective UID/GID, single link, size and stable device/inode/content metadata are
+checked. Actual bytes must equal the package-authenticated binding exactly.
+The original installation/credential/canary validator still runs in its original
+order/count. Its return is followed by a same-handle content/identity check;
+callback replacement or same-inode rewriting must fail before a target exists.
+
+Publication does not rename files obtained by re-resolving staged paths. It
+creates a non-overwriting private target relative to the held parent and writes
+only the authenticated binding snapshot and the pinned **post-sanitization**
+database. It must never rebuild the database from the original package bytes,
+which would undo session/OAuth removal and paused-refresh state. Published file
+identities and binding bytes, parent/stage/target identity, cancellation and file/
+directory sync results are checked before success. Both files form the completed
+result; crash/power-loss atomicity beyond the existing private staging/sync
+contract is not claimed.
+
+Rollback and staged cleanup operate relative to held directories and recorded
+created-file identities. A replaced file/directory is not blindly deleted;
+incomplete cleanup remains a distinct joined error and cannot hide the original
+failure. A cleanup-only error after completed publication can leave a valid
+committed target and must not trigger an automatic restore retry. These bounded
+checks do not claim resistance to root or a completely compromised same-UID
+process continuously rewriting every object in the private namespace.
+
+Deterministic Linux tests cover pre-read, validator and publication handoffs,
+same-length in-place writes, same bytes/new inode, symlinks, missing/truncated/
+oversized bindings, mode/owner/link-count predicates, parent/stage/target
+replacement, non-overwrite, cancellation and I/O/sync failure. Both native VM
+jobs compile/run these public regressions before the unchanged real credential
+reader sequence. The root-owned public test process also exercises actual foreign
+owner mutation; ordinary unprivileged runs explicitly skip only that mutation.
 
 ## Evidence and stop rules
 
@@ -159,10 +201,16 @@ Public references inspected:
 - [GitHub workflow artifact transfer](https://docs.github.com/en/actions/tutorials/store-and-share-data)
 - [GitHub standard hosted runner labels and architectures](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 - [GitHub Ubuntu 24.04 ARM64 image metadata](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Arm64-Readme.md)
+- [Existing x/sys v0.36.0 Linux descriptor APIs](https://pkg.go.dev/golang.org/x/sys@v0.36.0/unix)
 
 The 2026-10-19 bounded ARM-B workflow selection and public source guards are
 independently authored. The last two public references were checked for runner
 availability/metadata only; no runner implementation is imported or copied.
+
+The Linux publication correction and its regressions are independently authored
+from this contract, project-owned file/backup formats and public descriptor APIs.
+They use the already locked x/sys dependency (BSD-3-Clause); no implementation
+source is copied and no dependency version changes.
 
 No new runtime dependency. systemd retains LGPL-2.1-or-later/component notices;
 Python standard library retains PSF terms. Existing Go libraries retain their

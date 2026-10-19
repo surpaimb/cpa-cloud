@@ -139,7 +139,7 @@ func verifyWithSystemdKeyMaterial(ctx context.Context, input string, material Ke
 	return decoded.info, nil
 }
 
-func restoreWithSystemdKeyMaterial(ctx context.Context, input, dataDir string, material KeyMaterial) (Info, error) {
+func restoreWithSystemdKeyMaterial(ctx context.Context, input, dataDir string, material KeyMaterial) (info Info, retErr error) {
 	defer wipe(material.WrappingKey[:])
 	target, parent, err := validateNewRestoreTarget(dataDir)
 	if err != nil {
@@ -157,15 +157,16 @@ func restoreWithSystemdKeyMaterial(ctx context.Context, input, dataDir string, m
 		return Info{}, err
 	}
 	defer decoded.destroy()
-	stage, err := makeSecureTempDir(parent, ".cpa-cloud-restore-stage-")
+	publication, err := newSystemdRestoreStage(parent, target, parentIdentity)
 	if err != nil {
 		return Info{}, err
 	}
-	defer removeKnownDirectory(stage, databaseFilename, systemdBindingFilename)
-	if err := writeExclusiveFile(filepath.Join(stage, databaseFilename), decoded.db, 0o600); err != nil {
+	defer func() { retErr = errors.Join(retErr, publication.cleanup()) }()
+	stage := publication.path
+	if err := publication.stageFile(databaseFilename, decoded.db); err != nil {
 		return Info{}, fmt.Errorf("stage database: %w", err)
 	}
-	if err := writeExclusiveFile(filepath.Join(stage, systemdBindingFilename), decoded.rootKey, 0o600); err != nil {
+	if err := publication.stageFile(systemdBindingFilename, decoded.rootKey); err != nil {
 		return Info{}, fmt.Errorf("stage master-key binding: %w", err)
 	}
 	if err := sanitizeRestoredDatabase(ctx, filepath.Join(stage, databaseFilename)); err != nil {
@@ -189,13 +190,9 @@ func restoreWithSystemdKeyMaterial(ctx context.Context, input, dataDir string, m
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Info{}, err
 	}
-	if err := validateSystemdBinding(decoded.rootKey, &material); err != nil {
-		return Info{}, err
-	}
-	if err := publishRestoreDirectoryFiles(stage, target, databaseFilename, systemdBindingFilename); err != nil {
+	if err := publication.publish(ctx, decoded.rootKey, &material); err != nil {
 		return Info{}, fmt.Errorf("publish restored data directory: %w", err)
 	}
-	stage = ""
 	return decoded.info, nil
 }
 

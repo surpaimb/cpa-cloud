@@ -288,6 +288,17 @@ class CrossVMTests(unittest.TestCase):
         tree = ast.parse((HERE / "cross-vm-backup.py").read_text())
         self.assertFalse(any(isinstance(node, ast.keyword) and node.arg == "shell" for node in ast.walk(tree)))
 
+    def test_linux_production_publication_regressions_run_on_both_native_jobs(self):
+        source = (HERE.parent / ".github/workflows/cross-vm-backup.yml").read_text()
+        self.assertEqual(source.count('go test -c -o "$RUNNER_TEMP/cross-vm-publication.test" ./internal/backup'), 2)
+        self.assertEqual(source.count('sudo "$RUNNER_TEMP/cross-vm-publication.test" -test.run \'^TestLinuxSystemd\' -test.count=1 -test.v'), 2)
+        publisher = (HERE.parent / "internal/backup/systemd_restore_linux.go").read_text()
+        for required in ("unix.O_NOFOLLOW", "s.Nlink == 1", "s.Uid == uint32(os.Geteuid())", "s.Gid == uint32(os.Getegid())",
+                         "subtle.ConstantTimeCompare(data, expected)", "validateSystemdBinding(actual, material)", "systemdCheckPublished"):
+            self.assertIn(required, publisher)
+        self.assertNotIn("os.Rename(", publisher)
+        self.assertNotIn("publishRestoreDirectoryFiles(", publisher)
+
     def test_operation_error_is_not_masked_by_failed_journal_and_stop(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = self.harness(Path(directory))
