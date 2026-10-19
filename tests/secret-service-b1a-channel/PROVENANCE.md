@@ -1,0 +1,46 @@
+# B1a-C provenance and dependencies
+
+Written independently for the CPA Cloud B1a-C contract on 2026-10-19 by this
+project's Codex integration task. All four Python files, this contract/provenance,
+the separate workflow and preflight document are newly authored project source.
+No CLIProxyAPI, Sub2API, archived CPA, reference-tree implementation, tests,
+migrations, assets or SDKs were used. Prior project research prevents a strict
+clean-room claim. Existing project preflight isolation requirements and PR88
+scope were read as contracts; its supervisor was not copied, imported or patched.
+
+Public primary sources consulted 2026-10-19 (behavioral facts, not implementation
+templates):
+
+- [GNOME Keyring 46.1 upstream manual](https://github.com/GNOME/gnome-keyring/blob/46.1/docs/gnome-keyring-daemon.xml):
+  `--login` consumes stdin including newlines; `--unlock` reads a password from
+  stdin. This motivates exact bytes + EOF and rejecting CR/LF, **not** a claim
+  that C executes GNOME. No GNOME implementation source was ported.
+- [systemd-run manual](https://www.freedesktop.org/software/systemd/man/systemd-run.html):
+  transient exec service, `--pipe` hands original FDs through without reopening,
+  synchronous wait and explicit properties. Only switches supported by Ubuntu
+  24.04 systemd are used, not newly added options from later manuals.
+- [systemd execution isolation](https://www.freedesktop.org/software/systemd/man/systemd.exec.html):
+  private namespaces, filesystem restrictions, minimal environment and UID.
+- [Python 3.12 os](https://docs.python.org/3.12/library/os.html),
+  [subprocess](https://docs.python.org/3.12/library/subprocess.html),
+  [HMAC](https://docs.python.org/3.12/library/hmac.html): anonymous CLOEXEC/nonblocking
+  pipes, fstat/read/write/close, explicit stdin FD, close_fds, bounded wait and
+  constant-time receipt comparison.
+- [D-Bus daemon configuration](https://dbus.freedesktop.org/doc/dbus-daemon.1.html):
+  a new local session bus address, EXTERNAL authentication and private policy.
+
+No new Python package dependency or product runtime linkage. Python standard
+library retains PSF-2.0; systemd tools retain their upstream LGPL/GPL licenses;
+D-Bus retains its upstream AFL-2.1/GPL-2.0-or-later licensing. Installed binaries
+are invoked on the disposable runner and are not copied into repository/package
+outputs. Ubuntu package copyright/license files remain authoritative. The new
+workflow pins `dbus-daemon=1.14.10-4ubuntu4.1` (the existing project manifest's
+version, without modifying that manifest), verifies the version and package
+copyright file, and does not execute/install GNOME as a C component;
+the unchanged old regressions have their own pinned component provenance.
+
+The checkout action is the same existing audited project pin, newly referenced
+without changing any old workflow. This is not release, package or deployment
+authorization. No real credential/configuration, official client or provider is
+used. Report B0 no-secret, C synthetic-password and A2/A3 synthetic-secret as
+separate evidence classes; do not erase PR87's historical seven reds.
