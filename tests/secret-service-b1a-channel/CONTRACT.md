@@ -234,3 +234,60 @@ Only the new natural exact-head C and seven old attempt1 regressions, followed
 by original E/F formal new-head review, may establish the next narrow result.
 The first unexpected dedicated red freezes this source again. All old C #1/#2
 and A3 red evidence remains intact. Draft / production NO-GO continues.
+
+## Independent raw-helper handoff batch after C #3
+
+Sole parent `0ba876cae2320529d62b47e6ea3598ecd973d8ab`. Historical C #3
+run39277844314 attempt1 remains FAILURE: 91/91 Linux public tests passed,
+`c-user-create-exit-option` then `c-setup-user-create-rejected`, clear=true,
+capture-complete=false, aggregate cleanup=false, 0/15 final admissions.
+Neither this class nor the next static P2 establishes a root cause or the
+absence of partial helper effects. Original E/F's independent P2 counterexample
+was an acquired-report failure before ProcessOwner returned: the raw guard
+could observe successful helper exit, yet Commands' missing full owner skipped
+the existing success callback and leaked its side-effect ownership record.
+
+Only fixture.py, test_channel.py and these C contract/provenance notes change.
+channel.py, receiver, workflow, all PR88 files and product stay byte-frozen.
+No useradd argument, UID, permission, success exit gate, exit-class vocabulary,
+isolation property, unconfirmed-object treatment or setup behavior is repaired.
+Argument compatibility, including the existing -K setting, is outside this
+batch. No new poll/wait, helper, lookup, probe, retry or deletion target is added.
+
+- A private ProcessRecord is retained independently of a complete owner.
+  Immediately after factory success, its raw process and cleanup guard are
+  registered before acquired output, full-owner construction or Capture.
+  It retains only the existing returncode and results obtained by the original
+  poll/wait sites (including the original forced-cleanup wait), not an extra
+  observation. A failed full-owner construction keeps the same raw guard.
+- An already observed integer success invokes the existing success callback
+  once, before a subsequent report can reject. The callback's existing resource
+  registration precedes its own output gate. Callback attempt is consumed
+  before invocation; errors are retained privately, not retried or allowed to
+  skip the original wait or any stream close. Nonzero, signal, unknown and
+  absent results never authorize successful side-effect registration.
+- Original primary exception object/category, callback error, diagnostic
+  delivery loss and physical cleaner failure remain separate. A later absent
+  result cannot erase a confirmed terminal result. Cleanup consumes the raw
+  record before acting; consumed stream/FD ownership is not retried, even after
+  close-after-release or a failed callback/report. Other owned cleanup proceeds.
+  Raw-only capture stays incomplete; successful physical cleanup or a recovered
+  diagnostic sink cannot wash delivery/capture red into admission.
+- Existing exit-class reporting now reads the independent retained result,
+  never infers missing solely because a complete owner was not returned.
+  Classes retain their previous meaning and are not a cause/residue claim.
+  Raw handles, numeric results, stderr, identity and secrets remain private.
+
+Public negatives were introduced before repair and retain the original 91
+test names plus 15 VM cases. Controlled processes/streams cover success before
+acquired-output loss; success observed only by the original raw-guard wait;
+full-owner construction failure; nonzero/signal/unknown/absent/creation failure;
+joint acquired/cleanup/callback/report errors; consumed records; and exact
+poll/wait/termination/callback/resource-cleaner/stream-close counts. A Linux
+public FD sentinel is reused after a deliberately failing close, then verified
+after all guard cleanup. These are declared controlled public regressions,
+not real I/O faults, real identity provisioning, or a cause of any historical
+red. New natural exact-head C plus seven old first-attempt regressions and
+original E/F formal new-head review remain required. The first unexpected
+dedicated red freezes the new source. C #1/#2/#3 and all A3 history is preserved;
+Draft / production NO-GO remains.

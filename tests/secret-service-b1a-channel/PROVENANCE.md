@@ -92,3 +92,21 @@ negatives are project-authored controlled tests, not real I/O fault injection,
 real identity provisioning, GNOME/Key acceptance or the cause of old failures.
 No new dependency or license change. Old test counts and red evidence remain
 historical; each new head requires fresh natural CI and formal review.
+
+## Independent raw-helper handoff batch, 2026-10-20
+
+Project-authored from the bounded contract and original E/F static review of
+sole parent `0ba876cae2320529d62b47e6ea3598ecd973d8ab`. This review is not proof
+of C #3's runtime cause or absence of partial effects. Only fixture.py,
+test_channel.py and these two notes change; channel.py, receiver/workflow,
+all PR88 files, product, helper arguments/UID/permissions, exit vocabulary and
+isolation remain frozen. No argument-compatibility repair is part of this batch.
+
+The previously recorded Python subprocess returncode/poll/wait contract is
+reused, not copied implementation: existing observations are retained in an
+independent private record; no extra observation, helper or lookup is added.
+Controlled public process/stream and public FD-reuse negatives are independently
+written here, distinguish physical cleanup from incomplete capture/delivery,
+and are not real kernel/output I/O-fault or real-user provisioning evidence.
+No new dependency or license change. All old red evidence remains historical;
+new source requires its own natural CI and formal E/F review.

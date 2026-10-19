@@ -590,6 +590,202 @@ class UserCreateExitClasses(unittest.TestCase):
         self.assertTrue(commands.diag.delivery_failed)
 
 
+class RawHelperHandoffRegressions(unittest.TestCase):
+    class Stream:
+        def __init__(self, fail=False):
+            self.closed, self.calls, self.fail = False, 0, fail
+        def close(self):
+            self.calls += 1
+            self.closed = True
+            if self.fail:
+                raise OSError("public stream close-after-release bait")
+
+    class Process:
+        def __init__(self, initial=None, polled=None, waited=0, close_failure=False):
+            self.returncode, self.polled, self.waited = initial, polled, waited
+            self.stdout = RawHelperHandoffRegressions.Stream(close_failure)
+            self.stderr = RawHelperHandoffRegressions.Stream()
+            self.polls = self.waits = self.terminates = self.kills = 0
+        def poll(self):
+            self.polls += 1
+            if self.polled is not None:
+                self.returncode = self.polled
+            return self.returncode
+        def wait(self, timeout):
+            self.waits += 1
+            self.returncode = self.waited
+            return self.waited
+        def terminate(self):
+            self.terminates += 1
+        def kill(self):
+            self.kills += 1
+
+    def failing_acquired(self, process, callback_extra=None, report_failure=False, expected_waits=1):
+        lines, events, reports = [], [], []
+        primary = c.Failure("c-capture")
+        class Diag(fixture.Diagnostics):
+            def require_delivery(self):
+                if self.delivery_failed:
+                    raise primary
+        def sink(value):
+            lines.append(value)
+            events.append(value)
+            if value == "c-cleanup-helper-process-acquired" or (report_failure and
+                (value.startswith("c-user-create-exit-") or value == "c-cleanup-helper-process-rejected")):
+                raise OSError("public sink bait " + PUBLIC.decode())
+        diag = Diag(sink=sink, report_sink=reports.append)
+        owned = fixture.Resources(diag)
+        released, callback_calls = [], []
+        def callback():
+            callback_calls.append(True)
+            events.append("public-callback")
+            owned.own("user", "public-resource", released.append)
+            if callback_extra:
+                callback_extra()
+        commands = fixture.Commands(diag, process_factory=lambda *a, **k: process)
+        with self.assertRaises(c.Failure) as caught:
+            with owned:
+                commands.run(["public-helper-unused"], user_create=True, owned_success=callback)
+        self.assertIs(caught.exception, primary)
+        self.assertTrue(diag.delivery_failed)
+        self.assertFalse(all(ok for _, ok in commands.inventory.values()))
+        self.assertEqual(process.polls, 1)
+        self.assertEqual(process.waits, expected_waits)
+        self.assertEqual(process.stdout.calls, 1)
+        self.assertEqual(process.stderr.calls, 1)
+        with self.assertRaises(c.Failure):
+            fixture.finish_case(diag, "positive", "c-capture", True, False, owned.ok, True)
+        self.assertFalse(any(line.startswith("CHECK C_CASE_") for line in reports))
+        self.assertTrue(all(line in fixture.DIAGNOSTICS for line in lines))
+        return commands, owned, callback_calls, released, events
+
+    def test_success_before_acquired_sink_is_handed_off_before_report(self):
+        process = self.Process(initial=0, waited=0)
+        commands, owned, calls, released, events = self.failing_acquired(process)
+        self.assertEqual(calls, [True])
+        self.assertEqual(released, ["public-resource"])
+        self.assertLess(events.index("public-callback"), events.index("c-cleanup-helper-process-acquired"))
+        self.assertTrue(owned.ok)
+        self.assertEqual(commands.last_record.result, 0)
+        self.assertEqual(owned.cleanup()[1], False)
+        self.assertEqual(released, ["public-resource"])
+
+    def test_only_existing_raw_guard_wait_observes_success(self):
+        process = self.Process(initial=None, polled=None, waited=0)
+        commands, owned, calls, released, events = self.failing_acquired(process)
+        self.assertEqual(calls, [True])
+        self.assertEqual(released, ["public-resource"])
+        self.assertEqual(process.terminates, 1)
+        self.assertEqual(process.kills, 0)
+        self.assertLess(events.index("public-callback"), events.index("c-cleanup-helper-process-ok"))
+        self.assertEqual(commands.last_record.result, 0)
+        self.assertTrue(owned.ok)
+
+    def test_existing_forced_wait_result_is_retained_without_extra_observation(self):
+        class Forced(self.Process):
+            def wait(self, timeout):
+                self.waits += 1
+                if self.waits == 1:
+                    raise subprocess.TimeoutExpired("public-helper-unused", timeout)
+                self.returncode = 0
+                return 0
+        process = Forced()
+        commands, _, calls, released, events = self.failing_acquired(process, expected_waits=2)
+        self.assertEqual(calls, [True])
+        self.assertEqual(released, ["public-resource"])
+        self.assertEqual((process.polls, process.waits, process.terminates, process.kills), (1, 2, 1, 1))
+        self.assertEqual(commands.last_record.cleanup_failure, "c-wait")
+        self.assertIn("c-user-create-exit-success", events)
+
+    def test_non_success_raw_results_never_register_resource(self):
+        for result, label in ((2, "syntax"), (-9, "signal"), (PUBLIC.decode(), "unknown"),
+                              (False, "unknown"), (None, "missing-result")):
+            with self.subTest(exit_class=label):
+                process = self.Process(initial=result, waited=result)
+                commands, _, calls, released, events = self.failing_acquired(process)
+                self.assertEqual(calls, [])
+                self.assertEqual(released, [])
+                self.assertIn("c-user-create-exit-" + label, events)
+
+    def test_full_owner_constructor_failure_keeps_raw_wait_handoff(self):
+        process = self.Process(initial=None, waited=0)
+        primary = c.Failure("c-identity")
+        lines, released, callbacks = [], [], []
+        diag = fixture.Diagnostics(sink=lines.append)
+        owned = fixture.Resources(diag)
+        def bad_owner(*args, **kwargs):
+            raise primary
+        commands = fixture.Commands(diag, process_factory=lambda *a, **k: process, owner_factory=bad_owner)
+        def callback():
+            callbacks.append(True)
+            owned.own("user", "public", released.append)
+        with self.assertRaises(c.Failure) as caught:
+            with owned:
+                commands.run(["public-helper-unused"], user_create=True, owned_success=callback)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(callbacks, [True])
+        self.assertEqual(released, ["public"])
+        self.assertEqual((process.polls, process.waits, process.terminates, process.kills), (1, 1, 1, 0))
+        self.assertEqual((process.stdout.calls, process.stderr.calls), (1, 1))
+        self.assertIn("c-user-create-exit-success", lines)
+        self.assertFalse(all(ok for _, ok in commands.inventory.values()))
+
+    def test_creation_failure_never_gets_raw_result_or_callback(self):
+        primary = OSError("public creation bait")
+        calls, lines = [], []
+        def bad_factory(*args, **kwargs):
+            raise primary
+        commands = fixture.Commands(fixture.Diagnostics(sink=lines.append), process_factory=bad_factory)
+        with self.assertRaises(OSError) as caught:
+            commands.run(["public-helper-unused"], user_create=True, owned_success=lambda: calls.append(True))
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(calls, [])
+        self.assertEqual(lines, ["c-user-create-exit-missing-result"])
+
+    def test_joint_acquired_cleanup_callback_report_failures_keep_primary(self):
+        process = self.Process(initial=None, waited=0, close_failure=True)
+        callback_error = c.Failure("c-identity")
+        def bad_callback():
+            raise callback_error
+        commands, owned, calls, released, events = self.failing_acquired(
+            process, callback_extra=bad_callback, report_failure=True)
+        self.assertEqual(calls, [True])
+        self.assertEqual(released, ["public-resource"])
+        self.assertIs(commands.last_record.handoff_error, callback_error)
+        self.assertEqual(commands.last_record.cleanup_failure, "c-close")
+        self.assertIs(commands.last_record.primary, owned.primary)
+        self.assertEqual(commands.last_record.primary.args, ("c-capture",))
+        self.assertIn("c-user-create-exit-success", events)
+
+    def test_early_success_callback_registration_report_failure_is_not_retried(self):
+        process = self.Process(initial=0, waited=0)
+        released, callbacks, lines = [], [], []
+        def sink(value):
+            lines.append(value)
+            if value in ("c-cleanup-user-acquired", "c-user-create-exit-success"):
+                raise OSError("public resource/report sink bait")
+        diag = fixture.Diagnostics(sink=sink)
+        owned = fixture.Resources(diag)
+        commands = fixture.Commands(diag, process_factory=lambda *a, **k: process)
+        def callback():
+            callbacks.append(True)
+            owned.own("user", "public-resource", released.append)
+        with self.assertRaises(c.Failure) as caught:
+            with owned:
+                commands.run(["public-helper-unused"], user_create=True, owned_success=callback)
+        self.assertIs(caught.exception, commands.last_record.handoff_error)
+        self.assertEqual(caught.exception.args, ("c-capture",))
+        self.assertTrue(diag.delivery_failed)
+        self.assertEqual(callbacks, [True])
+        self.assertEqual(released, ["public-resource"])
+        self.assertEqual((process.polls, process.waits), (1, 1))
+        self.assertEqual((process.stdout.calls, process.stderr.calls), (1, 1))
+        commands.last_record.cleanup()  # consumed record: no OS close or callback
+        self.assertEqual((process.polls, process.waits), (1, 1))
+        self.assertEqual((process.stdout.calls, process.stderr.calls), (1, 1))
+        self.assertEqual(callbacks, [True])
+
+
 @unittest.skipUnless(sys.platform == "linux", "Linux anonymous pipe/procfs required")
 class Pipes(unittest.TestCase):
     def setUp(self):
@@ -776,6 +972,38 @@ class Pipes(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "linux", "Linux FD/directory identity regressions")
 class SafetyRegressions(unittest.TestCase):
+    def test_raw_helper_handoff_close_reuse_does_not_reclose_public_sentinel(self):
+        r, w = os.pipe()
+        replacement = []
+        with tempfile.TemporaryFile() as sentinel:
+            sentinel.write(b"public-raw-helper-sentinel")
+            sentinel.flush()
+            class ReusingStream(RawHelperHandoffRegressions.Stream):
+                def close(self):
+                    self.calls += 1
+                    self.closed = True
+                    os.close(w)
+                    os.dup2(sentinel.fileno(), w)
+                    replacement.append(c.OwnedFD(w))
+                    raise OSError("public raw stream close-after-release bait")
+            process = RawHelperHandoffRegressions.Process(waited=0)
+            process.stdout = ReusingStream()
+            try:
+                commands, _, calls, released, _ = RawHelperHandoffRegressions.failing_acquired(self, process)
+                self.assertEqual(calls, [True])
+                self.assertEqual(released, ["public-resource"])
+                with self.assertRaisesRegex(c.Failure, "c-close"):
+                    commands.last_record.cleanup()
+                self.assertEqual((process.polls, process.waits), (1, 1))
+                self.assertEqual((process.stdout.calls, process.stderr.calls), (1, 1))
+                self.assertEqual(os.fstat(w).st_ino, os.fstat(sentinel.fileno()).st_ino)
+                os.lseek(w, 0, os.SEEK_SET)
+                self.assertEqual(os.read(w, 64), b"public-raw-helper-sentinel")
+            finally:
+                os.close(r)
+                for owner in replacement:
+                    owner.close()
+
     def test_consumed_reused_sentinel_survives_sink_and_cleanup_failure(self):
         r, w = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
         owner = c.OwnedFD(w)

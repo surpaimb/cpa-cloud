@@ -161,11 +161,22 @@ class Resources:
         value = factory()
         return self.own(stage, value, cleaner)
 
-    def process(self, stage, factory, capture_factory=None):
-        process = self.acquire(stage, factory, ProcessOwner.raw_cleanup)
-        owner = ProcessOwner(process, capture_factory)
-        # The raw process/streams were already guarded before owner construction.
-        self.entries[-1] = (stage, owner, lambda value: value.cleanup())
+    def process(self, stage, factory, capture_factory=None, record=None, owner_factory=None):
+        require(stage in CLEANUP_STAGES, "c-protocol")
+        self.diag.setup_gate()
+        record = record or ProcessRecord()
+        record.process = factory()  # retain before any report or full owner
+        index = len(self.entries)
+        self.entries.append((stage, record, lambda value: value.cleanup()))
+        # returncode is an existing observation, not an added poll/wait. The
+        # guard is already installed before the success callback can fail.
+        record.observe(record.process.returncode)
+        record.raise_handoff()
+        self.diag.emit("c-cleanup-" + stage + "-acquired")
+        self.diag.setup_gate()
+        owner = (owner_factory or ProcessOwner)(record.process, capture_factory, record)
+        record.owner = owner
+        self.entries[index] = (stage, owner, lambda value: value.cleanup())
         return owner
 
     def pipe_pair(self, factory):
@@ -221,9 +232,49 @@ class Resources:
                 self.ok and not self.diag.delivery_failed)
 
 
+class ProcessRecord:
+    """Private raw acquisition/result ledger; never a probe or public output."""
+    def __init__(self, owned_success=None):
+        self.process = self.owner = None
+        self.result = self.primary = None
+        self.owned_success = owned_success
+        self.handoff_attempted, self.handoff_error = False, None
+        self.cleanup_consumed, self.cleanup_failure = False, None
+
+    def observe(self, result):
+        # Only a result already obtained by the existing process operations.
+        # A later absent result must not erase a confirmed terminal result.
+        if result is not None or self.result is None:
+            self.result = result
+        if type(result) is int and result == 0 and not self.handoff_attempted and self.owned_success is not None:
+            self.handoff_attempted = True  # callback failure never permits retry
+            try:
+                self.owned_success()
+            except BaseException as error:
+                # Defer this error so the original wait and every owned stream
+                # close still run. Keep the object private and separate.
+                self.handoff_error = error
+
+    def raise_handoff(self):
+        if self.handoff_error is not None:
+            raise self.handoff_error
+
+    def cleanup(self):
+        if self.cleanup_consumed:
+            require(self.cleanup_failure is None, self.cleanup_failure or "c-cleanup")
+            return
+        self.cleanup_consumed = True
+        try:
+            ProcessOwner.raw_cleanup(self.process, self)
+        except Exception as error:
+            self.cleanup_failure = error.args[0] if isinstance(error, Failure) else "c-cleanup"
+            raise
+
+
 class ProcessOwner:
-    def __init__(self, process, capture_factory=None):
+    def __init__(self, process, capture_factory=None, record=None):
         self.process = process
+        self.record = record
         self.streams = {"out": OwnedStream(process.stdout), "err": OwnedStream(process.stderr)}
         self.captures, self.results, self.attempted = {}, {}, set()
         self.capture_factory = capture_factory or Capture
@@ -242,10 +293,10 @@ class ProcessOwner:
         return capture
 
     @staticmethod
-    def raw_cleanup(process):
+    def raw_cleanup(process, record=None):
         first = None
         try:
-            stop_child(process)
+            stop_child(process, record)
         except Exception:
             first = "c-wait"
         for stream in (process.stdout, process.stderr):
@@ -262,7 +313,7 @@ class ProcessOwner:
             return
         self.consumed = True
         try:
-            stop_child(self.process)
+            stop_child(self.process, self.record)
         except Exception:
             self.failure = "c-wait"
         for name, owner in self.streams.items():
@@ -328,28 +379,37 @@ def failure_output(label, sink=None):
         pass
 
 
-def stop_child(process):
+def stop_child(process, record=None):
     try:
-        if process.poll() is None:
+        polled = process.poll()
+        if record is not None:
+            record.observe(polled)
+        if polled is None:
             process.terminate()
-        process.wait(timeout=3)
+        waited = process.wait(timeout=3)
+        if record is not None:
+            record.observe(waited)
     except Exception:
         # A later forced cleanup must not turn an earlier wait failure green.
         try:
             process.kill()
-            process.wait(timeout=3)
+            waited = process.wait(timeout=3)
+            if record is not None:
+                record.observe(waited)
         except Exception:
             pass
         raise Failure("c-wait") from None
 
 
 class Commands:
-    def __init__(self, diag=None, process_factory=None, capture_factory=None):
+    def __init__(self, diag=None, process_factory=None, capture_factory=None, owner_factory=None):
         self.inventory = {}
         self.number = 0
         self.diag = diag or Diagnostics()
         self.process_factory = process_factory or subprocess.Popen
         self.capture_factory = capture_factory
+        self.owner_factory = owner_factory
+        self.last_record = None
 
     def run(self, args, timeout=10, check=True, owned_success=None, user_create=False):
         # Every helper's two streams are registered before waiting. Names and
@@ -358,12 +418,14 @@ class Commands:
         name = "helper-" + str(self.number)
         self.inventory[name + "-out"] = (b"", False)
         self.inventory[name + "-err"] = (b"", False)
-        owner = None
+        record = ProcessRecord(owned_success)
+        self.last_record = record  # independent of Resources.process returning
         try:
             with Resources(self.diag) as owned:
                 owner = owned.process("helper-process", lambda: self.process_factory(
                     args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, env=SAFE, close_fds=True), self.capture_factory)
+                    stderr=subprocess.PIPE, env=SAFE, close_fds=True), self.capture_factory,
+                    record=record, owner_factory=self.owner_factory)
                 out = self.diag.run("helper-capture", lambda: owner.capture("out"))
                 err = self.diag.run("helper-capture", lambda: owner.capture("err"))
                 expired = False
@@ -373,6 +435,8 @@ class Commands:
                     expired = True
                     owner.process.kill()
                     code = owner.process.wait(timeout=3)
+                record.observe(code)
+                record.raise_handoff()
                 self.inventory[name + "-out"] = out.finish()
                 self.inventory[name + "-err"] = err.finish()
                 require(not expired, "c-wait")
@@ -380,21 +444,18 @@ class Commands:
                 require(not check or code == 0, "c-setup")
         finally:
             pending = sys.exc_info()[1]
+            record.primary = pending
             try:
-                if owner:
-                    for stream, result in owner.results.items():
+                if record.owner is not None:
+                    for stream, result in record.owner.results.items():
                         self.inventory[name + "-" + stream] = result
-                    # Preserve the original success-only ownership gate, before
-                    # reporting its result. No new poll/wait/lookup is performed.
-                    if owned_success is not None and owner.process.returncode == 0:
-                        owned_success()
-            except Exception:
-                if pending is None:
-                    raise
+                if pending is None and record.handoff_error is not None:
+                    record.primary = record.handoff_error
+                    record.raise_handoff()
             finally:
                 reporting_pending = sys.exc_info()[1]
                 if user_create:
-                    self.diag.emit(user_create_exit_class(owner.process.returncode if owner else None))
+                    self.diag.emit(user_create_exit_class(record.result))
                     if reporting_pending is None:
                         self.diag.setup_gate()
         return code, self.inventory[name + "-out"][0]
