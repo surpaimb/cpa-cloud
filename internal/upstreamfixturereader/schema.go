@@ -8,13 +8,30 @@ import (
 	m "cpacloud.local/server/internal/upstreammanifest"
 )
 
-// Strict frozen-profile grammar, not a generic SQL parser. Literal contents
-// are preserved; whitespace/case normalization occurs outside literals only.
-func tokens(s string) ([]string, bool) {
+type tokenKind uint8
+
+const (
+	identifierToken tokenKind = iota
+	quotedIdentifierToken
+	keywordToken
+	nullToken
+	stringToken
+	numberToken
+	punctuationToken
+)
+
+type token struct {
+	kind tokenKind
+	text string
+}
+
+// Strict frozen-profile lexer, not a generic SQL parser. Quoting and literal
+// categories survive lexing; only bare words are case-folded here.
+func tokens(s string) ([]token, bool) {
 	if len(s) > 16384 {
 		return nil, false
 	}
-	var out []string
+	var out []token
 	for i := 0; i < len(s); {
 		c := s[i]
 		if c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' {
@@ -40,7 +57,7 @@ func tokens(s string) ([]string, bool) {
 			if !closed {
 				return nil, false
 			}
-			out = append(out, s[start:i])
+			out = append(out, token{stringToken, s[start:i]})
 			continue
 		}
 		if c == '"' {
@@ -55,8 +72,19 @@ func tokens(s string) ([]string, bool) {
 			if i == len(s) || i == start {
 				return nil, false
 			}
-			out = append(out, strings.ToLower(s[start:i]))
+			out = append(out, token{quotedIdentifierToken, s[start:i]})
 			i++
+			continue
+		}
+		if c >= '0' && c <= '9' {
+			start := i
+			for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+				i++
+			}
+			if i < len(s) && word(s[i]) {
+				return nil, false
+			}
+			out = append(out, token{numberToken, s[start:i]})
 			continue
 		}
 		if word(c) {
@@ -64,11 +92,19 @@ func tokens(s string) ([]string, bool) {
 			for i < len(s) && word(s[i]) {
 				i++
 			}
-			out = append(out, strings.ToLower(s[start:i]))
+			text := strings.ToLower(s[start:i])
+			kind := identifierToken
+			switch text {
+			case "null":
+				kind = nullToken
+			case "create", "table", "text", "blob", "integer", "primary", "key", "not", "check", "in", "default", "unique", "is", "or", "and":
+				kind = keywordToken
+			}
+			out = append(out, token{kind, text})
 			continue
 		}
 		if strings.ContainsRune("(),=", rune(c)) {
-			out = append(out, string(c))
+			out = append(out, token{punctuationToken, string(c)})
 			i++
 			continue
 		}
@@ -79,7 +115,7 @@ func tokens(s string) ([]string, bool) {
 func word(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
 }
-func equal(a, b []string) bool {
+func equal(a, b []token) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -89,6 +125,32 @@ func equal(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// The trusted frozen pattern identifies the only positions where identifier
+// quotes may be normalized. A quoted keyword, NULL, string or number cannot
+// match its unquoted counterpart, including with SQLite's default DQS behavior.
+func patternEqual(actual, expected []token) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	for i, want := range expected {
+		if actual[i] == want {
+			continue
+		}
+		if want.kind != identifierToken || !frozenIdentifier(want.text) || actual[i].kind != quotedIdentifierToken || !strings.EqualFold(actual[i].text, want.text) {
+			return false
+		}
+	}
+	return true
+}
+
+func frozenIdentifier(name string) bool {
+	if name == "upstreams" {
+		return true
+	}
+	_, found := definitions()[name]
+	return found
 }
 
 func definitions() map[string]string {
@@ -114,21 +176,22 @@ const stateConstraint = `CHECK((provider_kind IN ('openai-compatible','anthropic
 
 func knownDDL(ddl string) bool {
 	t, valid := tokens(ddl)
-	if !valid || len(t) < 6 || !equal(t[:4], []string{"create", "table", "upstreams", "("}) || t[len(t)-1] != ")" {
+	header, _ := tokens("CREATE TABLE upstreams (")
+	if !valid || len(t) < 6 || !patternEqual(t[:4], header) || t[len(t)-1] != (token{punctuationToken, ")"}) {
 		return false
 	}
-	var parts [][]string
+	var parts [][]token
 	start, depth := 4, 0
 	for i := 4; i < len(t)-1; i++ {
 		switch t[i] {
-		case "(":
+		case token{punctuationToken, "("}:
 			depth++
-		case ")":
+		case token{punctuationToken, ")"}:
 			depth--
 			if depth < 0 {
 				return false
 			}
-		case ",":
+		case token{punctuationToken, ","}:
 			if depth == 0 {
 				parts = append(parts, t[start:i])
 				start = i + 1
@@ -149,23 +212,27 @@ func knownDDL(ddl string) bool {
 		if len(p) == 0 {
 			return false
 		}
-		if p[0] == "check" {
+		if p[0] == (token{keywordToken, "check"}) {
 			want, _ := tokens(stateConstraint)
-			if !equal(p, want) {
+			if !patternEqual(p, want) {
 				return false
 			}
 			checks++
 			continue
 		}
-		definition, found := defs[p[0]]
-		if !found || seen[p[0]] {
+		if p[0].kind != identifierToken && p[0].kind != quotedIdentifierToken {
+			return false
+		}
+		name := strings.ToLower(p[0].text)
+		definition, found := defs[name]
+		if !found || seen[name] {
 			return false
 		}
 		want, _ := tokens(definition)
-		if !equal(p, want) {
+		if !patternEqual(p, want) {
 			return false
 		}
-		seen[p[0]] = true
+		seen[name] = true
 	}
 	return len(seen) == 14 && checks == 1
 }

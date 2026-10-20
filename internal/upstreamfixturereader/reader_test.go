@@ -528,6 +528,158 @@ func TestStrictDDLTokenizationRetainsLiteralMeaning(t *testing.T) {
 	}
 }
 
+// Each mutation changes a CHECK expression only, not column nullability.
+// These public fixtures are independent of the reader's frozen definitions.
+func quotedNULLVariants(t *testing.T) []struct{ name, ddl string } {
+	t.Helper()
+	changes := []struct{ name, old, replacement string }{
+		{"inline_state", "CHECK(credential_state IS NULL OR", `CHECK(credential_state IS "NULL" OR`},
+		{"api_state", "AND credential_state IS NULL AND", `AND credential_state IS "NULL" AND`},
+		{"api_verified", "AND verified_at IS NULL AND", `AND verified_at IS "NULL" AND`},
+		{"api_operation", "AND operation_id IS NULL)", `AND operation_id IS "NULL")`},
+		{"codex_state", "credential_state IS NOT NULL", `credential_state IS NOT "NULL"`},
+		{"codex_operation", "operation_id IS NOT NULL", `operation_id IS NOT "NULL"`},
+		{"codex_both", "credential_state IS NOT NULL AND operation_id IS NOT NULL", `credential_state IS NOT "NULL" AND operation_id IS NOT "NULL"`},
+		{"inline_lowercase", "CHECK(credential_state IS NULL OR", `CHECK(credential_state IS "null" OR`},
+	}
+	var variants []struct{ name, ddl string }
+	for _, change := range changes {
+		if strings.Count(freshDDL, change.old) != 1 {
+			t.Fatal("QUOTED_NULL_MUTATION_BOUNDARY")
+		}
+		variants = append(variants, struct{ name, ddl string }{change.name, strings.Replace(freshDDL, change.old, change.replacement, 1)})
+	}
+	return variants
+}
+
+func TestQuotedNULLKnownDDL(t *testing.T) {
+	for _, variant := range quotedNULLVariants(t) {
+		t.Run(variant.name, func(t *testing.T) {
+			if knownDDL(variant.ddl) {
+				t.Fatal("QUOTED_NULL_DDL_ACCEPTED")
+			}
+		})
+	}
+}
+
+func quotedNULLFixture(t *testing.T, ddl string, legalRow bool) sealedFixture {
+	t.Helper()
+	return createFixture(t, ddl, 0, func(db *sql.DB) {
+		// Exercise the pinned driver's default DQS behavior; never disable DQS.
+		var bare, quoted int
+		if db.QueryRow(`SELECT NULL IS NOT NULL, NULL IS NOT "NULL"`).Scan(&bare, &quoted) != nil || bare != 0 || quoted != 1 {
+			t.Fatal("DEFAULT_DQS_SEMANTICS_CHANGED")
+		}
+		if legalRow {
+			blob := bytes.Repeat([]byte{'P'}, 40)
+			defer clear(blob)
+			execFixed(t, db, `INSERT INTO upstreams(id,name,provider_kind,endpoint,enabled,credential_ciphertext,key_version,revision,archived,archived_at,created_at,credential_state,verified_at,operation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, "public-quoted-null-control", "Public fixture", "codex-membership", "https://fixture.invalid", 1, blob, 2, 3, 0, nil, "2026-10-20T00:00:00Z", "verified", "2026-10-20T00:00:00Z", "public-quoted-null-operation")
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal("QUOTED_NULL_METADATA_BEGIN")
+		}
+		defer tx.Rollback()
+		ctx := context.Background()
+		if checkTable(ctx, tx) != ok || checkColumns(ctx, tx) != ok || checkIndexes(ctx, tx) != ok || checkIntegrity(ctx, tx) != ok {
+			t.Fatal("QUOTED_NULL_METADATA_CONTROL_FAILED")
+		}
+		if tx.Rollback() != nil {
+			t.Fatal("QUOTED_NULL_METADATA_ROLLBACK")
+		}
+	})
+}
+
+func TestQuotedNULLSealedSchema(t *testing.T) {
+	for _, variant := range quotedNULLVariants(t) {
+		for _, row := range []struct {
+			name  string
+			legal bool
+		}{{"empty", false}, {"legal_row", true}} {
+			t.Run(variant.name+"/"+row.name, func(t *testing.T) {
+				s := quotedNULLFixture(t, variant.ddl, row.legal)
+				out, c := readFixture(context.Background(), s, 7, 8)
+				if out != nil || c != badSchema {
+					if c == ok && out != nil {
+						t.Fatal("QUOTED_NULL_SCHEMA_ACCEPTED_MANIFEST")
+					}
+					t.Fatal("QUOTED_NULL_NOT_BAD_SCHEMA")
+				}
+				if !verifySeal(s) {
+					t.Fatal("QUOTED_NULL_FIXTURE_MUTATED")
+				}
+			})
+		}
+	}
+}
+
+func TestQuotedNULLFixtureControl(t *testing.T) {
+	for _, legal := range []bool{false, true} {
+		s := quotedNULLFixture(t, freshDDL, legal)
+		out, c := readFixture(context.Background(), s, 7, 8)
+		wantRows := 0
+		if legal {
+			wantRows = 1
+		}
+		if c != ok || out == nil || len(out.Entries) != wantRows || !verifySeal(s) {
+			t.Fatal("QUOTED_NULL_LEGAL_CONTROL_REJECTED")
+		}
+	}
+}
+
+func TestTokenCategoriesRemainDistinct(t *testing.T) {
+	for _, pair := range []struct{ name, a, b string }{
+		{"null_quote", "NULL", `"NULL"`}, {"keyword_quote", "IS", `"IS"`},
+		{"type_quote", "TEXT", `"TEXT"`}, {"number_quote", "0", `"0"`},
+		{"number_string", "0", "'0'"}, {"string_identifier", "'NULL'", `"NULL"`},
+	} {
+		t.Run(pair.name, func(t *testing.T) {
+			a, aOK := tokens(pair.a)
+			b, bOK := tokens(pair.b)
+			if !aOK || !bOK || equal(a, b) {
+				t.Fatal("TOKEN_CATEGORIES_COLLAPSED")
+			}
+		})
+	}
+}
+
+func TestFrozenIdentifierQuotesRemainAccepted(t *testing.T) {
+	ddl := strings.Replace(freshDDL, "CREATE TABLE upstreams", `CREATE TABLE "upstreams"`, 1)
+	for _, name := range []string{"provider_kind", "credential_state", "verified_at", "operation_id"} {
+		ddl = strings.ReplaceAll(ddl, name, `"`+name+`"`)
+	}
+	if !knownDDL(ddl) {
+		t.Fatal("FROZEN_IDENTIFIER_QUOTES_REJECTED")
+	}
+	s := createFixture(t, ddl, 7, nil)
+	out, c := readFixture(context.Background(), s, 7, 8)
+	if c != ok || out == nil || len(out.Entries) != 7 || !verifySeal(s) {
+		t.Fatal("QUOTED_IDENTIFIER_FIXTURE_REJECTED")
+	}
+}
+
+func TestFrozenGrammarRejectsQuotedNonIdentifiers(t *testing.T) {
+	for _, change := range []struct{ name, old, replacement string }{
+		{"create", "CREATE TABLE", `"CREATE" TABLE`},
+		{"type", "name TEXT", `name "TEXT"`},
+		{"check", "CHECK(archived", `"CHECK"(archived`},
+		{"default_number", "DEFAULT 0", `DEFAULT "0"`},
+		{"check_number", "IN (0,1)", `IN ("0",1)`},
+		{"null_string", "IS NULL OR", "IS 'NULL' OR"},
+		{"null_number", "IS NULL OR", "IS 0 OR"},
+		{"null_identifier", "IS NULL OR", "IS credential_state OR"},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			if strings.Count(freshDDL, change.old) != 1 {
+				t.Fatal("FROZEN_GRAMMAR_MUTATION_BOUNDARY")
+			}
+			if knownDDL(strings.Replace(freshDDL, change.old, change.replacement, 1)) {
+				t.Fatal("QUOTED_NON_IDENTIFIER_ACCEPTED")
+			}
+		})
+	}
+}
+
 func TestCleanupFoldPreservesEveryPrimaryFailure(t *testing.T) {
 	for _, primary := range []code{badSeal, badOpen, badSchema, badData, badClose, cancelled} {
 		for _, cleanupFailed := range []bool{false, true} {

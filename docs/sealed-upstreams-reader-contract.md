@@ -32,7 +32,7 @@ Online WAL/concurrent-writer snapshot acquisition is a separate future batch.
 
 ## Read-only lifecycle and same-transaction evidence
 
-The pinned existing driver is `modernc.org/sqlite v1.38.2` (SQLite 3.50.1).
+The pinned existing driver is `modernc.org/sqlite v1.38.2` (SQLite 3.50.3 in its Windows/Linux amd64 generated sources).
 The code constructs its own escaped file URI with `mode=ro&cache=private`;
 there is no writable fallback, caller DSN, `immutable=1`, `nolock` or custom
 VFS. One dedicated `database/sql.Conn` holds one explicit read transaction.
