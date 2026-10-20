@@ -29,7 +29,7 @@ func main() {
 func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	if len(args) == 0 {
 		writeUsage(stdout)
-		return 2, errors.New("a subcommand is required")
+		return 2, legacyFailure("none", "arguments")
 	}
 	switch args[0] {
 	case "systemd-v3-verify", "systemd-v3-restore":
@@ -42,85 +42,116 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 		return runKeyImport(ctx, args[1:], stdin, stdout)
 	case "create":
 		flags := flag.NewFlagSet("cpa-cloud-backup create", flag.ContinueOnError)
-		flags.SetOutput(stdout)
 		var dataDir, output string
 		flags.StringVar(&dataDir, "data-dir", "", "source CPA Cloud data directory")
 		flags.StringVar(&output, "output", "", "new backup package file")
-		if err := flags.Parse(args[1:]); err != nil {
-			if err == flag.ErrHelp {
-				return 0, nil
-			}
+		if help, err := parseLegacyFlags(flags, "create", args[1:], stdout); help {
+			return 0, nil
+		} else if err != nil {
 			return 2, err
 		}
 		if flags.NArg() != 0 || dataDir == "" || output == "" {
-			return 2, errors.New("create requires --data-dir and --output")
+			return 2, legacyFailure("create", "arguments")
 		}
 		password, err := readPassword(stdin)
 		if err != nil {
-			return 1, err
+			return 1, legacyFailure("create", "password")
 		}
 		defer wipe(password)
 		info, err := backup.Create(ctx, dataDir, output, password, version)
 		if err != nil {
-			return 1, err
+			return 1, legacyOperationFailure("create", err)
 		}
 		fmt.Fprintf(stdout, "Created authenticated backup format v%d from CPA Cloud %s with %d files.\n", info.FormatVersion, info.SourceVersion, len(info.Files))
 		return 0, nil
 	case "verify":
 		flags := flag.NewFlagSet("cpa-cloud-backup verify", flag.ContinueOnError)
-		flags.SetOutput(stdout)
 		var input string
 		flags.StringVar(&input, "input", "", "backup package file")
-		if err := flags.Parse(args[1:]); err != nil {
-			if err == flag.ErrHelp {
-				return 0, nil
-			}
+		if help, err := parseLegacyFlags(flags, "verify", args[1:], stdout); help {
+			return 0, nil
+		} else if err != nil {
 			return 2, err
 		}
 		if flags.NArg() != 0 || input == "" {
-			return 2, errors.New("verify requires --input")
+			return 2, legacyFailure("verify", "arguments")
 		}
 		password, err := readPassword(stdin)
 		if err != nil {
-			return 1, err
+			return 1, legacyFailure("verify", "password")
 		}
 		defer wipe(password)
 		info, err := backup.Verify(ctx, input, password)
 		if err != nil {
-			return 1, err
+			return 1, legacyOperationFailure("verify", err)
 		}
 		fmt.Fprintf(stdout, "Verified authenticated backup format v%d from CPA Cloud %s (%s); future-version restore compatibility is not implied.\n", info.FormatVersion, info.SourceVersion, info.CreatedAt)
 		return 0, nil
 	case "restore":
 		flags := flag.NewFlagSet("cpa-cloud-backup restore", flag.ContinueOnError)
-		flags.SetOutput(stdout)
 		var input, dataDir string
 		flags.StringVar(&input, "input", "", "backup package file")
 		flags.StringVar(&dataDir, "data-dir", "", "new restore data directory")
-		if err := flags.Parse(args[1:]); err != nil {
-			if err == flag.ErrHelp {
-				return 0, nil
-			}
+		if help, err := parseLegacyFlags(flags, "restore", args[1:], stdout); help {
+			return 0, nil
+		} else if err != nil {
 			return 2, err
 		}
 		if flags.NArg() != 0 || input == "" || dataDir == "" {
-			return 2, errors.New("restore requires --input and --data-dir")
+			return 2, legacyFailure("restore", "arguments")
 		}
 		password, err := readPassword(stdin)
 		if err != nil {
-			return 1, err
+			return 1, legacyFailure("restore", "password")
 		}
 		defer wipe(password)
 		info, err := backup.Restore(ctx, input, dataDir, password)
 		if err != nil {
-			return 1, err
+			return 1, legacyOperationFailure("restore", err)
 		}
 		fmt.Fprintf(stdout, "Restored authenticated backup format v%d into a new data directory.\n", info.FormatVersion)
 		return 0, nil
 	default:
 		writeUsage(stdout)
-		return 2, fmt.Errorf("unknown subcommand %q", args[0])
+		return 2, legacyFailure("unknown", "arguments")
 	}
+}
+
+// Independently authored from docs/backup-cli-diagnostic-redaction-contract.md.
+// Raw parser diagnostics must never reach a caller's output. Help is generated
+// again from static registrations, not from a captured diagnostic or argv.
+func parseLegacyFlags(flags *flag.FlagSet, command string, args []string, stdout io.Writer) (bool, error) {
+	flags.SetOutput(io.Discard)
+	if err := flags.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			flags.SetOutput(stdout)
+			flags.Usage()
+			return true, nil
+		}
+		fixed := legacyFailure(command, "arguments")
+		fmt.Fprintln(stdout, fixed)
+		return false, fixed
+	}
+	return false, nil
+}
+
+func legacyFailure(command, phase string) error {
+	switch command {
+	case "none", "unknown", "create", "verify", "restore", "key-export", "key-verify", "key-import":
+	default:
+		command, phase = "unknown", "operation"
+	}
+	switch phase {
+	case "arguments", "versions", "password", "operation":
+	default:
+		command, phase = "unknown", "operation"
+	}
+	return errors.New("BACKUP_CLI " + command + " " + phase + " failed")
+}
+
+// Deliberately neither format nor retain the cause, including its unwrap chain.
+func legacyOperationFailure(command string, _ error) error {
+	return legacyFailure(command, "operation")
 }
 
 func readPassword(reader io.Reader) ([]byte, error) {
