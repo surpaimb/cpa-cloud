@@ -8,29 +8,16 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"cpacloud.local/server/internal/selfschema"
 )
 
 // These definitions are intentionally audited verbatim. An existing object with
 // the right name but weaker constraints must not be silently accepted.
 var selfSchema = []struct{ name, kind, ddl string }{
-	{"employee_self_credentials", "table", `CREATE TABLE employee_self_credentials (
-		employee_id TEXT PRIMARY KEY REFERENCES employees(id) ON DELETE CASCADE,
-		password_hash BLOB,
-		enrollment_digest BLOB,
-		enrollment_expires_at TEXT,
-		updated_at TEXT NOT NULL,
-		CHECK ((enrollment_digest IS NULL) = (enrollment_expires_at IS NULL)),
-		CHECK (password_hash IS NULL OR enrollment_digest IS NULL)
-	)`},
-	{"employee_self_sessions", "table", `CREATE TABLE employee_self_sessions (
-		selector TEXT PRIMARY KEY,
-		employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
-		verifier_digest BLOB NOT NULL,
-		csrf_token TEXT NOT NULL,
-		expires_at TEXT NOT NULL,
-		created_at TEXT NOT NULL
-	)`},
-	{"employee_self_sessions_expiry_idx", "index", `CREATE INDEX employee_self_sessions_expiry_idx ON employee_self_sessions(expires_at)`},
+	{"employee_self_credentials", "table", selfschema.Credentials},
+	{"employee_self_sessions", "table", selfschema.Sessions},
+	{"employee_self_sessions_expiry_idx", "index", selfschema.ExpiryIndex},
 }
 
 func (s *store) migrateSelfService(ctx context.Context) error {
