@@ -343,7 +343,9 @@ func upstreamShadowCheckSchema(ctx context.Context, tx *sql.Tx) upstreamShadowCo
 	}
 	for _, name := range tableNames {
 		var inbound int
-		if tx.QueryRowContext(ctx, `SELECT count(*) FROM pragma_foreign_key_list(?,'main') WHERE "table"='upstreams'`, name).Scan(&inbound) != nil || inbound != 0 {
+		// REFERENCES preserves spelling; match SQLite's ASCII case folding,
+		// not Go Unicode EqualFold. https://sqlite.org/datatype3.html#collation
+		if tx.QueryRowContext(ctx, `SELECT count(*) FROM pragma_foreign_key_list(?,'main') WHERE "table" COLLATE NOCASE='upstreams'`, name).Scan(&inbound) != nil || inbound != 0 {
 			return upstreamShadowSchema
 		}
 	}

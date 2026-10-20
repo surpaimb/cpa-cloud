@@ -556,6 +556,168 @@ func TestUpstreamShadowSchemaAndLimits(t *testing.T) {
 	}
 }
 
+// Independently authored P2 regressions use real SQL on owned temporary stores.
+// Parent spelling is observed, not substituted through a query/driver boundary.
+func upstreamShadowTestAllTableFacts(t *testing.T, db *sql.DB) map[string][][]any {
+	t.Helper()
+	names, err := db.Query(`SELECT name FROM main.sqlite_schema WHERE type='table' ORDER BY name`)
+	if err != nil {
+		t.Fatal("SHADOW_ALL_FACTS_TABLES_FAILED")
+	}
+	var tables []string
+	for names.Next() {
+		var name string
+		if names.Scan(&name) != nil {
+			names.Close()
+			t.Fatal("SHADOW_ALL_FACTS_TABLE_SCAN_FAILED")
+		}
+		tables = append(tables, name)
+	}
+	iterationErr, closeErr := names.Err(), names.Close()
+	if iterationErr != nil || closeErr != nil {
+		t.Fatal("SHADOW_ALL_FACTS_TABLE_CLOSE_FAILED")
+	}
+	out := map[string][][]any{}
+	for _, name := range tables {
+		// Only test-owned names are read; quote identifiers rather than data-bind
+		// them. All fixtures here are ordinary rowid tables.
+		r, err := db.Query(`SELECT * FROM main."` + strings.ReplaceAll(name, `"`, `""`) + `" ORDER BY rowid`)
+		if err != nil {
+			t.Fatal("SHADOW_ALL_FACTS_QUERY_FAILED")
+		}
+		columns, err := r.Columns()
+		if err != nil {
+			r.Close()
+			t.Fatal("SHADOW_ALL_FACTS_COLUMNS_FAILED")
+		}
+		out[name] = nil
+		for r.Next() {
+			values, dest := make([]any, len(columns)), make([]any, len(columns))
+			for i := range values {
+				dest[i] = &values[i]
+			}
+			if r.Scan(dest...) != nil {
+				r.Close()
+				t.Fatal("SHADOW_ALL_FACTS_SCAN_FAILED")
+			}
+			for i, value := range values {
+				if b, ok := value.([]byte); ok {
+					values[i] = append([]byte{}, b...)
+				}
+			}
+			out[name] = append(out[name], values)
+		}
+		iterationErr, closeErr = r.Err(), r.Close()
+		if iterationErr != nil || closeErr != nil {
+			t.Fatal("SHADOW_ALL_FACTS_CLOSE_FAILED")
+		}
+	}
+	return out
+}
+
+func TestUpstreamShadowInboundForeignKeyIdentifierCase(t *testing.T) {
+	for _, test := range []struct{ name, declaration, spelling string }{
+		{"lowercase-control", `upstreams`, "upstreams"},
+		{"uppercase-unquoted", `UPSTREAMS`, "UPSTREAMS"},
+		{"uppercase-quoted", `"UPSTREAMS"`, "UPSTREAMS"},
+		{"mixed-case-quoted", `"UpStReAmS"`, "UpStReAmS"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m1, m2 := upstreamShadowTestRoots()
+			f := upstreamShadowTestCreate(t, upstreamShadowTestDDL(false), 13, func(db *sql.DB) {
+				upstreamShadowTestExec(t, db, `PRAGMA foreign_keys=ON`)
+				upstreamShadowTestExec(t, db, `CREATE TABLE shadow_inbound(id INTEGER PRIMARY KEY,parent_id TEXT NOT NULL REFERENCES `+test.declaration+`(id) ON UPDATE CASCADE,facts TEXT NOT NULL)`)
+				// With FK enforcement enabled, this insert also establishes that
+				// the declared spelling resolves to the supported upstreams table.
+				upstreamShadowTestExec(t, db, `INSERT INTO shadow_inbound VALUES(1,'shadow-000','public child facts')`)
+			})
+			var version, parent string
+			var enabled, references, violations int
+			if f.cap.db.QueryRow(`SELECT sqlite_version()`).Scan(&version) != nil || version != "3.50.3" ||
+				f.cap.db.QueryRow(`PRAGMA foreign_keys`).Scan(&enabled) != nil || enabled != 1 ||
+				f.cap.db.QueryRow(`SELECT count(*),min("table") FROM pragma_foreign_key_list('shadow_inbound','main')`).Scan(&references, &parent) != nil || references != 1 || parent != test.spelling ||
+				f.cap.db.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check`).Scan(&violations) != nil || violations != 0 {
+				t.Fatal("SHADOW_INBOUND_CASE_REAL_SQL_PRECONDITION_FAILED")
+			}
+			tx, err := f.cap.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+			if err != nil {
+				t.Fatal("SHADOW_INBOUND_CASE_ROW_CONTROL_BEGIN_FAILED")
+			}
+			rows, rowCode := upstreamShadowReadRows(context.Background(), tx, nil)
+			rollbackErr := tx.Rollback()
+			if rowCode != upstreamShadowOK || len(rows) != 13 || rollbackErr != nil {
+				t.Fatal("SHADOW_INBOUND_CASE_SUPPORTED_ROWS_FAILED")
+			}
+			before := upstreamShadowTestAllTableFacts(t, f.cap.db)
+			queries, writes, commits := 0, 0, 0
+			f.cap.boundary.query = func(ctx context.Context, tx *sql.Tx, q string) (*sql.Rows, error) {
+				queries++
+				return tx.QueryContext(ctx, q)
+			}
+			f.cap.boundary.beforeWrite = func(context.Context, *sql.Tx, int) error { writes++; return nil }
+			f.cap.boundary.commit = func(tx *sql.Tx) error { commits++; return tx.Commit() }
+			out, code := upstreamShadowRun(context.Background(), f.cap, m1, m2)
+			if out != nil && code == upstreamShadowOK {
+				t.Log("SHADOW_INBOUND_CASE_ACCEPTED_CANDIDATE")
+			}
+			if out != nil || code != upstreamShadowSchema {
+				t.Error("SHADOW_INBOUND_CASE_REJECTION_FAILED")
+			}
+			if queries != 0 || writes != 0 || commits != 0 {
+				t.Error("SHADOW_INBOUND_CASE_REACHED_ENUMERATION_WRITE_OR_COMMIT")
+			}
+			db := upstreamShadowTestDB(t, f)
+			after := upstreamShadowTestAllTableFacts(t, db)
+			if db.Close() != nil {
+				t.Fatal("SHADOW_INBOUND_CASE_REOPEN_CLOSE_FAILED")
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Error("SHADOW_INBOUND_CASE_CHANGED_FACTS")
+			}
+		})
+	}
+}
+
+func TestUpstreamShadowUnrelatedForeignKeyParents(t *testing.T) {
+	// The last spelling is intentionally distinct in SQLite, although Go's
+	// Unicode EqualFold would conflate its long-s with ASCII s.
+	for _, parent := range []string{"UPSTREAMS_OTHER", "UPSTREAM", "upſtreams"} {
+		t.Run(parent, func(t *testing.T) {
+			m1, m2 := upstreamShadowTestRoots()
+			f := upstreamShadowTestCreate(t, upstreamShadowTestDDL(false), 13, func(db *sql.DB) {
+				upstreamShadowTestExec(t, db, `PRAGMA foreign_keys=ON`)
+				upstreamShadowTestExec(t, db, `CREATE TABLE "`+parent+`"(id TEXT PRIMARY KEY,facts TEXT NOT NULL)`)
+				upstreamShadowTestExec(t, db, `INSERT INTO "`+parent+`" VALUES('shadow-000','public parent facts')`)
+				upstreamShadowTestExec(t, db, `CREATE TABLE shadow_inbound(id INTEGER PRIMARY KEY,parent_id TEXT NOT NULL REFERENCES "`+parent+`"(id) ON UPDATE CASCADE,facts TEXT NOT NULL)`)
+				upstreamShadowTestExec(t, db, `INSERT INTO shadow_inbound VALUES(1,'shadow-000','public child facts')`)
+			})
+			var references, violations int
+			var spelling string
+			if f.cap.db.QueryRow(`SELECT count(*),min("table") FROM pragma_foreign_key_list('shadow_inbound','main')`).Scan(&references, &spelling) != nil || references != 1 || spelling != parent ||
+				f.cap.db.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check`).Scan(&violations) != nil || violations != 0 {
+				t.Fatal("SHADOW_UNRELATED_FK_PRECONDITION_FAILED")
+			}
+			beforeAll := upstreamShadowTestAllTableFacts(t, f.cap.db)
+			before, other := upstreamShadowTestBefore(t, f)
+			out, code := upstreamShadowRun(context.Background(), f.cap, m1, m2)
+			if out == nil || code != upstreamShadowOK {
+				t.Fatal("SHADOW_UNRELATED_FK_FALSE_REJECTION")
+			}
+			upstreamShadowTestCommitted(t, f, before, other, m1, m2)
+			db := upstreamShadowTestDB(t, f)
+			afterAll := upstreamShadowTestAllTableFacts(t, db)
+			if db.Close() != nil {
+				t.Fatal("SHADOW_UNRELATED_FK_REOPEN_CLOSE_FAILED")
+			}
+			delete(beforeAll, "upstreams")
+			delete(afterAll, "upstreams")
+			if !reflect.DeepEqual(beforeAll, afterAll) {
+				t.Fatal("SHADOW_UNRELATED_FK_CHANGED_FACTS")
+			}
+		})
+	}
+}
+
 func TestUpstreamShadowControlledEncryptionBoundaries(t *testing.T) {
 	for _, name := range []string{"simulated-random-source-return", "simulated-duplicate-nonce-return", "simulated-truncated-return", "simulated-wrong-m2-return"} {
 		t.Run(name, func(t *testing.T) {
