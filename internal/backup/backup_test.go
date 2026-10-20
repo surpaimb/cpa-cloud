@@ -6,20 +6,415 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"cpacloud.local/server/internal/selfschema"
 	_ "modernc.org/sqlite"
 )
 
 var testPassword = []byte("synthetic-backup-password")
+
+// D2 independently authored synthetic SQLite admission/atomicity controls.
+func d2UnitFixture(t *testing.T, statements []string) (string, map[string][]string) {
+	t.Helper()
+	dir := t.TempDir()
+	db := openSyntheticDatabase(t, dir)
+	for _, s := range statements {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatal("D2_FIXTURE_SQL")
+		}
+	}
+	facts := d2UnitFacts(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatal("D2_FIXTURE_CLOSE")
+	}
+	return filepath.Join(dir, databaseFilename), facts
+}
+func d2CompleteDDL() []string {
+	return []string{selfschema.Credentials, selfschema.Sessions, selfschema.ExpiryIndex}
+}
+func d2SeedDDL() []string {
+	return append(d2CompleteDDL(), `INSERT INTO employee_self_credentials VALUES('emp_synthetic',NULL,x'010203','2099-01-01T00:00:00.000000000Z','2026-01-01T00:00:00.000000000Z')`, `INSERT INTO employee_self_sessions VALUES('self_synthetic','emp_synthetic',x'010203','synthetic-csrf','2099-01-01T00:00:00.000000000Z','2026-01-01T00:00:00.000000000Z')`)
+}
+func d2UnitFacts(t *testing.T, db *sql.DB) map[string][]string {
+	t.Helper()
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`)
+	if err != nil {
+		t.Fatal("D2_FACT_TABLES")
+	}
+	var names []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatal("D2_FACT_TABLE_SCAN")
+		}
+		names = append(names, s)
+	}
+	if rows.Err() != nil || rows.Close() != nil {
+		t.Fatal("D2_FACT_TABLE_ROWS")
+	}
+	out := map[string][]string{}
+	for _, name := range append(names, "@schema") {
+		query := `SELECT * FROM "` + strings.ReplaceAll(name, `"`, `""`) + `"`
+		if name == "@schema" {
+			query = `SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name`
+		}
+		r, err := db.Query(query)
+		if err != nil {
+			t.Fatal("D2_FACT_QUERY")
+		}
+		cols, err := r.Columns()
+		if err != nil {
+			t.Fatal("D2_FACT_COLUMNS")
+		}
+		out[name] = []string{}
+		for r.Next() {
+			v := make([]any, len(cols))
+			refs := make([]any, len(cols))
+			for i := range v {
+				refs[i] = &v[i]
+			}
+			if r.Scan(refs...) != nil {
+				t.Fatal("D2_FACT_SCAN")
+			}
+			var b strings.Builder
+			for _, x := range v {
+				switch v := x.(type) {
+				case nil:
+					b.WriteString("N;")
+				case []byte:
+					fmt.Fprintf(&b, "B%x;", v)
+				default:
+					fmt.Fprintf(&b, "%T:%q;", v, fmt.Sprint(v))
+				}
+			}
+			out[name] = append(out[name], b.String())
+		}
+		if r.Err() != nil || r.Close() != nil {
+			t.Fatal("D2_FACT_ROWS")
+		}
+		sort.Strings(out[name])
+	}
+	return out
+}
+func d2ReopenedFacts(t *testing.T, path string) map[string][]string {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal("D2_REOPEN")
+	}
+	facts := d2UnitFacts(t, db)
+	if db.Close() != nil {
+		t.Fatal("D2_REOPEN_CLOSE")
+	}
+	return facts
+}
+
+func TestD2SchemaAdmission(t *testing.T) {
+	cases := []struct {
+		name string
+		ddl  []string
+	}{
+		{"weak-check", []string{strings.Replace(selfschema.Credentials, `CHECK (password_hash IS NULL OR enrollment_digest IS NULL)`, `CHECK (1)`, 1), selfschema.Sessions, selfschema.ExpiryIndex}},
+		{"view", []string{`CREATE VIEW employee_self_credentials AS SELECT id FROM employees`}},
+		{"virtual", []string{`CREATE VIRTUAL TABLE employee_self_credentials USING fts5(value)`}},
+		{"wrong-index", []string{selfschema.Credentials, selfschema.Sessions, `CREATE INDEX employee_self_sessions_expiry_idx ON employee_self_sessions(created_at)`}},
+		{"extra-index", append(d2CompleteDDL(), `CREATE INDEX extra_self_idx ON employee_self_credentials(updated_at)`)},
+	}
+	for mask := 1; mask < 7; mask++ {
+		var ddl []string
+		all := d2CompleteDDL()
+		for i := 0; i < 3; i++ {
+			if mask&(1<<i) != 0 {
+				if i == 2 && mask&2 == 0 {
+					ddl = append(ddl, `CREATE INDEX employee_self_sessions_expiry_idx ON employees(name)`)
+				} else {
+					ddl = append(ddl, all[i])
+				}
+			}
+		}
+		cases = append(cases, struct {
+			name string
+			ddl  []string
+		}{fmt.Sprintf("partial-%d", mask), ddl})
+	}
+	for _, name := range []string{"employee_self_credentials", "employee_self_sessions", "employee_self_sessions_expiry_idx"} {
+		ddl := d2CompleteDDL()
+		for i := range ddl {
+			ddl[i] = strings.ReplaceAll(ddl[i], name, strings.ToUpper(name))
+		}
+		cases = append(cases, struct {
+			name string
+			ddl  []string
+		}{"alias-" + name, ddl})
+	}
+	for _, quoted := range []string{`"NULL"`, `"null"`} {
+		for _, position := range []int{1, 2} {
+			ddl := d2CompleteDDL()
+			if position == 1 {
+				ddl[0] = strings.Replace(ddl[0], `enrollment_digest IS NULL) = (enrollment_expires_at IS NULL)`, `enrollment_digest IS `+quoted+`) = (enrollment_expires_at IS `+quoted+`)`, 1)
+			} else {
+				ddl[0] = strings.Replace(ddl[0], `password_hash IS NULL OR enrollment_digest IS NULL`, `password_hash IS `+quoted+` OR enrollment_digest IS `+quoted, 1)
+			}
+			cases = append(cases, struct {
+				name string
+				ddl  []string
+			}{fmt.Sprintf("quoted-%s-%d", quoted, position), ddl})
+		}
+	}
+	for _, target := range []string{"employee_self_credentials", "employee_self_sessions", "sessions", "codex_oauth_sessions", "codex_oauth_refresh_states"} {
+		event := "DELETE"
+		if target == "employee_self_credentials" || target == "codex_oauth_refresh_states" {
+			event = "UPDATE"
+		}
+		ddl := append(d2CompleteDDL(), `CREATE TRIGGER d2_trigger BEFORE `+event+` ON `+target+` BEGIN SELECT RAISE(FAIL,'D2_TRIGGER_EXECUTED'); END`)
+		cases = append(cases, struct {
+			name string
+			ddl  []string
+		}{"trigger-" + target, ddl})
+	}
+	for _, target := range []string{"employee_self_credentials", "EMPLOYEE_SELF_CREDENTIALS", "Employee_Self_Sessions"} {
+		for _, action := range []string{"CASCADE", "SET NULL"} {
+			for _, missing := range []bool{false, true} {
+				var ddl []string
+				if !missing {
+					ddl = d2CompleteDDL()
+				}
+				column := "employee_id"
+				if strings.Contains(strings.ToLower(target), "sessions") {
+					column = "selector"
+				}
+				ddl = append(ddl, `CREATE TABLE inbound_empty(v TEXT REFERENCES "`+target+`"(`+column+`) ON DELETE `+action+`)`)
+				cases = append(cases, struct {
+					name string
+					ddl  []string
+				}{fmt.Sprintf("inbound-%s-%s-missing%t", target, action, missing), ddl})
+			}
+		}
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, before := d2UnitFixture(t, tc.ddl)
+			err := sanitizeRestoredDatabase(context.Background(), path)
+			if !errors.Is(err, errRestoredSelfSchema) {
+				t.Fatal("D2_BAD_SCHEMA_NOT_REJECTED_AT_GATE")
+			}
+			if !reflect.DeepEqual(before, d2ReopenedFacts(t, path)) {
+				t.Fatal("D2_REJECTION_CHANGED_FACTS")
+			}
+		})
+	}
+	for _, target := range []string{"EMPLOYEE_SELF_CREDENTIALS", "Employee_Self_Sessions"} {
+		for _, action := range []string{"CASCADE", "SET NULL"} {
+			t.Run("populated-inbound-"+target+"-"+action, func(t *testing.T) {
+				column, value := "employee_id", "emp_synthetic"
+				if strings.Contains(strings.ToLower(target), "sessions") {
+					column, value = "selector", "self_synthetic"
+				}
+				ddl := append(d2SeedDDL(), `CREATE TABLE inbound_populated(v TEXT REFERENCES "`+target+`"(`+column+`) ON DELETE `+action+`)`, `INSERT INTO inbound_populated VALUES('`+value+`')`)
+				path, before := d2UnitFixture(t, ddl)
+				if !errors.Is(sanitizeRestoredDatabase(context.Background(), path), errRestoredSelfSchema) || !reflect.DeepEqual(before, d2ReopenedFacts(t, path)) {
+					t.Fatal("D2_POPULATED_INBOUND_NOT_REJECTED_UNCHANGED")
+				}
+			})
+		}
+	}
+	for _, complete := range []bool{false, true} {
+		t.Run(fmt.Sprintf("admit-complete%t", complete), func(t *testing.T) {
+			var ddl []string
+			if complete {
+				ddl = d2SeedDDL()
+			}
+			path, before := d2UnitFixture(t, ddl)
+			if err := sanitizeRestoredDatabase(context.Background(), path); err != nil {
+				t.Fatal("D2_VALID_SCHEMA_REJECTED")
+			}
+			after := d2ReopenedFacts(t, path)
+			for _, name := range []string{"sessions", "codex_oauth_sessions", "codex_oauth_refresh_states", "employee_self_sessions", "employee_self_credentials"} {
+				delete(before, name)
+				delete(after, name)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatal("D2_NON_TARGET_CHANGED")
+			}
+		})
+	}
+}
+
+func TestD2SanitizerFailureBoundaries(t *testing.T) {
+	for _, mode := range []string{"partial-write", "real-commit-refusal", "committed-error-adapter", "pre-cancel", "during-cleanup-cancel", "committed-cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			ddl := d2SeedDDL()
+			if mode == "real-commit-refusal" {
+				ddl = append(ddl, `CREATE TABLE deferred_child(v TEXT REFERENCES sessions(id) DEFERRABLE INITIALLY DEFERRED)`, `INSERT INTO deferred_child VALUES('session_old')`)
+			}
+			path, before := d2UnitFixture(t, ddl)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ops := restoredSanitizeOps{}
+			calls, commits := 0, 0
+			realCommitted := false
+			sentinel := errors.New("D2_CONTROLLED_RETURN_ERROR")
+			if mode == "pre-cancel" {
+				cancel()
+			}
+			ops.exec = func(c context.Context, tx *sql.Tx, s string) error {
+				calls++
+				if mode == "partial-write" && calls == 2 {
+					return sentinel
+				}
+				_, err := tx.ExecContext(c, s)
+				if mode == "during-cleanup-cancel" && calls == 1 {
+					cancel()
+				}
+				return err
+			}
+			ops.commit = func(tx *sql.Tx) error {
+				commits++
+				err := tx.Commit()
+				realCommitted = err == nil
+				if err == nil && mode == "committed-error-adapter" {
+					return sentinel
+				}
+				if err == nil && mode == "committed-cancel" {
+					cancel()
+				}
+				return err
+			}
+			err := sanitizeRestoredDatabaseWithOps(ctx, path, ops)
+			if err == nil {
+				t.Fatal("D2_FAILURE_RETURNED_SUCCESS")
+			}
+			after := d2ReopenedFacts(t, path)
+			if strings.HasPrefix(mode, "committed-") {
+				if !realCommitted || commits != 1 || reflect.DeepEqual(before, after) {
+					t.Fatal("D2_COMMITTED_BOUNDARY_LOST")
+				}
+				if len(after["employee_self_sessions"]) != 0 || len(after["sessions"]) != 0 {
+					t.Fatal("D2_COMMITTED_FACTS_WRONG")
+				}
+			} else {
+				if realCommitted || !reflect.DeepEqual(before, after) {
+					t.Fatal("D2_PRECOMMIT_FACTS_CHANGED")
+				}
+			}
+			if mode == "real-commit-refusal" && commits != 1 {
+				t.Fatal("D2_REAL_COMMIT_NOT_REACHED")
+			}
+			if mode == "partial-write" && calls != 2 {
+				t.Fatal("D2_PARTIAL_WRITE_NOT_REACHED")
+			}
+			if strings.Contains(mode, "cancel") && !errors.Is(err, context.Canceled) {
+				t.Fatal("D2_CANCEL_IDENTITY_LOST")
+			}
+		})
+	}
+}
+
+func TestD2BadRestoreNeverPublishes(t *testing.T) {
+	path, before := d2UnitFixture(t, append(d2CompleteDDL(), `CREATE INDEX extra_self_idx ON employee_self_credentials(updated_at)`))
+	dir := filepath.Dir(path)
+	writeTestRootKey(t, dir)
+	pkg := filepath.Join(t.TempDir(), "bad.cpacb")
+	if _, err := Create(context.Background(), dir, pkg, testPassword, "d2"); err != nil {
+		t.Fatal("D2_BAD_PACKAGE_CREATE")
+	}
+	original, err := os.ReadFile(pkg)
+	if err != nil {
+		t.Fatal("D2_BAD_PACKAGE_READ")
+	}
+	target := filepath.Join(t.TempDir(), "target")
+	if _, err := Restore(context.Background(), pkg, target, testPassword); !errors.Is(err, errRestoredSelfSchema) {
+		t.Fatal("D2_BAD_RESTORE_GATE")
+	}
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("D2_BAD_TARGET_EXISTS")
+	}
+	after, err := os.ReadFile(pkg)
+	if err != nil || !bytes.Equal(original, after) || !reflect.DeepEqual(before, d2ReopenedFacts(t, path)) {
+		t.Fatal("D2_BAD_RESTORE_SOURCE_CHANGED")
+	}
+}
+
+// A test-only database/sql driver makes metadata read/Close failures explicit.
+// These are adapter controls, not real SQLite I/O failures.
+type d2MetadataDriver struct{}
+type d2MetadataConn struct{}
+type d2MetadataRows struct {
+	mode string
+	n    int
+}
+
+func init()                                               { sql.Register("d2_metadata_rows", d2MetadataDriver{}) }
+func (d2MetadataDriver) Open(string) (driver.Conn, error) { return d2MetadataConn{}, nil }
+func (d2MetadataConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("D2_UNUSED_PREPARE")
+}
+func (d2MetadataConn) Close() error              { return nil }
+func (d2MetadataConn) Begin() (driver.Tx, error) { return nil, errors.New("D2_UNUSED_BEGIN") }
+func (d2MetadataConn) QueryContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
+	if q == "query-error" {
+		return nil, errors.New("D2_QUERY_ERROR")
+	}
+	return &d2MetadataRows{mode: q}, nil
+}
+func (r *d2MetadataRows) Columns() []string { return []string{"value"} }
+func (r *d2MetadataRows) Close() error {
+	if r.mode == "close-error" {
+		return errors.New("D2_CLOSE_ERROR")
+	}
+	return nil
+}
+func (r *d2MetadataRows) Next(dest []driver.Value) error {
+	r.n++
+	if r.n == 1 {
+		dest[0] = int64(1)
+		if r.mode == "scan-error" {
+			dest[0] = []string{"unsupported"}
+		}
+		return nil
+	}
+	if r.mode == "rows-error" {
+		return errors.New("D2_ROWS_ERROR")
+	}
+	if r.mode == "extra-row" && r.n == 2 {
+		dest[0] = int64(2)
+		return nil
+	}
+	return io.EOF
+}
+func TestD2MetadataFailures(t *testing.T) {
+	db, err := sql.Open("d2_metadata_rows", "")
+	if err != nil {
+		t.Fatal("D2_ADAPTER_OPEN")
+	}
+	defer db.Close()
+	for _, mode := range []string{"ok", "query-error", "scan-error", "rows-error", "close-error", "extra-row"} {
+		t.Run(mode, func(t *testing.T) {
+			err := restoredRowsMatch(context.Background(), db, mode, [][]string{{"1"}})
+			if (err == nil) != (mode == "ok") {
+				t.Fatal("D2_METADATA_FAILURE_ACCEPTED")
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !errors.Is(restoredRowsMatch(ctx, db, "ok", [][]string{{"1"}}), context.Canceled) {
+		t.Fatal("D2_METADATA_CANCEL_LOST")
+	}
+}
 
 func TestCreateVerifyRestoreLiveWALAndSafetyState(t *testing.T) {
 	ctx := context.Background()

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"cpacloud.local/server/internal/selfschema"
 	"golang.org/x/crypto/scrypt"
 	"modernc.org/sqlite"
 )
@@ -699,23 +700,46 @@ func verifySQLite(ctx context.Context, path string) error {
 }
 
 func sanitizeRestoredDatabase(ctx context.Context, path string) error {
+	return sanitizeRestoredDatabaseWithOps(ctx, path, restoredSanitizeOps{})
+}
+
+// Per-operation test adapters, never mutable global hooks. An adapter returning
+// an error after a real Commit is uncertainty evidence, not an actual I/O fault.
+type restoredSanitizeOps struct {
+	exec   func(context.Context, *sql.Tx, string) error
+	commit func(*sql.Tx) error
+}
+
+func sanitizeRestoredDatabaseWithOps(ctx context.Context, path string, ops restoredSanitizeOps) (retErr error) {
 	db, err := sql.Open("sqlite", sqliteURI(path, "rw"))
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { retErr = errors.Join(retErr, db.Close()) }()
 	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=DELETE`); err != nil {
+	conn, err := db.Conn(ctx)
+	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+	defer func() { retErr = errors.Join(retErr, conn.Close()) }()
+	if _, err := conn.ExecContext(ctx, `PRAGMA journal_mode=DELETE`); err != nil {
 		return err
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+		return err
+	}
+	if err := restoredRowsMatch(ctx, conn, `PRAGMA foreign_keys`, [][]string{{"1"}}); err != nil {
+		return err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	selfPresent, err := admitRestoredSelfState(ctx, tx)
+	if err != nil {
+		return err
+	}
 	if exists, err := tableExists(ctx, tx, "sessions"); err != nil {
 		return err
 	} else if exists {
@@ -738,13 +762,179 @@ func sanitizeRestoredDatabase(ctx context.Context, path string) error {
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if selfPresent {
+		for _, statement := range []string{`DELETE FROM employee_self_sessions`, `UPDATE employee_self_credentials SET enrollment_digest=NULL,enrollment_expires_at=NULL`} {
+			if ops.exec != nil {
+				err = ops.exec(ctx, tx, statement)
+			} else {
+				_, err = tx.ExecContext(ctx, statement)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		if err := restoredRowsMatch(ctx, tx, `SELECT (SELECT count(*) FROM employee_self_sessions),(SELECT count(*) FROM employee_self_credentials WHERE enrollment_digest IS NOT NULL OR enrollment_expires_at IS NOT NULL)`, [][]string{{"0", "0"}}); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not a wal") {
+	if ops.commit != nil {
+		err = ops.commit(tx)
+	} else {
+		err = tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not a wal") {
 		return err
 	}
 	return nil
+}
+
+var errRestoredSelfSchema = errors.New("restored self state schema rejected")
+
+type restoredQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+// Every metadata query is fully consumed and closed; a partial result, driver
+// error, NULL mismatch or cancellation cannot be mistaken for an empty result.
+func restoredRowsMatch(ctx context.Context, q restoredQueryer, query string, expected [][]string, args ...any) (retErr error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, rows.Close(), ctx.Err()) }()
+	columns, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	i := 0
+	for rows.Next() {
+		values := make([]sql.NullString, len(columns))
+		dest := make([]any, len(columns))
+		for j := range values {
+			dest[j] = &values[j]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return err
+		}
+		if i >= len(expected) || len(expected[i]) != len(values) {
+			return errRestoredSelfSchema
+		}
+		for j, v := range values {
+			actual := "\x00"
+			if v.Valid {
+				actual = v.String
+			}
+			if actual != expected[i][j] {
+				return errRestoredSelfSchema
+			}
+		}
+		i++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if i != len(expected) {
+		return errRestoredSelfSchema
+	}
+	return nil
+}
+
+// Admission precedes ALL sanitizer DML, including the preexisting admin/OAuth
+// cleanup. SQLite, not Unicode EqualFold or a SQL tokenizer, owns identity rules.
+func admitRestoredSelfState(ctx context.Context, tx *sql.Tx) (present bool, retErr error) {
+	rows, err := tx.QueryContext(ctx, `SELECT type,name,tbl_name,sql,
+	 name COLLATE NOCASE IN ('employee_self_credentials','employee_self_sessions','employee_self_sessions_expiry_idx'),
+	 tbl_name COLLATE NOCASE IN ('employee_self_credentials','employee_self_sessions'),
+	 type='trigger' AND tbl_name COLLATE NOCASE IN ('employee_self_credentials','employee_self_sessions','sessions','codex_oauth_sessions','codex_oauth_refresh_states')
+	 FROM main.sqlite_master ORDER BY type,name`)
+	if err != nil {
+		return false, err
+	}
+	defer func() { retErr = errors.Join(retErr, rows.Close(), ctx.Err()) }()
+	expected := map[string]struct{ kind, owner, ddl string }{
+		"employee_self_credentials":         {"table", "employee_self_credentials", selfschema.Credentials},
+		"employee_self_sessions":            {"table", "employee_self_sessions", selfschema.Sessions},
+		"employee_self_sessions_expiry_idx": {"index", "employee_self_sessions", selfschema.ExpiryIndex},
+	}
+	count := 0
+	for rows.Next() {
+		var kind, name, owner string
+		var ddl sql.NullString
+		var reserved, owned, trigger bool
+		if err := rows.Scan(&kind, &name, &owner, &ddl, &reserved, &owned, &trigger); err != nil {
+			return false, err
+		}
+		if trigger {
+			return false, errRestoredSelfSchema
+		}
+		if reserved {
+			want, ok := expected[name]
+			if !ok || kind != want.kind || owner != want.owner || !ddl.Valid || strings.TrimSpace(ddl.String) != strings.TrimSpace(want.ddl) {
+				return false, errRestoredSelfSchema
+			}
+			count++
+		} else if owned {
+			if kind != "index" || ddl.Valid || (name != "sqlite_autoindex_employee_self_credentials_1" && name != "sqlite_autoindex_employee_self_sessions_1") || name != "sqlite_autoindex_"+owner+"_1" {
+				return false, errRestoredSelfSchema
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+	if count != 0 && count != 3 {
+		return false, errRestoredSelfSchema
+	}
+	// Includes empty children and the all-missing legacy profile. No DML probes.
+	if err := restoredRowsMatch(ctx, tx, `SELECT m.name,f.id,f.seq FROM main.sqlite_master AS m JOIN pragma_foreign_key_list(m.name,'main') AS f WHERE m.type='table' AND f."table" COLLATE NOCASE IN ('employee_self_credentials','employee_self_sessions') ORDER BY m.name,f.id,f.seq`, nil); err != nil {
+		return false, err
+	}
+	if count == 0 {
+		return false, nil
+	}
+	for _, table := range []struct {
+		name    string
+		columns [][]string
+		indexes [][]string
+	}{
+		{"employee_self_credentials", [][]string{{"0", "employee_id", "TEXT", "0", "\x00", "1", "0"}, {"1", "password_hash", "BLOB", "0", "\x00", "0", "0"}, {"2", "enrollment_digest", "BLOB", "0", "\x00", "0", "0"}, {"3", "enrollment_expires_at", "TEXT", "0", "\x00", "0", "0"}, {"4", "updated_at", "TEXT", "1", "\x00", "0", "0"}}, [][]string{{"sqlite_autoindex_employee_self_credentials_1", "1", "pk", "0"}}},
+		{"employee_self_sessions", [][]string{{"0", "selector", "TEXT", "0", "\x00", "1", "0"}, {"1", "employee_id", "TEXT", "1", "\x00", "0", "0"}, {"2", "verifier_digest", "BLOB", "1", "\x00", "0", "0"}, {"3", "csrf_token", "TEXT", "1", "\x00", "0", "0"}, {"4", "expires_at", "TEXT", "1", "\x00", "0", "0"}, {"5", "created_at", "TEXT", "1", "\x00", "0", "0"}}, [][]string{{"employee_self_sessions_expiry_idx", "0", "c", "0"}, {"sqlite_autoindex_employee_self_sessions_1", "1", "pk", "0"}}},
+	} {
+		if err := restoredRowsMatch(ctx, tx, `SELECT cid,name,type,"notnull",dflt_value,pk,hidden FROM pragma_table_xinfo(?,'main') ORDER BY cid`, table.columns, table.name); err != nil {
+			return false, err
+		}
+		if err := restoredRowsMatch(ctx, tx, `SELECT name,"unique",origin,partial FROM pragma_index_list(?,'main') ORDER BY name`, table.indexes, table.name); err != nil {
+			return false, err
+		}
+		if err := restoredRowsMatch(ctx, tx, `SELECT id,seq,"table","from","to",on_update,on_delete,match FROM pragma_foreign_key_list(?,'main') ORDER BY id,seq`, [][]string{{"0", "0", "employees", "employee_id", "id", "NO ACTION", "CASCADE", "NONE"}}, table.name); err != nil {
+			return false, err
+		}
+	}
+	for _, index := range []struct{ name, cid, column string }{
+		{"sqlite_autoindex_employee_self_credentials_1", "0", "employee_id"},
+		{"sqlite_autoindex_employee_self_sessions_1", "0", "selector"},
+		{"employee_self_sessions_expiry_idx", "4", "expires_at"},
+	} {
+		if err := restoredRowsMatch(ctx, tx, `SELECT seqno,cid,name,"desc",coll,"key" FROM pragma_index_xinfo(?,'main') ORDER BY seqno`, [][]string{{"0", index.cid, index.column, "0", "BINARY", "1"}, {"1", "-1", "\x00", "0", "BINARY", "0"}}, index.name); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 type queryRower interface {
