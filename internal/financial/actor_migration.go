@@ -151,7 +151,7 @@ func migratedActorCounts(ctx context.Context, tx *sql.Tx, hasCommercial bool) (a
 	return counts, nil
 }
 
-// modernc.org/sqlite v1.38.2 uses plain BEGIN (DEFERRED) unless its DSN has
+// modernc.org/sqlite v1.46.2 uses plain BEGIN (DEFERRED) unless its DSN has
 // _txlock. The first statement must therefore write the main database before
 // any validation reads. SQLite permits only one concurrent write transaction.
 func beginActorWriteTx(ctx context.Context, conn *sql.Conn) (*sql.Tx, error) {

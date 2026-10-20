@@ -633,7 +633,7 @@ func TestUpstreamShadowInboundForeignKeyIdentifierCase(t *testing.T) {
 			})
 			var version, parent string
 			var enabled, references, violations int
-			if f.cap.db.QueryRow(`SELECT sqlite_version()`).Scan(&version) != nil || version != "3.50.3" ||
+			if f.cap.db.QueryRow(`SELECT sqlite_version()`).Scan(&version) != nil || version != "3.51.3" ||
 				f.cap.db.QueryRow(`PRAGMA foreign_keys`).Scan(&enabled) != nil || enabled != 1 ||
 				f.cap.db.QueryRow(`SELECT count(*),min("table") FROM pragma_foreign_key_list('shadow_inbound','main')`).Scan(&references, &parent) != nil || references != 1 || parent != test.spelling ||
 				f.cap.db.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check`).Scan(&violations) != nil || violations != 0 {
