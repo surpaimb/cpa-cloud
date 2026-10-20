@@ -32,7 +32,7 @@ Only the fixed enum values and bounded integers are interpreted by the mapper.
 
 | Column | Frozen DDL / identity / current source format | Symbolic rule and planned M2 action |
 | --- | --- | --- |
-| id | 107 TEXT PRIMARY KEY; object identity for credential AAD at security.go 123/137/147/161/171/185 | nonzero TextSymbol, unique across index/rows; preserve same object ID, never create upstream |
+| id | 107 TEXT PRIMARY KEY; object identity for credential AAD at security.go 123/134/147/158/171/182 | nonzero TextSymbol, unique across index/rows; preserve same object ID, never create upstream |
 | name | 108 TEXT NOT NULL | TextSymbol S; preserve source fact; no real string-length/parser claim |
 | provider_kind | 109 TEXT NOT NULL, four-provider CHECK and state relationship 122-125 | exact fixed enum; select source format/consumer label, preserve |
 | endpoint | 110 TEXT NOT NULL; creation validates before storing, upstreams.go 188-198 | TextSymbol S; preserve, no URL/network validation or use |
