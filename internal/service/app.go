@@ -487,6 +487,7 @@ func (a *App) Handler() http.Handler {
 	}
 	mux.HandleFunc("POST /admin/api/v1/employees", a.requireAdmin(a.createEmployee, true))
 	mux.HandleFunc("PATCH /admin/api/v1/employees/{id}", a.requireAdmin(a.updateEmployee, true))
+	mux.HandleFunc("POST /admin/api/v1/employees/{id}/retire-credentials", a.requireAdmin(a.retireEmployeeCredentials, true))
 	mux.HandleFunc("PUT /admin/api/v1/employees/{id}/model-policy", a.requireAdmin(a.updateModelPolicy, true))
 	mux.HandleFunc("GET /admin/api/v1/employees/{id}/keys", a.requireAdmin(a.listKeys, false))
 	mux.HandleFunc("POST /admin/api/v1/employees/{id}/keys", a.requireAdmin(a.createKey, true))
