@@ -223,8 +223,93 @@ func decodeFixture(t *testing.T, encoded, hash string) []byte {
 	return data
 }
 
+type ownedFixtureParent struct {
+	raw, real         string
+	rejectedComponent string
+}
+
+// Read-only metadata audit, matching the unchanged production parent's Lstat
+// requirements. Readlink also identifies Windows owned junction negatives.
+func firstNonRealParent(path string) (component string, index int, kind string, err error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", 0, "", err
+	}
+	current := filepath.VolumeName(abs) + string(os.PathSeparator)
+	for i, part := range strings.Split(strings.TrimPrefix(abs, current), string(os.PathSeparator)) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, e := os.Lstat(current)
+		if e != nil {
+			return "", 0, "", e
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return current, i, "link", nil
+		}
+		if !info.IsDir() {
+			return current, i, "non-directory", nil
+		}
+		if _, e := os.Readlink(current); e == nil {
+			return current, i, "link", nil
+		}
+	}
+	return "", 0, "", nil
+}
+
+func prepareOwnedFixtureParent(t *testing.T) ownedFixtureParent {
+	t.Helper()
+	raw := t.TempDir()
+	bad, index, kind, err := firstNonRealParent(raw)
+	if err != nil {
+		t.Fatal("SQLITE_COMPAT_R2_PARENT_AUDIT_FAILED")
+	}
+	if bad != "" {
+		name := filepath.Base(bad)
+		switch name {
+		case "var", "tmp", "private", "_temp", "T", "owned-link":
+		default:
+			name = "other"
+		}
+		t.Logf("SQLITE_COMPAT_R2_RAW_PARENT_COMPONENT index=%d kind=%s name=%s path_digest=%x", index, kind, name, sha256.Sum256([]byte(bad)))
+	}
+	real, err := filepath.EvalSymlinks(raw)
+	if err != nil {
+		t.Fatal("SQLITE_COMPAT_R2_PARENT_RESOLUTION_FAILED")
+	}
+	real, err = filepath.Abs(real)
+	if err != nil {
+		t.Fatal("SQLITE_COMPAT_R2_PARENT_ABSOLUTE_FAILED")
+	}
+	a, e1 := os.Stat(raw)
+	b, e2 := os.Lstat(real)
+	if e1 != nil || e2 != nil || !os.SameFile(a, b) {
+		t.Fatal("SQLITE_COMPAT_R2_PARENT_NOT_SAME_OWNED_DIRECTORY")
+	}
+	if bad, _, _, err := firstNonRealParent(real); err != nil || bad != "" {
+		t.Fatal("SQLITE_COMPAT_R2_PREPARED_PARENT_NOT_REAL")
+	}
+	t.Logf("SQLITE_COMPAT_R2_OWNED_PARENT_PREPARED raw_chain_real=%t same_owned_directory=true prepared_chain_real=true", bad == "")
+	return ownedFixtureParent{raw: raw, real: real, rejectedComponent: bad}
+}
+
+func assertOwnedLinkedRestoreRefused(t *testing.T, input, parent, physicalParent string) {
+	t.Helper()
+	target := filepath.Join(parent, "must-not-be-restored")
+	_, err := backup.Restore(context.Background(), input, target, []byte(fixturePassword))
+	if err == nil || !(strings.Contains(err.Error(), "restore parent: path contains a link or non-directory component") || strings.Contains(err.Error(), "restore parent: path contains a reparse point")) {
+		t.Fatal("SQLITE_COMPAT_R2_LINK_PARENT_NOT_REFUSED_BY_GUARD")
+	}
+	if _, err := os.Lstat(filepath.Join(physicalParent, "must-not-be-restored")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("SQLITE_COMPAT_R2_LINK_PARENT_CREATED_TARGET")
+	}
+	t.Log("SQLITE_COMPAT_R2_LINK_PARENT_RESTORE_GUARD_REFUSAL_PASS")
+}
+
 func TestLegacyFixture(t *testing.T) {
-	root := t.TempDir()
+	parent := prepareOwnedFixtureParent(t)
+	root := parent.real
 	source := filepath.Join(root, "source")
 	if err := os.Mkdir(source, 0700); err != nil {
 		t.Fatal(err)
@@ -304,6 +389,9 @@ func TestLegacyFixture(t *testing.T) {
 	if err != nil || info.SourceVersion != "sqlite-v1.38.2-synthetic-compat" {
 		t.Fatal("SQLITE_COMPAT_OLD_BACKUP_VERIFY_FAILED")
 	}
+	if parent.rejectedComponent != "" {
+		assertOwnedLinkedRestoreRefused(t, backupPath, parent.raw, parent.real)
+	}
 	target := filepath.Join(root, "restored")
 	if _, err := backup.Restore(context.Background(), backupPath, target, []byte(fixturePassword)); err != nil {
 		t.Fatal("SQLITE_COMPAT_OLD_BACKUP_RESTORE_FAILED", err)
@@ -319,6 +407,38 @@ func TestLegacyFixture(t *testing.T) {
 		}
 	}
 	t.Log("SQLITE_COMPAT_LEGACY_DATABASE_AND_OLD_BACKUP_PASS; original-source-id=" + legacySourceID)
+}
+
+func TestLegacyFixtureR2OwnedLinkedParentRejected(t *testing.T) {
+	root := prepareOwnedFixtureParent(t).real
+	input := filepath.Join(root, "old.cpacb")
+	if err := os.WriteFile(input, decodeFixture(t, legacyBackup, legacyBackupSHA256), 0600); err != nil {
+		t.Fatal("SQLITE_COMPAT_R2_LINK_FIXTURE_WRITE_FAILED")
+	}
+	realParent := filepath.Join(root, "owned-real-parent")
+	if err := os.Mkdir(realParent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "owned-link")
+	if err := os.Symlink(realParent, link); err != nil {
+		if runtime.GOOS != "windows" {
+			t.Fatal("SQLITE_COMPAT_R2_OWNED_LINK_CREATE_FAILED")
+		}
+		// A directory junction in this owned fixture needs no symlink privilege.
+		// Output is deliberately not logged; no ACL/trust or external path changes.
+		if _, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, realParent).CombinedOutput(); err != nil {
+			t.Fatal("SQLITE_COMPAT_R2_OWNED_JUNCTION_CREATE_FAILED")
+		}
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(link); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Error("SQLITE_COMPAT_R2_OWNED_LINK_REMOVE_FAILED")
+		}
+	})
+	if bad, _, _, err := firstNonRealParent(link); err != nil || bad != link {
+		t.Fatal("SQLITE_COMPAT_R2_OWNED_LINK_AUDIT_FAILED")
+	}
+	assertOwnedLinkedRestoreRefused(t, input, link, realParent)
 }
 
 func heldConn(t *testing.T, db *sql.DB) *sql.Conn {
@@ -410,10 +530,49 @@ func probeIdentity(t *testing.T, db *sql.DB) {
 		t.Fatal("SQLITE_COMPAT_R1_INVALID_PROBE_IDENTITY")
 	}
 	version, source := runtimeIdentity(t, db)
-	if version != wantVersion || moduleVersion(t) != wantModule || runtime.Version() != "go1.26.8" {
+	strictGo := os.Getenv("CPA_SQLITE_PROBE_EXPECT_VERSION") != "" || os.Getenv("CPA_SQLITE_PROBE_EXPECT_MODULE") != "" || os.Getenv("CPA_SQLITE_EXPECT_GOOS") != "" || os.Getenv("CPA_SQLITE_EXPECT_GOARCH") != ""
+	if !probeIdentityMatches(moduleVersion(t), version, source, runtime.Version(), wantModule, wantVersion, strictGo) {
 		t.Fatal("SQLITE_COMPAT_R1_WRONG_PROBE_IDENTITY")
 	}
 	t.Logf("SQLITE_COMPAT_R1_PROBE_IDENTITY go=%s target=%s/%s module=%s sqlite=%s source=%s", runtime.Version(), runtime.GOOS, runtime.GOARCH, wantModule, version, source)
+}
+
+func probeIdentityMatches(module, version, source, goVersion, wantModule, wantVersion string, strictGo bool) bool {
+	wantSource := ""
+	switch {
+	case wantModule == "v1.46.2" && wantVersion == "3.51.3":
+		wantSource = "2026-03-13 10:38:09 737ae4a34738ffa0c3ff7f9bb18df914dd1cad163f28fd6b6e114a344fe6d618"
+	case wantModule == "v1.38.2" && wantVersion == "3.50.3":
+		wantSource = legacySourceID
+	default:
+		return false
+	}
+	return module == wantModule && version == wantVersion && source == wantSource && (!strictGo || goVersion == "go1.26.8")
+}
+
+func TestProbeIdentityR2OrdinaryAndDedicatedPolicy(t *testing.T) {
+	const source = "2026-03-13 10:38:09 737ae4a34738ffa0c3ff7f9bb18df914dd1cad163f28fd6b6e114a344fe6d618"
+	for _, test := range []struct {
+		name, module, version, source, goVersion, wantModule, wantVersion string
+		strict, want                                                      bool
+	}{
+		{"ordinary-core-1269", "v1.46.2", "3.51.3", source, "go1.26.9", "v1.46.2", "3.51.3", false, true},
+		{"ordinary-1268", "v1.46.2", "3.51.3", source, "go1.26.8", "v1.46.2", "3.51.3", false, true},
+		{"dedicated-1268", "v1.46.2", "3.51.3", source, "go1.26.8", "v1.46.2", "3.51.3", true, true},
+		{"dedicated-reject-1269", "v1.46.2", "3.51.3", source, "go1.26.9", "v1.46.2", "3.51.3", true, false},
+		{"old-control-1268", "v1.38.2", "3.50.3", legacySourceID, "go1.26.8", "v1.38.2", "3.50.3", true, true},
+		{"old-control-reject-1269", "v1.38.2", "3.50.3", legacySourceID, "go1.26.9", "v1.38.2", "3.50.3", true, false},
+		{"wrong-module", "v1.38.2", "3.51.3", source, "go1.26.9", "v1.46.2", "3.51.3", false, false},
+		{"wrong-version", "v1.46.2", "3.50.3", source, "go1.26.9", "v1.46.2", "3.51.3", false, false},
+		{"wrong-source", "v1.46.2", "3.51.3", "wrong", "go1.26.9", "v1.46.2", "3.51.3", false, false},
+		{"old-wrong-source", "v1.38.2", "3.50.3", source, "go1.26.8", "v1.38.2", "3.50.3", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := probeIdentityMatches(test.module, test.version, test.source, test.goVersion, test.wantModule, test.wantVersion, test.strict); got != test.want {
+				t.Fatal("SQLITE_COMPAT_R2_IDENTITY_POLICY_FAILED")
+			}
+		})
+	}
 }
 
 // The first row proves SQL actually ran before cancellation is armed. R1 does
@@ -527,6 +686,9 @@ func runWALR1CancellationCloseReuse(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if !walFactsMatch(t, db) {
+		t.Fatal("SQLITE_COMPAT_R2_WAL_PRE_CLOSE_FACTS_DIFFER")
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +696,9 @@ func runWALR1CancellationCloseReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	reopened := openDB(t, path, "ro")
-	orderedFacts(t, reopened)
+	if !walFactsMatch(t, reopened) {
+		t.Fatal("SQLITE_COMPAT_R2_WAL_REOPEN_FACTS_DIFFER")
+	}
 	count(t, reopened, `SELECT count(*) FROM facts`, 3)
 	t.Log("SQLITE_COMPAT_R1_WAL_CANCEL_CLOSE_SAME_PHYSICAL_REUSE_CHECKPOINT_REOPEN_PASS; timely-row-step-gate-excluded; not-wal-reset-bug-reproduction")
 }
@@ -552,6 +716,41 @@ func TestNativeRuntimeIdentity(t *testing.T) {
 		t.Fatal("SQLITE_COMPAT_NOT_NATIVE_GOARCH")
 	}
 	t.Logf("SQLITE_COMPAT_NATIVE_RUNTIME_PASS go=%s target=%s/%s sqlite=%s source=%s", runtime.Version(), runtime.GOOS, runtime.GOARCH, version, source)
+}
+
+// Independent complete oracle, not a snapshot of possibly wrong live values.
+// Tests-first wrong-value/schema controls reproduced the old count-only green.
+func walFactsMatch(t *testing.T, db *sql.DB) bool {
+	t.Helper()
+	want := []string{
+		"table|facts|facts|true|CREATE TABLE facts(id INTEGER PRIMARY KEY,p INTEGER REFERENCES facts(id))",
+		"facts:id,p",
+		"int64:1|<nil>:<nil>",
+		"int64:2|int64:1",
+		"int64:3|int64:2",
+	}
+	return reflect.DeepEqual(orderedFacts(t, db), want)
+}
+
+func TestWALR2CompleteFactOracleRejectsSameCountWrongValuesAndSchema(t *testing.T) {
+	for _, test := range []struct {
+		name, schema, rows string
+		want               bool
+	}{
+		{"exact", `CREATE TABLE facts(id INTEGER PRIMARY KEY,p INTEGER REFERENCES facts(id))`, `(1,NULL),(2,1),(3,2)`, true},
+		{"wrong-valid-parent", `CREATE TABLE facts(id INTEGER PRIMARY KEY,p INTEGER REFERENCES facts(id))`, `(1,NULL),(2,1),(3,1)`, false},
+		{"wrong-null", `CREATE TABLE facts(id INTEGER PRIMARY KEY,p INTEGER REFERENCES facts(id))`, `(1,NULL),(2,NULL),(3,2)`, false},
+		{"wrong-schema", `CREATE TABLE facts(id INTEGER PRIMARY KEY,p TEXT REFERENCES facts(id))`, `(1,NULL),(2,1),(3,2)`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := openDB(t, filepath.Join(t.TempDir(), "oracle.db"), "rwc")
+			mustExec(t, db, test.schema+`; INSERT INTO facts VALUES `+test.rows)
+			// All controls have three rows, integrity=ok and no FK violation.
+			if got := walFactsMatch(t, db); got != test.want {
+				t.Fatal("SQLITE_COMPAT_R2_WAL_ORACLE_ACCEPTED_WRONG_FACTS")
+			}
+		})
+	}
 }
 
 func TestDeferredForeignKeyCommitRefusalSamePhysicalConnection(t *testing.T) {

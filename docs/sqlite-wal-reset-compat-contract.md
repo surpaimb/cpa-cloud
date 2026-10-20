@@ -320,3 +320,120 @@ Historical contract prefix SHA-256 remains
 `48b7440633ae87f06d62372fcb33464392f8f4120325e16bf087d16ec0d1dbf3`.
 All nine repository paths remain within the original budget. This local result
 does not anticipate six-native-job CI, ordinary CI or new-head formal E/F review.
+
+## Independent bounded correction R2 — 2026-10-20 18:34 +08:00
+
+Root authorizes one follow-up commit on the same Draft PR97 after first-head
+terminal failures and formal review, not a rerun/hot patch of that failed head.
+Exact old head: `2e33c8cf00266770b825241448f75aff954c3370`; base PR96 remains
+`453473f1d18f21ea820b610760591ae2515c9dea`. All previous sections, first-red
+snapshot, original cancellation FAIL/assertions and R1 limitations stay intact.
+
+Frozen old-head natural pull_request / attempt1 terminal results:
+
+| Run | Result | Fixed evidence |
+| --- | --- | --- |
+| SQLite native #1 39404008967 | FAILURE | Both macOS targets: TestLegacyFixture / SQLITE_COMPAT_OLD_BACKUP_RESTORE_FAILED; other four targets SUCCESS |
+| Code #497 39404008960 | FAILURE | Core job118565452970 / SQLITE_COMPAT_R1_WRONG_PROBE_IDENTITY; actual Go1.26.9; four race jobs SUCCESS |
+| CLI #11 39404008944 | SUCCESS | Separate inherited synthetic VM evidence |
+| Retained VM #17 39404008888 | SUCCESS | Separate inherited synthetic VM evidence |
+
+Complete filter=all terminal checks: 23 = 17 success + 3 skipped + 3 failure +
+0 pending + 0 other. Skipped did not execute. Root confirms formal independent
+read-only review of this exact old head/base: E P1/P2/P3=0/3/0 and
+F=0/2/0, both NO-GO. E's additional P2 is a test oracle defect: active WAL
+reopen discarded orderedFacts and only checked count=3, so valid-but-wrong
+values/schema could appear green. No actual database corruption was found.
+
+R2 may change only `internal/sqlitecompat/sqlite_compat_test.go` and this
+contract. No go.mod/go.sum, dependency, workflow/runner, business, production
+Restore/backup algorithm/schema, PR96 kernel, earlier document, credential or
+trust change is allowed. Local work starts from the exact remote old head;
+the metadata-equivalent original local commit/branch is preserved, not reset.
+
+Test first, then address only these gates:
+
+1. Reproduce the ordinary-core Go1.26.9 failure. Ordinary `go test ./...` must
+   not require the exact Go1.26.8 patch, but must still identify exact driver,
+   SQLite version and full source ID. Dedicated six-native jobs and explicitly
+   controlled old/new probes retain exact Go1.26.8; add policy-negative controls.
+2. The old macOS decoded log proves `restore parent: path contains a link or
+   non-directory component`, not the identity of that component. The production
+   error intentionally omits its name, so **/var is not established**. Before
+   preparing each owned synthetic fixture, audit its original parent chain with
+   Lstat, record a sanitized component classification if found, resolve only
+   that owned temporary directory to its same physical real directory and
+   verify its full parent chain. Do not weaken production protection. Preserve
+   an actual linked-parent Restore-refusal negative, including on macOS. Real
+   macOS component/runtime evidence must come from the new natural native jobs;
+   no manual dispatch/rerun and no pretended local macOS execution.
+3. The active WAL oracle must compare full ordered typed schema/row facts,
+   independently including (1,NULL),(2,1),(3,2), before close and after reopen.
+   Add same-count, integrity/FK-valid wrong-value/schema negative controls so
+   row count alone cannot satisfy the test. Do not alter the historical strict
+   helper/assertion/WAL body to implement this correction.
+
+Windows SQLite execution stays serial. If the fix needs additional files,
+production protection changes or a remaining local gate fails, stop before
+commit. After all local gates, one commit/transport to the same Draft PR is
+authorized; root owns natural-CI repinning and new-head formal E/F review.
+First unexpected natural red freezes again. A green correction is at most a
+driver-compatibility narrow candidate: the WAL-reset race was not reproduced,
+timely later-step cancellation original FAIL remains, and real source,
+M1->M2/GOV-02/employee C/production remain NO-GO.
+
+R2 evidence is pending at this scope revision. Old-head red and review results
+must never be rewritten as green for a later corrected head.
+
+### R2 local tests-first and validation results
+
+The old unconditional patch-version gate was reproduced locally with actual
+Go1.26.9 windows/amd64: all three WAL probe cases failed with the original
+SQLITE_COMPAT_R1_WRONG_PROBE_IDENTITY label before the policy change. The exact
+Go1.26.9 toolchain was acquired using Go's toolchain downloader with official
+checksum verification, process-only settings and no module/credential/trust edit.
+
+A tests-first oracle that mirrored the old discarded-facts/count-only behavior
+accepted three deliberately wrong, integrity/FK-valid same-count fixtures:
+wrong valid parent, wrong NULL and wrong TEXT schema/type. The new negative
+controls failed with SQLITE_COMPAT_R2_WAL_ORACLE_ACCEPTED_WRONG_FACTS. This is a
+controlled synthetic test-oracle reproduction, not discovered real corruption.
+The corrected oracle compares an independently specified full ordered schema
+and typed (1,NULL),(2,1),(3,2) fact list, both before closing and after reopen;
+all three wrong controls are now rejected and the exact positive is accepted.
+
+Actual revised package execution on Windows/amd64 was serial and non-cached:
+
+| Execution context | Go | Results |
+| --- | --- | --- |
+| Dedicated native-style context, explicit expected OS/arch | 1.26.8 | 11 main + 17 sub PASS, 0 fail/skip |
+| Ordinary core-style context, no dedicated/control markers | 1.26.9 | 11 main + 17 sub PASS, 0 fail/skip; targeted vet PASS |
+| Frozen v1.38.2 alternate-modfile controlled WAL cases | 1.26.8 | 1 main + 3 sub PASS under R1/R2's limited gates |
+
+Ten identity-policy controls include rejecting Go1.26.9 in dedicated and old
+controlled contexts, accepting it only in ordinary current-driver context,
+and rejecting wrong module/SQLite/full source ID. Real old/current controlled
+identities and full source IDs remain checked. The controlled old cases still
+observed the excluded timely-row-step limitation; no universal non-regression
+or prompt-cancellation claim is added.
+
+The actual owned linked-parent Restore negative executed on Windows, using an
+owned directory junction when the host refused symlink creation; it is not a
+skip and changes no ACL/trust/external directory. Production Restore rejected
+the linked parent and created no restore target. The positive legacy fixture
+now resolves only its own temporary directory, verifies SameFile and walks its
+full real parent chain before restoration. On this Windows host that original
+chain was already real. **The first-head macOS component remains unknown**:
+the old log recorded only the generic refusal. New native tests first audit the
+original chain, emit a sanitized component classification/digest if present,
+confirm production rejection of that raw aliased parent, then verify a same-owned
+real parent. macOS architectures still require new natural CI evidence; no local
+macOS execution or specific /var diagnosis is claimed in this local result.
+
+Only the two authorized files changed. Original strict cancellation helper and
+historical WAL body, all legacy fixture byte/hash constants, all prior contract
+text and the other seven original PR paths were verified unchanged. No workflow,
+runner, module, business/Restore/schema or PR96 kernel change was made. The next
+single publication does not erase first-head Code/native red or E/F NO-GO, and
+must not reuse those first-head successes for the new head. Root owns exact-head
+natural CI and formal E/F review. Draft and all stated production NO-GO remain.
