@@ -185,3 +185,79 @@ Retain PR99/PR98 histories, old preparation/final/tests-first reds and frozen
 active-only/H2/H3 states. No GOV-02 cross-backup anti-resurrection, M1-to-M2, real
 host/client, actual power-loss or production GO. Keep Draft. No Ready/merge/tag/
 package/deploy, real DB/backup/Key/config/session/8787/password/client access.
+
+## Independent first-natural-red diagnostic continuation — 2026-10-21
+
+This is a new independently bounded diagnostic batch, not a repair conclusion.
+Start at exact published PR100 head
+f393797dbfa062a983bb09ef2c8183a0a571581b, base PR99
+8280d3df2c59cd2280d39b25e788f05d39aab4ef. The complete candidate tree is
+f69fd91f1a3c137bcb477afe7ce11ff1f5492f89. The prior local equivalent commit
+c334b9424f841194dfb0bf183709c6c4f05287ff has a different parent; it is not
+renamed or reset to pretend SHA equality. The exact remote object is fetched
+read-only, its tree verified, and selected detached without deleting that branch.
+
+The first natural pull_request/attempt1 Code #501 run39500154209 ended FAILURE:
+race-service (2), job118895347179, Race-check service shard 2,
+TestAdminKeyRevocationSlotTriggerReversal/armed, AKR_SLOT_TRIGGER_INSTALL.
+Three other natural workflows succeeded; full head checks ended
+23=19success/3skipped/0pending/1failure/0other. The three skips did not execute.
+The original 15-parent/38-child local green and the genuine old tests-first red
+above remain historical facts, neither erases this red. Coordinator-confirmed
+independent pure read-only E/F rechecks identify a test-preparation/evidence
+blocker; the prior source-only narrow GO is suspended. SQL, locking, the existing
+10-second context, Close and product lifecycle are not distinguished by the old
+combined label. No actual data race or root cause is inferred from the job name.
+
+Only this contract and the existing admin_key_revocation_confirmation_test.go
+may change. All employees.go bytes, every other source, trigger SQL, four-slot
+scenarios, success/failure/postcondition assertions, fixture lifecycle, runner,
+timeouts and retry policy freeze. No skip, removed armed case, increased timeout,
+retry, replacement runner or trigger installation on a live App is allowed.
+Retain close App -> separate real owned SQLite DB -> real ExecContext(trigger)
+-> always attempt db.Close -> real Open -> real administrator HTTP. Keep the
+actual ExecContext and Close errors separately, snapshot the operation context
+after each phase, and attempt Close before any failure/classification reporting.
+No synthetic classifier replaces either real database operation.
+
+Diagnostics may emit only fixed exec/close phases, fixed combined failure phase,
+ok/error, error-context and operation-context classifications, allowlisted SQLite
+numeric-code classifications, and bounded monotonic elapsed buckets. Never call
+or format err.Error(), SQL, data-directory paths, Key/employee/session identities,
+credentials or database values. Missing or unreviewed codes classify unknown;
+unknown errors remain failures, never success. Error code categories are not
+root-cause findings and elapsed buckets are not exact deadlines/cleanup proofs.
+
+Public numeric-code source, read 2026-10-21:
+[SQLite result and error codes](https://www.sqlite.org/rescode.html).
+Reviewed exact values are 1(ERROR), 4(ABORT), 5(BUSY), 6(LOCKED), 9(INTERRUPT),
+10(IOERR), 19(CONSTRAINT), 261(BUSY_RECOVERY), 517(BUSY_SNAPSHOT),
+773(BUSY_TIMEOUT), 262(LOCKED_SHAREDCACHE), 518(LOCKED_VTAB), 4106(IOERR_CLOSE).
+Only these literal numeric strings can be emitted; arbitrary/unknown Code()
+integers are never printed or masked into a presumed known extended cause.
+The already-used private Code() int / errors.As pattern is reused without a new
+dependency. Classification fixtures are explicitly synthetic coded errors, not
+native SQLite failures. Error() panics in the fixture to expose accidental use.
+
+Before the single executable gate, freeze the exact original 53 full names and
+source identities, plus TestAdminKeyRevocationSlotTriggerDiagnostics with exactly
+exec-only, close-only, exec-and-close and unknown children, and childless
+TestAdminKeyRevocationSlotTriggerDiagnosticBoundaries: total17 parents/42 children
+=59 full names, zero skips. Independent assertions retain both phase outcomes,
+context classifications, wrapped Code() values, unknown/negative/out-of-range
+codes and all duration-bucket boundaries. These pure classification assertions
+are not a dynamic reproduction or diagnosis of the original real DB failure.
+
+One Windows Go1.26.8 noncached serial invocation selects all59 names with the
+original -count=1 -p=1 -parallel=1 -mod=readonly -timeout=15m -failfast -json
+settings. Freeze arguments/oracle/hashes before it; record exact run/pass names,
+exit/skip/failure/incomplete/parse facts and raw-output hashes privately. First
+unexpected red, unknown exit, unclear owned cleanup or scope drift freezes the
+batch: no patch, rerun or later gate. Only a complete directed pass permits
+directed vet/build, gofmt/link/diff and exact two-file/frozen-source checks, then
+one new commit/push to this original Draft PR100, natural new-head CI only.
+No manual dispatch/rerun or old-CI modification. A new pass says only that this
+one run did not reproduce the setup failure; no root-cause fix, restored narrow
+GO, GOV-02, real migration or production GO. Production/lifecycle changes require
+the coordinator to authorize a separate batch. Original E/F review the new exact
+head independently after the coordinator re-pins it; no GO is self-issued.

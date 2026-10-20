@@ -705,6 +705,184 @@ func TestAdminKeyRevocationAuthPrecedence(t *testing.T) {
 	}
 }
 
+// Diagnostic-only continuation: no Error() text, SQL or identity reaches output.
+// Code() fixtures below are synthetic classifiers, not native failure injection.
+type adminKeyRevocationSlotTriggerDiagnostic struct {
+	result, errorContext, contextState, sqliteCode, elapsed string
+}
+
+func adminKeyRevocationTriggerContextClass(err error) string {
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	default:
+		return "other"
+	}
+}
+
+func adminKeyRevocationTriggerSQLiteCode(err error) string {
+	if err == nil {
+		return "none"
+	}
+	var coded interface{ Code() int }
+	if errors.As(err, &coded) {
+		// Exact reviewed SQLite codes only; do not print arbitrary Code() values.
+		switch coded.Code() {
+		case 1:
+			return "1"
+		case 4:
+			return "4"
+		case 5:
+			return "5"
+		case 6:
+			return "6"
+		case 9:
+			return "9"
+		case 10:
+			return "10"
+		case 19:
+			return "19"
+		case 261:
+			return "261"
+		case 517:
+			return "517"
+		case 773:
+			return "773"
+		case 262:
+			return "262"
+		case 518:
+			return "518"
+		case 4106:
+			return "4106"
+		}
+	}
+	return "unknown"
+}
+
+func adminKeyRevocationTriggerElapsed(elapsed time.Duration) string {
+	switch {
+	case elapsed < 0:
+		return "invalid"
+	case elapsed < time.Millisecond:
+		return "lt1ms"
+	case elapsed < 100*time.Millisecond:
+		return "1ms_lt100ms"
+	case elapsed < time.Second:
+		return "100ms_lt1s"
+	case elapsed < 10*time.Second:
+		return "1s_lt10s"
+	case elapsed < time.Minute:
+		return "10s_lt60s"
+	default:
+		return "ge60s"
+	}
+}
+
+func adminKeyRevocationClassifyTrigger(err, contextErr error, elapsed time.Duration) adminKeyRevocationSlotTriggerDiagnostic {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	return adminKeyRevocationSlotTriggerDiagnostic{
+		result: result, errorContext: adminKeyRevocationTriggerContextClass(err),
+		contextState: adminKeyRevocationTriggerContextClass(contextErr),
+		sqliteCode:   adminKeyRevocationTriggerSQLiteCode(err),
+		elapsed:      adminKeyRevocationTriggerElapsed(elapsed),
+	}
+}
+
+func adminKeyRevocationSlotTriggerFailurePhase(execErr, closeErr error) string {
+	switch {
+	case execErr != nil && closeErr != nil:
+		return "exec_and_close"
+	case execErr != nil:
+		return "exec"
+	case closeErr != nil:
+		return "close"
+	default:
+		return "none"
+	}
+}
+
+type adminKeyRevocationDiagnosticCodeError int
+
+func (e adminKeyRevocationDiagnosticCodeError) Code() int { return int(e) }
+func (adminKeyRevocationDiagnosticCodeError) Error() string {
+	panic("AKR_DIAGNOSTIC_ERROR_STRING_USED")
+}
+
+type adminKeyRevocationDiagnosticUnknownError struct{}
+
+func (adminKeyRevocationDiagnosticUnknownError) Error() string {
+	panic("AKR_DIAGNOSTIC_ERROR_STRING_USED")
+}
+
+func TestAdminKeyRevocationSlotTriggerDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name, phase                          string
+		execErr, closeErr, execCtx, closeCtx error
+		execWant, closeWant                  adminKeyRevocationSlotTriggerDiagnostic
+	}{
+		{
+			name: "exec-only", phase: "exec",
+			execErr: errors.Join(context.DeadlineExceeded, adminKeyRevocationDiagnosticCodeError(5)),
+			execCtx: context.DeadlineExceeded, closeCtx: context.DeadlineExceeded,
+			execWant:  adminKeyRevocationSlotTriggerDiagnostic{"error", "deadline", "deadline", "5", "1ms_lt100ms"},
+			closeWant: adminKeyRevocationSlotTriggerDiagnostic{"ok", "none", "deadline", "none", "1ms_lt100ms"},
+		},
+		{
+			name: "close-only", phase: "close", closeErr: adminKeyRevocationDiagnosticCodeError(4106),
+			execWant:  adminKeyRevocationSlotTriggerDiagnostic{"ok", "none", "none", "none", "1ms_lt100ms"},
+			closeWant: adminKeyRevocationSlotTriggerDiagnostic{"error", "other", "none", "4106", "1ms_lt100ms"},
+		},
+		{
+			name: "exec-and-close", phase: "exec_and_close",
+			execErr: errors.Join(adminKeyRevocationDiagnosticCodeError(517)), closeErr: context.Canceled, closeCtx: context.Canceled,
+			execWant:  adminKeyRevocationSlotTriggerDiagnostic{"error", "other", "none", "517", "1ms_lt100ms"},
+			closeWant: adminKeyRevocationSlotTriggerDiagnostic{"error", "cancelled", "cancelled", "unknown", "1ms_lt100ms"},
+		},
+		{
+			name: "unknown", phase: "exec", execErr: adminKeyRevocationDiagnosticUnknownError{},
+			execWant:  adminKeyRevocationSlotTriggerDiagnostic{"error", "other", "none", "unknown", "1ms_lt100ms"},
+			closeWant: adminKeyRevocationSlotTriggerDiagnostic{"ok", "none", "none", "none", "1ms_lt100ms"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := adminKeyRevocationClassifyTrigger(tc.execErr, tc.execCtx, 2*time.Millisecond)
+			closed := adminKeyRevocationClassifyTrigger(tc.closeErr, tc.closeCtx, 3*time.Millisecond)
+			if exec != tc.execWant || closed != tc.closeWant || adminKeyRevocationSlotTriggerFailurePhase(tc.execErr, tc.closeErr) != tc.phase {
+				t.Fatal("AKR_SLOT_TRIGGER_DIAGNOSTIC_CLASSIFICATION")
+			}
+		})
+	}
+}
+
+func TestAdminKeyRevocationSlotTriggerDiagnosticBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		want string
+	}{{1, "1"}, {4, "4"}, {5, "5"}, {6, "6"}, {9, "9"}, {10, "10"}, {19, "19"}, {261, "261"}, {517, "517"}, {773, "773"}, {262, "262"}, {518, "518"}, {4106, "4106"}, {-1, "unknown"}, {0, "unknown"}, {999, "unknown"}, {1 << 30, "unknown"}} {
+		if adminKeyRevocationTriggerSQLiteCode(errors.Join(adminKeyRevocationDiagnosticCodeError(tc.code))) != tc.want {
+			t.Fatal("AKR_SLOT_TRIGGER_DIAGNOSTIC_CODE_ALLOWLIST")
+		}
+	}
+	for _, tc := range []struct {
+		elapsed time.Duration
+		want    string
+	}{{-1, "invalid"}, {0, "lt1ms"}, {time.Millisecond - 1, "lt1ms"}, {time.Millisecond, "1ms_lt100ms"}, {100*time.Millisecond - 1, "1ms_lt100ms"}, {100 * time.Millisecond, "100ms_lt1s"}, {time.Second - 1, "100ms_lt1s"}, {time.Second, "1s_lt10s"}, {10*time.Second - 1, "1s_lt10s"}, {10 * time.Second, "10s_lt60s"}, {time.Minute - 1, "10s_lt60s"}, {time.Minute, "ge60s"}, {time.Hour, "ge60s"}} {
+		if adminKeyRevocationTriggerElapsed(tc.elapsed) != tc.want {
+			t.Fatal("AKR_SLOT_TRIGGER_DIAGNOSTIC_ELAPSED_BOUNDARY")
+		}
+	}
+	if adminKeyRevocationSlotTriggerFailurePhase(nil, nil) != "none" || adminKeyRevocationTriggerSQLiteCode(nil) != "none" || adminKeyRevocationTriggerContextClass(errors.Join(context.Canceled)) != "cancelled" || adminKeyRevocationTriggerContextClass(errors.Join(context.Canceled, context.DeadlineExceeded)) != "deadline" {
+		t.Fatal("AKR_SLOT_TRIGGER_DIAGNOSTIC_CONTEXT_BOUNDARY")
+	}
+}
+
 func (f *adminKeyRevocationFixture) offlineSlotTrigger(trigger string) {
 	f.t.Helper()
 	self, loopback := f.app.cfg.EmployeeSelfServiceEnabled, f.app.cfg.AllowLoopbackUpstream
@@ -718,10 +896,19 @@ func (f *adminKeyRevocationFixture) offlineSlotTrigger(trigger string) {
 	db.SetMaxOpenConns(1)
 	ctx, cancel := context.WithTimeout(f.t.Context(), 10*time.Second)
 	defer cancel()
+	execStarted := time.Now()
 	_, writeErr := db.ExecContext(ctx, trigger)
+	execElapsed, execContextErr := time.Since(execStarted), ctx.Err()
+	closeStarted := time.Now()
 	closeErr := db.Close()
-	if writeErr != nil || closeErr != nil {
-		f.t.Fatal("AKR_SLOT_TRIGGER_INSTALL")
+	closeElapsed, closeContextErr := time.Since(closeStarted), ctx.Err()
+	// Close has already been attempted regardless of the real ExecContext result.
+	if phase := adminKeyRevocationSlotTriggerFailurePhase(writeErr, closeErr); phase != "none" {
+		exec := adminKeyRevocationClassifyTrigger(writeErr, execContextErr, execElapsed)
+		closed := adminKeyRevocationClassifyTrigger(closeErr, closeContextErr, closeElapsed)
+		f.t.Logf("AKR_SLOT_TRIGGER_DIAGNOSTIC phase=exec result=%s error_context=%s context=%s sqlite_code=%s elapsed=%s", exec.result, exec.errorContext, exec.contextState, exec.sqliteCode, exec.elapsed)
+		f.t.Logf("AKR_SLOT_TRIGGER_DIAGNOSTIC phase=close result=%s error_context=%s context=%s sqlite_code=%s elapsed=%s", closed.result, closed.errorContext, closed.contextState, closed.sqliteCode, closed.elapsed)
+		f.t.Fatalf("AKR_SLOT_TRIGGER_INSTALL phase=%s", phase)
 	}
 	f.reopenConfigured(self, loopback)
 }
