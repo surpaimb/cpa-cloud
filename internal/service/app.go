@@ -28,6 +28,33 @@ const (
 	modelMaxBody       = 4 << 20
 )
 
+// Independently authored for the 2026-10-21 passive Close-segments contract.
+// These private enums carry no product state or error result.
+type appClosePhase uint8
+type appCloseEdge uint8
+
+const (
+	appCloseOneShot appClosePhase = iota + 1
+	appCloseExpiry
+	appCloseBackupAutomation
+	appCloseBackgroundResponses
+	appCloseScheduledTests
+	appCloseChannelMonitors
+	appCloseGovernance
+	appCloseProxyTests
+	appCloseRecovery
+	appCloseHealthTests
+	appCloseAccountPool
+	appCloseRefresh
+	appCloseProxyClients
+	appCloseStore
+)
+const (
+	appCloseEnter appCloseEdge = iota + 1
+	appCloseReturn
+	appCloseSkipNil
+)
+
 type App struct {
 	cfg                            Config
 	store                          *store
@@ -64,6 +91,9 @@ type App struct {
 	logins                         map[string]*loginAttempt
 	selfLoginMu                    sync.Mutex
 	selfLogins                     map[string]*loginAttempt
+	// Per-App passive test observer; production leaves nil. RETURN is not a
+	// physical-close/join guarantee. The callback cannot return a decision.
+	closeObserver func(appClosePhase, appCloseEdge)
 	// Independently authored for docs/employee-self-password-change-contract.md.
 	// SQL-boundary hooks exercise uncertain commits and mid-hash revocation.
 	// Production leaves both nil.
@@ -407,47 +437,108 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 	return nil
 }
 
+func (a *App) observeClose(phase appClosePhase, edge appCloseEdge) {
+	if a.closeObserver != nil {
+		a.closeObserver(phase, edge)
+	}
+}
+
 func (a *App) Close() error {
 	if a.subscriptionOneShot != nil {
+		a.observeClose(appCloseOneShot, appCloseEnter)
 		a.subscriptionOneShot.Close()
+		a.observeClose(appCloseOneShot, appCloseReturn)
+	} else {
+		a.observeClose(appCloseOneShot, appCloseSkipNil)
 	}
 	if a.subscriptionExpiry != nil {
+		a.observeClose(appCloseExpiry, appCloseEnter)
 		a.subscriptionExpiry.Close()
+		a.observeClose(appCloseExpiry, appCloseReturn)
+	} else {
+		a.observeClose(appCloseExpiry, appCloseSkipNil)
 	}
 	if a.backupAutomation != nil {
+		a.observeClose(appCloseBackupAutomation, appCloseEnter)
 		a.backupAutomation.Close()
+		a.observeClose(appCloseBackupAutomation, appCloseReturn)
+	} else {
+		a.observeClose(appCloseBackupAutomation, appCloseSkipNil)
 	}
 	if a.backgroundResponses != nil {
+		a.observeClose(appCloseBackgroundResponses, appCloseEnter)
 		a.backgroundResponses.Close()
+		a.observeClose(appCloseBackgroundResponses, appCloseReturn)
+	} else {
+		a.observeClose(appCloseBackgroundResponses, appCloseSkipNil)
 	}
 	if a.scheduledTests != nil {
+		a.observeClose(appCloseScheduledTests, appCloseEnter)
 		a.scheduledTests.Close()
+		a.observeClose(appCloseScheduledTests, appCloseReturn)
+	} else {
+		a.observeClose(appCloseScheduledTests, appCloseSkipNil)
 	}
 	if a.channelMonitors != nil {
+		a.observeClose(appCloseChannelMonitors, appCloseEnter)
 		a.channelMonitors.Close()
+		a.observeClose(appCloseChannelMonitors, appCloseReturn)
+	} else {
+		a.observeClose(appCloseChannelMonitors, appCloseSkipNil)
 	}
 	if a.governance != nil {
+		a.observeClose(appCloseGovernance, appCloseEnter)
 		a.governance.Close()
+		a.observeClose(appCloseGovernance, appCloseReturn)
+	} else {
+		a.observeClose(appCloseGovernance, appCloseSkipNil)
 	}
 	if a.proxyTests != nil {
+		a.observeClose(appCloseProxyTests, appCloseEnter)
 		a.proxyTests.Close()
+		a.observeClose(appCloseProxyTests, appCloseReturn)
+	} else {
+		a.observeClose(appCloseProxyTests, appCloseSkipNil)
 	}
 	if a.recovery != nil {
+		a.observeClose(appCloseRecovery, appCloseEnter)
 		a.recovery.Close()
+		a.observeClose(appCloseRecovery, appCloseReturn)
+	} else {
+		a.observeClose(appCloseRecovery, appCloseSkipNil)
 	}
 	if a.healthTests != nil {
+		a.observeClose(appCloseHealthTests, appCloseEnter)
 		a.healthTests.Close()
+		a.observeClose(appCloseHealthTests, appCloseReturn)
+	} else {
+		a.observeClose(appCloseHealthTests, appCloseSkipNil)
 	}
 	if a.accountPool != nil {
+		a.observeClose(appCloseAccountPool, appCloseEnter)
 		a.accountPool.Close()
+		a.observeClose(appCloseAccountPool, appCloseReturn)
+	} else {
+		a.observeClose(appCloseAccountPool, appCloseSkipNil)
 	}
 	if a.refresh != nil {
+		a.observeClose(appCloseRefresh, appCloseEnter)
 		a.refresh.Close()
+		a.observeClose(appCloseRefresh, appCloseReturn)
+	} else {
+		a.observeClose(appCloseRefresh, appCloseSkipNil)
 	}
 	if a.proxyClients != nil {
+		a.observeClose(appCloseProxyClients, appCloseEnter)
 		a.proxyClients.Close()
+		a.observeClose(appCloseProxyClients, appCloseReturn)
+	} else {
+		a.observeClose(appCloseProxyClients, appCloseSkipNil)
 	}
-	return a.store.close()
+	a.observeClose(appCloseStore, appCloseEnter)
+	err := a.store.close()
+	a.observeClose(appCloseStore, appCloseReturn)
+	return err
 }
 
 func (a *App) Handler() http.Handler {

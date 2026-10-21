@@ -254,15 +254,24 @@ type slog21Fixture struct {
 	mu                                                      sync.Mutex
 	transform                                               func(*http.Request) *http.Request
 	handoffs                                                map[*sql.DB]*slog21HandoffTrace
+	segments                                                [8]*slog21SegmentRecorder
+	segmentCount                                            int
+	segmentCurrent                                          *slog21SegmentRecorder
+	segmentCensusInvalid                                    bool
 }
 
 func newSlog21(t *testing.T) *slog21Fixture {
 	t.Helper()
 	f := &slog21Fixture{t: t, dir: t.TempDir(), client: &http.Client{Timeout: 10 * time.Second}}
 	t.Cleanup(func() {
+		if f.app != nil && !f.closed {
+			f.prepareSegments(slog21HandFinalClean, true)
+		}
 		if f.close() != nil {
 			t.Error("SLOG21_UNEXPECTED_CLEANUP")
 		}
+		// The old close/observer/oracle path has finished before any new gate.
+		f.flushSegments()
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -313,6 +322,7 @@ func (f *slog21Fixture) open() {
 		}
 		slog21Fail(f.t, "OPEN")
 	}
+	f.bindSegments(a)
 	f.app = a
 	f.closed = false
 	h := a.Handler()
@@ -355,6 +365,7 @@ func (f *slog21Fixture) raw() *sql.DB {
 func (f *slog21Fixture) closedRaw(before slog21Snap) *sql.DB {
 	f.t.Helper()
 	handoff := &slog21HandoffTrace{stage: slog21HandoffStage(), old: f.app.store.db}
+	f.prepareSegments(handoff.stage, false)
 	handoff.observe(f.t, slog21HandCloseEnter, slog21HandEnter, nil, -1, false)
 	started := time.Now()
 	closeErr := f.close()
@@ -1454,28 +1465,28 @@ func TestSelfLogoutSnapshotErrorDiagnostic20261021(t *testing.T) {
 // Filled from the final frozen source callsites, not runtime paths or SQL.
 func slog21DiagSites() []slog21DiagSite {
 	return []slog21DiagSite{
-		{function: "(*slog21Fixture).closedRaw", line: 373, cut: slog21CutAfterClose},
-		{function: "(*slog21Fixture).openRaw", line: 382, cut: slog21CutBeforeOpen},
-		{function: "(*slog21Fixture).openRaw", line: 387, cut: slog21CutAfterOpen},
-		{function: "(*slog21Fixture).reopen", line: 392, cut: slog21CutReopenBeforeClose},
-		{function: "(*slog21Fixture).controlWindow", line: 535, cut: slog21CutControlsBefore},
-		{function: "(*slog21Fixture).controlWindow", line: 537, cut: slog21CutControlsAfter},
-		{function: "(*slog21Fixture).install", line: 564, cut: slog21CutTriggerBeforeClose},
-		{function: "(*slog21Fixture).install", line: 566, cut: slog21CutDDLBefore},
-		{function: "(*slog21Fixture).install", line: 588, cut: slog21CutDDLAfter},
-		{function: "(*slog21Fixture).clean", line: 642, cut: slog21CutCleanupBefore},
-		{function: "TestSelfLogout20261021JointOracle", line: 657, cut: slog21CutDeleteBefore},
-		{function: "TestSelfLogout20261021JointOracle", line: 666, cut: slog21CutDeleteAfter},
-		{function: "TestSelfLogout20261021JointOracle", line: 674, cut: slog21CutOracleTarget},
-		{function: "(*slog21Fixture).expectedAfter", line: 702, cut: slog21CutPostResponse},
-		{function: "(*slog21Fixture).expectedAfter", line: 732, cut: slog21CutPersistedTarget},
-		{function: "TestSelfLogout20261021Normal", line: 741, cut: slog21CutNormalBefore},
-		{function: "TestSelfLogout20261021NativeAbort", line: 757, cut: slog21CutAbortBefore},
-		{function: "TestSelfLogout20261021Boundaries", line: 780, cut: slog21CutBoundaryBefore},
-		{function: "TestSelfLogout20261021DeferredFK", line: 866, cut: slog21CutFKBefore},
-		{function: "TestSelfLogout20261021AuthBoundaries", line: 899, cut: slog21CutAuthBefore},
-		{function: "TestSelfLogout20261021AuthBoundaries", line: 947, cut: slog21CutAuthAfter},
-		{function: "TestSelfLogout20261021TwoAuthenticated", line: 953, cut: slog21CutDualBefore},
+		{function: "(*slog21Fixture).closedRaw", line: 384, cut: slog21CutAfterClose},
+		{function: "(*slog21Fixture).openRaw", line: 393, cut: slog21CutBeforeOpen},
+		{function: "(*slog21Fixture).openRaw", line: 398, cut: slog21CutAfterOpen},
+		{function: "(*slog21Fixture).reopen", line: 403, cut: slog21CutReopenBeforeClose},
+		{function: "(*slog21Fixture).controlWindow", line: 546, cut: slog21CutControlsBefore},
+		{function: "(*slog21Fixture).controlWindow", line: 548, cut: slog21CutControlsAfter},
+		{function: "(*slog21Fixture).install", line: 575, cut: slog21CutTriggerBeforeClose},
+		{function: "(*slog21Fixture).install", line: 577, cut: slog21CutDDLBefore},
+		{function: "(*slog21Fixture).install", line: 599, cut: slog21CutDDLAfter},
+		{function: "(*slog21Fixture).clean", line: 653, cut: slog21CutCleanupBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 668, cut: slog21CutDeleteBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 677, cut: slog21CutDeleteAfter},
+		{function: "TestSelfLogout20261021JointOracle", line: 685, cut: slog21CutOracleTarget},
+		{function: "(*slog21Fixture).expectedAfter", line: 713, cut: slog21CutPostResponse},
+		{function: "(*slog21Fixture).expectedAfter", line: 743, cut: slog21CutPersistedTarget},
+		{function: "TestSelfLogout20261021Normal", line: 752, cut: slog21CutNormalBefore},
+		{function: "TestSelfLogout20261021NativeAbort", line: 768, cut: slog21CutAbortBefore},
+		{function: "TestSelfLogout20261021Boundaries", line: 791, cut: slog21CutBoundaryBefore},
+		{function: "TestSelfLogout20261021DeferredFK", line: 877, cut: slog21CutFKBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 910, cut: slog21CutAuthBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 958, cut: slog21CutAuthAfter},
+		{function: "TestSelfLogout20261021TwoAuthenticated", line: 964, cut: slog21CutDualBefore},
 	}
 }
 
@@ -1750,6 +1761,338 @@ func TestSelfLogout20261021CloseHandoffDiagnostic(t *testing.T) {
 			mutate(&v)
 			if v.valid() {
 				t.Fatal("SLOG21_HANDOFF_UNKNOWN_CONTROL")
+			}
+		}
+	})
+}
+
+// Independently authored for the passive App.Close-segments diagnostic contract.
+// This expectation is fixed from the frozen fixture Config/construction, never
+// from observed events or current App component pointers.
+type slog21SegmentSpec struct {
+	phase appClosePhase
+	edge  appCloseEdge
+}
+
+func slog21SegmentExpected() [27]slog21SegmentSpec {
+	return [27]slog21SegmentSpec{
+		{appCloseOneShot, appCloseEnter}, {appCloseOneShot, appCloseReturn},
+		{appCloseExpiry, appCloseEnter}, {appCloseExpiry, appCloseReturn},
+		{appCloseBackupAutomation, appCloseEnter}, {appCloseBackupAutomation, appCloseReturn},
+		{appCloseBackgroundResponses, appCloseSkipNil},
+		{appCloseScheduledTests, appCloseEnter}, {appCloseScheduledTests, appCloseReturn},
+		{appCloseChannelMonitors, appCloseEnter}, {appCloseChannelMonitors, appCloseReturn},
+		{appCloseGovernance, appCloseEnter}, {appCloseGovernance, appCloseReturn},
+		{appCloseProxyTests, appCloseEnter}, {appCloseProxyTests, appCloseReturn},
+		{appCloseRecovery, appCloseEnter}, {appCloseRecovery, appCloseReturn},
+		{appCloseHealthTests, appCloseEnter}, {appCloseHealthTests, appCloseReturn},
+		{appCloseAccountPool, appCloseEnter}, {appCloseAccountPool, appCloseReturn},
+		{appCloseRefresh, appCloseEnter}, {appCloseRefresh, appCloseReturn},
+		{appCloseProxyClients, appCloseEnter}, {appCloseProxyClients, appCloseReturn},
+		{appCloseStore, appCloseEnter}, {appCloseStore, appCloseReturn},
+	}
+}
+
+type slog21SegmentRecord struct {
+	stage   slog21HandStage
+	phase   appClosePhase
+	edge    appCloseEdge
+	pool    [3]slog21HandCount
+	elapsed slog21DiagBucket
+	cleanup bool
+}
+
+func (r slog21SegmentRecord) valid() bool {
+	if r.stage < slog21HandInstall || r.stage > slog21HandFinalClean || r.phase < appCloseOneShot || r.phase > appCloseStore || r.edge < appCloseEnter || r.edge > appCloseSkipNil {
+		return false
+	}
+	if r.edge == appCloseReturn {
+		if r.elapsed < 1 || r.elapsed > 6 {
+			return false
+		}
+	} else if r.elapsed != 0 {
+		return false
+	}
+	for _, n := range r.pool {
+		if n < slog21HandZero || n > slog21HandNonzero {
+			return false
+		}
+	}
+	return true
+}
+
+func (r slog21SegmentRecord) text() string {
+	count := func(n slog21HandCount) string {
+		return slog21DiagLabel(int(n), []string{"ABSENT", "ZERO", "NONZERO", "UNKNOWN"})
+	}
+	elapsed := "NA"
+	if r.edge == appCloseReturn {
+		elapsed = slog21DiagLabel(int(r.elapsed), []string{"INVALID", "LT1MS", "1MS_LT100MS", "100MS_LT1S", "1S_LT10S", "10S_LT60S", "GE60S"})
+	}
+	return "SLOG21_APP_CLOSE_SEGMENT" +
+		" stage=" + slog21DiagLabel(int(r.stage), []string{"UNKNOWN", "INSTALL", "REOPEN", "FINAL_CLEAN"}) +
+		" phase=" + slog21DiagLabel(int(r.phase), []string{"UNKNOWN", "oneShot", "expiry", "backupAutomation", "backgroundResponses", "scheduledTests", "channelMonitors", "governance", "proxyTests", "recovery", "healthTests", "accountPool", "refresh", "proxyClients", "store"}) +
+		" edge=" + slog21DiagLabel(int(r.edge), []string{"UNKNOWN", "ENTER", "RETURN", "SKIP_NIL"}) +
+		" old_open=" + count(r.pool[0]) + " old_in_use=" + count(r.pool[1]) + " old_idle=" + count(r.pool[2]) +
+		" elapsed=" + elapsed + " cleanup=" + slog21DiagBool(r.cleanup)
+}
+
+type slog21SegmentRecorder struct {
+	db            *sql.DB
+	busy, invalid atomic.Bool
+	overflow      bool
+	stage         slog21HandStage
+	cleanup       bool
+	flushed       bool
+	starts        [15]time.Time
+	records       [32]slog21SegmentRecord
+	n             int
+}
+
+// No logging, testing.T, error interface, SQL/Conn/Ping or product mutation is
+// reachable from this callback. A busy guard only latches and returns; no wait.
+func (r *slog21SegmentRecorder) capture(phase appClosePhase, edge appCloseEdge) {
+	if !r.busy.CompareAndSwap(false, true) {
+		r.invalid.Store(true)
+		return
+	}
+	now := time.Now()
+	v := slog21SegmentRecord{stage: r.stage, phase: phase, edge: edge, cleanup: r.cleanup}
+	if r.db == nil || r.flushed {
+		r.invalid.Store(true)
+	}
+	v.pool = slog21HandoffStats(r.db)
+	if phase >= appCloseOneShot && phase <= appCloseStore {
+		if edge == appCloseEnter {
+			if !r.starts[phase].IsZero() {
+				r.invalid.Store(true)
+			}
+			r.starts[phase] = now
+		} else if edge == appCloseReturn && !r.starts[phase].IsZero() {
+			v.elapsed = slog21DiagElapsed(now.Sub(r.starts[phase]))
+		}
+	}
+	r.appendRecord(v)
+	r.busy.Store(false)
+}
+
+// Caller owns the nonblocking guard (or a pure, unpublished control instance).
+func (r *slog21SegmentRecorder) appendRecord(v slog21SegmentRecord) {
+	if r.n >= len(r.records) {
+		r.overflow = true
+		r.invalid.Store(true)
+		return
+	}
+	expected := slog21SegmentExpected()
+	if r.n >= len(expected) || expected[r.n] != (slog21SegmentSpec{v.phase, v.edge}) || !v.valid() || v.stage != r.stage || v.cleanup != r.cleanup {
+		r.invalid.Store(true)
+	}
+	r.records[r.n] = v
+	r.n++
+}
+
+func (r *slog21SegmentRecorder) prepare(stage slog21HandStage, cleanup bool) {
+	if !r.busy.CompareAndSwap(false, true) {
+		r.invalid.Store(true)
+		return
+	}
+	if r.stage != 0 || r.n != 0 || stage < slog21HandInstall || stage > slog21HandFinalClean || r.flushed {
+		r.invalid.Store(true)
+	} else {
+		r.stage, r.cleanup = stage, cleanup
+	}
+	r.busy.Store(false)
+}
+
+func (r *slog21SegmentRecorder) complete() bool {
+	if r.invalid.Load() || r.overflow || r.n != len(slog21SegmentExpected()) {
+		return false
+	}
+	for i, spec := range slog21SegmentExpected() {
+		v := r.records[i]
+		if !v.valid() || (slog21SegmentSpec{v.phase, v.edge}) != spec || v.stage != r.stage || v.cleanup != r.cleanup {
+			return false
+		}
+	}
+	return true
+}
+
+func (f *slog21Fixture) bindSegments(a *App) {
+	r := &slog21SegmentRecorder{db: a.store.db}
+	a.closeObserver = r.capture
+	f.segmentCurrent = r
+	if f.segmentCount >= len(f.segments) {
+		// Still bind an independent recorder; never skip the real close/oracle.
+		f.segmentCensusInvalid = true
+		return
+	}
+	f.segments[f.segmentCount] = r
+	f.segmentCount++
+}
+
+func (f *slog21Fixture) prepareSegments(stage slog21HandStage, cleanup bool) {
+	if f.segmentCurrent == nil {
+		f.segmentCensusInvalid = true
+		return
+	}
+	f.segmentCurrent.prepare(stage, cleanup)
+}
+
+// Invoked only at the end of the original fixture cleanup, after its original
+// close and the test's original observer/oracle path. It cannot replace the
+// first original failure or interrupt a later original test-body observation.
+func (f *slog21Fixture) flushSegments() {
+	if f.segmentCensusInvalid || f.segmentCount == 0 {
+		f.t.Error("SLOG21_SEGMENT_CENSUS_INVALID")
+	}
+	for i := 0; i < f.segmentCount; i++ {
+		r := f.segments[i]
+		if r == nil || !r.busy.CompareAndSwap(false, true) {
+			if r != nil {
+				r.invalid.Store(true)
+			}
+			f.t.Error("SLOG21_SEGMENT_FLUSH_REENTRY")
+			continue
+		}
+		valid := !r.flushed && r.complete()
+		records, n := r.records, r.n
+		r.flushed = true
+		r.busy.Store(false)
+		for j := 0; j < n; j++ {
+			f.t.Log(records[j].text())
+		}
+		if !valid {
+			f.t.Error("SLOG21_SEGMENT_TRACE_INVALID")
+		}
+	}
+}
+
+// Pure controls: no new App.Open, shutdown, DB, connection, worker or goroutine.
+func TestSelfLogout20261021AppCloseSegmentsDiagnostic(t *testing.T) {
+	value := func(s slog21SegmentSpec) slog21SegmentRecord {
+		v := slog21SegmentRecord{stage: slog21HandReopen, phase: s.phase, edge: s.edge, pool: [3]slog21HandCount{slog21HandZero, slog21HandZero, slog21HandZero}}
+		if s.edge == appCloseReturn {
+			v.elapsed = 1
+		}
+		return v
+	}
+	fill := func(r *slog21SegmentRecorder) {
+		for _, spec := range slog21SegmentExpected() {
+			r.appendRecord(value(spec))
+		}
+	}
+	t.Run("fixed-presence", func(t *testing.T) {
+		presence := [14]bool{true, true, true, false, true, true, true, true, true, true, true, true, true, true}
+		expected, index := slog21SegmentExpected(), 0
+		for i, present := range presence {
+			phase := appClosePhase(i + 1)
+			if !present {
+				if expected[index] != (slog21SegmentSpec{phase, appCloseSkipNil}) {
+					t.Fatal("SLOG21_SEGMENT_PINNED_NIL_CONTROL")
+				}
+				index++
+				continue
+			}
+			if expected[index] != (slog21SegmentSpec{phase, appCloseEnter}) || expected[index+1] != (slog21SegmentSpec{phase, appCloseReturn}) {
+				t.Fatal("SLOG21_SEGMENT_PINNED_PAIR_CONTROL")
+			}
+			index += 2
+		}
+		r := &slog21SegmentRecorder{stage: slog21HandReopen}
+		fill(r)
+		if index != 27 || !r.complete() {
+			t.Fatal("SLOG21_SEGMENT_PINNED_TOTAL_CONTROL")
+		}
+	})
+	t.Run("fixed-capacity-overflow", func(t *testing.T) {
+		r := &slog21SegmentRecorder{stage: slog21HandReopen}
+		for i := 0; i < 33; i++ {
+			r.appendRecord(value(slog21SegmentSpec{appCloseOneShot, appCloseEnter}))
+		}
+		if r.n != 32 || !r.overflow || !r.invalid.Load() || r.complete() {
+			t.Fatal("SLOG21_SEGMENT_OVERFLOW_CONTROL")
+		}
+	})
+	t.Run("unknown-duplicate-order", func(t *testing.T) {
+		for _, bad := range []slog21SegmentSpec{{0, appCloseEnter}, {255, 255}, {appCloseExpiry, appCloseReturn}, {appCloseOneShot, appCloseSkipNil}, {appCloseOneShot, appCloseEnter}} {
+			r := &slog21SegmentRecorder{stage: slog21HandReopen}
+			r.appendRecord(value(slog21SegmentSpec{appCloseOneShot, appCloseEnter}))
+			r.appendRecord(value(bad))
+			if !r.invalid.Load() || r.complete() {
+				t.Fatal("SLOG21_SEGMENT_ORDER_CONTROL")
+			}
+		}
+	})
+	t.Run("missing-zero", func(t *testing.T) {
+		r := &slog21SegmentRecorder{stage: slog21HandReopen}
+		if r.complete() {
+			t.Fatal("SLOG21_SEGMENT_ZERO_CONTROL")
+		}
+		fill(r)
+		r.n--
+		if r.complete() {
+			t.Fatal("SLOG21_SEGMENT_MISSING_CONTROL")
+		}
+		for _, mutate := range []func(*slog21SegmentRecord){
+			func(v *slog21SegmentRecord) { v.stage = 0 },
+			func(v *slog21SegmentRecord) { v.pool[0] = slog21HandAbsent },
+			func(v *slog21SegmentRecord) { v.elapsed = 255 },
+		} {
+			v := value(slog21SegmentSpec{appCloseStore, appCloseReturn})
+			mutate(&v)
+			if v.valid() {
+				t.Fatal("SLOG21_SEGMENT_INVALID_VALUE_CONTROL")
+			}
+		}
+	})
+	t.Run("reentry-latch", func(t *testing.T) {
+		r := &slog21SegmentRecorder{}
+		r.busy.Store(true)
+		r.capture(appCloseOneShot, appCloseEnter)
+		if !r.invalid.Load() || r.n != 0 {
+			t.Fatal("SLOG21_SEGMENT_REENTRY_CONTROL")
+		}
+		r.busy.Store(false)
+		r.prepare(slog21HandReopen, false)
+		fill(r)
+		if r.complete() {
+			t.Fatal("SLOG21_SEGMENT_LATCH_RESET_CONTROL")
+		}
+	})
+	t.Run("per-app-independent", func(t *testing.T) {
+		var a, b App
+		if a.closeObserver != nil || b.closeObserver != nil {
+			t.Fatal("SLOG21_SEGMENT_DEFAULT_NIL_CONTROL")
+		}
+		r, s := &slog21SegmentRecorder{stage: slog21HandReopen}, &slog21SegmentRecorder{stage: slog21HandReopen}
+		a.closeObserver, b.closeObserver = r.capture, s.capture
+		fill(r)
+		if !r.complete() || s.n != 0 || s.invalid.Load() || s.complete() {
+			t.Fatal("SLOG21_SEGMENT_INDEPENDENCE_CONTROL")
+		}
+		fill(s)
+		r.records[0].phase = 255
+		if r.complete() || !s.complete() {
+			t.Fatal("SLOG21_SEGMENT_BUFFER_ALIAS_CONTROL")
+		}
+	})
+	t.Run("safe-delayed-format", func(t *testing.T) {
+		r := &slog21SegmentRecorder{stage: slog21HandReopen}
+		fill(r)
+		if r.flushed || !r.complete() {
+			t.Fatal("SLOG21_SEGMENT_PASSIVE_RECORDING_CONTROL")
+		}
+		want := "SLOG21_APP_CLOSE_SEGMENT stage=REOPEN phase=oneShot edge=ENTER old_open=ZERO old_in_use=ZERO old_idle=ZERO elapsed=NA cleanup=false"
+		if r.records[0].text() != want {
+			t.Fatal("SLOG21_SEGMENT_FINITE_FORMAT_CONTROL")
+		}
+		unknown := slog21SegmentRecord{stage: 255, phase: 255, edge: 255, pool: [3]slog21HandCount{255, 255, 255}}
+		if unknown.text() != "SLOG21_APP_CLOSE_SEGMENT stage=UNKNOWN phase=UNKNOWN edge=UNKNOWN old_open=UNKNOWN old_in_use=UNKNOWN old_idle=UNKNOWN elapsed=NA cleanup=false" {
+			t.Fatal("SLOG21_SEGMENT_UNKNOWN_FORMAT_CONTROL")
+		}
+		for _, spec := range slog21SegmentExpected() {
+			if len(strings.Fields(value(spec).text())) != 9 {
+				t.Fatal("SLOG21_SEGMENT_FORMAT_SHAPE_CONTROL")
 			}
 		}
 	})
