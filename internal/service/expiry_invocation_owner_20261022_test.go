@@ -133,6 +133,10 @@ func eioAudit(app, worker, fixture string) string {
 	if eioHashSource(oldWorker) != "8e6aca505ba606c2d67f3163fe698b9b0ec7d11f752242aac96ef5c7dfeae6e0" {
 		return "FAPP_SOURCE_WORKER_BOUNDARY"
 	}
+	fixture, originLabel := projectInitializeOriginCallerFixture(fixture)
+	if originLabel != "" {
+		return originLabel
+	}
 	oldFixture := strip(fixture, []string{
 		"\tf.installFirstOwner(t, selection)\n",
 		"\tf.firstOwnerReturned(ownerPlan, a, err)\n",
