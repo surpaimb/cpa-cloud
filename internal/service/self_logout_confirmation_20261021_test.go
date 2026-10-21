@@ -268,11 +268,14 @@ type slog21Fixture struct {
 	expiryCount                                             int
 	expiryCensusInvalid                                     bool
 	prequery                                                *slogPrequeryPlan
+	firstOwner                                              *expiryInvocationPlan
+	firstOwnerAttempted                                     bool
 }
 
-func newSlog21(t *testing.T) *slog21Fixture {
+func newSlog21(t *testing.T, selection ...expiryOwnerSelection) *slog21Fixture {
 	t.Helper()
 	f := &slog21Fixture{t: t, dir: t.TempDir(), client: &http.Client{Timeout: 10 * time.Second}}
+	f.installFirstOwner(t, selection)
 	t.Cleanup(func() {
 		if f.app != nil && !f.closed {
 			f.prepareSegments(slog21HandFinalClean, true)
@@ -328,8 +331,9 @@ func (f *slog21Fixture) open() {
 	ctx, cancel := context.WithTimeout(f.t.Context(), 30*time.Second)
 	defer cancel()
 	expiryRecorder := &slog21ExpiryRecorder{}
-	startup := withExpiryOpenObserver(ctx, expiryRecorder.capture)
+	startup, ownerPlan := f.firstOwnerStartup(withExpiryOpenObserver(ctx, expiryRecorder.capture))
 	a, err := Open(startup, Config{DataDir: f.dir, Listen: "127.0.0.1:0", EmployeeSelfServiceEnabled: true, Version: "slog-owned"})
+	f.firstOwnerReturned(ownerPlan, a, err)
 	if err != nil || a == nil {
 		if a != nil && a.Close() != nil {
 			f.t.Error("SLOG21_UNEXPECTED_PARTIAL_CLEANUP")
@@ -808,7 +812,7 @@ func (r slog21Result) RowsAffected() (int64, error) { return r.count, r.err }
 func TestSelfLogout20261021Boundaries(t *testing.T) {
 	for _, scenario := range []string{"begin-refusal", "begin-cancelled", "nil-result", "rows-error", "zero-rows", "multiple-rows", "employee-predicate", "verifier-predicate", "confirmation-query-error", "replacement-employee", "replacement-verifier", "pre-commit-refusal", "post-commit-report"} {
 		t.Run(scenario, func(t *testing.T) {
-			f := newSlog21(t)
+			f := newSlog21(t, firstOwnerBoundarySelection(scenario))
 			if scenario == "pre-commit-refusal" {
 				f.prequery = newSlogPrequery()
 			}
@@ -933,7 +937,7 @@ func TestSelfLogout20261021DeferredFK(t *testing.T) {
 }
 
 func TestSelfLogout20261021AuthBoundaries(t *testing.T) {
-	f := newSlog21(t)
+	f := newSlog21(t, expiryOwnerAuthFirst)
 	before := slog21Snapshot(t, f.app.store.db)
 	var entered atomic.Bool
 	f.hooks(selfLogoutOperationHooks{beforeBegin: func(context.Context) error { entered.Store(true); return sql.ErrConnDone }})
@@ -1492,28 +1496,28 @@ func TestSelfLogoutSnapshotErrorDiagnostic20261021(t *testing.T) {
 // Filled from the final frozen source callsites, not runtime paths or SQL.
 func slog21DiagSites() []slog21DiagSite {
 	return []slog21DiagSite{
-		{function: "(*slog21Fixture).closedRaw", line: 405, cut: slog21CutAfterClose},
-		{function: "(*slog21Fixture).openRaw", line: 414, cut: slog21CutBeforeOpen},
-		{function: "(*slog21Fixture).openRaw", line: 419, cut: slog21CutAfterOpen},
-		{function: "(*slog21Fixture).reopen", line: 424, cut: slog21CutReopenBeforeClose},
-		{function: "(*slog21Fixture).controlWindow", line: 567, cut: slog21CutControlsBefore},
-		{function: "(*slog21Fixture).controlWindow", line: 569, cut: slog21CutControlsAfter},
-		{function: "(*slog21Fixture).install", line: 596, cut: slog21CutTriggerBeforeClose},
-		{function: "(*slog21Fixture).install", line: 598, cut: slog21CutDDLBefore},
-		{function: "(*slog21Fixture).install", line: 620, cut: slog21CutDDLAfter},
-		{function: "(*slog21Fixture).clean", line: 674, cut: slog21CutCleanupBefore},
-		{function: "TestSelfLogout20261021JointOracle", line: 689, cut: slog21CutDeleteBefore},
-		{function: "TestSelfLogout20261021JointOracle", line: 698, cut: slog21CutDeleteAfter},
-		{function: "TestSelfLogout20261021JointOracle", line: 706, cut: slog21CutOracleTarget},
-		{function: "(*slog21Fixture).expectedAfter", line: 734, cut: slog21CutPostResponse},
-		{function: "(*slog21Fixture).expectedAfter", line: 764, cut: slog21CutPersistedTarget},
-		{function: "TestSelfLogout20261021Normal", line: 773, cut: slog21CutNormalBefore},
-		{function: "TestSelfLogout20261021NativeAbort", line: 789, cut: slog21CutAbortBefore},
-		{function: "TestSelfLogout20261021Boundaries", line: 815, cut: slog21CutBoundaryBefore},
-		{function: "TestSelfLogout20261021DeferredFK", line: 904, cut: slog21CutFKBefore},
-		{function: "TestSelfLogout20261021AuthBoundaries", line: 937, cut: slog21CutAuthBefore},
-		{function: "TestSelfLogout20261021AuthBoundaries", line: 985, cut: slog21CutAuthAfter},
-		{function: "TestSelfLogout20261021TwoAuthenticated", line: 991, cut: slog21CutDualBefore},
+		{function: "(*slog21Fixture).closedRaw", line: 409, cut: slog21CutAfterClose},
+		{function: "(*slog21Fixture).openRaw", line: 418, cut: slog21CutBeforeOpen},
+		{function: "(*slog21Fixture).openRaw", line: 423, cut: slog21CutAfterOpen},
+		{function: "(*slog21Fixture).reopen", line: 428, cut: slog21CutReopenBeforeClose},
+		{function: "(*slog21Fixture).controlWindow", line: 571, cut: slog21CutControlsBefore},
+		{function: "(*slog21Fixture).controlWindow", line: 573, cut: slog21CutControlsAfter},
+		{function: "(*slog21Fixture).install", line: 600, cut: slog21CutTriggerBeforeClose},
+		{function: "(*slog21Fixture).install", line: 602, cut: slog21CutDDLBefore},
+		{function: "(*slog21Fixture).install", line: 624, cut: slog21CutDDLAfter},
+		{function: "(*slog21Fixture).clean", line: 678, cut: slog21CutCleanupBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 693, cut: slog21CutDeleteBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 702, cut: slog21CutDeleteAfter},
+		{function: "TestSelfLogout20261021JointOracle", line: 710, cut: slog21CutOracleTarget},
+		{function: "(*slog21Fixture).expectedAfter", line: 738, cut: slog21CutPostResponse},
+		{function: "(*slog21Fixture).expectedAfter", line: 768, cut: slog21CutPersistedTarget},
+		{function: "TestSelfLogout20261021Normal", line: 777, cut: slog21CutNormalBefore},
+		{function: "TestSelfLogout20261021NativeAbort", line: 793, cut: slog21CutAbortBefore},
+		{function: "TestSelfLogout20261021Boundaries", line: 819, cut: slog21CutBoundaryBefore},
+		{function: "TestSelfLogout20261021DeferredFK", line: 908, cut: slog21CutFKBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 941, cut: slog21CutAuthBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 989, cut: slog21CutAuthAfter},
+		{function: "TestSelfLogout20261021TwoAuthenticated", line: 995, cut: slog21CutDualBefore},
 	}
 }
 

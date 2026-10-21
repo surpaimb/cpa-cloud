@@ -98,6 +98,7 @@ type App struct {
 	// Independently authored for the expiry SQL lifecycle diagnostic contract.
 	// Bound once before worker launch; no Config/HTTP entry and nil in production.
 	expiryObserver financial.ExpiryObserver
+	expiryOwner    *expiryInvocationOwner
 	// Independently authored for docs/employee-self-password-change-contract.md.
 	// SQL-boundary hooks exercise uncertain commits and mid-hash revocation.
 	// Production leaves both nil.
@@ -192,7 +193,8 @@ type loginAttempt struct {
 // not expose a diagnostic Value. Open unwraps it before any initialization.
 type expiryOpenBinding struct {
 	context.Context
-	observer financial.ExpiryObserver
+	observer  financial.ExpiryObserver
+	ownerPlan *expiryInvocationPlan
 }
 
 func withExpiryOpenObserver(ctx context.Context, observer financial.ExpiryObserver) context.Context {
@@ -210,6 +212,7 @@ func takeExpiryOpenObserver(ctx context.Context) (context.Context, financial.Exp
 }
 
 func Open(ctx context.Context, cfg Config) (*App, error) {
+	owner := beginExpiryInvocationOwner(ctx)
 	ctx, expiryObserver := takeExpiryOpenObserver(ctx)
 	if cfg.EmployeeSelfUpstreamEstimatedCostSummaryEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return nil, errors.New("employee self upstream estimated cost summary requires employee self service")
@@ -299,9 +302,11 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	app := &App{
 		cfg: cfg, store: s, secrets: sec, http: client,
 		expiryObserver: expiryObserver,
+		expiryOwner:    owner,
 		oauthHTTP:      newCodexOAuthHTTPClient(), codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(),
 		logins: make(map[string]*loginAttempt), selfLogins: make(map[string]*loginAttempt), trustedProxies: trustedProxies,
 	}
+	owner.appConstructed(app)
 	opened := false
 	defer func() {
 		if !opened {
