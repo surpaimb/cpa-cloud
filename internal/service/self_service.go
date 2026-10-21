@@ -586,8 +586,83 @@ func (a *App) selfProfileInfo(w http.ResponseWriter, _ *http.Request, session se
 	writeJSON(w, 200, session.Profile)
 }
 
+// Independently authored for docs/employee-self-logout-confirmation-2026-10-21.md.
+// Context-local adapters are private to in-package tests, not HTTP inputs. They
+// may add failures/reports but cannot erase actual SQL or Commit errors.
+type selfLogoutContextKey struct{}
+type selfLogoutOperationHooks struct {
+	beforeBegin   func(context.Context) error
+	afterBegin    func(*sql.Tx) error
+	result        func(sql.Result) sql.Result
+	beforeConfirm func(*sql.Tx) error
+	beforeCommit  func(*sql.Tx) error
+	afterCommit   func(error) error
+}
+
 func (a *App) selfLogout(w http.ResponseWriter, r *http.Request, session selfSession) {
-	if _, err := a.store.db.ExecContext(r.Context(), `DELETE FROM employee_self_sessions WHERE selector=?`, session.Selector); err != nil {
+	// requireSelf owns admission.RLock throughout. Never upgrade/reacquire it,
+	// and never use the one-connection pool while this transaction owns it.
+	hooks, _ := r.Context().Value(selfLogoutContextKey{}).(selfLogoutOperationHooks)
+	fail := func() { selfError(w, 503, "storage_unavailable") }
+	if hooks.beforeBegin != nil {
+		if hooks.beforeBegin(r.Context()) != nil {
+			fail()
+			return
+		}
+	}
+	tx, err := a.store.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		fail()
+		return
+	}
+	defer tx.Rollback()
+	if hooks.afterBegin != nil {
+		if hooks.afterBegin(tx) != nil {
+			fail()
+			return
+		}
+	}
+	result, err := tx.ExecContext(r.Context(), `DELETE FROM employee_self_sessions WHERE selector=? AND employee_id=? AND verifier_digest=?`, session.Selector, session.EmployeeID, session.VerifierDigest)
+	if err != nil {
+		fail()
+		return
+	}
+	if hooks.result != nil {
+		result = hooks.result(result)
+	}
+	if result == nil {
+		fail()
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		fail()
+		return
+	}
+	if hooks.beforeConfirm != nil {
+		if hooks.beforeConfirm(tx) != nil {
+			fail()
+			return
+		}
+	}
+	var remaining int
+	if tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM employee_self_sessions WHERE selector=?`, session.Selector).Scan(&remaining) != nil || remaining != 0 {
+		fail()
+		return
+	}
+	if hooks.beforeCommit != nil {
+		if hooks.beforeCommit(tx) != nil {
+			fail()
+			return
+		}
+	}
+	commitErr := tx.Commit()
+	if hooks.afterCommit != nil {
+		if reportErr := hooks.afterCommit(commitErr); commitErr == nil {
+			commitErr = reportErr
+		}
+	}
+	if commitErr != nil {
 		selfError(w, 503, "storage_unavailable")
 		return
 	}
