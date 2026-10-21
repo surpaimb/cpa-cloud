@@ -6,18 +6,22 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	diagSQLite "modernc.org/sqlite"
 )
 
 const slog21Time = "2006-01-02T15:04:05.000000000Z"
@@ -38,20 +42,24 @@ type slog21Snap struct {
 }
 
 func slog21Fail(t *testing.T, tag string) { t.Helper(); t.Fatal("SLOG21_UNEXPECTED_" + tag) }
-func slog21Read(t *testing.T, ctx context.Context, tx *sql.Tx, q string, typed bool) ([]string, [][]slog21Cell) {
+func slog21Read(t *testing.T, ctx context.Context, tx *sql.Tx, q string, typed bool, diag *slog21DiagTrace, query slog21DiagQuery) ([]string, [][]slog21Cell) {
 	t.Helper()
+	queryStarted := time.Now()
 	r, err := tx.QueryContext(ctx, q)
 	if err != nil {
+		diag.capture(slog21DiagContext(ctx), query, slog21DiagQueryContext, err, queryStarted, false).emit(t)
 		slog21Fail(t, "SNAPSHOT_QUERY")
 	}
-	defer r.Close()
+	defer diag.closeRows(t, ctx, r, query, queryStarted)
 	cols, err := r.Columns()
 	if err != nil {
+		diag.capture(slog21DiagContext(ctx), query, slog21DiagColumns, err, queryStarted, false).emit(t)
 		slog21Fail(t, "SNAPSHOT_COLUMNS")
 	}
 	n := len(cols)
 	if typed {
 		if n%2 != 0 {
+			diag.internal(ctx, query, slog21DiagWidth, queryStarted).emit(t)
 			slog21Fail(t, "SNAPSHOT_WIDTH")
 		}
 		n /= 2
@@ -63,7 +71,8 @@ func slog21Read(t *testing.T, ctx context.Context, tx *sql.Tx, q string, typed b
 		for i := range v {
 			p[i] = &v[i]
 		}
-		if r.Scan(p...) != nil {
+		if scanErr := r.Scan(p...); scanErr != nil {
+			diag.capture(slog21DiagContext(ctx), query, slog21DiagScan, scanErr, queryStarted, false).emit(t)
 			slog21Fail(t, "SNAPSHOT_SCAN")
 		}
 		row := make([]slog21Cell, n)
@@ -85,11 +94,13 @@ func slog21Read(t *testing.T, ctx context.Context, tx *sql.Tx, q string, typed b
 				c.Kind = "blob"
 				c.Blob = append([]byte{}, x...)
 			default:
+				diag.internal(ctx, query, slog21DiagValueType, queryStarted).emit(t)
 				slog21Fail(t, "SNAPSHOT_TYPE")
 			}
 			if typed {
 				kind, ok := v[n+i].(string)
 				if !ok {
+					diag.internal(ctx, query, slog21DiagSQLiteType, queryStarted).emit(t)
 					slog21Fail(t, "SQLITE_TYPE")
 				}
 				c.SQLType = kind
@@ -99,8 +110,22 @@ func slog21Read(t *testing.T, ctx context.Context, tx *sql.Tx, q string, typed b
 		rows = append(rows, row)
 	}
 	err = r.Err()
+	var iterationRecord, closeRecord slog21DiagRecord
+	if err != nil {
+		iterationRecord = diag.capture(slog21DiagContext(ctx), query, slog21DiagRowsErr, err, queryStarted, false)
+	}
+	closeContext := slog21DiagContext(ctx)
 	closeErr := r.Close()
+	if closeErr != nil {
+		closeRecord = diag.capture(closeContext, query, slog21DiagRowsClose, closeErr, queryStarted, true)
+	}
 	if err != nil || closeErr != nil {
+		if err != nil {
+			iterationRecord.emit(t)
+		}
+		if closeErr != nil {
+			closeRecord.emit(t)
+		}
 		slog21Fail(t, "SNAPSHOT_CLOSE")
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -115,24 +140,28 @@ func slog21Snapshot(t *testing.T, db *sql.DB) slog21Snap {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
+	diag := &slog21DiagTrace{started: time.Now(), cut: slog21DiagLocate()}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
+		diag.capture(slog21DiagContext(ctx), slog21DiagNoQuery, slog21DiagBegin, err, diag.started, false).emit(t)
 		slog21Fail(t, "SNAPSHOT_BEGIN")
 	}
-	defer tx.Rollback()
-	_, objects := slog21Read(t, ctx, tx, `SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE substr(name,1,7)<>'sqlite_'`, false)
+	defer diag.rollback(t, ctx, tx)
+	_, objects := slog21Read(t, ctx, tx, `SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE substr(name,1,7)<>'sqlite_'`, false, diag, slog21DiagObjects)
 	s := slog21Snap{Schema: objects, Tables: map[string]slog21Table{}}
 	for _, o := range objects {
 		if len(o) != 4 || o[0].Kind != "string" || o[1].Kind != "string" {
+			diag.internal(ctx, slog21DiagObjects, slog21DiagObjectType, diag.started).emit(t)
 			slog21Fail(t, "OBJECT_TYPE")
 		}
 		if o[0].Text != "table" {
 			continue
 		}
 		name := o[1].Text
-		c, _ := slog21Read(t, ctx, tx, `SELECT * FROM `+slog21Quote(name)+` WHERE 0`, false)
-		_, m := slog21Read(t, ctx, tx, `PRAGMA table_xinfo(`+slog21Quote(name)+`)`, false)
+		c, _ := slog21Read(t, ctx, tx, `SELECT * FROM `+slog21Quote(name)+` WHERE 0`, false, diag, slog21DiagDiscovery)
+		_, m := slog21Read(t, ctx, tx, `PRAGMA table_xinfo(`+slog21Quote(name)+`)`, false, diag, slog21DiagDeclaration)
 		if len(c) == 0 || len(c) != len(m) {
+			diag.internal(ctx, slog21DiagDeclaration, slog21DiagMetadata, diag.started).emit(t)
 			slog21Fail(t, "COLUMN_METADATA")
 		}
 		expr := []string{}
@@ -142,10 +171,10 @@ func slog21Snapshot(t *testing.T, db *sql.DB) slog21Snap {
 		for _, col := range c {
 			expr = append(expr, `typeof(`+slog21Quote(col)+`)`)
 		}
-		_, rows := slog21Read(t, ctx, tx, `SELECT `+strings.Join(expr, ",")+` FROM `+slog21Quote(name), true)
+		_, rows := slog21Read(t, ctx, tx, `SELECT `+strings.Join(expr, ",")+` FROM `+slog21Quote(name), true, diag, slog21DiagTypedRows)
 		s.Tables[name] = slog21Table{Columns: c, Metadata: m, Rows: rows}
 	}
-	if len(s.Tables) == 0 || tx.Commit() != nil {
+	if len(s.Tables) == 0 || diag.commit(t, ctx, tx) != nil {
 		slog21Fail(t, "SNAPSHOT_COMMIT")
 	}
 	return s
@@ -977,4 +1006,438 @@ func TestSelfLogout20261021TwoAuthenticated(t *testing.T) {
 	f.finish(r)
 	f.expectedAfter(before, false)
 	f.clean()
+}
+
+// Diagnostic-only observers for docs/employee-self-logout-query-diagnostic-2026-10-21.md.
+// No record contains an error, SQL, object name, value, identity or runtime path.
+type slog21DiagCut uint8
+
+const (
+	slog21CutUnknown slog21DiagCut = iota
+	slog21CutControlsBefore
+	slog21CutControlsAfter
+	slog21CutReopenBeforeClose
+	slog21CutAfterClose
+	slog21CutBeforeOpen
+	slog21CutAfterOpen
+	slog21CutTriggerBeforeClose
+	slog21CutDDLBefore
+	slog21CutDDLAfter
+	slog21CutDeleteBefore
+	slog21CutDeleteAfter
+	slog21CutOracleTarget
+	slog21CutPostResponse
+	slog21CutPersistedTarget
+	slog21CutCleanupBefore
+	slog21CutNormalBefore
+	slog21CutAbortBefore
+	slog21CutBoundaryBefore
+	slog21CutFKBefore
+	slog21CutAuthBefore
+	slog21CutAuthAfter
+	slog21CutDualBefore
+)
+
+type slog21DiagQuery uint8
+
+const (
+	slog21DiagNoQuery slog21DiagQuery = iota
+	slog21DiagObjects
+	slog21DiagDiscovery
+	slog21DiagDeclaration
+	slog21DiagTypedRows
+)
+
+type slog21DiagOp uint8
+
+const (
+	slog21DiagUnknownOp slog21DiagOp = iota
+	slog21DiagBegin
+	slog21DiagQueryContext
+	slog21DiagColumns
+	slog21DiagWidth
+	slog21DiagScan
+	slog21DiagValueType
+	slog21DiagSQLiteType
+	slog21DiagRowsErr
+	slog21DiagRowsClose
+	slog21DiagObjectType
+	slog21DiagMetadata
+	slog21DiagCommit
+	slog21DiagRollback
+)
+
+type slog21DiagCtx uint8
+type slog21DiagErr uint8
+type slog21DiagCode uint8
+type slog21DiagBucket uint8
+
+const (
+	slog21CtxNone slog21DiagCtx = iota
+	slog21CtxDeadline
+	slog21CtxCancelled
+	slog21CtxOther
+)
+const (
+	slog21ErrUnknown slog21DiagErr = iota
+	slog21ErrNone
+	slog21ErrDeadline
+	slog21ErrCancelled
+	slog21ErrTxDone
+	slog21ErrConnDone
+	slog21ErrSQLite
+)
+const (
+	slog21CodeNone slog21DiagCode = iota
+	slog21CodeUnknown
+	slog21Code1
+	slog21Code4
+	slog21Code5
+	slog21Code6
+	slog21Code9
+	slog21Code10
+	slog21Code19
+	slog21Code261
+	slog21Code517
+	slog21Code773
+	slog21Code262
+	slog21Code518
+	slog21Code4106
+)
+
+func slog21DiagLabel(index int, labels []string) string {
+	if index < 0 || index >= len(labels) {
+		return "UNKNOWN"
+	}
+	return labels[index]
+}
+func slog21DiagSQLiteCode(code int) slog21DiagCode {
+	switch code {
+	case 1:
+		return slog21Code1
+	case 4:
+		return slog21Code4
+	case 5:
+		return slog21Code5
+	case 6:
+		return slog21Code6
+	case 9:
+		return slog21Code9
+	case 10:
+		return slog21Code10
+	case 19:
+		return slog21Code19
+	case 261:
+		return slog21Code261
+	case 517:
+		return slog21Code517
+	case 773:
+		return slog21Code773
+	case 262:
+		return slog21Code262
+	case 518:
+		return slog21Code518
+	case 4106:
+		return slog21Code4106
+	default:
+		return slog21CodeUnknown
+	}
+}
+func slog21DiagError(err error) (slog21DiagErr, slog21DiagCode) {
+	switch {
+	case err == nil:
+		return slog21ErrNone, slog21CodeNone
+	case errors.Is(err, context.DeadlineExceeded):
+		return slog21ErrDeadline, slog21CodeNone
+	case errors.Is(err, context.Canceled):
+		return slog21ErrCancelled, slog21CodeNone
+	case errors.Is(err, sql.ErrTxDone):
+		return slog21ErrTxDone, slog21CodeNone
+	case errors.Is(err, sql.ErrConnDone):
+		return slog21ErrConnDone, slog21CodeNone
+	}
+	var native *diagSQLite.Error
+	if errors.As(err, &native) && native != nil {
+		return slog21ErrSQLite, slog21DiagSQLiteCode(native.Code())
+	}
+	return slog21ErrUnknown, slog21CodeNone
+}
+func slog21DiagContext(ctx context.Context) slog21DiagCtx {
+	err := ctx.Err()
+	switch {
+	case err == nil:
+		return slog21CtxNone
+	case errors.Is(err, context.DeadlineExceeded):
+		return slog21CtxDeadline
+	case errors.Is(err, context.Canceled):
+		return slog21CtxCancelled
+	default:
+		return slog21CtxOther
+	}
+}
+func slog21DiagElapsed(d time.Duration) slog21DiagBucket {
+	switch {
+	case d < 0:
+		return 0
+	case d < time.Millisecond:
+		return 1
+	case d < 100*time.Millisecond:
+		return 2
+	case d < time.Second:
+		return 3
+	case d < 10*time.Second:
+		return 4
+	case d < time.Minute:
+		return 5
+	default:
+		return 6
+	}
+}
+
+type slog21DiagRecord struct {
+	cut                           slog21DiagCut
+	query                         slog21DiagQuery
+	op                            slog21DiagOp
+	context                       slog21DiagCtx
+	err                           slog21DiagErr
+	sqlite                        slog21DiagCode
+	snapshotElapsed, queryElapsed slog21DiagBucket
+	cleanup, primary              bool
+}
+
+func slog21DiagBool(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
+}
+func (r slog21DiagRecord) text() string {
+	return "SLOG21_SNAPSHOT_DIAGNOSTIC" +
+		" cut=" + slog21DiagLabel(int(r.cut), []string{"UNKNOWN", "CONTROLS_BEFORE", "CONTROLS_AFTER", "REOPEN_BEFORE_CLOSE", "AFTER_APP_CLOSE", "BEFORE_OPEN", "AFTER_OPEN", "TRIGGER_BEFORE_CLOSE", "DDL_BEFORE", "DDL_AFTER", "DELETE_BEFORE", "DELETE_AFTER", "ORACLE_REOPENED_TARGET", "POST_RESPONSE", "PERSISTED_TARGET", "CLEANUP_BEFORE_CLOSE", "NORMAL_BEFORE", "ABORT_BEFORE", "BOUNDARY_BEFORE", "FK_BEFORE", "AUTH_BEFORE", "AUTH_AFTER", "DUAL_BEFORE"}) +
+		" query=" + slog21DiagLabel(int(r.query), []string{"NONE", "OBJECT_ENUMERATION", "COLUMN_DISCOVERY", "COLUMN_DECLARATION", "TYPED_ROWS"}) +
+		" op=" + slog21DiagLabel(int(r.op), []string{"UNKNOWN", "BEGIN", "QUERY_CONTEXT", "COLUMNS", "WIDTH", "SCAN", "VALUE_TYPE", "SQLITE_TYPE", "ROWS_ERR", "ROWS_CLOSE", "OBJECT_TYPE", "COLUMN_METADATA", "COMMIT", "ROLLBACK"}) +
+		" context=" + slog21DiagLabel(int(r.context), []string{"NONE", "DEADLINE", "CANCELLED", "OTHER"}) +
+		" error=" + slog21DiagLabel(int(r.err), []string{"UNKNOWN", "NONE", "CONTEXT_DEADLINE", "CONTEXT_CANCELLED", "TX_DONE", "CONN_DONE", "SQLITE"}) +
+		" sqlite=" + slog21DiagLabel(int(r.sqlite), []string{"NONE", "UNKNOWN", "1", "4", "5", "6", "9", "10", "19", "261", "517", "773", "262", "518", "4106"}) +
+		" snapshot_elapsed=" + slog21DiagLabel(int(r.snapshotElapsed), []string{"INVALID", "LT1MS", "1MS_LT100MS", "100MS_LT1S", "1S_LT10S", "10S_LT60S", "GE60S"}) +
+		" query_elapsed=" + slog21DiagLabel(int(r.queryElapsed), []string{"INVALID", "LT1MS", "1MS_LT100MS", "100MS_LT1S", "1S_LT10S", "10S_LT60S", "GE60S"}) +
+		" cleanup=" + slog21DiagBool(r.cleanup) + " primary=" + slog21DiagBool(r.primary)
+}
+func (r slog21DiagRecord) emit(t *testing.T) { t.Helper(); t.Log(r.text()) }
+
+type slog21DiagTrace struct {
+	started       time.Time
+	cut           slog21DiagCut
+	firstObserved bool
+}
+
+func (d *slog21DiagTrace) capture(state slog21DiagCtx, query slog21DiagQuery, op slog21DiagOp, err error, queryStarted time.Time, cleanup bool) slog21DiagRecord {
+	// state is a value sampled before any original cancellation/cleanup call.
+	kind, code := slog21DiagError(err)
+	r := slog21DiagRecord{cut: d.cut, query: query, op: op, context: state, err: kind, sqlite: code, snapshotElapsed: slog21DiagElapsed(time.Since(d.started)), queryElapsed: slog21DiagElapsed(time.Since(queryStarted)), cleanup: cleanup, primary: err != nil && !d.firstObserved}
+	if err != nil {
+		d.firstObserved = true
+	}
+	return r
+}
+func (d *slog21DiagTrace) internal(ctx context.Context, query slog21DiagQuery, op slog21DiagOp, queryStarted time.Time) slog21DiagRecord {
+	r := d.capture(slog21DiagContext(ctx), query, op, nil, queryStarted, false)
+	r.err = slog21ErrUnknown
+	r.primary = !d.firstObserved
+	d.firstObserved = true
+	return r
+}
+func (d *slog21DiagTrace) closeRows(t *testing.T, ctx context.Context, r *sql.Rows, query slog21DiagQuery, queryStarted time.Time) {
+	t.Helper()
+	state := slog21DiagContext(ctx)
+	err := r.Close()
+	if err != nil {
+		d.capture(state, query, slog21DiagRowsClose, err, queryStarted, true).emit(t)
+	}
+}
+func (d *slog21DiagTrace) rollback(t *testing.T, ctx context.Context, tx *sql.Tx) {
+	t.Helper()
+	state := slog21DiagContext(ctx)
+	err := tx.Rollback()
+	if err != nil && !errors.Is(err, sql.ErrTxDone) {
+		d.capture(state, slog21DiagNoQuery, slog21DiagRollback, err, d.started, true).emit(t)
+	}
+}
+func (d *slog21DiagTrace) commit(t *testing.T, ctx context.Context, tx *sql.Tx) error {
+	t.Helper()
+	state := slog21DiagContext(ctx)
+	err := tx.Commit()
+	if err != nil {
+		d.capture(state, slog21DiagNoQuery, slog21DiagCommit, err, d.started, false).emit(t)
+	}
+	return err
+}
+
+type slog21DiagSite struct {
+	function string
+	line     int
+	cut      slog21DiagCut
+}
+
+func slog21DiagLocate() slog21DiagCut {
+	var pcs [16]uintptr
+	n := runtime.Callers(2, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		if !strings.HasSuffix(frame.Function, ".slog21Snapshot") {
+			return slog21DiagCutAt(frame.Function, frame.Line)
+		}
+		if !more {
+			break
+		}
+	}
+	return slog21CutUnknown
+}
+func slog21DiagCutAt(function string, line int) slog21DiagCut {
+	for _, site := range slog21DiagSites() {
+		if line == site.line && (strings.HasSuffix(function, "."+site.function) || strings.Contains(function, "."+site.function+".func")) {
+			return site.cut
+		}
+	}
+	return slog21CutUnknown
+}
+
+// These pure controls never call a DB, fixture, old oracle or error formatter.
+type slog21DiagPanicError struct{}
+
+func (slog21DiagPanicError) Error() string { panic("synthetic diagnostic Error method must not run") }
+
+type slog21DiagWrappedError struct{ next error }
+
+func (slog21DiagWrappedError) Error() string   { panic("synthetic wrapper Error method must not run") }
+func (e slog21DiagWrappedError) Unwrap() error { return e.next }
+
+type slog21DiagContextValue struct {
+	context.Context
+	err error
+}
+
+func (c slog21DiagContextValue) Err() error { return c.err }
+
+func TestSelfLogoutSnapshotErrorDiagnostic20261021(t *testing.T) {
+	t.Run("error-classes", func(t *testing.T) {
+		var typedNil *diagSQLite.Error
+		for _, c := range []struct {
+			err  error
+			kind slog21DiagErr
+			code slog21DiagCode
+		}{
+			{nil, slog21ErrNone, slog21CodeNone},
+			{context.DeadlineExceeded, slog21ErrDeadline, slog21CodeNone},
+			{context.Canceled, slog21ErrCancelled, slog21CodeNone},
+			{slog21DiagWrappedError{context.DeadlineExceeded}, slog21ErrDeadline, slog21CodeNone},
+			{sql.ErrTxDone, slog21ErrTxDone, slog21CodeNone},
+			{sql.ErrConnDone, slog21ErrConnDone, slog21CodeNone},
+			{slog21DiagPanicError{}, slog21ErrUnknown, slog21CodeNone},
+			{slog21DiagWrappedError{slog21DiagPanicError{}}, slog21ErrUnknown, slog21CodeNone},
+			{errors.New("SYNTHETIC_SNAPSHOT_DIAG_PUBLIC_CANARY"), slog21ErrUnknown, slog21CodeNone},
+			{&diagSQLite.Error{}, slog21ErrSQLite, slog21CodeUnknown},
+			{typedNil, slog21ErrUnknown, slog21CodeNone},
+		} {
+			kind, code := slog21DiagError(c.err)
+			if kind != c.kind || code != c.code {
+				t.Fatal("SLOG21_DIAG_CLASSIFIER_UNEXPECTED")
+			}
+		}
+	})
+	t.Run("format-canary", func(t *testing.T) {
+		d := slog21DiagTrace{started: time.Now(), cut: slog21CutPostResponse}
+		r := d.capture(slog21CtxNone, slog21DiagTypedRows, slog21DiagQueryContext, slog21DiagPanicError{}, d.started, false)
+		line := r.text()
+		fields := strings.Fields(line)
+		if len(fields) != 11 || strings.Contains(line, "SYNTHETIC_SNAPSHOT_DIAG_PUBLIC_CANARY") || !strings.HasPrefix(line, "SLOG21_SNAPSHOT_DIAGNOSTIC cut=POST_RESPONSE query=TYPED_ROWS op=QUERY_CONTEXT context=NONE error=UNKNOWN sqlite=NONE ") {
+			t.Fatal("SLOG21_DIAG_FORMAT_UNEXPECTED")
+		}
+		r = slog21DiagRecord{cut: 255, query: 255, op: 255, context: 255, err: 255, sqlite: 255, snapshotElapsed: 255, queryElapsed: 255}
+		if r.text() != "SLOG21_SNAPSHOT_DIAGNOSTIC cut=UNKNOWN query=UNKNOWN op=UNKNOWN context=UNKNOWN error=UNKNOWN sqlite=UNKNOWN snapshot_elapsed=UNKNOWN query_elapsed=UNKNOWN cleanup=false primary=false" {
+			t.Fatal("SLOG21_DIAG_FORMAT_UNKNOWN_UNEXPECTED")
+		}
+	})
+	t.Run("bucket-boundaries", func(t *testing.T) {
+		for _, c := range []struct {
+			elapsed time.Duration
+			want    slog21DiagBucket
+		}{{-1, 0}, {0, 1}, {time.Millisecond, 2}, {100 * time.Millisecond, 3}, {time.Second, 4}, {10 * time.Second, 5}, {time.Minute, 6}} {
+			if slog21DiagElapsed(c.elapsed) != c.want {
+				t.Fatal("SLOG21_DIAG_BUCKET_UNEXPECTED")
+			}
+		}
+	})
+	t.Run("sqlite-code-whitelist", func(t *testing.T) {
+		for i, code := range []int{1, 4, 5, 6, 9, 10, 19, 261, 517, 773, 262, 518, 4106} {
+			if slog21DiagSQLiteCode(code) != slog21DiagCode(i+2) {
+				t.Fatal("SLOG21_DIAG_CODE_UNEXPECTED")
+			}
+		}
+		for _, code := range []int{-1, 0, 999999} {
+			if slog21DiagSQLiteCode(code) != slog21CodeUnknown {
+				t.Fatal("SLOG21_DIAG_UNKNOWN_CODE_UNEXPECTED")
+			}
+		}
+	})
+	t.Run("primary-cleanup", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		d := slog21DiagTrace{started: time.Now(), cut: slog21CutPostResponse}
+		state := slog21DiagContext(ctx)
+		first := d.capture(state, slog21DiagTypedRows, slog21DiagRowsErr, slog21DiagPanicError{}, d.started, false)
+		cancel()
+		cleanup := d.capture(state, slog21DiagTypedRows, slog21DiagRowsClose, sql.ErrConnDone, d.started, true)
+		if !first.primary || first.cleanup || first.context != slog21CtxNone || cleanup.primary || !cleanup.cleanup || cleanup.context != slog21CtxNone || slog21DiagContext(ctx) != slog21CtxCancelled {
+			t.Fatal("SLOG21_DIAG_PRE_CLEANUP_CAPTURE_UNEXPECTED")
+		}
+		expired, expireCancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		expiredState := slog21DiagContext(expired)
+		expireCancel()
+		if expiredState != slog21CtxDeadline || slog21DiagContext(slog21DiagContextValue{Context: t.Context(), err: slog21DiagPanicError{}}) != slog21CtxOther {
+			t.Fatal("SLOG21_DIAG_CONTEXT_CLASS_UNEXPECTED")
+		}
+	})
+	t.Run("cut-map", func(t *testing.T) {
+		if len(slog21DiagSites()) != 22 {
+			t.Fatal("SLOG21_DIAG_CUT_COUNT_UNEXPECTED")
+		}
+		for _, site := range slog21DiagSites() {
+			if site.line <= 0 || site.cut == slog21CutUnknown || slog21DiagCutAt("cpacloud.local/server/internal/service."+site.function, site.line) != site.cut {
+				t.Fatal("SLOG21_DIAG_CUT_MAP_UNEXPECTED")
+			}
+		}
+		if slog21DiagCutAt("SYNTHETIC_SNAPSHOT_DIAG_PUBLIC_CANARY", 1) != slog21CutUnknown {
+			t.Fatal("SLOG21_DIAG_CUT_UNKNOWN_UNEXPECTED")
+		}
+	})
+}
+
+// Filled from the final frozen source callsites, not runtime paths or SQL.
+func slog21DiagSites() []slog21DiagSite {
+	return []slog21DiagSite{
+		{function: "(*slog21Fixture).closedRaw", line: 340, cut: slog21CutAfterClose},
+		{function: "(*slog21Fixture).openRaw", line: 346, cut: slog21CutBeforeOpen},
+		{function: "(*slog21Fixture).openRaw", line: 351, cut: slog21CutAfterOpen},
+		{function: "(*slog21Fixture).reopen", line: 356, cut: slog21CutReopenBeforeClose},
+		{function: "(*slog21Fixture).controlWindow", line: 499, cut: slog21CutControlsBefore},
+		{function: "(*slog21Fixture).controlWindow", line: 501, cut: slog21CutControlsAfter},
+		{function: "(*slog21Fixture).install", line: 528, cut: slog21CutTriggerBeforeClose},
+		{function: "(*slog21Fixture).install", line: 530, cut: slog21CutDDLBefore},
+		{function: "(*slog21Fixture).install", line: 552, cut: slog21CutDDLAfter},
+		{function: "(*slog21Fixture).clean", line: 606, cut: slog21CutCleanupBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 621, cut: slog21CutDeleteBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 630, cut: slog21CutDeleteAfter},
+		{function: "TestSelfLogout20261021JointOracle", line: 638, cut: slog21CutOracleTarget},
+		{function: "(*slog21Fixture).expectedAfter", line: 666, cut: slog21CutPostResponse},
+		{function: "(*slog21Fixture).expectedAfter", line: 696, cut: slog21CutPersistedTarget},
+		{function: "TestSelfLogout20261021Normal", line: 705, cut: slog21CutNormalBefore},
+		{function: "TestSelfLogout20261021NativeAbort", line: 721, cut: slog21CutAbortBefore},
+		{function: "TestSelfLogout20261021Boundaries", line: 744, cut: slog21CutBoundaryBefore},
+		{function: "TestSelfLogout20261021DeferredFK", line: 830, cut: slog21CutFKBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 863, cut: slog21CutAuthBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 911, cut: slog21CutAuthAfter},
+		{function: "TestSelfLogout20261021TwoAuthenticated", line: 917, cut: slog21CutDualBefore},
+	}
 }
