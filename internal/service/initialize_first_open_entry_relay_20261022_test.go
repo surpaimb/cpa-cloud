@@ -61,6 +61,10 @@ func b1DeleteField(src, name, typ string) (string, bool) {
 }
 
 func b1Audit(s map[string]string) string {
+	s, admissionLabel := projectConstructorAdmissionB1Inputs(s)
+	if admissionLabel != "" {
+		return admissionLabel
+	}
 	owner := s["expiry_invocation_owner_20261022.go"]
 	hook := "\tp.firstOpenRelay.receiveAtEntry(p, owner)\n"
 	if strings.Count(owner, hook) != 1 || !strings.Contains(owner, "\tp.owner = owner\n\tp.appendLocked(expiryOwnerEntry)\n"+hook+"\treturn owner\n") {

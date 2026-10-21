@@ -778,7 +778,7 @@ func (f *slog21Fixture) expectedAfter(before slog21Snap, present bool) {
 func TestSelfLogout20261021Normal(t *testing.T) {
 	for _, scenario := range []string{"empty", "ignored-body-query"} {
 		t.Run(scenario, func(t *testing.T) {
-			f := newSlog21(t)
+			f := newSlog21Admitted(t, admissionNormalSelection(scenario))
 			before := slog21Snapshot(t, f.app.store.db)
 			path, body := "/self/api/v1/sessions", ""
 			if scenario != "empty" {
@@ -817,7 +817,7 @@ func (r slog21Result) RowsAffected() (int64, error) { return r.count, r.err }
 func TestSelfLogout20261021Boundaries(t *testing.T) {
 	for _, scenario := range []string{"begin-refusal", "begin-cancelled", "nil-result", "rows-error", "zero-rows", "multiple-rows", "employee-predicate", "verifier-predicate", "confirmation-query-error", "replacement-employee", "replacement-verifier", "pre-commit-refusal", "post-commit-report"} {
 		t.Run(scenario, func(t *testing.T) {
-			f := newSlog21(t, firstOwnerBoundarySelection(scenario))
+			f := newSlog21Admitted(t, admissionBoundarySelection(scenario), firstOwnerBoundarySelection(scenario))
 			if scenario == "pre-commit-refusal" {
 				f.prequery = newSlogPrequery()
 			}

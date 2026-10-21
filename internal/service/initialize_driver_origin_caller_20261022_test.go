@@ -96,6 +96,10 @@ func idocFormatHash(src string) string {
 // owner stripping/hash. Only these exact seams and numeric anchor relocation
 // are admissible; refreshing an old hash cannot hide a wider modification.
 func projectInitializeOriginCallerFixture(src string) (string, string) {
+	src, admissionLabel := projectConstructorAdmissionFixture(src)
+	if admissionLabel != "" {
+		return "", admissionLabel
+	}
 	setup := "\tf.installInitializeOrigin(t, selection)\n"
 	newCall := "\tinitializeErr := Initialize(f.initializeOriginStartup(ctx), f.dir, strings.NewReader(\"synthetic-self-logout-admin\\n\"))\n\tf.initializeOriginReturned(initializeErr)\n\tif initializeErr != nil {\n"
 	oldCall := "\tif Initialize(ctx, f.dir, strings.NewReader(\"synthetic-self-logout-admin\\n\")) != nil {\n"
