@@ -42,6 +42,7 @@ func (f *slog21Fixture) installInitializeOrigin(t *testing.T, selection []expiry
 		}
 	}
 	f.initializeOrigin = newInitializeOriginPlan(scope)
+	f.installFirstOpenRelayReport(t)
 	t.Cleanup(func() {
 		v := f.initializeOrigin.view()
 		if v.admitted && f.initializeDelivery != nil && f.initializeDelivery.attempt == f.initializeOrigin.attemptToken() {
@@ -67,6 +68,7 @@ func (f *slog21Fixture) installInitializeOrigin(t *testing.T, selection []expiry
 }
 
 func (f *slog21Fixture) initializeOriginStartup(ctx context.Context) context.Context {
+	prepareFirstOpenRelay(f.initializeOrigin, f.firstOwner)
 	return withInitializeOrigin(ctx, f.initializeOrigin)
 }
 
@@ -79,6 +81,7 @@ func (f *slog21Fixture) initializeOriginReturned(actualErr error) {
 		return
 	}
 	f.initializeDelivery = f.initializeOrigin.callerReturned(f.initializeOrigin.attemptToken(), actualErr)
+	armFirstOpenRelay(f.initializeOrigin, f.initializeDelivery)
 }
 
 func idocFormatHash(src string) string {
