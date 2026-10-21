@@ -74,6 +74,7 @@ func Initialize(ctx context.Context, dataDir string, passwordReader io.Reader) e
 }
 
 func InitializeWithConfig(ctx context.Context, cfg Config, passwordReader io.Reader) error {
+	ctx, initOrigin := takeInitializeOrigin(ctx)
 	dataDir := cfg.DataDir
 	if strings.TrimSpace(dataDir) == "" {
 		return errors.New("data directory is required")
@@ -92,6 +93,9 @@ func InitializeWithConfig(ctx context.Context, cfg Config, passwordReader io.Rea
 		return err
 	}
 	defer s.close()
+	if initOrigin != nil && initOrigin.bindOriginalStore(s) {
+		initOrigin.captureFromStore(s, s.db.Driver())
+	}
 	var count int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admins`).Scan(&count); err != nil {
 		return fmt.Errorf("inspect administrators: %w", err)
@@ -121,6 +125,9 @@ func InitializeWithConfig(ctx context.Context, cfg Config, passwordReader io.Rea
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO admins(id,username,password_hash,created_at) VALUES(?,?,?,?)`, id, "admin", hash, utcNow()); err != nil {
 		return fmt.Errorf("create administrator: %w", err)
+	}
+	if initOrigin != nil {
+		initOrigin.nilResultPrepared()
 	}
 	return nil
 }
