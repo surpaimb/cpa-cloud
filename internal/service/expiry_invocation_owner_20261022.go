@@ -57,16 +57,17 @@ type expiryOwnerView struct {
 // One plan has exactly one invocation slot and five event slots. No global
 // registry or counter exists. Never copy a plan after first use.
 type expiryInvocationPlan struct {
-	mu        sync.Mutex
-	selection expiryOwnerSelection
-	owner     *expiryInvocationOwner
-	app       *App
-	worker    *subscriptionExpiryWorker
-	started   bool
-	returned  expiryOwnerReturn
-	invalid   bool
-	n         uint8
-	events    [5]expiryOwnerEvent
+	mu             sync.Mutex
+	selection      expiryOwnerSelection
+	owner          *expiryInvocationOwner
+	firstOpenRelay *initializeFirstOpenRelay
+	app            *App
+	worker         *subscriptionExpiryWorker
+	started        bool
+	returned       expiryOwnerReturn
+	invalid        bool
+	n              uint8
+	events         [5]expiryOwnerEvent
 }
 
 // Non-zero-size, private capability allocated only at the real Open entry.
@@ -124,6 +125,7 @@ func beginExpiryInvocationOwner(ctx context.Context) *expiryInvocationOwner {
 	owner := &expiryInvocationOwner{plan: p}
 	p.owner = owner
 	p.appendLocked(expiryOwnerEntry)
+	p.firstOpenRelay.receiveAtEntry(p, owner)
 	return owner
 }
 

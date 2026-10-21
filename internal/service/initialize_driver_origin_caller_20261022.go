@@ -2,7 +2,8 @@ package service
 
 // Independently authored for the 2026-10-22 caller-only Init-origin contract.
 // Acquisition is solely the selected original store's public Driver getter.
-// No implementation reference is routed to App/Open, a Conn or a transaction.
+// A separate B1 relay may deliver only to first Open entry; never to
+// an App store, opener, Conn or transaction.
 
 import (
 	"context"
@@ -68,6 +69,8 @@ type initializeOriginPlan struct {
 	store                           *store
 	db                              *sql.DB
 	implementation                  driver.Driver
+	firstOpenDelivery               *initializeCallerDelivery
+	firstOpenRelay                  *initializeFirstOpenRelay
 	prepared, callerSeen, delivered bool
 	n                               uint8
 	events                          [7]initializeOriginEvent
@@ -264,7 +267,9 @@ func (p *initializeOriginPlan) callerReturned(a *initializeOriginAttempt, actual
 		return nil
 	}
 	p.delivered = true
-	return &initializeCallerDelivery{attempt: a, selection: p.selection, implementation: p.implementation}
+	delivery := &initializeCallerDelivery{attempt: a, selection: p.selection, implementation: p.implementation}
+	p.firstOpenDelivery = delivery
+	return delivery
 }
 
 func (p *initializeOriginPlan) view() initializeOriginView {
