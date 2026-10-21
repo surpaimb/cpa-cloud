@@ -48,7 +48,13 @@ func slog21Read(t *testing.T, ctx context.Context, tx *sql.Tx, q string, typed b
 	r, err := tx.QueryContext(ctx, q)
 	if err != nil {
 		diag.capture(slog21DiagContext(ctx), query, slog21DiagQueryContext, err, queryStarted, false).emit(t)
+		if diag.handoff != nil && query == slog21DiagObjects {
+			diag.handoff.observe(t, slog21HandSchema, slog21HandError, err, -1, false)
+		}
 		slog21Fail(t, "SNAPSHOT_QUERY")
+	}
+	if diag.handoff != nil && query == slog21DiagObjects {
+		diag.handoff.observe(t, slog21HandSchema, slog21HandOK, nil, -1, false)
 	}
 	defer diag.closeRows(t, ctx, r, query, queryStarted)
 	cols, err := r.Columns()
@@ -136,17 +142,31 @@ func slog21Read(t *testing.T, ctx context.Context, tx *sql.Tx, q string, typed b
 	return cols[:n], rows
 }
 func slog21Quote(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
-func slog21Snapshot(t *testing.T, db *sql.DB) slog21Snap {
+func slog21Snapshot(t *testing.T, db *sql.DB, handoff ...*slog21HandoffTrace) slog21Snap {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	diag := &slog21DiagTrace{started: time.Now(), cut: slog21DiagLocate()}
+	if len(handoff) > 1 || (len(handoff) == 1 && handoff[0] == nil) {
+		slog21Fail(t, "HANDOFF_TRACE_MISSING")
+	}
+	if len(handoff) == 1 {
+		diag.handoff = handoff[0]
+		diag.handoff.observe(t, slog21HandBeginEnter, slog21HandEnter, nil, -1, false)
+	}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		diag.capture(slog21DiagContext(ctx), slog21DiagNoQuery, slog21DiagBegin, err, diag.started, false).emit(t)
+		if diag.handoff != nil {
+			diag.handoff.observe(t, slog21HandBeginReturn, slog21HandError, err, -1, false)
+			diag.handoff.observe(t, slog21HandSchema, slog21HandNotAttempted, nil, -1, false)
+		}
 		slog21Fail(t, "SNAPSHOT_BEGIN")
 	}
 	defer diag.rollback(t, ctx, tx)
+	if diag.handoff != nil {
+		diag.handoff.observe(t, slog21HandBeginReturn, slog21HandOK, nil, -1, false)
+	}
 	_, objects := slog21Read(t, ctx, tx, `SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE substr(name,1,7)<>'sqlite_'`, false, diag, slog21DiagObjects)
 	s := slog21Snap{Schema: objects, Tables: map[string]slog21Table{}}
 	for _, o := range objects {
@@ -233,6 +253,7 @@ type slog21Fixture struct {
 	adminCSRF, csrf, employee, otherEmployee, selector, key string
 	mu                                                      sync.Mutex
 	transform                                               func(*http.Request) *http.Request
+	handoffs                                                map[*sql.DB]*slog21HandoffTrace
 }
 
 func newSlog21(t *testing.T) *slog21Fixture {
@@ -325,7 +346,7 @@ func (f *slog21Fixture) raw() *sql.DB {
 	}
 	db.SetMaxOpenConns(1)
 	f.t.Cleanup(func() {
-		if db.Close() != nil {
+		if f.closeRaw(db, true) != nil {
 			f.t.Error("SLOG21_UNEXPECTED_RAW_CLEANUP")
 		}
 	})
@@ -333,18 +354,33 @@ func (f *slog21Fixture) raw() *sql.DB {
 }
 func (f *slog21Fixture) closedRaw(before slog21Snap) *sql.DB {
 	f.t.Helper()
-	if f.close() != nil {
+	handoff := &slog21HandoffTrace{stage: slog21HandoffStage(), old: f.app.store.db}
+	handoff.observe(f.t, slog21HandCloseEnter, slog21HandEnter, nil, -1, false)
+	started := time.Now()
+	closeErr := f.close()
+	closeElapsed := time.Since(started)
+	handoff.observe(f.t, slog21HandCloseReturn, slog21HandoffResult(closeErr), closeErr, closeElapsed, false)
+	if closeErr != nil {
 		slog21Fail(f.t, "APP_CLOSE")
 	}
 	db := f.raw()
-	slog21Exact(f.t, before, slog21Snapshot(f.t, db))
+	handoff.raw, handoff.rawCreated = db, true
+	if f.handoffs == nil {
+		f.handoffs = make(map[*sql.DB]*slog21HandoffTrace)
+	}
+	f.handoffs[db] = handoff
+	handoff.observe(f.t, slog21HandRawCreated, slog21HandOK, nil, -1, false)
+	slog21Exact(f.t, before, slog21Snapshot(f.t, db, handoff))
+	if !handoff.complete() {
+		slog21Fail(f.t, "HANDOFF_TRACE_INCOMPLETE")
+	}
 	return db
 }
 func (f *slog21Fixture) openRaw(db *sql.DB) {
 	f.t.Helper()
 	start := time.Now().UTC()
 	before := slog21Snapshot(f.t, db)
-	if db.Close() != nil {
+	if f.closeRaw(db, false) != nil {
 		slog21Fail(f.t, "RAW_CLOSE")
 	}
 	f.open()
@@ -539,19 +575,19 @@ func (f *slog21Fixture) install(kind string) {
 	case "abort":
 		statement = `CREATE TRIGGER ` + name + ` BEFORE DELETE ON employee_self_sessions` + condition + `BEGIN SELECT RAISE(ABORT,'controlled'); END`
 	default:
-		db.Close()
+		f.closeRaw(db, false)
 		slog21Fail(f.t, "TRIGGER_KIND")
 	}
 	ctx, cancel := context.WithTimeout(f.t.Context(), 10*time.Second)
 	defer cancel()
 	_, err := db.ExecContext(ctx, statement)
 	if err != nil {
-		db.Close()
+		f.closeRaw(db, false)
 		slog21Fail(f.t, "TRIGGER_INSTALL")
 	}
 	post := slog21Snapshot(f.t, db)
 	if !reflect.DeepEqual(pre.Tables, post.Tables) || len(post.Schema) != len(pre.Schema)+1 {
-		db.Close()
+		f.closeRaw(db, false)
 		slog21Fail(f.t, "DDL_ROWS_OR_COUNT")
 	}
 	filtered := [][]slog21Cell{}
@@ -560,7 +596,7 @@ func (f *slog21Fixture) install(kind string) {
 		if o[0].Text == "trigger" && o[1].Text == name {
 			found++
 			if o[2].Text != "employee_self_sessions" || o[3].Kind != "string" || strings.TrimSpace(o[3].Text) != statement {
-				db.Close()
+				f.closeRaw(db, false)
 				slog21Fail(f.t, "TRIGGER_MANIFEST")
 			}
 		} else {
@@ -568,7 +604,7 @@ func (f *slog21Fixture) install(kind string) {
 		}
 	}
 	if found != 1 || !reflect.DeepEqual(filtered, pre.Schema) {
-		db.Close()
+		f.closeRaw(db, false)
 		slog21Fail(f.t, "DDL_MANIFEST")
 	}
 	f.openRaw(db)
@@ -605,7 +641,7 @@ func (f *slog21Fixture) clean() {
 	f.t.Helper()
 	s := slog21Snapshot(f.t, f.app.store.db)
 	db := f.closedRaw(s)
-	if db.Close() != nil {
+	if f.closeRaw(db, false) != nil {
 		slog21Fail(f.t, "FINAL_RAW_CLOSE")
 	}
 }
@@ -1229,6 +1265,7 @@ type slog21DiagTrace struct {
 	started       time.Time
 	cut           slog21DiagCut
 	firstObserved bool
+	handoff       *slog21HandoffTrace
 }
 
 func (d *slog21DiagTrace) capture(state slog21DiagCtx, query slog21DiagQuery, op slog21DiagOp, err error, queryStarted time.Time, cleanup bool) slog21DiagRecord {
@@ -1417,27 +1454,303 @@ func TestSelfLogoutSnapshotErrorDiagnostic20261021(t *testing.T) {
 // Filled from the final frozen source callsites, not runtime paths or SQL.
 func slog21DiagSites() []slog21DiagSite {
 	return []slog21DiagSite{
-		{function: "(*slog21Fixture).closedRaw", line: 340, cut: slog21CutAfterClose},
-		{function: "(*slog21Fixture).openRaw", line: 346, cut: slog21CutBeforeOpen},
-		{function: "(*slog21Fixture).openRaw", line: 351, cut: slog21CutAfterOpen},
-		{function: "(*slog21Fixture).reopen", line: 356, cut: slog21CutReopenBeforeClose},
-		{function: "(*slog21Fixture).controlWindow", line: 499, cut: slog21CutControlsBefore},
-		{function: "(*slog21Fixture).controlWindow", line: 501, cut: slog21CutControlsAfter},
-		{function: "(*slog21Fixture).install", line: 528, cut: slog21CutTriggerBeforeClose},
-		{function: "(*slog21Fixture).install", line: 530, cut: slog21CutDDLBefore},
-		{function: "(*slog21Fixture).install", line: 552, cut: slog21CutDDLAfter},
-		{function: "(*slog21Fixture).clean", line: 606, cut: slog21CutCleanupBefore},
-		{function: "TestSelfLogout20261021JointOracle", line: 621, cut: slog21CutDeleteBefore},
-		{function: "TestSelfLogout20261021JointOracle", line: 630, cut: slog21CutDeleteAfter},
-		{function: "TestSelfLogout20261021JointOracle", line: 638, cut: slog21CutOracleTarget},
-		{function: "(*slog21Fixture).expectedAfter", line: 666, cut: slog21CutPostResponse},
-		{function: "(*slog21Fixture).expectedAfter", line: 696, cut: slog21CutPersistedTarget},
-		{function: "TestSelfLogout20261021Normal", line: 705, cut: slog21CutNormalBefore},
-		{function: "TestSelfLogout20261021NativeAbort", line: 721, cut: slog21CutAbortBefore},
-		{function: "TestSelfLogout20261021Boundaries", line: 744, cut: slog21CutBoundaryBefore},
-		{function: "TestSelfLogout20261021DeferredFK", line: 830, cut: slog21CutFKBefore},
-		{function: "TestSelfLogout20261021AuthBoundaries", line: 863, cut: slog21CutAuthBefore},
-		{function: "TestSelfLogout20261021AuthBoundaries", line: 911, cut: slog21CutAuthAfter},
-		{function: "TestSelfLogout20261021TwoAuthenticated", line: 917, cut: slog21CutDualBefore},
+		{function: "(*slog21Fixture).closedRaw", line: 373, cut: slog21CutAfterClose},
+		{function: "(*slog21Fixture).openRaw", line: 382, cut: slog21CutBeforeOpen},
+		{function: "(*slog21Fixture).openRaw", line: 387, cut: slog21CutAfterOpen},
+		{function: "(*slog21Fixture).reopen", line: 392, cut: slog21CutReopenBeforeClose},
+		{function: "(*slog21Fixture).controlWindow", line: 535, cut: slog21CutControlsBefore},
+		{function: "(*slog21Fixture).controlWindow", line: 537, cut: slog21CutControlsAfter},
+		{function: "(*slog21Fixture).install", line: 564, cut: slog21CutTriggerBeforeClose},
+		{function: "(*slog21Fixture).install", line: 566, cut: slog21CutDDLBefore},
+		{function: "(*slog21Fixture).install", line: 588, cut: slog21CutDDLAfter},
+		{function: "(*slog21Fixture).clean", line: 642, cut: slog21CutCleanupBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 657, cut: slog21CutDeleteBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 666, cut: slog21CutDeleteAfter},
+		{function: "TestSelfLogout20261021JointOracle", line: 674, cut: slog21CutOracleTarget},
+		{function: "(*slog21Fixture).expectedAfter", line: 702, cut: slog21CutPostResponse},
+		{function: "(*slog21Fixture).expectedAfter", line: 732, cut: slog21CutPersistedTarget},
+		{function: "TestSelfLogout20261021Normal", line: 741, cut: slog21CutNormalBefore},
+		{function: "TestSelfLogout20261021NativeAbort", line: 757, cut: slog21CutAbortBefore},
+		{function: "TestSelfLogout20261021Boundaries", line: 780, cut: slog21CutBoundaryBefore},
+		{function: "TestSelfLogout20261021DeferredFK", line: 866, cut: slog21CutFKBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 899, cut: slog21CutAuthBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 947, cut: slog21CutAuthAfter},
+		{function: "TestSelfLogout20261021TwoAuthenticated", line: 953, cut: slog21CutDualBefore},
 	}
+}
+
+// Independently authored Close/handoff observation. All pointers stay local to
+// the existing fixture; Stats does not open a connection or identify a lock owner.
+type slog21HandStage uint8
+type slog21HandEvent uint8
+type slog21HandResult uint8
+type slog21HandCount uint8
+
+const (
+	slog21HandInstall slog21HandStage = iota + 1
+	slog21HandReopen
+	slog21HandFinalClean
+)
+const (
+	slog21HandCloseEnter slog21HandEvent = iota + 1
+	slog21HandCloseReturn
+	slog21HandRawCreated
+	slog21HandBeginEnter
+	slog21HandBeginReturn
+	slog21HandSchema
+	slog21HandRawClose
+)
+const (
+	slog21HandEnter slog21HandResult = iota + 1
+	slog21HandOK
+	slog21HandError
+	slog21HandNotAttempted
+)
+const (
+	slog21HandAbsent slog21HandCount = iota
+	slog21HandZero
+	slog21HandNonzero
+	slog21HandUnknown
+)
+
+func slog21HandoffStageAt(function string) slog21HandStage {
+	switch function {
+	case "cpacloud.local/server/internal/service.(*slog21Fixture).install":
+		return slog21HandInstall
+	case "cpacloud.local/server/internal/service.(*slog21Fixture).reopen":
+		return slog21HandReopen
+	case "cpacloud.local/server/internal/service.(*slog21Fixture).clean":
+		return slog21HandFinalClean
+	default:
+		return 0
+	}
+}
+func slog21HandoffStage() slog21HandStage {
+	var pcs [16]uintptr
+	n := runtime.Callers(2, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		if stage := slog21HandoffStageAt(frame.Function); stage != 0 {
+			return stage
+		}
+		if !more {
+			return 0
+		}
+	}
+}
+func slog21HandoffCount(n int) slog21HandCount {
+	if n < 0 {
+		return slog21HandUnknown
+	}
+	if n == 0 {
+		return slog21HandZero
+	}
+	return slog21HandNonzero
+}
+func slog21HandoffPool(s sql.DBStats) [3]slog21HandCount {
+	return [3]slog21HandCount{slog21HandoffCount(s.OpenConnections), slog21HandoffCount(s.InUse), slog21HandoffCount(s.Idle)}
+}
+func slog21HandoffStats(db *sql.DB) [3]slog21HandCount {
+	if db == nil {
+		return [3]slog21HandCount{}
+	}
+	return slog21HandoffPool(db.Stats())
+}
+func slog21HandoffResult(err error) slog21HandResult {
+	if err != nil {
+		return slog21HandError
+	}
+	return slog21HandOK
+}
+
+type slog21HandoffRecord struct {
+	stage                                  slog21HandStage
+	event                                  slog21HandEvent
+	result                                 slog21HandResult
+	err                                    slog21DiagErr
+	sqlite                                 slog21DiagCode
+	elapsed                                slog21DiagBucket
+	timed                                  bool
+	oldPool, rawPool                       [3]slog21HandCount
+	rawCreated, rawCloseCalled, rawCloseOK bool
+	cleanup                                bool
+}
+
+func (r slog21HandoffRecord) valid() bool {
+	if r.stage < slog21HandInstall || r.stage > slog21HandFinalClean || r.event < slog21HandCloseEnter || r.event > slog21HandRawClose || r.result < slog21HandEnter || r.result > slog21HandNotAttempted || r.err < slog21ErrNone || r.err > slog21ErrSQLite || r.sqlite == slog21CodeUnknown || r.sqlite > slog21DiagSQLiteCode(4106) {
+		return false
+	}
+	if r.timed && (r.elapsed < 1 || r.elapsed > 6) {
+		return false
+	}
+	for i := range r.oldPool {
+		if r.oldPool[i] < slog21HandZero || r.oldPool[i] > slog21HandNonzero {
+			return false
+		}
+		if r.rawCreated {
+			if r.rawPool[i] < slog21HandZero || r.rawPool[i] > slog21HandNonzero {
+				return false
+			}
+		} else if r.rawPool[i] != slog21HandAbsent {
+			return false
+		}
+	}
+	if (!r.rawCreated && r.rawCloseCalled) || (r.rawCloseOK && !r.rawCloseCalled) || (r.result == slog21HandError) != (r.err != slog21ErrNone) {
+		return false
+	}
+	return (r.err == slog21ErrSQLite) == (r.sqlite != slog21CodeNone)
+}
+func (r slog21HandoffRecord) text() string {
+	count := func(n slog21HandCount) string {
+		return slog21DiagLabel(int(n), []string{"ABSENT", "ZERO", "NONZERO", "UNKNOWN"})
+	}
+	elapsed := "NA"
+	if r.timed {
+		elapsed = slog21DiagLabel(int(r.elapsed), []string{"INVALID", "LT1MS", "1MS_LT100MS", "100MS_LT1S", "1S_LT10S", "10S_LT60S", "GE60S"})
+	}
+	return "SLOG21_CLOSE_HANDOFF_DIAGNOSTIC" +
+		" stage=" + slog21DiagLabel(int(r.stage), []string{"UNKNOWN", "INSTALL", "REOPEN", "FINAL_CLEAN"}) +
+		" event=" + slog21DiagLabel(int(r.event), []string{"UNKNOWN", "CLOSE_ENTER", "CLOSE_RETURN", "RAW_CREATED", "BEGIN_ENTER", "BEGIN_RETURN", "SCHEMA_RETURN", "RAW_CLOSE"}) +
+		" result=" + slog21DiagLabel(int(r.result), []string{"UNKNOWN", "ENTER", "OK", "ERROR", "NOT_ATTEMPTED"}) +
+		" error=" + slog21DiagLabel(int(r.err), []string{"UNKNOWN", "NONE", "CONTEXT_DEADLINE", "CONTEXT_CANCELLED", "TX_DONE", "CONN_DONE", "SQLITE"}) +
+		" sqlite=" + slog21DiagLabel(int(r.sqlite), []string{"NONE", "UNKNOWN", "1", "4", "5", "6", "9", "10", "19", "261", "517", "773", "262", "518", "4106"}) +
+		" elapsed=" + elapsed +
+		" old_open=" + count(r.oldPool[0]) + " old_in_use=" + count(r.oldPool[1]) + " old_idle=" + count(r.oldPool[2]) +
+		" raw_open=" + count(r.rawPool[0]) + " raw_in_use=" + count(r.rawPool[1]) + " raw_idle=" + count(r.rawPool[2]) +
+		" raw_created=" + slog21DiagBool(r.rawCreated) + " raw_close_called=" + slog21DiagBool(r.rawCloseCalled) + " raw_close_ok=" + slog21DiagBool(r.rawCloseOK) +
+		" cleanup=" + slog21DiagBool(r.cleanup)
+}
+
+type slog21HandoffTrace struct {
+	stage                                  slog21HandStage
+	old, raw                               *sql.DB
+	rawCreated, rawCloseCalled, rawCloseOK bool
+	last                                   slog21HandEvent
+	invalid                                bool
+}
+
+// accept is a pure sequence gate. Repeated RAW_CLOSE only observes the original
+// fixture's existing idempotent cleanup call; it never causes another Close.
+func (h *slog21HandoffTrace) accept(event slog21HandEvent) bool {
+	if event < slog21HandCloseEnter || event > slog21HandRawClose || (event != h.last+1 && !(event == slog21HandRawClose && h.last == slog21HandRawClose)) {
+		h.invalid = true
+		return false
+	}
+	h.last = event
+	return true
+}
+func (h *slog21HandoffTrace) complete() bool {
+	return !h.invalid && h.last >= slog21HandSchema
+}
+func (h *slog21HandoffTrace) observe(t *testing.T, event slog21HandEvent, result slog21HandResult, err error, elapsed time.Duration, cleanup bool) {
+	t.Helper()
+	kind, code := slog21DiagError(err)
+	r := slog21HandoffRecord{stage: h.stage, event: event, result: result, err: kind, sqlite: code, oldPool: slog21HandoffStats(h.old), rawPool: slog21HandoffStats(h.raw), rawCreated: h.rawCreated, rawCloseCalled: h.rawCloseCalled, rawCloseOK: h.rawCloseOK, cleanup: cleanup, timed: event == slog21HandCloseReturn}
+	if r.timed {
+		r.elapsed = slog21DiagElapsed(elapsed)
+	}
+	valid := r.valid()
+	ordered := h.accept(event)
+	t.Log(r.text())
+	if !valid || !ordered {
+		h.invalid = true
+		t.Error("SLOG21_UNEXPECTED_HANDOFF_RECORD")
+	}
+}
+func (f *slog21Fixture) closeRaw(db *sql.DB, cleanup bool) error {
+	// The original Close call stays first and occurs exactly once per original
+	// callsite. Sampling never opens, probes, retries or forces another handle.
+	err := db.Close()
+	handoff := f.handoffs[db]
+	if handoff == nil {
+		f.t.Error("SLOG21_UNEXPECTED_HANDOFF_TRACE_MISSING")
+		return err
+	}
+	handoff.rawCloseCalled, handoff.rawCloseOK = true, err == nil
+	handoff.observe(f.t, slog21HandRawClose, slog21HandoffResult(err), err, -1, cleanup)
+	if !handoff.complete() {
+		f.t.Error("SLOG21_UNEXPECTED_HANDOFF_TRACE_INCOMPLETE")
+	}
+	return err
+}
+
+func TestSelfLogout20261021CloseHandoffDiagnostic(t *testing.T) {
+	t.Run("pool-buckets", func(t *testing.T) {
+		for _, c := range []struct {
+			n    int
+			want slog21HandCount
+		}{{-1, slog21HandUnknown}, {0, slog21HandZero}, {1, slog21HandNonzero}, {1000000, slog21HandNonzero}} {
+			if slog21HandoffCount(c.n) != c.want {
+				t.Fatal("SLOG21_HANDOFF_BUCKET_CONTROL")
+			}
+		}
+		if slog21HandoffStats(nil) != [3]slog21HandCount{} || slog21HandoffPool(sql.DBStats{OpenConnections: 2, InUse: 1, Idle: 1}) != [3]slog21HandCount{slog21HandNonzero, slog21HandNonzero, slog21HandNonzero} {
+			t.Fatal("SLOG21_HANDOFF_STATS_CONTROL")
+		}
+	})
+	t.Run("stage-map", func(t *testing.T) {
+		for i, fn := range []string{"install", "reopen", "clean"} {
+			if slog21HandoffStageAt("cpacloud.local/server/internal/service.(*slog21Fixture)."+fn) != slog21HandStage(i+1) {
+				t.Fatal("SLOG21_HANDOFF_STAGE_CONTROL")
+			}
+		}
+		if slog21HandoffStageAt("SYNTHETIC_HANDOFF_PUBLIC_CANARY") != 0 {
+			t.Fatal("SLOG21_HANDOFF_UNKNOWN_STAGE_CONTROL")
+		}
+	})
+	t.Run("format-canary", func(t *testing.T) {
+		r := slog21HandoffRecord{stage: slog21HandInstall, event: slog21HandCloseEnter, result: slog21HandEnter, err: slog21ErrNone, oldPool: [3]slog21HandCount{slog21HandZero, slog21HandZero, slog21HandZero}}
+		if !r.valid() || len(strings.Fields(r.text())) != 17 || !strings.HasPrefix(r.text(), "SLOG21_CLOSE_HANDOFF_DIAGNOSTIC stage=INSTALL event=CLOSE_ENTER result=ENTER error=NONE sqlite=NONE elapsed=NA ") {
+			t.Fatal("SLOG21_HANDOFF_FORMAT_CONTROL")
+		}
+		for _, err := range []error{slog21DiagPanicError{}, slog21DiagWrappedError{slog21DiagPanicError{}}, errors.New("SYNTHETIC_HANDOFF_PUBLIC_CANARY")} {
+			r.err, r.sqlite = slog21DiagError(err)
+			r.result = slog21HandError
+			if r.valid() || strings.Contains(r.text(), "SYNTHETIC_HANDOFF_PUBLIC_CANARY") || !strings.Contains(r.text(), "error=UNKNOWN") {
+				t.Fatal("SLOG21_HANDOFF_CANARY_CONTROL")
+			}
+		}
+	})
+	t.Run("sequence", func(t *testing.T) {
+		for _, stage := range []slog21HandStage{slog21HandInstall, slog21HandReopen, slog21HandFinalClean} {
+			h := slog21HandoffTrace{stage: stage}
+			for event := slog21HandCloseEnter; event <= slog21HandRawClose; event++ {
+				if !h.accept(event) || h.complete() != (event >= slog21HandSchema) {
+					t.Fatal("SLOG21_HANDOFF_SEQUENCE_CONTROL")
+				}
+			}
+			if !h.accept(slog21HandRawClose) || !h.complete() {
+				t.Fatal("SLOG21_HANDOFF_IDEMPOTENT_CLOSE_CONTROL")
+			}
+		}
+	})
+	t.Run("missing-and-unknown", func(t *testing.T) {
+		for _, event := range []slog21HandEvent{0, slog21HandCloseReturn, 255} {
+			h := slog21HandoffTrace{}
+			if h.accept(event) || h.complete() || !h.invalid {
+				t.Fatal("SLOG21_HANDOFF_MISSING_CONTROL")
+			}
+		}
+		r := slog21HandoffRecord{stage: slog21HandInstall, event: slog21HandCloseReturn, result: slog21HandOK, err: slog21ErrNone, oldPool: [3]slog21HandCount{slog21HandZero, slog21HandZero, slog21HandZero}, timed: true, elapsed: 1}
+		if !r.valid() {
+			t.Fatal("SLOG21_HANDOFF_VALID_CONTROL")
+		}
+		for _, mutate := range []func(*slog21HandoffRecord){
+			func(v *slog21HandoffRecord) { v.stage = 0 },
+			func(v *slog21HandoffRecord) { v.event = 255 },
+			func(v *slog21HandoffRecord) { v.err = slog21ErrUnknown },
+			func(v *slog21HandoffRecord) { v.sqlite = slog21CodeUnknown },
+			func(v *slog21HandoffRecord) { v.elapsed = 0 },
+			func(v *slog21HandoffRecord) { v.oldPool[0] = slog21HandAbsent },
+			func(v *slog21HandoffRecord) { v.rawPool[0] = slog21HandUnknown },
+			func(v *slog21HandoffRecord) { v.rawCloseOK = true },
+		} {
+			v := r
+			mutate(&v)
+			if v.valid() {
+				t.Fatal("SLOG21_HANDOFF_UNKNOWN_CONTROL")
+			}
+		}
+	})
 }
