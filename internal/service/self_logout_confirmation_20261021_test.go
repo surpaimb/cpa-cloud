@@ -15,11 +15,14 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"cpacloud.local/server/internal/financial"
 
 	diagSQLite "modernc.org/sqlite"
 )
@@ -258,6 +261,9 @@ type slog21Fixture struct {
 	segmentCount                                            int
 	segmentCurrent                                          *slog21SegmentRecorder
 	segmentCensusInvalid                                    bool
+	expiryRecorders                                         [8]*slog21ExpiryRecorder
+	expiryCount                                             int
+	expiryCensusInvalid                                     bool
 }
 
 func newSlog21(t *testing.T) *slog21Fixture {
@@ -272,6 +278,7 @@ func newSlog21(t *testing.T) *slog21Fixture {
 		}
 		// The old close/observer/oracle path has finished before any new gate.
 		f.flushSegments()
+		f.flushExpirySQL()
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -315,7 +322,9 @@ func (f *slog21Fixture) open() {
 	}
 	ctx, cancel := context.WithTimeout(f.t.Context(), 30*time.Second)
 	defer cancel()
-	a, err := Open(ctx, Config{DataDir: f.dir, Listen: "127.0.0.1:0", EmployeeSelfServiceEnabled: true, Version: "slog-owned"})
+	expiryRecorder := &slog21ExpiryRecorder{}
+	startup := withExpiryOpenObserver(ctx, expiryRecorder.capture)
+	a, err := Open(startup, Config{DataDir: f.dir, Listen: "127.0.0.1:0", EmployeeSelfServiceEnabled: true, Version: "slog-owned"})
 	if err != nil || a == nil {
 		if a != nil && a.Close() != nil {
 			f.t.Error("SLOG21_UNEXPECTED_PARTIAL_CLEANUP")
@@ -323,6 +332,12 @@ func (f *slog21Fixture) open() {
 		slog21Fail(f.t, "OPEN")
 	}
 	f.bindSegments(a)
+	if f.expiryCount < len(f.expiryRecorders) {
+		f.expiryRecorders[f.expiryCount] = expiryRecorder
+		f.expiryCount++
+	} else {
+		f.expiryCensusInvalid = true
+	}
 	f.app = a
 	f.closed = false
 	h := a.Handler()
@@ -1465,28 +1480,28 @@ func TestSelfLogoutSnapshotErrorDiagnostic20261021(t *testing.T) {
 // Filled from the final frozen source callsites, not runtime paths or SQL.
 func slog21DiagSites() []slog21DiagSite {
 	return []slog21DiagSite{
-		{function: "(*slog21Fixture).closedRaw", line: 384, cut: slog21CutAfterClose},
-		{function: "(*slog21Fixture).openRaw", line: 393, cut: slog21CutBeforeOpen},
-		{function: "(*slog21Fixture).openRaw", line: 398, cut: slog21CutAfterOpen},
-		{function: "(*slog21Fixture).reopen", line: 403, cut: slog21CutReopenBeforeClose},
-		{function: "(*slog21Fixture).controlWindow", line: 546, cut: slog21CutControlsBefore},
-		{function: "(*slog21Fixture).controlWindow", line: 548, cut: slog21CutControlsAfter},
-		{function: "(*slog21Fixture).install", line: 575, cut: slog21CutTriggerBeforeClose},
-		{function: "(*slog21Fixture).install", line: 577, cut: slog21CutDDLBefore},
-		{function: "(*slog21Fixture).install", line: 599, cut: slog21CutDDLAfter},
-		{function: "(*slog21Fixture).clean", line: 653, cut: slog21CutCleanupBefore},
-		{function: "TestSelfLogout20261021JointOracle", line: 668, cut: slog21CutDeleteBefore},
-		{function: "TestSelfLogout20261021JointOracle", line: 677, cut: slog21CutDeleteAfter},
-		{function: "TestSelfLogout20261021JointOracle", line: 685, cut: slog21CutOracleTarget},
-		{function: "(*slog21Fixture).expectedAfter", line: 713, cut: slog21CutPostResponse},
-		{function: "(*slog21Fixture).expectedAfter", line: 743, cut: slog21CutPersistedTarget},
-		{function: "TestSelfLogout20261021Normal", line: 752, cut: slog21CutNormalBefore},
-		{function: "TestSelfLogout20261021NativeAbort", line: 768, cut: slog21CutAbortBefore},
-		{function: "TestSelfLogout20261021Boundaries", line: 791, cut: slog21CutBoundaryBefore},
-		{function: "TestSelfLogout20261021DeferredFK", line: 877, cut: slog21CutFKBefore},
-		{function: "TestSelfLogout20261021AuthBoundaries", line: 910, cut: slog21CutAuthBefore},
-		{function: "TestSelfLogout20261021AuthBoundaries", line: 958, cut: slog21CutAuthAfter},
-		{function: "TestSelfLogout20261021TwoAuthenticated", line: 964, cut: slog21CutDualBefore},
+		{function: "(*slog21Fixture).closedRaw", line: 399, cut: slog21CutAfterClose},
+		{function: "(*slog21Fixture).openRaw", line: 408, cut: slog21CutBeforeOpen},
+		{function: "(*slog21Fixture).openRaw", line: 413, cut: slog21CutAfterOpen},
+		{function: "(*slog21Fixture).reopen", line: 418, cut: slog21CutReopenBeforeClose},
+		{function: "(*slog21Fixture).controlWindow", line: 561, cut: slog21CutControlsBefore},
+		{function: "(*slog21Fixture).controlWindow", line: 563, cut: slog21CutControlsAfter},
+		{function: "(*slog21Fixture).install", line: 590, cut: slog21CutTriggerBeforeClose},
+		{function: "(*slog21Fixture).install", line: 592, cut: slog21CutDDLBefore},
+		{function: "(*slog21Fixture).install", line: 614, cut: slog21CutDDLAfter},
+		{function: "(*slog21Fixture).clean", line: 668, cut: slog21CutCleanupBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 683, cut: slog21CutDeleteBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 692, cut: slog21CutDeleteAfter},
+		{function: "TestSelfLogout20261021JointOracle", line: 700, cut: slog21CutOracleTarget},
+		{function: "(*slog21Fixture).expectedAfter", line: 728, cut: slog21CutPostResponse},
+		{function: "(*slog21Fixture).expectedAfter", line: 758, cut: slog21CutPersistedTarget},
+		{function: "TestSelfLogout20261021Normal", line: 767, cut: slog21CutNormalBefore},
+		{function: "TestSelfLogout20261021NativeAbort", line: 783, cut: slog21CutAbortBefore},
+		{function: "TestSelfLogout20261021Boundaries", line: 806, cut: slog21CutBoundaryBefore},
+		{function: "TestSelfLogout20261021DeferredFK", line: 892, cut: slog21CutFKBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 925, cut: slog21CutAuthBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 973, cut: slog21CutAuthAfter},
+		{function: "TestSelfLogout20261021TwoAuthenticated", line: 979, cut: slog21CutDualBefore},
 	}
 }
 
@@ -2094,6 +2109,600 @@ func TestSelfLogout20261021AppCloseSegmentsDiagnostic(t *testing.T) {
 			if len(strings.Fields(value(spec).text())) != 9 {
 				t.Fatal("SLOG21_SEGMENT_FORMAT_SHAPE_CONTROL")
 			}
+		}
+	})
+}
+
+// Independently authored expiry-only recorder. The two real producers have
+// independent fixed buffers; legitimate Close/worker overlap is not reentry.
+const slog21ExpiryWorkerCapacity = 4096
+const slog21ExpiryControlCapacity = 32
+
+type slog21ExpiryRecorder struct {
+	worker                    [slog21ExpiryWorkerCapacity]financial.ExpiryObservation
+	control                   [slog21ExpiryControlCapacity]financial.ExpiryObservation
+	workerN, controlN         int
+	workerBusy, controlBusy   atomic.Bool
+	invalid, bound, doneReady atomic.Bool
+	flushed                   bool
+}
+
+func (r *slog21ExpiryRecorder) capture(o financial.ExpiryObservation) {
+	control := o.Phase == financial.ExpiryBind || o.Phase == financial.ExpiryCancel || o.Phase == financial.ExpiryWait
+	guard := &r.workerBusy
+	if control {
+		guard = &r.controlBusy
+	}
+	if !guard.CompareAndSwap(false, true) {
+		r.invalid.Store(true)
+		return
+	}
+	if !o.Valid() || r.flushed {
+		r.invalid.Store(true)
+	}
+	if o.Phase == financial.ExpiryStart && !r.bound.Load() || o.Phase == financial.ExpiryWait && o.Edge == financial.ExpiryReturn && !r.doneReady.Load() {
+		r.invalid.Store(true)
+	}
+	if control {
+		if r.controlN < len(r.control) {
+			r.control[r.controlN] = o
+			r.controlN++
+		} else {
+			r.invalid.Store(true)
+		}
+	} else if r.workerN < len(r.worker) {
+		r.worker[r.workerN] = o
+		r.workerN++
+	} else {
+		r.invalid.Store(true)
+	}
+	if o.Phase == financial.ExpiryBind {
+		r.bound.Store(true)
+	}
+	if o.Phase == financial.ExpiryDoneReady {
+		r.doneReady.Store(true)
+	}
+	guard.Store(false)
+}
+
+type slog21ExpiryCursor struct {
+	records []financial.ExpiryObservation
+	n       int
+}
+
+func (c *slog21ExpiryCursor) peek() financial.ExpiryPhase {
+	if c.n >= len(c.records) {
+		return 0
+	}
+	return c.records[c.n].Phase
+}
+
+func (c *slog21ExpiryCursor) point(phase financial.ExpiryPhase, pass uint16, item uint8) bool {
+	if c.n >= len(c.records) {
+		return false
+	}
+	o := c.records[c.n]
+	if o.Phase != phase || o.Edge != financial.ExpiryPoint || o.Pass != pass || o.Item != item {
+		return false
+	}
+	c.n++
+	return true
+}
+
+func (c *slog21ExpiryCursor) pair(phase financial.ExpiryPhase, pass uint16, item uint8) (financial.ExpiryObservation, bool) {
+	if c.n+1 >= len(c.records) {
+		return financial.ExpiryObservation{}, false
+	}
+	a, b := c.records[c.n], c.records[c.n+1]
+	if a.Phase != phase || b.Phase != phase || a.Edge != financial.ExpiryEnter || b.Edge != financial.ExpiryReturn || a.Pass != pass || b.Pass != pass || a.Item != item || b.Item != item {
+		return financial.ExpiryObservation{}, false
+	}
+	c.n += 2
+	return b, true
+}
+
+func (c *slog21ExpiryCursor) failed(pass uint16) (bool, financial.ExpiryCount, bool) {
+	_, ok := c.pair(financial.ExpiryRollback, pass, 0)
+	return true, financial.ExpiryCountZero, ok
+}
+
+// sql validates only the original function's branch grammar. A nonnil cleanup
+// error remains observed, not converted into a new product error or repair.
+func (c *slog21ExpiryCursor) sql(pass uint16) (bool, financial.ExpiryCount, bool) {
+	begin, ok := c.pair(financial.ExpiryBegin, pass, 0)
+	if !ok {
+		return false, 0, false
+	}
+	if begin.Error != financial.ExpiryErrorNone {
+		return true, financial.ExpiryCountZero, true
+	}
+	query, ok := c.pair(financial.ExpiryQuery, pass, 0)
+	if !ok {
+		return false, 0, false
+	}
+	if query.Error != financial.ExpiryErrorNone {
+		return c.failed(pass)
+	}
+	var scanned uint8
+	for c.peek() == financial.ExpiryScan {
+		if scanned == 100 {
+			return false, 0, false
+		}
+		scanned++
+		scan, ok := c.pair(financial.ExpiryScan, pass, scanned)
+		if !ok {
+			return false, 0, false
+		}
+		if scan.Error != financial.ExpiryErrorNone {
+			if _, ok := c.pair(financial.ExpiryRowsClose, pass, 0); !ok {
+				return false, 0, false
+			}
+			return c.failed(pass)
+		}
+		if c.peek() == financial.ExpiryValidate {
+			if !c.point(financial.ExpiryValidate, pass, scanned) {
+				return false, 0, false
+			}
+			if _, ok := c.pair(financial.ExpiryRowsClose, pass, 0); !ok {
+				return false, 0, false
+			}
+			return c.failed(pass)
+		}
+	}
+	iteration, ok := c.pair(financial.ExpiryRowsErr, pass, 0)
+	if !ok {
+		return false, 0, false
+	}
+	closed, ok := c.pair(financial.ExpiryRowsClose, pass, 0)
+	if !ok {
+		return false, 0, false
+	}
+	if iteration.Error != financial.ExpiryErrorNone || closed.Error != financial.ExpiryErrorNone {
+		return c.failed(pass)
+	}
+	for item := uint8(1); item <= scanned; item++ {
+		executed, ok := c.pair(financial.ExpiryExec, pass, item)
+		if !ok {
+			return false, 0, false
+		}
+		if executed.Error != financial.ExpiryErrorNone {
+			return c.failed(pass)
+		}
+		metadata, ok := c.pair(financial.ExpiryRowsAffected, pass, item)
+		if !ok {
+			return false, 0, false
+		}
+		if metadata.Error != financial.ExpiryErrorNone || metadata.Count != financial.ExpiryCountOne {
+			return c.failed(pass)
+		}
+	}
+	committed, ok := c.pair(financial.ExpiryCommit, pass, 0)
+	if !ok {
+		return false, 0, false
+	}
+	if _, ok := c.pair(financial.ExpiryRollback, pass, 0); !ok {
+		return false, 0, false
+	}
+	if committed.Error != financial.ExpiryErrorNone {
+		return true, financial.ExpiryCountZero, true
+	}
+	return false, expiryWorkerCount(int(scanned)), true
+}
+
+func (r *slog21ExpiryRecorder) complete() bool {
+	if r.invalid.Load() || !r.bound.Load() || !r.doneReady.Load() || r.controlN != 5 || r.workerN < 2 || r.workerN > len(r.worker) {
+		return false
+	}
+	for _, o := range r.control[:r.controlN] {
+		if !o.Valid() {
+			return false
+		}
+	}
+	for _, o := range r.worker[:r.workerN] {
+		if !o.Valid() {
+			return false
+		}
+	}
+	control := slog21ExpiryCursor{records: r.control[:r.controlN]}
+	if !control.point(financial.ExpiryBind, 0, 0) {
+		return false
+	}
+	if r.control[0].Context != financial.ExpiryContextNone {
+		return false
+	}
+	cancel, ok := control.pair(financial.ExpiryCancel, 0, 0)
+	if !ok || cancel.Error != financial.ExpiryErrorNone || cancel.Context != financial.ExpiryContextCancelled {
+		return false
+	}
+	wait, ok := control.pair(financial.ExpiryWait, 0, 0)
+	if !ok || wait.Error != financial.ExpiryErrorNone || wait.Context != financial.ExpiryContextCancelled || control.n != len(control.records) {
+		return false
+	}
+	worker := slog21ExpiryCursor{records: r.worker[:r.workerN]}
+	if !worker.point(financial.ExpiryStart, 0, 0) {
+		return false
+	}
+	var pass uint16
+	for worker.peek() == financial.ExpiryPass {
+		if pass == ^uint16(0) {
+			return false
+		}
+		pass++
+		if worker.n >= len(worker.records) {
+			return false
+		}
+		entered := worker.records[worker.n]
+		if entered.Phase != financial.ExpiryPass || entered.Edge != financial.ExpiryEnter || entered.Pass != pass {
+			return false
+		}
+		worker.n++
+		failed, wantCount, ok := worker.sql(pass)
+		if !ok || worker.n >= len(worker.records) {
+			return false
+		}
+		returned := worker.records[worker.n]
+		kind := financial.ExpiryErrorNone
+		if failed {
+			kind = financial.ExpiryErrorOther
+		}
+		if returned.Phase != financial.ExpiryPass || returned.Edge != financial.ExpiryReturn || returned.Pass != pass || returned.Error != kind || returned.Count != wantCount {
+			return false
+		}
+		worker.n++
+		stopped, ok := worker.pair(financial.ExpiryStop, pass, 0)
+		if !ok || stopped.Error != financial.ExpiryErrorNone || (stopped.Context != financial.ExpiryContextCancelled && stopped.Context != financial.ExpiryContextDeadline) {
+			return false
+		}
+	}
+	if pass == 0 || !worker.point(financial.ExpiryDoneReady, 0, 0) || worker.n != len(worker.records) || worker.records[worker.n-1].Context != financial.ExpiryContextCancelled {
+		return false
+	}
+	return true
+}
+
+func slog21ExpiryText(o financial.ExpiryObservation, control bool, slot int) string {
+	lane := "WORKER"
+	if control {
+		lane = "CONTROL"
+	}
+	if slot < 1 || slot > 8 {
+		slot = 0
+	}
+	return "SLOG21_EXPIRY_SQL_LIFECYCLE lane=" + lane + " app=" + strconv.Itoa(slot) +
+		" pass=" + strconv.Itoa(int(o.Pass)) + " item=" + strconv.Itoa(int(o.Item)) +
+		" phase=" + slog21DiagLabel(int(o.Phase), []string{"UNKNOWN", "BIND", "START", "PASS", "STOP", "CANCEL", "WAIT", "DONE_READY", "BEGIN", "QUERY", "SCAN", "VALIDATE", "ROWS_ERR", "ROWS_CLOSE", "EXEC", "ROWS_AFFECTED", "COMMIT", "ROLLBACK"}) +
+		" edge=" + slog21DiagLabel(int(o.Edge), []string{"UNKNOWN", "POINT", "ENTER", "RETURN"}) +
+		" error=" + slog21DiagLabel(int(o.Error), []string{"UNKNOWN", "NONE", "CANCELLED", "DEADLINE", "TX_DONE", "CONN_DONE", "SQLITE", "OTHER"}) +
+		" sqlite=" + slog21DiagLabel(int(o.SQLite), []string{"NONE", "UNKNOWN", "1", "4", "5", "6", "9", "10", "19", "261", "517", "773", "262", "518", "4106"}) +
+		" context=" + slog21DiagLabel(int(o.Context), []string{"UNKNOWN", "NONE", "CANCELLED", "DEADLINE", "OTHER"}) +
+		" elapsed=" + slog21DiagLabel(int(o.Elapsed), []string{"NA", "LT1MS", "1MS_LT100MS", "100MS_LT1S", "1S_LT10S", "10S_LT60S", "GE60S", "INVALID"}) +
+		" count=" + slog21DiagLabel(int(o.Count), []string{"NA", "ZERO", "ONE", "MANY", "INVALID"})
+}
+
+func (f *slog21Fixture) flushExpirySQL() {
+	if f.expiryCensusInvalid || f.expiryCount == 0 {
+		f.t.Error("SLOG21_EXPIRY_CENSUS_INVALID")
+	}
+	for slot := 0; slot < f.expiryCount; slot++ {
+		r := f.expiryRecorders[slot]
+		if r == nil || !r.workerBusy.CompareAndSwap(false, true) {
+			f.t.Error("SLOG21_EXPIRY_FLUSH_INVALID")
+			continue
+		}
+		if !r.controlBusy.CompareAndSwap(false, true) {
+			r.invalid.Store(true)
+			r.workerBusy.Store(false)
+			f.t.Error("SLOG21_EXPIRY_FLUSH_INVALID")
+			continue
+		}
+		valid := !r.flushed && r.complete()
+		for i := 0; i < r.controlN; i++ {
+			f.t.Log(slog21ExpiryText(r.control[i], true, slot+1))
+		}
+		for i := 0; i < r.workerN; i++ {
+			f.t.Log(slog21ExpiryText(r.worker[i], false, slot+1))
+		}
+		r.flushed = true
+		valid = valid && !r.invalid.Load()
+		r.controlBusy.Store(false)
+		r.workerBusy.Store(false)
+		if !valid {
+			f.t.Error("SLOG21_EXPIRY_TRACE_INVALID")
+		}
+	}
+}
+
+// Pure finite vectors only: these helpers do not open an App, DB or worker.
+func slog21ExpiryPureRecord(phase financial.ExpiryPhase, edge financial.ExpiryEdge, pass uint16, item uint8) financial.ExpiryObservation {
+	o := financial.ExpiryObservation{Phase: phase, Edge: edge, Pass: pass, Item: item, Error: financial.ExpiryErrorNone, Context: financial.ExpiryContextNone}
+	if edge == financial.ExpiryReturn {
+		o.Elapsed = financial.ExpiryLT1MS
+		if phase == financial.ExpiryPass {
+			o.Count = financial.ExpiryCountZero
+		}
+		if phase == financial.ExpiryRowsAffected {
+			o.Count = financial.ExpiryCountOne
+		}
+	}
+	if phase == financial.ExpiryWait || phase == financial.ExpiryDoneReady || edge == financial.ExpiryReturn && (phase == financial.ExpiryCancel || phase == financial.ExpiryStop) {
+		o.Context = financial.ExpiryContextCancelled
+	}
+	return o
+}
+
+func slog21ExpiryPurePair(r *slog21ExpiryRecorder, phase financial.ExpiryPhase, pass uint16, item uint8, kind financial.ExpiryError) {
+	r.capture(slog21ExpiryPureRecord(phase, financial.ExpiryEnter, pass, item))
+	o := slog21ExpiryPureRecord(phase, financial.ExpiryReturn, pass, item)
+	o.Error = kind
+	r.capture(o)
+}
+
+func slog21ExpiryPurePass(r *slog21ExpiryRecorder, pass uint16) {
+	r.capture(slog21ExpiryPureRecord(financial.ExpiryPass, financial.ExpiryEnter, pass, 0))
+	for _, phase := range []financial.ExpiryPhase{financial.ExpiryBegin, financial.ExpiryQuery, financial.ExpiryRowsErr, financial.ExpiryRowsClose, financial.ExpiryCommit} {
+		slog21ExpiryPurePair(r, phase, pass, 0, financial.ExpiryErrorNone)
+	}
+	slog21ExpiryPurePair(r, financial.ExpiryRollback, pass, 0, financial.ExpiryErrorTxDone)
+	r.capture(slog21ExpiryPureRecord(financial.ExpiryPass, financial.ExpiryReturn, pass, 0))
+	slog21ExpiryPurePair(r, financial.ExpiryStop, pass, 0, financial.ExpiryErrorNone)
+}
+
+func slog21ExpiryPureFinish(r *slog21ExpiryRecorder) {
+	slog21ExpiryPurePair(r, financial.ExpiryCancel, 0, 0, financial.ExpiryErrorNone)
+	r.capture(slog21ExpiryPureRecord(financial.ExpiryWait, financial.ExpiryEnter, 0, 0))
+	r.capture(slog21ExpiryPureRecord(financial.ExpiryDoneReady, financial.ExpiryPoint, 0, 0))
+	r.capture(slog21ExpiryPureRecord(financial.ExpiryWait, financial.ExpiryReturn, 0, 0))
+}
+
+func slog21ExpiryPureComplete(passes uint16) *slog21ExpiryRecorder {
+	r := &slog21ExpiryRecorder{}
+	r.capture(slog21ExpiryPureRecord(financial.ExpiryBind, financial.ExpiryPoint, 0, 0))
+	r.capture(slog21ExpiryPureRecord(financial.ExpiryStart, financial.ExpiryPoint, 0, 0))
+	for pass := uint16(1); pass <= passes; pass++ {
+		slog21ExpiryPurePass(r, pass)
+	}
+	slog21ExpiryPureFinish(r)
+	return r
+}
+
+func slog21ExpiryPureBranch(failure financial.ExpiryPhase, metadata financial.ExpiryCount) *slog21ExpiryRecorder {
+	r := &slog21ExpiryRecorder{}
+	r.capture(slog21ExpiryPureRecord(financial.ExpiryBind, financial.ExpiryPoint, 0, 0))
+	r.capture(slog21ExpiryPureRecord(financial.ExpiryStart, financial.ExpiryPoint, 0, 0))
+	r.capture(slog21ExpiryPureRecord(financial.ExpiryPass, financial.ExpiryEnter, 1, 0))
+	pair := func(phase financial.ExpiryPhase, item uint8) bool {
+		kind := financial.ExpiryErrorNone
+		if phase == failure {
+			kind = financial.ExpiryErrorOther
+		}
+		r.capture(slog21ExpiryPureRecord(phase, financial.ExpiryEnter, 1, item))
+		o := slog21ExpiryPureRecord(phase, financial.ExpiryReturn, 1, item)
+		o.Error = kind
+		if phase == financial.ExpiryRowsAffected {
+			o.Count = metadata
+			if kind != financial.ExpiryErrorNone {
+				o.Count = financial.ExpiryCountNA
+			}
+		}
+		r.capture(o)
+		return kind == financial.ExpiryErrorNone
+	}
+	begun := pair(financial.ExpiryBegin, 0)
+	succeeded := begun
+	if succeeded {
+		succeeded = pair(financial.ExpiryQuery, 0)
+		if succeeded {
+			succeeded = pair(financial.ExpiryScan, 1)
+			if succeeded && failure == financial.ExpiryValidate {
+				o := slog21ExpiryPureRecord(financial.ExpiryValidate, financial.ExpiryPoint, 1, 1)
+				o.Error = financial.ExpiryErrorOther
+				r.capture(o)
+				succeeded = false
+			}
+			if !succeeded {
+				pair(financial.ExpiryRowsClose, 0)
+			} else {
+				iterationOK := pair(financial.ExpiryRowsErr, 0)
+				closeOK := pair(financial.ExpiryRowsClose, 0)
+				succeeded = iterationOK && closeOK
+				if succeeded {
+					succeeded = pair(financial.ExpiryExec, 1)
+				}
+				if succeeded {
+					succeeded = pair(financial.ExpiryRowsAffected, 1) && metadata == financial.ExpiryCountOne
+				}
+				if succeeded {
+					succeeded = pair(financial.ExpiryCommit, 0)
+				}
+			}
+		}
+		// This cleanup error is deliberately not assigned to succeeded.
+		pair(financial.ExpiryRollback, 0)
+	}
+	o := slog21ExpiryPureRecord(financial.ExpiryPass, financial.ExpiryReturn, 1, 0)
+	if succeeded {
+		o.Count = financial.ExpiryCountOne
+	} else {
+		o.Error = financial.ExpiryErrorOther
+	}
+	r.capture(o)
+	slog21ExpiryPurePair(r, financial.ExpiryStop, 1, 0, financial.ExpiryErrorNone)
+	slog21ExpiryPureFinish(r)
+	return r
+}
+
+func TestExpirySQLRecorderPure20261021(t *testing.T) {
+	t.Run("startup-binding", func(t *testing.T) {
+		type originalKey struct{}
+		base, cancel := context.WithCancelCause(context.WithValue(context.Background(), originalKey{}, "synthetic-public-value"))
+		defer cancel(nil)
+		calls := 0
+		sink := func(financial.ExpiryObservation) { calls++ }
+		startup := withExpiryOpenObserver(base, sink)
+		original, extracted := takeExpiryOpenObserver(startup)
+		if original != base || extracted == nil || withExpiryOpenObserver(base, nil) != base || startup.Done() != base.Done() || startup.Value(originalKey{}) != base.Value(originalKey{}) || calls != 0 {
+			t.Fatal("EXPIRY_STARTUP_BINDING_CONTROL")
+		}
+		if _, absent := takeExpiryOpenObserver(original); absent != nil {
+			t.Fatal("EXPIRY_STARTUP_VALUE_PROPAGATED")
+		}
+		cause := errors.New("synthetic-public-cause")
+		cancel(cause)
+		if startup.Err() != base.Err() || context.Cause(startup) != context.Cause(base) || context.Cause(original) != cause {
+			t.Fatal("EXPIRY_STARTUP_CONTEXT_CONTROL")
+		}
+	})
+	t.Run("legal-interleaving", func(t *testing.T) {
+		// Cancel and Wait-enter may occur before the launched goroutine runs.
+		r := &slog21ExpiryRecorder{}
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryBind, financial.ExpiryPoint, 0, 0))
+		slog21ExpiryPurePair(r, financial.ExpiryCancel, 0, 0, financial.ExpiryErrorNone)
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryWait, financial.ExpiryEnter, 0, 0))
+		emit := func(o financial.ExpiryObservation) {
+			o.Context = financial.ExpiryContextCancelled
+			r.capture(o)
+		}
+		emit(slog21ExpiryPureRecord(financial.ExpiryStart, financial.ExpiryPoint, 0, 0))
+		emit(slog21ExpiryPureRecord(financial.ExpiryPass, financial.ExpiryEnter, 1, 0))
+		emit(slog21ExpiryPureRecord(financial.ExpiryBegin, financial.ExpiryEnter, 1, 0))
+		begun := slog21ExpiryPureRecord(financial.ExpiryBegin, financial.ExpiryReturn, 1, 0)
+		begun.Error = financial.ExpiryErrorCancelled
+		emit(begun)
+		returned := slog21ExpiryPureRecord(financial.ExpiryPass, financial.ExpiryReturn, 1, 0)
+		returned.Error = financial.ExpiryErrorOther
+		emit(returned)
+		emit(slog21ExpiryPureRecord(financial.ExpiryStop, financial.ExpiryEnter, 1, 0))
+		emit(slog21ExpiryPureRecord(financial.ExpiryStop, financial.ExpiryReturn, 1, 0))
+		emit(slog21ExpiryPureRecord(financial.ExpiryDoneReady, financial.ExpiryPoint, 0, 0))
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryWait, financial.ExpiryReturn, 0, 0))
+		if !r.complete() {
+			t.Fatal("EXPIRY_CANCEL_BEFORE_START_CONTROL")
+		}
+		// Cancel while a pass owns a successfully begun logical Tx. No new
+		// wait/SQL is used to produce this pure legal partial-order witness.
+		r = &slog21ExpiryRecorder{}
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryBind, financial.ExpiryPoint, 0, 0))
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryStart, financial.ExpiryPoint, 0, 0))
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryPass, financial.ExpiryEnter, 1, 0))
+		slog21ExpiryPurePair(r, financial.ExpiryBegin, 1, 0, financial.ExpiryErrorNone)
+		slog21ExpiryPurePair(r, financial.ExpiryCancel, 0, 0, financial.ExpiryErrorNone)
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryWait, financial.ExpiryEnter, 0, 0))
+		slog21ExpiryPurePair(r, financial.ExpiryQuery, 1, 0, financial.ExpiryErrorCancelled)
+		slog21ExpiryPurePair(r, financial.ExpiryRollback, 1, 0, financial.ExpiryErrorTxDone)
+		r.capture(returned)
+		slog21ExpiryPurePair(r, financial.ExpiryStop, 1, 0, financial.ExpiryErrorNone)
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryDoneReady, financial.ExpiryPoint, 0, 0))
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryWait, financial.ExpiryReturn, 0, 0))
+		if !r.complete() {
+			t.Fatal("EXPIRY_CANCEL_DURING_PASS_CONTROL")
+		}
+	})
+	t.Run("multiple-passes", func(t *testing.T) {
+		if !slog21ExpiryPureComplete(2).complete() || !slog21ExpiryPureComplete(3).complete() {
+			t.Fatal("EXPIRY_MULTIPASS_CONTROL")
+		}
+		// A pure one-item grammar vector is not a Scan/UPDATE DB execution.
+		r := &slog21ExpiryRecorder{}
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryBind, financial.ExpiryPoint, 0, 0))
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryStart, financial.ExpiryPoint, 0, 0))
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryPass, financial.ExpiryEnter, 1, 0))
+		for _, phase := range []financial.ExpiryPhase{financial.ExpiryBegin, financial.ExpiryQuery} {
+			slog21ExpiryPurePair(r, phase, 1, 0, financial.ExpiryErrorNone)
+		}
+		slog21ExpiryPurePair(r, financial.ExpiryScan, 1, 1, financial.ExpiryErrorNone)
+		for _, phase := range []financial.ExpiryPhase{financial.ExpiryRowsErr, financial.ExpiryRowsClose} {
+			slog21ExpiryPurePair(r, phase, 1, 0, financial.ExpiryErrorNone)
+		}
+		for _, phase := range []financial.ExpiryPhase{financial.ExpiryExec, financial.ExpiryRowsAffected} {
+			slog21ExpiryPurePair(r, phase, 1, 1, financial.ExpiryErrorNone)
+		}
+		slog21ExpiryPurePair(r, financial.ExpiryCommit, 1, 0, financial.ExpiryErrorNone)
+		slog21ExpiryPurePair(r, financial.ExpiryRollback, 1, 0, financial.ExpiryErrorTxDone)
+		o := slog21ExpiryPureRecord(financial.ExpiryPass, financial.ExpiryReturn, 1, 0)
+		o.Count = financial.ExpiryCountOne
+		r.capture(o)
+		slog21ExpiryPurePair(r, financial.ExpiryStop, 1, 0, financial.ExpiryErrorNone)
+		slog21ExpiryPureFinish(r)
+		if !r.complete() {
+			t.Fatal("EXPIRY_ONE_ITEM_GRAMMAR_CONTROL")
+		}
+		for _, phase := range []financial.ExpiryPhase{financial.ExpiryBegin, financial.ExpiryQuery, financial.ExpiryScan, financial.ExpiryValidate, financial.ExpiryRowsErr, financial.ExpiryRowsClose, financial.ExpiryExec, financial.ExpiryRowsAffected, financial.ExpiryCommit, financial.ExpiryRollback} {
+			if !slog21ExpiryPureBranch(phase, financial.ExpiryCountOne).complete() {
+				t.Fatal("EXPIRY_BRANCH_GRAMMAR_CONTROL")
+			}
+		}
+		for _, count := range []financial.ExpiryCount{financial.ExpiryCountZero, financial.ExpiryCountMany} {
+			if !slog21ExpiryPureBranch(0, count).complete() {
+				t.Fatal("EXPIRY_METADATA_BRANCH_CONTROL")
+			}
+		}
+	})
+	t.Run("missing-zero", func(t *testing.T) {
+		if (&slog21ExpiryRecorder{}).complete() || slog21ExpiryPureComplete(0).complete() {
+			t.Fatal("EXPIRY_ZERO_EVIDENCE_CONTROL")
+		}
+		r := slog21ExpiryPureComplete(1)
+		r.workerN--
+		if r.complete() {
+			t.Fatal("EXPIRY_MISSING_DONE_CONTROL")
+		}
+	})
+	t.Run("overflow-latch", func(t *testing.T) {
+		r := &slog21ExpiryRecorder{}
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryBind, financial.ExpiryPoint, 0, 0))
+		for i := 0; i <= slog21ExpiryWorkerCapacity; i++ {
+			r.capture(slog21ExpiryPureRecord(financial.ExpiryStart, financial.ExpiryPoint, 0, 0))
+		}
+		if r.workerN != 4096 || !r.invalid.Load() || r.complete() {
+			t.Fatal("EXPIRY_WORKER_OVERFLOW_CONTROL")
+		}
+		r = &slog21ExpiryRecorder{}
+		for i := 0; i <= slog21ExpiryControlCapacity; i++ {
+			r.capture(slog21ExpiryPureRecord(financial.ExpiryBind, financial.ExpiryPoint, 0, 0))
+		}
+		if r.controlN != 32 || !r.invalid.Load() || r.complete() {
+			t.Fatal("EXPIRY_CONTROL_OVERFLOW_CONTROL")
+		}
+	})
+	t.Run("illegal-sequence", func(t *testing.T) {
+		for _, mutate := range []func(*slog21ExpiryRecorder){
+			func(r *slog21ExpiryRecorder) { r.worker[1].Pass = 2 },
+			func(r *slog21ExpiryRecorder) { r.worker[10].Phase = financial.ExpiryRollback },
+			func(r *slog21ExpiryRecorder) { r.worker[5].SQLite = financial.ExpirySQLiteUnknown },
+			func(r *slog21ExpiryRecorder) { r.worker[5].Context = 255 },
+			func(r *slog21ExpiryRecorder) { r.control[1] = r.control[0] },
+			func(r *slog21ExpiryRecorder) { copy(r.worker[10:], r.worker[12:r.workerN]); r.workerN -= 2 },
+		} {
+			r := slog21ExpiryPureComplete(1)
+			mutate(r)
+			if r.complete() {
+				t.Fatal("EXPIRY_ILLEGAL_SEQUENCE_CONTROL")
+			}
+		}
+		r := &slog21ExpiryRecorder{}
+		r.workerBusy.Store(true)
+		r.capture(slog21ExpiryPureRecord(financial.ExpiryStart, financial.ExpiryPoint, 0, 0))
+		if !r.invalid.Load() || r.workerN != 0 {
+			t.Fatal("EXPIRY_SAME_LANE_REENTRY_CONTROL")
+		}
+		r.workerBusy.Store(false)
+	})
+	t.Run("finite-format", func(t *testing.T) {
+		r := slog21ExpiryPureComplete(2)
+		for i := 0; i < r.workerN; i++ {
+			line := slog21ExpiryText(r.worker[i], false, 8)
+			if len(line) > 256 || len(strings.Fields(line)) != 12 || strings.Contains(line, "SYNTHETIC_EXPIRY_PUBLIC_CANARY") {
+				t.Fatal("EXPIRY_FINITE_FORMAT_CONTROL")
+			}
+			for _, b := range []byte(line) {
+				if b > 127 {
+					t.Fatal("EXPIRY_NONASCII_FORMAT_CONTROL")
+				}
+			}
+		}
+		unknown := financial.ExpiryObservation{Phase: 255, Edge: 255, Error: 255, SQLite: 255, Context: 255, Elapsed: 255, Count: 255}
+		if slog21ExpiryText(unknown, false, 0) != "SLOG21_EXPIRY_SQL_LIFECYCLE lane=WORKER app=0 pass=0 item=0 phase=UNKNOWN edge=UNKNOWN error=UNKNOWN sqlite=UNKNOWN context=UNKNOWN elapsed=UNKNOWN count=UNKNOWN" {
+			t.Fatal("EXPIRY_UNKNOWN_FORMAT_CONTROL")
 		}
 	})
 }
