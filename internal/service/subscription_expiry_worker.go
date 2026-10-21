@@ -16,11 +16,13 @@ type subscriptionExpiryWorker struct {
 	finished sync.WaitGroup
 	parent   context.Context
 	observer financial.ExpiryObserver
+	owner    *expiryInvocationOwner
 }
 
 func newSubscriptionExpiryWorker(app *App) *subscriptionExpiryWorker {
 	ctx, cancel := context.WithCancel(context.Background())
-	worker := &subscriptionExpiryWorker{cancel: cancel, parent: ctx, observer: app.expiryObserver}
+	worker := &subscriptionExpiryWorker{cancel: cancel, parent: ctx, observer: app.expiryObserver, owner: app.expiryOwner}
+	worker.owner.workerConstructed(app, worker)
 	worker.expiryPoint(financial.ExpiryBind, ctx)
 	worker.finished.Add(1)
 	go func() {
@@ -28,6 +30,7 @@ func newSubscriptionExpiryWorker(app *App) *subscriptionExpiryWorker {
 			worker.expiryPoint(financial.ExpiryDoneReady, ctx)
 			worker.finished.Done()
 		}()
+		worker.owner.goroutineStarted(worker)
 		worker.expiryPoint(financial.ExpiryStart, ctx)
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
