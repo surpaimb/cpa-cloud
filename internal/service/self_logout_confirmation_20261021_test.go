@@ -170,6 +170,9 @@ func slog21Snapshot(t *testing.T, db *sql.DB, handoff ...*slog21HandoffTrace) sl
 	if diag.handoff != nil {
 		diag.handoff.observe(t, slog21HandBeginReturn, slog21HandOK, nil, -1, false)
 	}
+	if diag.handoff != nil {
+		diag.handoff.prequery.cut()
+	}
 	_, objects := slog21Read(t, ctx, tx, `SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE substr(name,1,7)<>'sqlite_'`, false, diag, slog21DiagObjects)
 	s := slog21Snap{Schema: objects, Tables: map[string]slog21Table{}}
 	for _, o := range objects {
@@ -264,6 +267,7 @@ type slog21Fixture struct {
 	expiryRecorders                                         [8]*slog21ExpiryRecorder
 	expiryCount                                             int
 	expiryCensusInvalid                                     bool
+	prequery                                                *slogPrequeryPlan
 }
 
 func newSlog21(t *testing.T) *slog21Fixture {
@@ -279,6 +283,7 @@ func newSlog21(t *testing.T) *slog21Fixture {
 		// The old close/observer/oracle path has finished before any new gate.
 		f.flushSegments()
 		f.flushExpirySQL()
+		f.prequery.report(t)
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -380,6 +385,7 @@ func (f *slog21Fixture) raw() *sql.DB {
 func (f *slog21Fixture) closedRaw(before slog21Snap) *sql.DB {
 	f.t.Helper()
 	handoff := &slog21HandoffTrace{stage: slog21HandoffStage(), old: f.app.store.db}
+	handoff.prequery = f.prequery.route(handoff.stage)
 	f.prepareSegments(handoff.stage, false)
 	handoff.observe(f.t, slog21HandCloseEnter, slog21HandEnter, nil, -1, false)
 	started := time.Now()
@@ -803,6 +809,9 @@ func TestSelfLogout20261021Boundaries(t *testing.T) {
 	for _, scenario := range []string{"begin-refusal", "begin-cancelled", "nil-result", "rows-error", "zero-rows", "multiple-rows", "employee-predicate", "verifier-predicate", "confirmation-query-error", "replacement-employee", "replacement-verifier", "pre-commit-refusal", "post-commit-report"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newSlog21(t)
+			if scenario == "pre-commit-refusal" {
+				f.prequery = newSlogPrequery()
+			}
 			before := slog21Snapshot(t, f.app.store.db)
 			row := f.target(before, true)
 			h := selfLogoutOperationHooks{}
@@ -870,6 +879,9 @@ func TestSelfLogout20261021Boundaries(t *testing.T) {
 				slog21Fail(t, "REAL_COMMIT_NOT_CONFIRMED")
 			}
 			f.expectedAfter(before, present)
+			if scenario == "pre-commit-refusal" {
+				f.prequery.arm()
+			}
 			f.clean()
 		})
 	}
@@ -1480,28 +1492,28 @@ func TestSelfLogoutSnapshotErrorDiagnostic20261021(t *testing.T) {
 // Filled from the final frozen source callsites, not runtime paths or SQL.
 func slog21DiagSites() []slog21DiagSite {
 	return []slog21DiagSite{
-		{function: "(*slog21Fixture).closedRaw", line: 399, cut: slog21CutAfterClose},
-		{function: "(*slog21Fixture).openRaw", line: 408, cut: slog21CutBeforeOpen},
-		{function: "(*slog21Fixture).openRaw", line: 413, cut: slog21CutAfterOpen},
-		{function: "(*slog21Fixture).reopen", line: 418, cut: slog21CutReopenBeforeClose},
-		{function: "(*slog21Fixture).controlWindow", line: 561, cut: slog21CutControlsBefore},
-		{function: "(*slog21Fixture).controlWindow", line: 563, cut: slog21CutControlsAfter},
-		{function: "(*slog21Fixture).install", line: 590, cut: slog21CutTriggerBeforeClose},
-		{function: "(*slog21Fixture).install", line: 592, cut: slog21CutDDLBefore},
-		{function: "(*slog21Fixture).install", line: 614, cut: slog21CutDDLAfter},
-		{function: "(*slog21Fixture).clean", line: 668, cut: slog21CutCleanupBefore},
-		{function: "TestSelfLogout20261021JointOracle", line: 683, cut: slog21CutDeleteBefore},
-		{function: "TestSelfLogout20261021JointOracle", line: 692, cut: slog21CutDeleteAfter},
-		{function: "TestSelfLogout20261021JointOracle", line: 700, cut: slog21CutOracleTarget},
-		{function: "(*slog21Fixture).expectedAfter", line: 728, cut: slog21CutPostResponse},
-		{function: "(*slog21Fixture).expectedAfter", line: 758, cut: slog21CutPersistedTarget},
-		{function: "TestSelfLogout20261021Normal", line: 767, cut: slog21CutNormalBefore},
-		{function: "TestSelfLogout20261021NativeAbort", line: 783, cut: slog21CutAbortBefore},
-		{function: "TestSelfLogout20261021Boundaries", line: 806, cut: slog21CutBoundaryBefore},
-		{function: "TestSelfLogout20261021DeferredFK", line: 892, cut: slog21CutFKBefore},
-		{function: "TestSelfLogout20261021AuthBoundaries", line: 925, cut: slog21CutAuthBefore},
-		{function: "TestSelfLogout20261021AuthBoundaries", line: 973, cut: slog21CutAuthAfter},
-		{function: "TestSelfLogout20261021TwoAuthenticated", line: 979, cut: slog21CutDualBefore},
+		{function: "(*slog21Fixture).closedRaw", line: 405, cut: slog21CutAfterClose},
+		{function: "(*slog21Fixture).openRaw", line: 414, cut: slog21CutBeforeOpen},
+		{function: "(*slog21Fixture).openRaw", line: 419, cut: slog21CutAfterOpen},
+		{function: "(*slog21Fixture).reopen", line: 424, cut: slog21CutReopenBeforeClose},
+		{function: "(*slog21Fixture).controlWindow", line: 567, cut: slog21CutControlsBefore},
+		{function: "(*slog21Fixture).controlWindow", line: 569, cut: slog21CutControlsAfter},
+		{function: "(*slog21Fixture).install", line: 596, cut: slog21CutTriggerBeforeClose},
+		{function: "(*slog21Fixture).install", line: 598, cut: slog21CutDDLBefore},
+		{function: "(*slog21Fixture).install", line: 620, cut: slog21CutDDLAfter},
+		{function: "(*slog21Fixture).clean", line: 674, cut: slog21CutCleanupBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 689, cut: slog21CutDeleteBefore},
+		{function: "TestSelfLogout20261021JointOracle", line: 698, cut: slog21CutDeleteAfter},
+		{function: "TestSelfLogout20261021JointOracle", line: 706, cut: slog21CutOracleTarget},
+		{function: "(*slog21Fixture).expectedAfter", line: 734, cut: slog21CutPostResponse},
+		{function: "(*slog21Fixture).expectedAfter", line: 764, cut: slog21CutPersistedTarget},
+		{function: "TestSelfLogout20261021Normal", line: 773, cut: slog21CutNormalBefore},
+		{function: "TestSelfLogout20261021NativeAbort", line: 789, cut: slog21CutAbortBefore},
+		{function: "TestSelfLogout20261021Boundaries", line: 815, cut: slog21CutBoundaryBefore},
+		{function: "TestSelfLogout20261021DeferredFK", line: 904, cut: slog21CutFKBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 937, cut: slog21CutAuthBefore},
+		{function: "TestSelfLogout20261021AuthBoundaries", line: 985, cut: slog21CutAuthAfter},
+		{function: "TestSelfLogout20261021TwoAuthenticated", line: 991, cut: slog21CutDualBefore},
 	}
 }
 
@@ -1654,6 +1666,7 @@ type slog21HandoffTrace struct {
 	rawCreated, rawCloseCalled, rawCloseOK bool
 	last                                   slog21HandEvent
 	invalid                                bool
+	prequery                               *slogPrequeryPlan
 }
 
 // accept is a pure sequence gate. Repeated RAW_CLOSE only observes the original
