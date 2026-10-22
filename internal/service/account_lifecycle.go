@@ -247,6 +247,11 @@ func (a *App) archiveModel(w http.ResponseWriter, r *http.Request, session admin
 		writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
 		return
 	}
+	var originalCreatedAt string
+	if err := tx.QueryRowContext(r.Context(), `SELECT created_at FROM models WHERE id=?`, item.ID).Scan(&originalCreatedAt); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	archivedAt := utcNow()
 	result, err := tx.ExecContext(r.Context(), `UPDATE models SET enabled=0,archived=1,archived_at=?,revision=revision+1 WHERE id=? AND revision=? AND archived=0`, archivedAt, item.ID, input.ExpectedRevision)
 	if err != nil {
@@ -257,7 +262,50 @@ func (a *App) archiveModel(w http.ResponseWriter, r *http.Request, session admin
 		writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
 		return
 	}
-	if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "model.archive", "model", item.ID, "succeeded"); err != nil || tx.Commit() != nil {
+	// First-transition audit identity belongs to this operation, not a matching
+	// old event. The already_archived no-op above intentionally does not enter it.
+	auditID, err := newID("aud")
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	var previousAuditRow, existingAuditID int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(rowid),0),COUNT(CASE WHEN id=? THEN 1 END) FROM account_lifecycle_audit`, auditID).
+		Scan(&previousAuditRow, &existingAuditID); err != nil || existingAuditID != 0 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	auditTime := utcNow()
+	auditResult, err := tx.ExecContext(r.Context(), `INSERT INTO account_lifecycle_audit(id,actor_id,action,target_type,target_id,result,occurred_at) VALUES(?,?,'model.archive','model',?,'succeeded',?)`, auditID, session.AdminID, item.ID, auditTime)
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if changed, err := auditResult.RowsAffected(); err != nil || changed != 1 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM account_lifecycle_audit WHERE id IN (
+		SELECT id FROM account_lifecycle_audit ORDER BY occurred_at DESC,id DESC LIMIT -1 OFFSET ?
+	)`, lifecycleAuditLimit); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	var total, added, retained int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(CASE WHEN rowid>? THEN 1 END),COUNT(CASE WHEN rowid>? AND id=? AND actor_id=? AND action='model.archive' AND target_type='model' AND target_id=? AND result='succeeded' AND occurred_at=? THEN 1 END) FROM account_lifecycle_audit`, previousAuditRow, previousAuditRow, auditID, session.AdminID, item.ID, auditTime).
+		Scan(&total, &added, &retained); err != nil || total > lifecycleAuditLimit || added != 1 || retained != 1 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	// Audit/retention triggers can reverse a tombstone too. No writes follow
+	// these final facts before the one Commit; success signals stay after Commit.
+	var confirmed int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM models WHERE id=? AND model_kind=? AND upstream_id=? AND upstream_model=? AND wire_protocol=? AND enabled=0 AND revision=? AND archived=1 AND archived_at=? AND created_at=?`, item.ID, item.ModelKind, item.UpstreamID, item.UpstreamModel, item.WireProtocol, item.Revision+1, archivedAt, originalCreatedAt).
+		Scan(&confirmed); err != nil || confirmed != 1 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
