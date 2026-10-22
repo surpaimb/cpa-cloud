@@ -97,7 +97,11 @@ type updateEmployeeRequest struct {
 
 func (a *App) updateEmployee(w http.ResponseWriter, r *http.Request, _ adminSession) {
 	var input updateEmployeeRequest
-	if !decodeJSON(w, r, adminMaxBody, &input) || input.ExpectedRevision < 1 {
+	if !decodeJSON(w, r, adminMaxBody, &input) {
+		return
+	}
+	if input.ExpectedRevision < 1 {
+		writeAdminError(w, http.StatusBadRequest, "invalid_revision", "A valid expected_revision is required.")
 		return
 	}
 	if input.Name == nil && input.Department == nil && input.Note == nil && input.Status == nil {
@@ -197,7 +201,11 @@ type modelPolicyRequest struct {
 
 func (a *App) updateModelPolicy(w http.ResponseWriter, r *http.Request, _ adminSession) {
 	var input modelPolicyRequest
-	if !decodeJSON(w, r, adminMaxBody, &input) || input.ExpectedRevision < 1 {
+	if !decodeJSON(w, r, adminMaxBody, &input) {
+		return
+	}
+	if input.ExpectedRevision < 1 {
+		writeAdminError(w, http.StatusBadRequest, "invalid_revision", "A valid expected_revision is required.")
 		return
 	}
 	if input.Mode != "all" && input.Mode != "selected" {
