@@ -380,6 +380,97 @@ func (a *App) archiveUpstream(w http.ResponseWriter, r *http.Request, session ad
 		writeAdminError(w, http.StatusConflict, "upstream_in_use", "The upstream is still referenced by an active model route.")
 		return
 	}
+	// Independently authored for the upstream archive audit contract. Preserve
+	// complete rows, including NULL/BLOB distinctions and peers, around the SQL
+	// hook and audit triggers. No new App/test hook or shared-helper semantics.
+	type archiveField struct {
+		kind    byte
+		text    string
+		integer int64
+		real    float64
+	}
+	type archiveFacts map[string]map[int64]map[string]archiveField
+	tables := []string{"upstreams", "codex_oauth_bindings", "codex_oauth_refresh_states", "upstream_proxy_bindings", "account_recovery_states"}
+	if a.archiveUpstreamTxHook != nil {
+		tables = append(tables, "scheduled_test_plans", "channel_monitor_plans")
+	}
+	readFacts := func() (archiveFacts, error) {
+		facts := make(archiveFacts)
+		for _, table := range tables {
+			rows, err := tx.QueryContext(r.Context(), "SELECT rowid,* FROM "+table+" ORDER BY rowid")
+			if err != nil {
+				return nil, err
+			}
+			columns, err := rows.Columns()
+			if err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			set := make(map[int64]map[string]archiveField)
+			for rows.Next() {
+				values := make([]any, len(columns))
+				pointers := make([]any, len(values))
+				for i := range values {
+					pointers[i] = &values[i]
+				}
+				if err := rows.Scan(pointers...); err != nil {
+					_ = rows.Close()
+					return nil, err
+				}
+				rowID, ok := values[0].(int64)
+				if !ok {
+					_ = rows.Close()
+					return nil, errors.New("upstream archive row identity unavailable")
+				}
+				row := make(map[string]archiveField)
+				for i := 1; i < len(values); i++ {
+					var field archiveField
+					switch value := values[i].(type) {
+					case nil:
+						field.kind = 'n'
+					case string:
+						field.kind, field.text = 's', value
+					case []byte:
+						field.kind, field.text = 'b', string(value)
+					case int64:
+						field.kind, field.integer = 'i', value
+					case float64:
+						field.kind, field.real = 'f', value
+					default:
+						_ = rows.Close()
+						return nil, errors.New("upstream archive row type unavailable")
+					}
+					row[columns[i]] = field
+				}
+				set[rowID] = row
+			}
+			iterationErr, closeErr := rows.Err(), rows.Close()
+			if iterationErr != nil {
+				return nil, iterationErr
+			}
+			if closeErr != nil {
+				return nil, closeErr
+			}
+			facts[table] = set
+		}
+		return facts, nil
+	}
+	expectedFacts, err := readFacts()
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	auditID, err := newID("aud")
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	var previousAuditRow, existingAuditID int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(rowid),0),COUNT(CASE WHEN id=? THEN 1 END) FROM account_lifecycle_audit`, auditID).
+		Scan(&previousAuditRow, &existingAuditID); err != nil || existingAuditID != 0 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	archivedAt := utcNow()
 	credentialState := any(nil)
 	if item.ProviderKind == codexMembershipProvider {
@@ -412,7 +503,113 @@ func (a *App) archiveUpstream(w http.ResponseWriter, r *http.Request, session ad
 			return
 		}
 	}
-	if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "upstream.archive", "upstream", id, "succeeded"); err != nil || tx.Commit() != nil {
+	auditTime := utcNow()
+	auditResult, err := tx.ExecContext(r.Context(), `INSERT INTO account_lifecycle_audit(id,actor_id,action,target_type,target_id,result,occurred_at) VALUES(?,?,?,?,?,?,?)`,
+		auditID, session.AdminID, "upstream.archive", "upstream", id, "succeeded", auditTime)
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if changed, err := auditResult.RowsAffected(); err != nil || changed != 1 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM account_lifecycle_audit WHERE id IN (
+		SELECT id FROM account_lifecycle_audit ORDER BY occurred_at DESC,id DESC LIMIT -1 OFFSET ?
+	)`, lifecycleAuditLimit); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	var total, added, retained int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(CASE WHEN rowid>? THEN 1 END),COUNT(CASE WHEN rowid>? AND id=? AND actor_id=? AND action='upstream.archive' AND target_type='upstream' AND target_id=? AND result='succeeded' AND occurred_at=? THEN 1 END) FROM account_lifecycle_audit`, previousAuditRow, previousAuditRow, auditID, session.AdminID, id, auditTime).
+		Scan(&total, &added, &retained); err != nil || total > lifecycleAuditLimit || added != 1 || retained != 1 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	confirmed := 0
+	for _, row := range expectedFacts["upstreams"] {
+		if row["id"] != (archiveField{kind: 's', text: id}) {
+			continue
+		}
+		if row["revision"] != (archiveField{kind: 'i', integer: item.Revision}) || item.Revision == 1<<63-1 {
+			writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+		confirmed++
+		row["enabled"], row["archived"] = archiveField{kind: 'i'}, archiveField{kind: 'i', integer: 1}
+		row["archived_at"] = archiveField{kind: 's', text: archivedAt}
+		row["revision"] = archiveField{kind: 'i', integer: item.Revision + 1}
+		row["credential_ciphertext"], row["key_version"] = archiveField{kind: 'b'}, archiveField{kind: 'i'}
+		row["credential_state"], row["verified_at"] = archiveField{kind: 'n'}, archiveField{kind: 'n'}
+		if item.ProviderKind == codexMembershipProvider {
+			row["credential_state"] = archiveField{kind: 's', text: codexStateReauth}
+		}
+	}
+	if confirmed != 1 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	for _, table := range []string{"codex_oauth_bindings", "codex_oauth_refresh_states", "upstream_proxy_bindings", "account_recovery_states"} {
+		key := "upstream_id"
+		if table == "account_recovery_states" {
+			key = "account_id"
+		}
+		for rowID, row := range expectedFacts[table] {
+			if row[key] == (archiveField{kind: 's', text: id}) {
+				delete(expectedFacts[table], rowID)
+			}
+		}
+	}
+	if a.archiveUpstreamTxHook != nil {
+		when, err := parseTime(archivedAt)
+		if err != nil {
+			writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+		for _, table := range []string{"scheduled_test_plans", "channel_monitor_plans"} {
+			for _, row := range expectedFacts[table] {
+				if row["upstream_id"] != (archiveField{kind: 's', text: id}) || row["archived_at"] != (archiveField{kind: 'n'}) {
+					continue
+				}
+				revision := row["revision"]
+				if revision.kind != 'i' || revision.integer < 1 || revision.integer == 1<<63-1 {
+					writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+					return
+				}
+				row["enabled"], row["next_run_at"] = archiveField{kind: 'i'}, archiveField{kind: 'n'}
+				row["revision"] = archiveField{kind: 'i', integer: revision.integer + 1}
+				row["updated_by_admin_id"] = archiveField{kind: 's', text: session.AdminID}
+				row["updated_at"] = archiveField{kind: 's', text: formatAccountPoolTime(when.UTC())}
+			}
+		}
+	}
+	// All SQL writes (including real plan hooks and audit/retention triggers)
+	// precede these final facts. Only one Commit follows, never a repair write.
+	finalFacts, err := readFacts()
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	for table, expected := range expectedFacts {
+		actual := finalFacts[table]
+		if len(actual) != len(expected) {
+			writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+			return
+		}
+		for rowID, row := range expected {
+			if len(actual[rowID]) != len(row) {
+				writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+				return
+			}
+			for name, value := range row {
+				if actual[rowID][name] != value {
+					writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+					return
+				}
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
