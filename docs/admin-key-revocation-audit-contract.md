@@ -200,3 +200,120 @@ confirmed remote ref. Its underlying transport cause is not established here.
 No trust/credential/remote setting was changed and no retry or substitute
 transport is claimed. This local record does not claim a push, new PR or CI;
 those require the root's transport disposition and exact remote verification.
+
+## Independent fixture-only P2 correction batch
+
+This separately authorized batch starts from remote PR122 head
+`864cce4692d53795d6f374537e47552c229be376`, base/sole parent PR98
+`d96e99ebef5942db1b585ff0042efc0872c67eca`. Local old candidate
+`ace85551ec884debe2144f0d021f8c437b5ba35e` differs only in commit metadata;
+both old trees are `3aae0f2d287f96b505f6b83b00a5ca5b664c4ea2`.
+
+Preserved old-head evidence: the root confirmed original E **0/1/0**, stopped
+pure read-only review without tests, and original F **0/0/0** source-only narrow
+GO. Highest P2 is **old-head narrow NO-GO**. The definite P2 is live replacement
+and restoration of `f.app.store.db` in the commit adapter while subscription
+background goroutines were not stopped and joined. It is not a demonstrated
+product revocation defect or natural CI red. The old natural pull_request
+attempt1 Code516/native29/CLI30/VM35 were all successful; complete checks were
+23 = 20 success + 3 skipped, with zero pending/failure/other. Skips were not
+execution. Those results and the old 53/53 and 27/27 observations above do not
+disprove or close the P2.
+
+Only this contract and `admin_key_revocation_audit_commit_test.go` may change
+in this new batch. The original four-file boundary above describes the original
+batch, not permission to edit its frozen product or main test files now.
+`employees.go`, the full App/HTTP/slot `admin_key_revocation_audit_test.go`, all
+old tests/helpers, dependencies and workflows remain unchanged. New fixture
+code is independently authored from this specification and the pinned own
+interfaces; no production seam or third file is authorized.
+
+Before replacing the adapter, a deterministic AST invariant test must observe
+the old commit file's two `.store.db` assignments and three calls to the full
+App fixture, then fail with fixed `AKRA_OLD_FIXTURE_PUBLICATION_INVARIANT`.
+This is a structural tests-first red for the known P2, not a probabilistic
+race reproduction or a product/root-cause claim.
+
+The replacement constructs only an owned temporary real SQLite fixture:
+
+- Real `Initialize`/`openStore` and secrets establish the existing schema,
+  administrator and digest behavior. A valid synthetic ordinary Key is seeded
+  as fixture data, not advertised as Key-creation API acceptance. Close the
+  bootstrap DB before opening the adapter DB; assign the new App's store only
+  in its initial composite construction, before any HTTP publication.
+- Never call `Open`, the full App fixture or `App.Handler`; start no App worker.
+  Keep real login, `requireAdmin(revokeKey,true)`, Origin/CSRF, requestMiddleware
+  and the actual ServeMux PathValue. No forged administrator session is passed
+  directly to the product handler.
+- Keep a non-nil actual notification runtime with valid runtime/change contexts
+  and cancels. Use its actual NotifyChanged/Close paths, not a callback stub.
+  This is notification-only, not a scheduler/lease fixture; no Acquire/Release
+  or full runtime constructor is used. Success proves an epoch increment and
+  cancellation of the previous change context; every 503 proves no notification.
+- Explicitly mark the target authenticated HTTP transaction in context. Setup,
+  login and snapshot work cannot trigger the fault or increment target Commit
+  counters. Each wrapped Tx keeps its request identity and owns its cancellation;
+  no mutable shared request cancel is overwritten. Count Begin, real Begin,
+  Commit and non-target transactions independently. No full runtime constructor's
+  initialization Commit is allowed to masquerade as the target Commit.
+- Preserve actual deferred-FK refusal/positive control, real-Commit-then-adapter
+  error/cancellation, Begin cancellation and independent retry. A response error
+  is not a rollback claim. Fault enablement changes only after the prior HTTP
+  handler completion is acknowledged; no live DB replacement/restoration occurs.
+- Construction failures and final cleanup close resources in order: prevent new
+  requests, close server and join entered handlers, close notification contexts,
+  then the fixed adapter DB. Bootstrap resources are also closed on early failure.
+
+The three commit parent tests retain all result/counter/retained-fact assertions.
+The full App/HTTP/slot main tests are not weakened. Required new gates include
+the deterministic invariant, real authentication negatives, non-vacuous positive
+notification, immutable DB ownership, exact target Commit attribution and safe
+cleanup, followed by serial non-cached new/old targeted regression, appropriate
+local CGO race, vet/build/format/links/diff. First unexpected test red, untrusted
+evidence, dependency download or need for a third file/shared seam stops this
+batch; no hot repair or rerun.
+
+All earlier preparation errors, expected missing-audit red, SSH exit128 and
+approved same-tree transfer records remain. Old Code513/514/515,
+UNKNOWN/CAPACITY_UNPROVEN, GOV-02/old-backup revival, real M1-to-M2 and production
+NO-GO remain open. A successful future correction requires a new exact head's
+natural CI and original E/F independent read-only review; it cannot rewrite the
+old-head P2 to zero. No Ready/merge/tag/package/deploy is authorized.
+
+Actual deterministic old-shape observation before adapter replacement: the
+single publication-invariant test ran non-cached/serial on Go1.26.9 Windows and
+failed only with `AKRA_OLD_FIXTURE_PUBLICATION_INVARIANT`, after exactly one
+`AKRA_OLD_REBINDS_2_FULL_FIXTURES_3` witness. No skip, JSON parse error or source
+parse failure occurred. Exit 1; LF-joined captured JSON stdout SHA256
+`948647d09c1db418c4fdb8ae9530da33902e1460d638a019808cd25853dc3c85`.
+No old commit/HTTP test or worker-scheduling race was executed for this oracle.
+
+Actual replacement gates, all offline with the existing Go1.26.9 Windows
+toolchain, `GOTOOLCHAIN=local`, `GOPROXY=off`, `GOSUMDB=off` and
+`GOFLAGS=-mod=readonly`:
+
+- One non-cached serial new/old targeted run used `-count=1 -p=1 -parallel=1
+  -failfast -timeout=10m`. Its selector included `TestAdminKeyRevocationAudit`,
+  `TestPreviewWorkflowPersistenceStreamingAndRevocation`, `TestSelfKeySlot`
+  and `TestSelfKeyRevoke`. All 26 parent tests + 59 subtests = **85/85** passed,
+  with zero fail/skip/JSON parse errors, exit 0, elapsed 152.2079774 seconds.
+  LF-joined JSON stdout SHA256:
+  `61605128d0127488e3969c2b262f74646303b227523b205ba4fff4a8d49cf937`.
+- One non-cached local CGO race run used the existing GCC and `-race -count=1
+  -p=1 -parallel=1 -failfast -timeout=10m`, restricted to the independent
+  `CommitFixture`, `NativeCommit`, `UncertainCommit` and `CancelledBegin`
+  audit tests. All 5 parents + 7 subtests = **12/12** passed, with zero
+  fail/skip/JSON parse errors or race reports, exit 0, elapsed 96.2261102
+  seconds. LF-joined JSON stdout SHA256:
+  `92491d8158c795df8e34ba209df56dc2e5d3a25dc6e074ff7adbd7a335beaf76`.
+- `go mod verify`, build of `./internal/service`, `./cmd/cpa-cloud` and
+  `./cmd/cpa-cloud-backup`, `go vet ./internal/service`, and gofmt's check of
+  the changed Go file all exited 0. No dependency download, new service,
+  real credential, backup or production database was used.
+
+The final scope/link/diff checks are recorded with this batch's exact candidate
+identity. The race observation applies only to these selected independent
+fixture tests, not all application workers or an exhaustive concurrency proof.
+Actual deferred-FK refusal remains distinct from the controlled error or
+cancellation returned after a real successful Commit. These local gates neither
+replace new-head natural CI nor issue original E/F's new-head formal review/GO.
