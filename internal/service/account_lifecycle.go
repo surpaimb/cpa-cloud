@@ -142,6 +142,11 @@ func (a *App) updateModel(w http.ResponseWriter, r *http.Request, session adminS
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "The upstream model is not supported by that provider.")
 		return
 	}
+	var originalCreatedAt string
+	if err := tx.QueryRowContext(r.Context(), `SELECT created_at FROM models WHERE id=?`, item.ID).Scan(&originalCreatedAt); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	item.UpstreamID, item.UpstreamModel, item.Enabled, item.WireProtocol, item.Revision = nextUpstream, nextModel, nextEnabled, nextWire, item.Revision+1
 	result, err := tx.ExecContext(r.Context(), `UPDATE models SET upstream_id=?,upstream_model=?,wire_protocol=?,enabled=?,revision=? WHERE id=? AND revision=? AND archived=0`,
 		item.UpstreamID, item.UpstreamModel, item.WireProtocol, boolInt(item.Enabled), item.Revision, item.ID, input.ExpectedRevision)
@@ -153,7 +158,50 @@ func (a *App) updateModel(w http.ResponseWriter, r *http.Request, session adminS
 		writeAdminError(w, http.StatusConflict, "revision_conflict", "The object was changed by another request.")
 		return
 	}
-	if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "model.update", "model", item.ID, "succeeded"); err != nil || tx.Commit() != nil {
+	// This entry point owns its audit identity. Shared lifecycle writers keep
+	// their existing contract; an old matching row cannot confirm this update.
+	auditID, err := newID("aud")
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	var previousAuditRow, existingAuditID int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(rowid),0),COUNT(CASE WHEN id=? THEN 1 END) FROM account_lifecycle_audit`, auditID).
+		Scan(&previousAuditRow, &existingAuditID); err != nil || existingAuditID != 0 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	auditTime := utcNow()
+	auditResult, err := tx.ExecContext(r.Context(), `INSERT INTO account_lifecycle_audit(id,actor_id,action,target_type,target_id,result,occurred_at) VALUES(?,?,'model.update','model',?,'succeeded',?)`, auditID, session.AdminID, item.ID, auditTime)
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if changed, err := auditResult.RowsAffected(); err != nil || changed != 1 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM account_lifecycle_audit WHERE id IN (
+		SELECT id FROM account_lifecycle_audit ORDER BY occurred_at DESC,id DESC LIMIT -1 OFFSET ?
+	)`, lifecycleAuditLimit); err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	var total, added, retained int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(CASE WHEN rowid>? THEN 1 END),COUNT(CASE WHEN rowid>? AND id=? AND actor_id=? AND action='model.update' AND target_type='model' AND target_id=? AND result='succeeded' AND occurred_at=? THEN 1 END) FROM account_lifecycle_audit`, previousAuditRow, previousAuditRow, auditID, session.AdminID, item.ID, auditTime).
+		Scan(&total, &added, &retained); err != nil || total > lifecycleAuditLimit || added != 1 || retained != 1 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	// Audit INSERT/retention triggers may change the model too. After these
+	// final reads, no DB writes precede the one Commit.
+	var confirmed int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM models WHERE id=? AND model_kind=? AND upstream_id=? AND upstream_model=? AND wire_protocol=? AND enabled=? AND revision=? AND archived=? AND archived_at IS ? AND created_at=?`, item.ID, item.ModelKind, item.UpstreamID, item.UpstreamModel, item.WireProtocol, boolInt(item.Enabled), item.Revision, boolInt(item.Archived), item.ArchivedAt, originalCreatedAt).
+		Scan(&confirmed); err != nil || confirmed != 1 {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
