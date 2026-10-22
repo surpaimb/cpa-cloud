@@ -540,7 +540,8 @@ func sameOptionalString(left, right *string) bool {
 	return *left == *right
 }
 
-func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, _ adminSession) {
+func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, session adminSession) {
+	// Independently authored for docs/admin-key-revocation-audit-contract.md.
 	var input struct{}
 	if !decodeJSON(w, r, adminMaxBody, &input) {
 		return
@@ -554,33 +555,130 @@ func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, _ adminSession) 
 	}
 	defer tx.Rollback()
 	keyID := r.PathValue("id")
-	var slotState string
-	err = tx.QueryRowContext(r.Context(), `SELECT state FROM employee_self_key_slots WHERE key_id=?`, keyID).Scan(&slotState)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	failed := func() {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+	}
+	type keyState struct {
+		owner, name, selector, digest, revokedType string
+		expires, revoked                           sql.NullString
+	}
+	readKey := func() (keyState, error) {
+		var state keyState
+		err := tx.QueryRowContext(r.Context(), `SELECT employee_id,name,selector,hex(digest),expires_at,revoked_at,typeof(revoked_at) FROM access_keys WHERE id=?`, keyID).
+			Scan(&state.owner, &state.name, &state.selector, &state.digest, &state.expires, &state.revoked, &state.revokedType)
+		return state, err
+	}
+	type slotState struct {
+		owner, state, fingerprint                                         string
+		employeeRevision, keyRevision, governanceRevision, budgetRevision sql.NullInt64
+		created, armed, issued, cancelled                                 sql.NullString
+	}
+	readSlot := func() (slotState, bool, error) {
+		var state slotState
+		err := tx.QueryRowContext(r.Context(), `SELECT employee_id,state,hex(arm_fingerprint),arm_employee_revision,arm_key_policy_revision,arm_governance_revision,arm_budget_revision,created_at,armed_at,issued_at,cancelled_at FROM employee_self_key_slots WHERE key_id=?`, keyID).
+			Scan(&state.owner, &state.state, &state.fingerprint, &state.employeeRevision, &state.keyRevision, &state.governanceRevision, &state.budgetRevision, &state.created, &state.armed, &state.issued, &state.cancelled)
+		if errors.Is(err, sql.ErrNoRows) {
+			return state, false, nil
+		}
+		return state, err == nil, err
+	}
+	beforeKey, err := readKey()
+	if errors.Is(err, sql.ErrNoRows) {
+		writeAdminError(w, 404, "not_found", "Key was not found.")
 		return
 	}
-	var count int64
-	if slotState == "pending" || slotState == "armed" {
+	if err != nil {
+		failed()
+		return
+	}
+	beforeSlot, hasSlot, err := readSlot()
+	if err != nil || (hasSlot && beforeSlot.owner != beforeKey.owner) {
+		failed()
+		return
+	}
+	cancelSlot := hasSlot && (beforeSlot.state == "pending" || beforeSlot.state == "armed")
+	transition := !beforeKey.revoked.Valid || cancelSlot
+	if cancelSlot {
 		if err := cancelSelfKeySlotTx(r.Context(), tx, keyID); err != nil {
-			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+			failed()
 			return
 		}
-		count = 1
-	} else {
-		res, err := tx.ExecContext(r.Context(), `UPDATE access_keys SET revoked_at=COALESCE(revoked_at,?) WHERE id=?`, utcNow(), keyID)
+	} else if !beforeKey.revoked.Valid {
+		res, err := tx.ExecContext(r.Context(), `UPDATE access_keys SET revoked_at=? WHERE id=? AND revoked_at IS NULL`, utcNow(), keyID)
 		if err != nil {
-			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+			failed()
 			return
 		}
-		count, err = res.RowsAffected()
-		if err != nil {
-			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		count, err := res.RowsAffected()
+		if err != nil || count != 1 {
+			failed()
 			return
 		}
 	}
-	if count != 1 {
-		writeAdminError(w, 404, "not_found", "Key was not found.")
+	expectedKey, err := readKey()
+	if err != nil || !expectedKey.revoked.Valid {
+		failed()
+		return
+	}
+	preservedKey := expectedKey
+	preservedKey.revoked, preservedKey.revokedType = beforeKey.revoked, beforeKey.revokedType
+	if preservedKey != beforeKey || (beforeKey.revoked.Valid && (expectedKey.revoked != beforeKey.revoked || expectedKey.revokedType != beforeKey.revokedType)) {
+		failed()
+		return
+	}
+	if !beforeKey.revoked.Valid {
+		if _, err := parseTime(expectedKey.revoked.String); err != nil || expectedKey.revokedType != "text" {
+			failed()
+			return
+		}
+	}
+	expectedSlot, found, err := readSlot()
+	if err != nil || found != hasSlot {
+		failed()
+		return
+	}
+	wantedSlot := beforeSlot
+	if cancelSlot {
+		wantedSlot.state, wantedSlot.fingerprint = "cancelled", ""
+		wantedSlot.employeeRevision, wantedSlot.keyRevision = sql.NullInt64{}, sql.NullInt64{}
+		wantedSlot.governanceRevision, wantedSlot.budgetRevision = sql.NullInt64{}, sql.NullInt64{}
+		wantedSlot.cancelled = expectedSlot.cancelled
+		if _, err := parseTime(expectedSlot.cancelled.String); err != nil || !expectedSlot.cancelled.Valid {
+			failed()
+			return
+		}
+	}
+	if expectedSlot != wantedSlot {
+		failed()
+		return
+	}
+	if transition {
+		var previousAuditRow int64
+		if err := tx.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(rowid),0) FROM account_lifecycle_audit`).Scan(&previousAuditRow); err != nil {
+			failed()
+			return
+		}
+		if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "access_key.revoke", "access_key", keyID, "succeeded"); err != nil {
+			failed()
+			return
+		}
+		var total, added, retained int64
+		if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(CASE WHEN rowid>? THEN 1 END),COUNT(CASE WHEN rowid>? AND actor_id=? AND action='access_key.revoke' AND target_type='access_key' AND target_id=? AND result='succeeded' THEN 1 END) FROM account_lifecycle_audit`, previousAuditRow, previousAuditRow, session.AdminID, keyID).
+			Scan(&total, &added, &retained); err != nil || total > lifecycleAuditLimit || added != 1 || retained != 1 {
+			failed()
+			return
+		}
+	}
+	// Audit INSERT/retention triggers may undo a preceding mutation. No writes
+	// follow these final checks before the one Commit, including on a no-op retry.
+	finalKey, err := readKey()
+	if err != nil || finalKey != expectedKey {
+		failed()
+		return
+	}
+	finalSlot, found, err := readSlot()
+	if err != nil || found != hasSlot || finalSlot != expectedSlot {
+		failed()
 		return
 	}
 	if err := tx.Commit(); err != nil {
