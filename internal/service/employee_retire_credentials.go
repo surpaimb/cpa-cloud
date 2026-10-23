@@ -9,7 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
+	"reflect"
+	"sort"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -143,6 +146,10 @@ func retireEmployeeCredentialsTx(ctx context.Context, tx *sql.Tx, id string, rev
 	if current != revision {
 		return employeeRetirementView{}, "revision_conflict"
 	}
+	expected, err := employeeRetirementExpectedFacts(ctx, tx, id, revision, stamp)
+	if err != nil {
+		return failed()
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE employees SET status='disabled',revision=revision+1 WHERE id=? AND revision=?`, id, revision)
 	if err != nil || !employeeRetirementRows(result, 1) || hooks.step("employee", tx) != nil {
 		return failed()
@@ -233,6 +240,12 @@ func retireEmployeeCredentialsTx(ctx context.Context, tx *sql.Tx, id string, rev
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_lifecycle_audit WHERE rowid>? AND actor_id=? AND action='employee.retire_credentials' AND target_type='employee' AND target_id=? AND result='succeeded'`, previousAuditRow, actor, id).Scan(&retained); err != nil || retained != 1 {
 		return failed()
 	}
+	actual, err := employeeRetirementReadFacts(ctx, tx)
+	if err != nil || !reflect.DeepEqual(expected, actual) {
+		return failed()
+	}
+	// Only read-only confirmation follows the last mutable hook; the caller's
+	// original sole Commit and its uncertain-result advisory wake are unchanged.
 	return employeeRetirementView{ID: id, Status: "disabled", Revision: revision + 1}, ""
 }
 
@@ -242,4 +255,244 @@ func employeeRetirementRows(result sql.Result, expected int64) bool {
 	}
 	count, err := result.RowsAffected()
 	return err == nil && count == expected
+}
+
+// Operation-private complete typed facts. No values leave this transaction or
+// enter logs/responses. The set is deliberately independent of target ownership.
+type employeeRetirementFactCell struct {
+	kind    byte
+	text    string
+	integer int64
+	real    uint64
+}
+
+type employeeRetirementFactTable struct {
+	name    string
+	columns []string
+	rows    [][]employeeRetirementFactCell
+}
+
+func employeeRetirementReadFacts(ctx context.Context, tx *sql.Tx) ([]employeeRetirementFactTable, error) {
+	failure := errors.New("employee retirement facts unavailable")
+	var facts []employeeRetirementFactTable
+	for _, name := range []string{
+		"employees", "access_keys", "employee_self_key_slots",
+		"employee_self_credentials", "employee_self_sessions", "employee_models",
+		"access_key_policies", "access_key_policy_protocols", "access_key_policy_models",
+		"access_key_policy_sources", "access_key_policy_source_cidrs",
+		"access_key_policy_account_groups", "access_key_policy_account_group_members",
+	} {
+		rows, err := tx.QueryContext(ctx, "SELECT * FROM "+name)
+		if err != nil {
+			return nil, failure
+		}
+		columns, err := rows.Columns()
+		if err != nil || len(columns) == 0 {
+			if rows.Close() != nil {
+				return nil, failure
+			}
+			return nil, failure
+		}
+		table := employeeRetirementFactTable{name: name, columns: append([]string{}, columns...), rows: make([][]employeeRetirementFactCell, 0)}
+		for rows.Next() {
+			values, targets := make([]any, len(columns)), make([]any, len(columns))
+			for i := range values {
+				targets[i] = &values[i]
+			}
+			if rows.Scan(targets...) != nil {
+				if rows.Close() != nil {
+					return nil, failure
+				}
+				return nil, failure
+			}
+			cells := make([]employeeRetirementFactCell, len(values))
+			for i, value := range values {
+				switch v := value.(type) {
+				case nil:
+					cells[i].kind = 'n'
+				case string:
+					cells[i] = employeeRetirementFactCell{kind: 't', text: v}
+				case int64:
+					cells[i] = employeeRetirementFactCell{kind: 'i', integer: v}
+				case float64:
+					cells[i] = employeeRetirementFactCell{kind: 'r', real: math.Float64bits(v)}
+				case []byte:
+					// Conversion owns a copy before Rows can reuse its BLOB buffer.
+					cells[i] = employeeRetirementFactCell{kind: 'b', text: string(v)}
+				default:
+					if rows.Close() != nil {
+						return nil, failure
+					}
+					return nil, failure
+				}
+			}
+			table.rows = append(table.rows, cells)
+		}
+		iterationErr, closeErr := rows.Err(), rows.Close()
+		if iterationErr != nil || closeErr != nil {
+			return nil, failure
+		}
+		facts = append(facts, table)
+	}
+	employeeRetirementSortFacts(facts)
+	return facts, nil
+}
+
+// Sort full rows by storage class and exact owned values, not SQLite affinity or
+// collation. Duplicate rows remain duplicates; neither hashes nor counts stand
+// in for the actual rows or column inventory.
+func employeeRetirementSortFacts(facts []employeeRetirementFactTable) {
+	for i := range facts {
+		rows := facts[i].rows
+		sort.Slice(rows, func(a, b int) bool {
+			for c, left := range rows[a] {
+				right := rows[b][c]
+				if left.kind != right.kind {
+					return left.kind < right.kind
+				}
+				if left.text != right.text {
+					return left.text < right.text
+				}
+				if left.integer != right.integer {
+					return left.integer < right.integer
+				}
+				if left.real != right.real {
+					return left.real < right.real
+				}
+			}
+			return false
+		})
+	}
+}
+
+func employeeRetirementFactColumns(table employeeRetirementFactTable, names ...string) ([]int, error) {
+	indexes := make([]int, len(names))
+	for i, name := range names {
+		indexes[i] = -1
+		for c, column := range table.columns {
+			if column == name {
+				if indexes[i] != -1 {
+					return nil, errors.New("employee retirement columns unavailable")
+				}
+				indexes[i] = c
+			}
+		}
+		if indexes[i] == -1 {
+			return nil, errors.New("employee retirement columns unavailable")
+		}
+	}
+	return indexes, nil
+}
+
+// Derive the only permitted transformation entirely from pre-write facts and
+// the supplied stamp. No observed write result is used as the expected state.
+func employeeRetirementExpectedFacts(ctx context.Context, tx *sql.Tx, id string, revision int64, stamp string) ([]employeeRetirementFactTable, error) {
+	facts, err := employeeRetirementReadFacts(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	failure := errors.New("employee retirement baseline invalid")
+	text := func(value string) employeeRetirementFactCell {
+		return employeeRetirementFactCell{kind: 't', text: value}
+	}
+	employeeColumns, err := employeeRetirementFactColumns(facts[0], "id", "status", "revision")
+	if err != nil {
+		return nil, err
+	}
+	targets := 0
+	for _, row := range facts[0].rows {
+		if row[employeeColumns[0]].kind == 't' && row[employeeColumns[0]].text == id {
+			if row[employeeColumns[1]].kind != 't' || row[employeeColumns[2]].kind != 'i' || row[employeeColumns[2]].integer != revision {
+				return nil, failure
+			}
+			targets++
+			row[employeeColumns[1]] = text("disabled")
+			row[employeeColumns[2]] = employeeRetirementFactCell{kind: 'i', integer: revision + 1}
+		}
+	}
+	if targets != 1 {
+		return nil, failure
+	}
+	keyColumns, err := employeeRetirementFactColumns(facts[1], "id", "employee_id", "revoked_at")
+	if err != nil {
+		return nil, err
+	}
+	owners := make(map[string]string)
+	for _, row := range facts[1].rows {
+		key, owner := row[keyColumns[0]], row[keyColumns[1]]
+		if key.kind != 't' || owner.kind != 't' || !validIdentifier(key.text, 128) {
+			return nil, failure
+		}
+		if _, duplicate := owners[key.text]; duplicate {
+			return nil, failure
+		}
+		owners[key.text] = owner.text
+		if owner.text != id {
+			continue
+		}
+		revoked := row[keyColumns[2]]
+		switch revoked.kind {
+		case 'n':
+			row[keyColumns[2]] = text(stamp)
+		case 't':
+			if _, err := parseTime(revoked.text); err != nil {
+				return nil, failure
+			}
+		default:
+			return nil, failure
+		}
+	}
+	slotColumns, err := employeeRetirementFactColumns(facts[2], "employee_id", "key_id", "state", "arm_fingerprint", "arm_employee_revision", "arm_key_policy_revision", "arm_governance_revision", "arm_budget_revision", "cancelled_at")
+	if err != nil {
+		return nil, err
+	}
+	related := 0
+	for _, row := range facts[2].rows {
+		owner, key := row[slotColumns[0]], row[slotColumns[1]]
+		if owner.kind != 't' || key.kind != 't' {
+			return nil, failure
+		}
+		keyOwner, exists := owners[key.text]
+		if owner.text != id && keyOwner != id {
+			continue
+		}
+		related++
+		if related > 1 || owner.text != id || !exists || keyOwner != id {
+			return nil, failure
+		}
+		state := row[slotColumns[2]]
+		if state.kind != 't' {
+			return nil, failure
+		}
+		switch state.text {
+		case "pending", "armed":
+			row[slotColumns[2]] = text("cancelled")
+			for _, column := range slotColumns[3:8] {
+				row[column] = employeeRetirementFactCell{kind: 'n'}
+			}
+			row[slotColumns[8]] = text(stamp)
+		case "issued", "cancelled":
+			// Lifetime tombstones, including history, remain byte-for-byte exact.
+		default:
+			return nil, failure
+		}
+	}
+	for _, i := range []int{3, 4} {
+		columns, err := employeeRetirementFactColumns(facts[i], "employee_id")
+		if err != nil {
+			return nil, err
+		}
+		retained := facts[i].rows[:0]
+		for _, row := range facts[i].rows {
+			if row[columns[0]].kind != 't' {
+				return nil, failure
+			}
+			if row[columns[0]].text != id {
+				retained = append(retained, row)
+			}
+		}
+		facts[i].rows = retained
+	}
+	employeeRetirementSortFacts(facts)
+	return facts, nil
 }
