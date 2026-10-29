@@ -757,3 +757,53 @@ Sub2API copying/porting. No strict clean-room claim. Sources are not acceptance:
 - [NIST SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final): GCM basis; this profile remains unvalidated.
 
 Document link/anchor/diff checks execute no acceptance vector.
+
+### W1P. Unauthenticated public-frame static source candidate
+
+This separately scoped candidate is SOURCE ONLY / ALL TESTS UNEXECUTED.
+Its sole format basis is [W1](#w1-version-and-canonical-encoding) and
+[W2](#w2-aead-nonce-ownership-and-bounds) at PR130
+ff6093ff5d4ef81a050725de86e4761612d74f4c. Only three paths may change:
+the new [frame module](../../desktop/employee-config-switcher/crates/employee-config-core/src/live/windows_preimage_frame.rs),
+its crate-private declaration in live/mod.rs, and this bounded appendix.
+W4 reader work, Cargo manifests/lock, dependencies, workflows and product
+callers remain frozen. No new production constructor or admission is wired.
+
+The logical interface is parse_untrusted_frame(&[u8]) ->
+Result<UntrustedFrame<'_>, FrameParseError>. It returns borrowed H/ciphertext/tag
+and explicitly untrusted public fields; errors contain only fixed categories.
+ReplacementTransactionId supplies only the nonzero-byte check. K is not R,
+so no RecoveryKeyReference, BackupKey, BackupReceipt or authorization is minted.
+No parser I/O, unsafe block, crypto, provider call, entropy, journal or
+untrusted-length allocation is introduced. B/T/M, SID/SD and decrypted payload
+semantics are outside this parser.
+
+payload_length means |P| = |ciphertext|, excluding the full 16-byte tag.
+The necessary four-byte LP(B) prefix gives a payload lower bound of 4; this
+does not establish a valid B or authenticated plaintext. The strict provider
+windows-dpapi-user/1 gives H=158 bytes; the general H limit stays 204.
+Payload <=4325380 and artifact <=4325600 bytes; use checked conversions/addition,
+bounded slices and exact final consumption. Accept only magic16/4/1/1,
+nonzero transaction, count 1..16, ordinal<count and big-endian nonce suffix
+equal to ordinal; all other header integers are little-endian. Reject unknown
+public profile/version/provider values, truncation, oversize and trailing data.
+The fixed header admits no optional extension; encrypted unknown fields cannot
+be inspected by framing. No journal match or nonce freshness is inferred.
+
+Thirteen inline tests are independently authored from a handwritten 182-byte
+public literal, never a product encoder. Its ciphertext/tag are dummy bytes,
+not an authenticated pre-image. Planned vectors cover borrowed views, every
+proper prefix, unknown headers/provider, transaction/count/ordinal, nonce
+endianness, min/max and u32-max lengths, global oversize and exact tail.
+Tampering K/B commitment/ciphertext/tag and repeating a frame may still parse;
+these explicit witnesses preserve the unauthenticated/stateless boundary.
+Only the literal fixture skips rustfmt reflow to retain reviewed byte offsets.
+
+This batch runs no formatter/compiler/build/test/product/CI and makes no PASS,
+race, AEAD, native identity or platform-acceptance claim. Future execution needs
+fresh E/F static review and separate authorization; existing three-platform
+core-test CI is only a planned gate, with actual source checkout and named
+tests to be verified then. No producer/nonce reservation, W4 proof, real
+restore/apply, persistent-Key, old C#9 closure or production GO follows.
+Prior STOP batches stay STOP. No archived implementation/tests are copied;
+this source is independently authored from this project's frozen contract.

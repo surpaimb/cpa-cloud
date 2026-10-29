@@ -12,5 +12,6 @@ pub mod recovery_key;
 pub mod replacement;
 pub mod residue;
 pub mod windows_dpapi;
+pub(crate) mod windows_preimage_frame;
 pub(crate) mod workspace_removal;
 pub(crate) mod workspace_retirement;
