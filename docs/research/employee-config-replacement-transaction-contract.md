@@ -551,3 +551,209 @@ write gate remain unresolved requirements.
 - [Linux `flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html)
 - [Linux `renameat2(2)`](https://man7.org/linux/man-pages/man2/renameat2.2.html)
 - [Linux `openat2(2)`](https://man7.org/linux/man-pages/man2/openat2.2.html)
+
+## Appendix: Windows pre-image and read-only reload candidate
+
+Status: specifications-only LOCAL DOC CANDIDATE, no implementation/test/E/F GO.
+Earlier scope/threat model/state machine, PR89 C#9 FAIL/0/15 and prior STOP
+history remain. Real apply, persistent-Key, B1a-C, three-platform acceptance
+and production stay NOT_READY/NO-GO.
+
+### W1. Version and canonical encoding
+
+The proposed Windows-only profile has 16-byte magic ASCII "CPA-WIN-PREIMG4"
+plus one NUL, pre-image version 4, platform 1 (Windows), algorithm 1
+(AES-256-GCM). Reject every other value, generic old v1/v2 and Linux pre-image
+v3; no migration, sniffing or downgrade. Its proposed journal binding is
+"windows-replacement"/1, a future contract identifier, not an implemented disk
+journal. Journal, pre-image, provider and wrapped-key-envelope versions are
+independent; an existing Linux journal is not this Windows journal.
+
+Unsigned integers are fixed-width little-endian except the nonce counter.
+LP(x) is u32 byte length plus x; no implicit padding/terminators/optional fields
+or trailing bytes. Constants are ASCII. Provider kind: 1..64 lowercase ASCII
+letters/digits/hyphens, alphanumeric ends. Leaf: LP(UTF-16LE), 1..255 code units,
+valid surrogate pairs. Reject NUL, separators, streams, dot/dot-dot, DOS/Win32
+reserved names/characters, trailing dot/space, absolute paths and aliases.
+No normalization/case/short-name substitution; native alias rejection is pending.
+
+Identity I is u64 VolumeSerialNumber plus full raw 16-byte FILE_ID_128 from an
+opened handle. Missing/all-zero IDs, omitted upper half, legacy 64-bit or
+path/hash substitutes are rejected. Comparison applies on one computer only.
+
+For the exact RecoveryKeyReference, opaque reference length 1..4096:
+
+    R = LP(provider_kind) || u32(provider_version) || LP(opaque_reference)
+    K = SHA-256(LP("CPA-WIN-KEYREF4") || R)
+
+Only windows-dpapi-user/version 1 is accepted. K commits the reference, but is
+no key/authorization. Keep R in private storage, not the clear header.
+
+Canonical target entry T, in order:
+
+    LP(leaf) || original I || u64(original_length)
+    || original_SHA256[32] || desired_SHA256[32] || u32(original_attributes)
+    || LP(owner_SID) || LP(self_relative_SD) || u16(SD_control) || u8(RM_control)
+
+SID is 8..68 bytes; complete SD is 20..65536 bytes; native validity is also
+required. Redundant SID/control/RM fields must match the SD. M is u32(count)
+followed by every T sorted lexicographically by UTF-16 code-unit values,
+without duplicate/native-equivalent leaves. Count is 1..16, M at most 2 MiB.
+Freeze/revalidate M before backup.
+
+Binding B, in order:
+
+    LP("CPA-WIN-BIND4") || nonzero_transaction_id[16]
+    || LP("windows-replacement") || u32(1)
+    || LP(provider_kind) || u32(provider_version) || K[32]
+    || root I || workspace I || u32(ordinal) || u32(count)
+    || SHA-256(M)[32] || T
+
+Ordinal is zero-based, less than count; T is that entry in M. B <=128 KiB.
+Expected B comes from a validated held-root-bound Windows journal, not backup
+assertions/loose strings. Its disk loader, authenticity/durability proof and
+production constructor are UNKNOWN/unimplemented; no receipt is supplied.
+
+### W2. AEAD, nonce ownership and bounds
+
+Use a fresh independent 32-byte transaction DEK only for this profile,
+AES-256-GCM, 12-byte nonce and full 16-byte tag. No compression, algorithm
+negotiation or derivation from employee credentials. Fix one freshly generated
+8-byte prefix per transaction; nonce is prefix || u32-big-endian(ordinal).
+At most 16 distinct ordinals/key; randomness excuses neither repeated DEKs nor
+repeated encryption at one key/ordinal.
+
+A future exclusive producer durably reserves transaction/reference/prefix/
+ordinal/B BEFORE its single AEAD invocation. Restart may reuse only identical
+complete durably bound ciphertext: no re-encryption, partial overwrite, changed
+prefix under uncertain reservation or non-use inferred from absence. Entropy/
+freshness failure or missing/partial/uncertain reservation/completion blocks.
+Reservation storage, transaction non-reuse and native crash proof are pending;
+the current provider does not supply them.
+
+    H = magic[16] || u32(4) || u32(1) || u32(1) || transaction_id[16]
+        || LP(provider_kind) || u32(provider_version) || K[32]
+        || u32(ordinal) || u32(count) || nonce[12]
+        || SHA-256(B)[32] || u32(payload_length)
+    P = LP(B) || original_file_bytes[original_length]
+    AAD = LP("CPA-WIN-PREIMAGE-AAD-v4") || H
+    file = H || AES-256-GCM-ciphertext(P, DEK, nonce, AAD) || tag[16]
+
+Transaction/reference, complete root/workspace/target identities, SID/SD,
+attributes, lengths, digests and target-set commitment are authenticated;
+sensitive metadata stays inside encrypted P. A header hash alone proves
+nothing. Release no plaintext until tag verification and byte-exact expected-B
+comparison succeed; recompute commitments and original-data SHA256.
+
+Original data: at most 4 MiB/file, 16 MiB/set. Payload: at most
+4 MiB + 128 KiB + 4 bytes; H: at most 204 bytes; artifact: at most
+4 MiB + 128 KiB + 4 + 204 + 16 bytes. Check exact length, all bounds and checked
+arithmetic before allocation/provider calls. Reject overflow, truncation,
+trailing bytes, unknown fields and inconsistent redundant lengths. Bound
+aggregate original-data buffering to 16 MiB and M to 2 MiB. No allocation from
+unchecked disk lengths or streaming unauthenticated plaintext.
+
+H must match journal transaction/reference/count/ordinal/reserved nonce and B
+commitment; reject every duplicated-field mismatch.
+
+### W3. Native security and durable preparation gates
+
+Capture owner SID/full self-relative SD from the original handle: owner/group,
+DACL/SACL state, all control/RM bits, ACL revisions, ACE types/flags/order/bytes.
+Validate offsets/bounds/coverage; reject malformed/unknown/unreadable/
+unrepresentable state. No SDDL/hash substitute, ACE sorting, ACL reconstruction,
+silent loss or privilege enabling. Backup objects' protected current-user-only
+DACL is separate from, and cannot replace, saved original security.
+
+Require the earlier owner-only protected DACL. Accept only file attribute 0x80
+(NORMAL alone) or 0x20 (ARCHIVE alone); reject every other value before backup,
+including readonly/reparse/compressed/encrypted/sparse/offline/recall/integrity/
+unknown flags. Ancestor directories need their own policy.
+
+Lossless full-SD/control/RM/ordered-ACE application/readback and same-identity
+reopen are REQUIRED NATIVE GATES, UNKNOWN/NOT_READY. API existence proves none.
+Reject states that cannot roundtrip exactly, without permission broadening or
+equivalence shortcuts. Required SACL access/directory flush may be unsupported.
+
+Retain root/workspace/parent handles; check every component without following
+reparse points, same volume, single-link regular files, exact entries and
+compatible locks. No unchecked absolute reopen. Create backup objects private,
+exclusive/no-replace. Journal full IDs/lengths/ciphertext digests; authenticated
+readback/exact-object reopen must agree. Names/content alone are insufficient.
+Hostile same-account writers stay outside scope.
+
+Producer order: key intent/availability; durable nonce reservation; private
+pending ciphertext; file flush; authenticated readback/ID comparison; no-replace
+publish; namespace/root flush; durable BackedUp for ALL targets before desired
+plaintext staging. Visible names/syscall success are not durability. Short
+write, interrupted publish, failed/unsupported flush, changed ID or uncertainty
+preserves evidence/blocks: no retry, delete-rename fallback or absence-as-success.
+Each filesystem needs native proof. Read-only reload cannot flush/repair/promote.
+
+### W4. Read-only reload and identity handoff
+
+Reload takes a validated journal and held root/workspace in the approved
+original machine/profile context. Open existing private objects only; check
+full IDs/sizes/DACLs/links/attributes/nofollow namespace, read bounded bytes.
+After public structural checks, call RecoveryKeyProvider::open EXACTLY ONCE
+for the exact transaction/full reference. No create/delete/unlock/prompt,
+provisioning/fallback, target write, stage/lock-file creation, journal append,
+ACL change or cleanup. A constructor/open creating directories/files/keys is
+unusable; the read-only adapter is unimplemented. OS-internal access-time/audit
+effects are not claimed absent.
+
+Recheck held/named backup/workspace IDs after AEAD/expected-B checks. Return
+bounded zeroizing pre-images, else none/preserve evidence. Reload obtains no
+Key/pre-image from target contents and grants no target-validation/recovery-
+admission receipt or CAS approval. Each recovery action must boundedly read
+the same controlled opened target and CAS-check journal digest/full ID/security.
+Same File ID/length with changed bytes: reject conflict, never overwrite.
+No implementation/host-safety claim.
+
+Original I is a compare-before-replace fact. Desired-stage I and rollback-stage
+I are new objects, distinct from original I and each other while bindings
+remain live. Durably record each stage's identity/digest/security before its
+replacement. Published must equal desired-stage I; Restored must equal
+rollback-stage I and original bytes/security/attributes, NOT obsolete original
+I. Earlier CommitPrepared/RollbackPrepared and all-target ordering remain.
+Reload creates no stage, publishes nothing and advances no state. Missing/
+third objects or external edits are conflicts, never overwritten.
+
+Require current-user DPAPI, never LOCAL_MACHINE. Its roaming exception means
+decryption is not original-host proof; FileIdInfo is not cross-machine proof.
+Reject imported/copied/moved workspaces or unknown host/profile continuity.
+That native gate is UNKNOWN; no hostname/registry/path authentication is invented.
+
+### W5. Planned public synthetic vectors: all UNEXECUTED
+
+Use public non-secret bytes/test-owned roots. No row is a measured PASS or real
+I/O fault injection; classification fixtures are separate from native failures.
+
+| Planned vector | Required result, still pending |
+| --- | --- |
+| Fresh/close/reopen | Same authenticated bytes/metadata/full IDs; zero application writes. |
+| Empty/nonempty files and two targets | Exact bytes, distinct per-key nonces, set bounds enforced. |
+| Published target followed by reload | Backup pre-image only; no target validation/recovery admission/CAS approval. |
+| Wrong transaction/key/reference/ordinal | Reject, no plaintext/create/delete/fallback. |
+| Tampered SID/DACL/control/ACE order/upper FileId half | Reject; no truncated identity or metadata shortcut. |
+| Truncation/oversize/trailing bytes/overflow | Reject before unchecked allocation/plaintext. |
+| Unknown format/journal/provider version or Linux v3 | Reject without migration/negotiation. |
+| Locked/missing provider or unknown host continuity | Preserve evidence; no bytes or repair. |
+| Reparse/alias/hardlink/attribute/object substitution or same-ID/length content edit | Recovery CAS rejects identity/security/digest conflicts on the same opened target. |
+| Publish/flush/reservation uncertain | Blocked; no re-encryption/retry/promotion/cleanup. |
+| Substituted stage or lossy SD roundtrip | Reject; Restored never matched to original identity alone. |
+
+OS identity/SD/durability/provider/concurrency/crash gates need implementation
+and separate E/F evidence; no persistent-Key/B1a-C/platform/production GO.
+
+### W6. Fixed public sources and provenance
+
+Independently authored encoding/bindings/vectors; no archived CPA/CLIProxyAPI/
+Sub2API copying/porting. No strict clean-room claim. Sources are not acceptance:
+
+- [Microsoft: Security Descriptor Operations](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-operations): handle/control APIs; no roundtrip proof.
+- [Microsoft: FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info): full volume/128-bit ID, one computer.
+- [Microsoft: CryptProtectData](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata): user/machine scope and roaming exception.
+- [NIST SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final): GCM basis; this profile remains unvalidated.
+
+Document link/anchor/diff checks execute no acceptance vector.
