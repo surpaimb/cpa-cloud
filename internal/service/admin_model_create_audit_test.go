@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -106,7 +109,7 @@ func (f *mcaFixture) facts(t *testing.T, db *sql.DB) mcaFacts {
 	}
 	return mcaFacts{
 		model:   mcaRows(t, db, "SELECT * FROM models WHERE id=?", mcaTarget),
-		audits:  mcaRows(t, db, "SELECT * FROM account_lifecycle_audit ORDER BY id"),
+		audits:  mcaRows(t, db, mcaP2AuditFactsQuery),
 		witness: mcaRows(t, db, "SELECT * FROM mca_witness ORDER BY rowid"),
 		peers:   peers,
 	}
@@ -629,6 +632,442 @@ func TestAdminModelCreateAuditStorageErrors(t *testing.T) {
 				t.Fatal("MCA_ABORT_CHANGED_FACTS")
 			}
 			f.finish(t)
+		})
+	}
+}
+
+// This selector is independent of the historical 23-case old oracle.
+func TestAdminModelCreateP2PrewriteOracle(t *testing.T) {
+	f := newMCAFixture(t)
+	if f.auditCount(t) != 0 {
+		t.Fatal("MCA_P2_INITIAL_BASELINE")
+	}
+	mcaExec(t, f.store.db, "CREATE TRIGGER mca_p2_prewrite AFTER INSERT ON models WHEN NEW.id='mca-target' BEGIN INSERT INTO account_lifecycle_audit(id,actor_id,action,target_type,target_id,result,occurred_at) VALUES('mca-p2-prewrite-extra','mca-p2-other','model.create','model','mca-peer','succeeded','2000-01-01T00:00:00Z'); END")
+	before := f.facts(t, f.store.db)
+	status, body, _ := f.post(t, f.want)
+	if os.Getenv("CPA_MCA_P2_PREWRITE_ORACLE") != "1" {
+		mcaError(t, status, body, http.StatusServiceUnavailable, "storage_unavailable")
+		if f.facts(t, f.store.db) != before {
+			t.Fatal("MCA_P2_REJECTED_FACTS_CHANGED")
+		}
+		f.finish(t)
+		return
+	}
+	f.checkView(t, status, body, f.want)
+	var extra int
+	if f.store.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM account_lifecycle_audit WHERE id='mca-p2-prewrite-extra' AND actor_id='mca-p2-other' AND action='model.create' AND target_type='model' AND target_id='mca-peer' AND result='succeeded' AND occurred_at='2000-01-01T00:00:00Z' AND typeof(rowid)='integer' AND typeof(id)='text' AND typeof(actor_id)='text' AND typeof(action)='text' AND typeof(target_type)='text' AND typeof(target_id)='text' AND typeof(result)='text' AND typeof(occurred_at)='text'`).Scan(&extra) != nil {
+		t.Fatal("MCA_P2_EXTRA_QUERY")
+	}
+	if extra != 1 || f.auditCount(t) != 2 || !f.matchingModel(t) || !f.currentAudit(t) || f.facts(t, f.store.db).peers != before.peers {
+		t.Fatal("MCA_P2_OLD_COUNTEREXAMPLE_MISSING")
+	}
+	f.finish(t)
+	if !f.removed {
+		t.Fatal("MCA_P2_OLD_CLEANUP_INCOMPLETE")
+	}
+	t.Fatal("MODEL_CREATE_P2_PREWRITE_OLD_FALSE_201")
+}
+
+const mcaP2AuditFactsQuery = `SELECT typeof(rowid),rowid,typeof(id),id,typeof(actor_id),actor_id,typeof(action),action,typeof(target_type),target_type,typeof(target_id),target_id,typeof(result),result,typeof(occurred_at),occurred_at FROM account_lifecycle_audit ORDER BY rowid`
+
+func mcaP2Insert(t *testing.T, db *sql.DB, values [7]string) {
+	t.Helper()
+	mcaExec(t, db, "INSERT INTO account_lifecycle_audit(id,actor_id,action,target_type,target_id,result,occurred_at) VALUES(?,?,?,?,?,?,?)", values[0], values[1], values[2], values[3], values[4], values[5], values[6])
+}
+
+func mcaP2SeedTotal(t *testing.T, f *mcaFixture, over bool) {
+	t.Helper()
+	tx, err := f.store.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal("MCA_P2_BYTE_SEED_BEGIN")
+	}
+	defer tx.Rollback()
+	for i := 0; i < 256; i++ {
+		values := [7]string{fmt.Sprintf("mca-seed-bytes-%04d", i), f.actor, strings.Repeat("a", 4096), strings.Repeat("t", 4096), strings.Repeat("u", 4096), "", "2000-01-01T00:00:00Z"}
+		fixed := 0
+		for _, value := range values {
+			fixed += len(value)
+		}
+		fill := 16384 - fixed
+		if fill < 0 || fill >= 4096 {
+			t.Fatal("MCA_P2_BYTE_SEED_BUDGET")
+		}
+		values[5] = strings.Repeat("r", fill)
+		if over && i == 255 {
+			values[5] += "x"
+		}
+		if _, err := tx.ExecContext(t.Context(), "INSERT INTO account_lifecycle_audit(id,actor_id,action,target_type,target_id,result,occurred_at) VALUES(?,?,?,?,?,?,?)", values[0], values[1], values[2], values[3], values[4], values[5], values[6]); err != nil {
+			t.Fatal("MCA_P2_BYTE_SEED_INSERT")
+		}
+	}
+	if tx.Commit() != nil {
+		t.Fatal("MCA_P2_BYTE_SEED_COMMIT")
+	}
+}
+
+func TestAdminModelCreateP2Positive(t *testing.T) {
+	for _, name := range []string{"empty", "one", "999", "1000", "transient_event", "identical_rowid_replacement"} {
+		t.Run(name, func(t *testing.T) {
+			f := newMCAFixture(t)
+			n := 0
+			switch name {
+			case "one", "identical_rowid_replacement":
+				n = 1
+			case "999":
+				n = 999
+			case "1000":
+				n = 1000
+			}
+			f.seed(t, n, false)
+			if name == "transient_event" {
+				mcaExec(t, f.store.db, "CREATE TRIGGER mca_p2_positive AFTER INSERT ON models WHEN NEW.id='mca-target' BEGIN INSERT INTO account_lifecycle_audit VALUES('mca-p2-transient','other','model.create','model','mca-peer','succeeded','2000-01-01T00:00:00Z'); DELETE FROM account_lifecycle_audit WHERE id='mca-p2-transient'; END")
+			}
+			if name == "identical_rowid_replacement" {
+				mcaExec(t, f.store.db, "CREATE TRIGGER mca_p2_positive AFTER INSERT ON models WHEN NEW.id='mca-target' BEGIN DELETE FROM account_lifecycle_audit WHERE id='mca-seed-0000'; INSERT INTO account_lifecycle_audit(rowid,id,actor_id,action,target_type,target_id,result,occurred_at) SELECT 1,'mca-seed-0000',id,'model.create','model','mca-target','succeeded','2000-01-01T00:00:00Z' FROM admins WHERE username='admin'; END")
+			}
+			priorQuery := "SELECT rowid,* FROM account_lifecycle_audit WHERE id LIKE 'mca-seed-%'"
+			if n == 1000 {
+				priorQuery += " AND id<>'mca-seed-0000'"
+			}
+			prior := mcaRows(t, f.store.db, priorQuery+" ORDER BY id")
+			before := f.facts(t, f.store.db)
+			status, body, _ := f.post(t, f.want)
+			f.checkView(t, status, body, f.want)
+			count := n + 1
+			if count > 1000 {
+				count = 1000
+			}
+			if !f.matchingModel(t) || !f.currentAudit(t) || f.auditCount(t) != count || f.facts(t, f.store.db).peers != before.peers || mcaRows(t, f.store.db, "SELECT rowid,* FROM account_lifecycle_audit WHERE id LIKE 'mca-seed-%' ORDER BY id") != prior {
+				t.Fatal("MCA_P2_POSITIVE_FACTS")
+			}
+			f.finish(t)
+		})
+	}
+}
+
+func TestAdminModelCreateP2CheckpointFaults(t *testing.T) {
+	cases := []struct{ name, trigger string }{
+		{"model_add_seeded", "CREATE TRIGGER mca_p2_fault AFTER INSERT ON models WHEN NEW.id='mca-target' BEGIN INSERT INTO account_lifecycle_audit VALUES('mca-p2-extra','other','model.create','model','mca-peer','succeeded','2000-01-01T00:00:00Z'); END"},
+		{"model_change_seed", "CREATE TRIGGER mca_p2_fault AFTER INSERT ON models WHEN NEW.id='mca-target' BEGIN UPDATE account_lifecycle_audit SET actor_id='changed' WHERE id='mca-seed-0000'; END"},
+		{"model_delete_seed", "CREATE TRIGGER mca_p2_fault AFTER INSERT ON models WHEN NEW.id='mca-target' BEGIN DELETE FROM account_lifecycle_audit WHERE id='mca-seed-0000'; END"},
+		{"model_rowid_reuse", "CREATE TRIGGER mca_p2_fault AFTER INSERT ON models WHEN NEW.id='mca-target' BEGIN DELETE FROM account_lifecycle_audit WHERE id='mca-seed-0000'; INSERT INTO account_lifecycle_audit(rowid,id,actor_id,action,target_type,target_id,result,occurred_at) VALUES(1,'mca-p2-replacement','other','model.create','model','mca-peer','succeeded','2000-01-01T00:00:00Z'); END"},
+		{"audit_remove_seed", "DELETE FROM account_lifecycle_audit WHERE id='mca-seed-0000';"},
+		{"audit_change_seed", "UPDATE account_lifecycle_audit SET result='changed' WHERE id='mca-seed-0000';"},
+		{"audit_rowid_reuse", "DELETE FROM account_lifecycle_audit WHERE id='mca-seed-0000'; INSERT INTO account_lifecycle_audit(rowid,id,actor_id,action,target_type,target_id,result,occurred_at) VALUES(1,'mca-p2-replacement','other','model.create','model','mca-peer','succeeded','2000-01-01T00:00:00Z');"},
+		{"audit_old_extra_trimmed", "INSERT INTO account_lifecycle_audit VALUES('mca-p2-old-extra','other','model.create','model','mca-peer','succeeded','1900-01-01T00:00:00Z');"},
+		{"trim_change_retained", "CREATE TRIGGER mca_p2_fault BEFORE DELETE ON account_lifecycle_audit WHEN OLD.id='mca-seed-0000' BEGIN UPDATE account_lifecycle_audit SET actor_id='changed' WHERE id='mca-seed-0001'; END"},
+		{"trim_add_old", "CREATE TRIGGER mca_p2_fault BEFORE DELETE ON account_lifecycle_audit WHEN OLD.id='mca-seed-0000' BEGIN INSERT INTO account_lifecycle_audit VALUES('mca-p2-trim-extra','other','model.create','model','mca-peer','succeeded','1900-01-01T00:00:00Z'); END"},
+		{"audit_blob_seed", "UPDATE account_lifecycle_audit SET actor_id=CAST(actor_id AS BLOB) WHERE id='mca-seed-0000';"},
+		{"baseline_overflow", ""},
+		{"baseline_overflow_duplicate", ""},
+		{"baseline_blob", ""},
+		{"baseline_field_oversize", ""},
+		{"baseline_total_oversize", ""},
+		{"pretrim_total_overflow", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMCAFixture(t)
+			n := 1
+			switch tc.name {
+			case "audit_old_extra_trimmed", "trim_change_retained", "trim_add_old":
+				n = 1000
+			case "baseline_overflow", "baseline_overflow_duplicate":
+				n = 1001
+			case "baseline_total_oversize", "pretrim_total_overflow":
+				n = 0
+			}
+			f.seed(t, n, false)
+			if tc.name == "baseline_total_oversize" || tc.name == "pretrim_total_overflow" {
+				mcaP2SeedTotal(t, f, tc.name == "baseline_total_oversize")
+			}
+			if tc.name == "baseline_blob" {
+				mcaExec(t, f.store.db, "UPDATE account_lifecycle_audit SET actor_id=CAST(actor_id AS BLOB)")
+			}
+			if tc.name == "baseline_field_oversize" {
+				mcaExec(t, f.store.db, "UPDATE account_lifecycle_audit SET action=?", strings.Repeat("x", 4097))
+			}
+			if strings.Contains(tc.name, "rowid_reuse") {
+				var rowid int64
+				if f.store.db.QueryRowContext(t.Context(), "SELECT rowid FROM account_lifecycle_audit WHERE id='mca-seed-0000'").Scan(&rowid) != nil || rowid != 1 {
+					t.Fatal("MCA_P2_ROWID_FIXTURE")
+				}
+			}
+			if tc.trigger != "" {
+				trigger := tc.trigger
+				if !strings.HasPrefix(trigger, "CREATE TRIGGER") {
+					trigger = "CREATE TRIGGER mca_p2_fault AFTER INSERT ON account_lifecycle_audit WHEN NEW.target_id='mca-target' AND NEW.id NOT LIKE 'mca-seed-%' BEGIN " + trigger + " END"
+				}
+				mcaExec(t, f.store.db, trigger)
+			}
+			before := f.facts(t, f.store.db)
+			input := f.want
+			if tc.name == "baseline_overflow_duplicate" {
+				input.ID = "mca-peer"
+			}
+			status, body, _ := f.post(t, input)
+			mcaError(t, status, body, http.StatusServiceUnavailable, "storage_unavailable")
+			if f.facts(t, f.store.db) != before {
+				t.Fatal("MCA_P2_CHECKPOINT_ROLLBACK_FACTS")
+			}
+			f.finish(t)
+		})
+	}
+}
+
+func TestAdminModelCreateP2ReaderBounds(t *testing.T) {
+	columns := [7]string{"id", "actor_id", "action", "target_type", "target_id", "result", "occurred_at"}
+	type boundsCase struct {
+		name, mode                 string
+		field, rows, cap, wantRows int
+		top, wantError             bool
+	}
+	cases := []boundsCase{
+		{name: "full_1000", rows: 1000, cap: 1000, wantRows: 1000},
+		{name: "full_1001_overflow", rows: 1001, cap: 1000, wantError: true},
+		{name: "pretrim_1001", rows: 1001, cap: 1001, wantRows: 1001},
+		{name: "pretrim_1002_overflow", rows: 1002, cap: 1001, wantError: true},
+	}
+	for i, column := range columns {
+		cases = append(cases,
+			boundsCase{name: column + "_at_limit", mode: "at", field: i, cap: 1000, wantRows: 1},
+			boundsCase{name: column + "_over_limit", mode: "over", field: i, cap: 1000, wantError: true},
+			boundsCase{name: column + "_blob", mode: "blob", field: i, cap: 1000, wantError: true})
+	}
+	cases = append(cases,
+		boundsCase{name: "id_null", mode: "null", cap: 1000, wantError: true},
+		boundsCase{name: "total_at_limit", mode: "total", cap: 1000, wantRows: 256},
+		boundsCase{name: "total_over_limit", mode: "total_over", cap: 1000, wantError: true},
+		boundsCase{name: "native_top_order", mode: "order", rows: 1001, cap: 1000, top: true, wantRows: 1000})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMCAFixture(t)
+			if tc.rows != 0 {
+				f.seed(t, tc.rows, false)
+			}
+			switch tc.mode {
+			case "at", "over", "blob", "null":
+				values := [7]string{"mca-p2-bound", f.actor, "model.create", "model", "mca-peer", "succeeded", "2000-01-01T00:00:00Z"}
+				if tc.mode == "at" || tc.mode == "over" {
+					size := 4096
+					if tc.mode == "over" {
+						size++
+					}
+					values[tc.field] = strings.Repeat("x", size)
+				}
+				mcaP2Insert(t, f.store.db, values)
+				if tc.mode == "blob" {
+					mcaExec(t, f.store.db, "UPDATE account_lifecycle_audit SET "+columns[tc.field]+"=CAST("+columns[tc.field]+" AS BLOB)")
+				}
+				if tc.mode == "null" {
+					mcaExec(t, f.store.db, "UPDATE account_lifecycle_audit SET id=NULL")
+				}
+			case "total", "total_over":
+				mcaP2SeedTotal(t, f, tc.mode == "total_over")
+			case "order":
+				for _, pair := range [][2]string{{"mca-seed-0000", "000-smallest"}, {"mca-seed-1000", "Ω-max"}, {"mca-seed-0999", "a-tie"}, {"mca-seed-0998", "Z-tie"}} {
+					mcaExec(t, f.store.db, "UPDATE account_lifecycle_audit SET id=? WHERE id=?", pair[1], pair[0])
+				}
+			}
+			before := f.facts(t, f.store.db)
+			tx, err := f.store.db.BeginTx(t.Context(), nil)
+			if err != nil {
+				t.Fatal("MCA_P2_READER_BEGIN")
+			}
+			snapshot, readErr := readModelCreateAuditSnapshot(t.Context(), tx, tc.cap, tc.top)
+			if tx.Rollback() != nil {
+				t.Fatal("MCA_P2_READER_ROLLBACK")
+			}
+			if tc.wantError {
+				if readErr == nil || snapshot != nil {
+					t.Fatal("MCA_P2_READER_ACCEPTED_INVALID")
+				}
+			} else {
+				if readErr != nil || len(snapshot) != tc.wantRows {
+					t.Fatal("MCA_P2_READER_REJECTED_VALID")
+				}
+				for _, row := range snapshot {
+					if row.RowIDType != "integer" || row.Types != [7]string{"text", "text", "text", "text", "text", "text", "text"} {
+						t.Fatal("MCA_P2_READER_TYPES")
+					}
+				}
+				if tc.top {
+					a, z := -1, -1
+					for i, row := range snapshot {
+						if row.Values[0] == "000-smallest" {
+							t.Fatal("MCA_P2_TOP_INCLUDED_OLDEST_ID")
+						}
+						if row.Values[0] == "a-tie" {
+							a = i
+						}
+						if row.Values[0] == "Z-tie" {
+							z = i
+						}
+					}
+					if snapshot[0].Values[0] != "Ω-max" || a < 0 || z < 0 || a >= z {
+						t.Fatal("MCA_P2_NATIVE_BINARY_ORDER")
+					}
+				}
+			}
+			if f.facts(t, f.store.db) != before {
+				t.Fatal("MCA_P2_READER_WROTE_FACTS")
+			}
+			f.finish(t)
+		})
+	}
+}
+
+var mcaP2ReaderBoundary = errors.New("mca-p2-controlled-reader-boundary")
+
+type mcaP2ReaderFault struct {
+	base       driver.Driver
+	target     int64
+	onClose    bool
+	queries    atomic.Int64
+	injected   atomic.Bool
+	unexpected atomic.Bool
+}
+
+func (d *mcaP2ReaderFault) Open(name string) (driver.Conn, error) {
+	c, err := d.base.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &mcaP2ReaderConn{Conn: c, owner: d}, nil
+}
+
+type mcaP2ReaderConn struct {
+	driver.Conn
+	owner *mcaP2ReaderFault
+}
+
+func (c *mcaP2ReaderConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if begin, ok := c.Conn.(driver.ConnBeginTx); ok {
+		return begin.BeginTx(ctx, opts)
+	}
+	return c.Conn.Begin()
+}
+
+func (c *mcaP2ReaderConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	q, ok := c.Conn.(driver.QueryerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	rows, err := q.QueryContext(ctx, query, args)
+	if err != nil {
+		c.owner.unexpected.Store(true)
+		return nil, err
+	}
+	if strings.HasPrefix(query, "SELECT typeof(rowid),rowid") && strings.Contains(query, "FROM account_lifecycle_audit") && c.owner.queries.Add(1) == c.owner.target {
+		return &mcaP2ReaderRows{Rows: rows, owner: c.owner}, nil
+	}
+	return rows, nil
+}
+
+type mcaP2ReaderRows struct {
+	driver.Rows
+	owner *mcaP2ReaderFault
+}
+
+func (r *mcaP2ReaderRows) Next(values []driver.Value) error {
+	if !r.owner.onClose {
+		r.owner.injected.Store(true)
+		return mcaP2ReaderBoundary
+	}
+	err := r.Rows.Next(values)
+	if err != nil && err != io.EOF {
+		r.owner.unexpected.Store(true)
+	}
+	return err
+}
+
+func (r *mcaP2ReaderRows) Close() error {
+	err := r.Rows.Close()
+	if err != nil {
+		r.owner.unexpected.Store(true)
+	}
+	if r.owner.onClose {
+		r.owner.injected.Store(true)
+		return errors.Join(err, mcaP2ReaderBoundary)
+	}
+	return err
+}
+
+func TestAdminModelCreateP2ReaderErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target int64
+		close  bool
+	}{{"metadata_next", 1, false}, {"metadata_close", 1, true}, {"values_next", 2, false}, {"values_close", 2, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bootstrap, err := openStore(dir)
+			if err != nil {
+				t.Fatal("MCA_P2_ERROR_BOOTSTRAP")
+			}
+			t.Cleanup(func() {
+				if bootstrap.close() != nil {
+					t.Error("MCA_P2_ERROR_BOOTSTRAP_CLOSE")
+				}
+			})
+			mcaP2Insert(t, bootstrap.db, [7]string{"mca-p2-unit", "actor", "model.create", "model", "target", "succeeded", "2000-01-01T00:00:00Z"})
+			before := mcaRows(t, bootstrap.db, mcaP2AuditFactsQuery)
+			owner := &mcaP2ReaderFault{base: bootstrap.db.Driver(), target: tc.target, onClose: tc.close}
+			if bootstrap.close() != nil {
+				t.Fatal("MCA_P2_ERROR_BOOTSTRAP_CLOSE")
+			}
+			name := "mca-p2-reader-" + tc.name
+			sql.Register(name, owner)
+			db, err := sql.Open(name, filepath.Join(dir, "cpa-cloud.db"))
+			if err != nil {
+				t.Fatal("MCA_P2_ERROR_OPEN")
+			}
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(1)
+			t.Cleanup(func() {
+				if db.Close() != nil {
+					t.Error("MCA_P2_ERROR_DB_CLOSE")
+				}
+			})
+			tx, err := db.BeginTx(t.Context(), nil)
+			if err != nil {
+				t.Fatal("MCA_P2_ERROR_BEGIN")
+			}
+			snapshot, readErr := readModelCreateAuditSnapshot(t.Context(), tx, 1000, false)
+			if tx.Rollback() != nil {
+				t.Fatal("MCA_P2_ERROR_ROLLBACK")
+			}
+			if snapshot != nil || !errors.Is(readErr, mcaP2ReaderBoundary) || !owner.injected.Load() || owner.unexpected.Load() {
+				t.Fatal("MCA_P2_CONTROLLED_READER_ERROR")
+			}
+			if db.Close() != nil {
+				t.Fatal("MCA_P2_ERROR_DB_CLOSE")
+			}
+			ro, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(dir, "cpa-cloud.db"))+"?mode=ro")
+			if err != nil {
+				t.Fatal("MCA_P2_ERROR_READONLY_OPEN")
+			}
+			t.Cleanup(func() {
+				if ro.Close() != nil {
+					t.Error("MCA_P2_ERROR_READONLY_CLOSE")
+				}
+			})
+			if mcaRows(t, ro, mcaP2AuditFactsQuery) != before {
+				t.Fatal("MCA_P2_ERROR_PERSISTENT_FACTS")
+			}
+			if ro.Close() != nil {
+				t.Fatal("MCA_P2_ERROR_READONLY_CLOSE")
+			}
+			rel, err := filepath.Rel(os.TempDir(), dir)
+			if err != nil || rel == "." || filepath.IsAbs(rel) || strings.HasPrefix(rel, "..") {
+				t.Fatal("MCA_P2_ERROR_REMOVE_SCOPE")
+			}
+			if os.RemoveAll(dir) != nil {
+				t.Fatal("MCA_P2_ERROR_REMOVE")
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatal("MCA_P2_ERROR_DIRECTORY_REMAINS")
+			}
 		})
 	}
 }
