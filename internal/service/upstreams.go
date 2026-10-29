@@ -476,7 +476,8 @@ func (a *App) createModel(w http.ResponseWriter, r *http.Request, session adminS
 		writeAdminError(w, 400, "invalid_request", "The model kind and wire protocol are incompatible.")
 		return
 	}
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO models(id,model_kind,upstream_id,upstream_model,wire_protocol,enabled,revision,archived,created_at) VALUES(?,?,?,?,?,?,1,0,?)`, input.ID, input.ModelKind, input.UpstreamID, input.UpstreamModel, wireProtocol, 1, utcNow())
+	modelTime := utcNow()
+	created, err := tx.ExecContext(r.Context(), `INSERT INTO models(id,model_kind,upstream_id,upstream_model,wire_protocol,enabled,revision,archived,created_at) VALUES(?,?,?,?,?,?,1,0,?)`, input.ID, input.ModelKind, input.UpstreamID, input.UpstreamModel, wireProtocol, 1, modelTime)
 	if err != nil {
 		if isConflict(err) {
 			writeAdminError(w, 409, "already_exists", "Model already exists.")
@@ -485,7 +486,51 @@ func (a *App) createModel(w http.ResponseWriter, r *http.Request, session adminS
 		}
 		return
 	}
-	if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "model.create", "model", input.ID, "succeeded"); err != nil || tx.Commit() != nil {
+	if affected, err := created.RowsAffected(); err != nil || affected != 1 {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	auditID, err := newID("aud")
+	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	var priorAuditRowID, existingAuditID int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(rowid),0),COUNT(CASE WHEN id=? THEN 1 END) FROM account_lifecycle_audit`, auditID).Scan(&priorAuditRowID, &existingAuditID); err != nil || existingAuditID != 0 {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	auditTime := utcNow()
+	audit, err := tx.ExecContext(r.Context(), `INSERT INTO account_lifecycle_audit(id,actor_id,action,target_type,target_id,result,occurred_at) VALUES(?,?,'model.create','model',?,'succeeded',?)`, auditID, session.AdminID, input.ID, auditTime)
+	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	if affected, err := audit.RowsAffected(); err != nil || affected != 1 {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM account_lifecycle_audit WHERE id IN (
+		SELECT id FROM account_lifecycle_audit ORDER BY occurred_at DESC,id DESC LIMIT -1 OFFSET ?
+	)`, lifecycleAuditLimit); err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	var totalAudit, newAudit, retainedAudit int
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(CASE WHEN rowid>? THEN 1 END),
+		COUNT(CASE WHEN rowid>? AND id=? AND actor_id=? AND action='model.create' AND target_type='model' AND target_id=? AND result='succeeded' AND occurred_at=? THEN 1 END)
+		FROM account_lifecycle_audit`, priorAuditRowID, priorAuditRowID, auditID, session.AdminID, input.ID, auditTime).Scan(&totalAudit, &newAudit, &retainedAudit); err != nil || totalAudit > lifecycleAuditLimit || newAudit != 1 || retainedAudit != 1 {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	// Retention and its triggers are the last writes. Re-read the entire intended
+	// model after them; an earlier INSERT result cannot establish these facts.
+	var matchingModel int
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM models WHERE id=? AND model_kind=? AND upstream_id=? AND upstream_model=? AND wire_protocol=? AND enabled=1 AND revision=1 AND archived=0 AND archived_at IS NULL AND created_at=?`, input.ID, input.ModelKind, input.UpstreamID, input.UpstreamModel, wireProtocol, modelTime).Scan(&matchingModel); err != nil || matchingModel != 1 {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	if tx.Commit() != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
