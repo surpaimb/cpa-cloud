@@ -1,17 +1,44 @@
 # Create-only lock observation contract after PR133's first red
 
 Status: **DOCS_ONLY_OBSERVATION_CONTRACT / NEW OBSERVATIONS UNEXECUTED**.
-This independently authored document is the sole new file in this local batch.
-It authorizes no fixture implementation, Rust invocation, old-case execution,
-production change, CI dispatch/rerun or remote transfer. Original E/F/D
-read-only review preferred a contract before the deferred two-file fixture.
+The initial docs-only local batch added only this independently authored file
+in commit d0d2b1a10690b2920d71e59c7ea4f54d79e5008d, then stopped before transfer.
+A separately authorized connector batch created Draft PR134, remote commit
+024e047626c588fa42e16e70875f03e340be1f79, sole parent PR133
+f9c22ad4e2d7936b70ee85fe1ed79b52d6d751db. Its complete candidate tree was
+41b1efeae72d9a9029b6422bcb54e37545eaa034 and original document blob was
+bdb3f2e090b3575037c330a82d639b8f514a8f62, mode 100644. Those historical batch
+boundaries and distinct local/remote metadata SHAs remain part of the record.
 
-The immediately preceding root dispatch script failed while parsing JavaScript
-backticks before actual task delivery or any write. That dispatch STOP remains
-history; this is a fresh batch, not completion of that failed dispatch. Earlier
+This fresh admission-contract revision changes only the same existing document.
+It authorizes no fixture implementation, Rust invocation, native actor or
+old-case execution, production change or CI dispatch/rerun. Its only conditional
+transport permission is the separately bounded same-PR connector fast-forward
+in section 7. Original E/F/D read-only review preferred a contract before the
+deferred two-file fixture; that fixture remains deferred.
+
+Before the initial document batch, a root dispatch script failed while parsing
+JavaScript backticks before actual task delivery or any write. That dispatch
+STOP remains history; neither the initial document nor this revision completes
+that stopped dispatch. Earlier
 implementation/read/identity/worktree STOPs and the body-only generic job-read
 tool STOP remain in [PR133's retained record](https://github.com/surpaimb/cpa-cloud/pull/133).
 This document changes neither that PR body nor any earlier PR.
+
+At the old PR134 head 024e047626c588fa42e16e70875f03e340be1f79, original F and
+a fresh independent E batch each completed formal pure read-only review with
+P1/P2/P3 = 0/0/0, only DOCS_ONLY_OBSERVATION_CONTRACT static narrow conclusions.
+E's earlier wide-output truncation STOP issued no conclusion and remains STOP.
+Subsequent D/F independent read-only pre-review identified future admission
+gaps addressed below; it supplied neither execution authority nor a root cause.
+E's later official-Rust-document tool-error batch also stopped without a formal
+new conclusion. That separate E STOP is retained; this revision does not
+retroactively complete either stopped E batch or claim a new formal E/F result.
+
+PR134's existing 6525-character body is intentionally not edited by this
+revision. Its old-head terminal facts are history, not CI or review evidence
+for a changed head. Root must freshly pin natural CI and arrange original E/F
+new independent formal same-head review after any authorized head update.
 
 ## 1. Exact historical evidence and source boundary
 
@@ -198,12 +225,44 @@ known-holder same-object control, missing required FD/object evidence makes
 that control incomplete, not a PASS. The controller must not search for or
 kill unrelated host holders.
 
-These records may require a test-only harness/observer that does not yet
-exist. Caller-only result inspection cannot distinguish all internal error
-sites or recover a descriptor already closed on return. If the necessary
-observation requires editing a production lock path, exposing a new API,
-reordering guard fields or altering lifetimes, STOP the fixture design for
-separate source review and authorization. This contract supplies none of it.
+### 5.1 Failed-open-attempt descriptor identity: future borrowed observation
+
+The future test-only observer interface is NOT_READY and requires a separately
+reviewed fixture/source batch. Its logical record binds case/actor/stage,
+attempt open sequence, the borrowed real FD, held-object dev/inode, saved
+operation result/error and a separate observation outcome. This is an interface
+contract, not an implemented Rust API or a new production admission type.
+
+For a successful real open followed by a failed flock, the required identity
+must be observed through that exact FD after open and before the failure path
+closes it. A caller-side path stat after acquire/recover returns cannot prove
+that closed FD's object, even if its later inode happens to match. If open
+itself failed, record no opened FD and the saved open error; do not invent an
+identity or call metadata operations on an invalid descriptor.
+
+Immediately save the real flock return value and, on failure, its errno/typed
+Io error before any observer metadata read, clock call, logging or capture.
+Observation can itself change errno or fail. Record that observation error
+separately; it must not replace, clear, relabel or otherwise change the
+original returned TransactionError variant, Io kind or saved OS error.
+Missing/failed identity observation makes the control incomplete/STOP, not a
+different production result and not a reason to repeat the operation.
+
+The observer may only borrow within the real FD's existing lifetime. No dup,
+extra diagnostic open/flock/unlock, descriptor inheritance, ownership escape,
+extra lock guard, blocking barrier/log write at the observation point or
+extension of the FD/guard/lock lifetime is authorized. Preserve _process/_file
+guard field order, acquisition/drop scope and the original return decision.
+Do not use a saved errno from a successful operation as a failure result.
+Instrumentation's influence on scheduling is not proven absent and cannot
+explain #410's historical timing.
+
+Caller-only inspection cannot supply all internal stages. If obtaining these
+receipts needs a production-path edit, new API, lifetime/guard change or
+test-only observation hook in the real path, stop for a fresh explicit source
+review and authorization before implementation. The observer/actor interface,
+native wiring and complete receipt proof remain NOT_READY; this document
+does not install the hook or authorize a fixture-bearing source PR.
 
 ## 6. Pre-frozen runner, command and single-execution envelope
 
@@ -219,7 +278,7 @@ Rust 1.90.0 baseline, no replacement toolchain or automatic installation.
 The top-level planned argv is frozen as follows, from the employee-config
 workspace in an approved detached source checkout:
 
-    PINNED_RUST_1_90_0_BIN/cargo test --locked --offline -p employee-config-core --lib live::engine::tests::create_only_lock_observation_v1 -- --exact --nocapture
+    PINNED_RUST_1_90_0_BIN/cargo test --locked --offline -p employee-config-core --lib live::engine::tests::create_only_lock_observation_v1 -- --ignored --exact --nocapture
 
 PINNED_RUST_1_90_0_BIN must be replaced in the reviewed manifest by an exact
 absolute existing binary path with its hash. The named observation test is
@@ -227,6 +286,76 @@ currently absent/unimplemented; this is not an executable command for today's
 tree. Freeze all actor argv, IPC protocol/version, source hashes, synthetic
 root owner markers and artifact paths in the later reviewed manifest. An
 unfilled pin blocks the run. No dependency download or toolchain fallback.
+
+### 6.1 Default-ignore gate and proof of exactly one actual execution
+
+Only the future new create_only_lock_observation_v1 fixture must be marked
+#[test] and #[ignore] by default, so ordinary full-suite CI does not execute
+its controlled actors. Do not add ignore to the old six malformed-journal
+cases, the payload/parser tests or any other existing assertion. The fixture
+must have no build-script, global initializer, non-ignored wrapper or other
+automatic path that starts its observation outside the ignored test body.
+
+The [official rustc test-harness documentation](https://doc.rust-lang.org/nightly/rustc/tests/index.html)
+describes default ignore, --ignored selection and full-path --exact matching.
+The [Cargo test reference](https://doc.rust-lang.org/cargo/commands/cargo-test.html)
+distinguishes Cargo options from harness arguments after --. These references
+are selection semantics, not proof of the pinned Rust 1.90 binary executing.
+The approved single command above must explicitly use both --ignored and
+--exact; a name match, test list or default ignored result is not execution.
+
+The same sole native invocation's complete raw receipts must establish:
+
+| Admission field | Required actual native result |
+| --- | --- |
+| Top-level target | the unique fully qualified live::engine::tests::create_only_lock_observation_v1 |
+| Started/executed | exactly one top-level test, with actual run evidence |
+| Native per-test result | the exact target passed once, not ignored or merely discovered |
+| Native summary | passed = 1, failed = 0, ignored = 0; record measured/filtered counts separately |
+| Case protocol | J01-J06 all present with complete required holder/contender/B/release/join/post-release events and FD/object bindings |
+| Envelope | native exit, complete dual-stream raw bytes/hashes, EOF, deadlines and cleanup receipts all bound to that invocation |
+
+For the frozen normal libtest output, require a unique running-one-test record,
+one exact-target ok result and the corresponding one-passed/zero-failed/
+zero-ignored summary. Bind the top-level harness PID and executable receipt;
+actor records/streams are separately identified and cannot impersonate a
+top-level libtest success. Extra/unassigned harness summaries or ambiguous
+actor/parent output make admission incomplete. Do not replace native counts
+with a fixture-authored success JSON or borrow counts from another invocation.
+
+Native exit 0 alone is insufficient: zero selected tests can still have a
+successful-looking result. Running zero tests, an ignored target, only matching
+or listing a name, absent per-case events, a missing/partial raw stream or
+unobserved exit is STOP, not a PASS. Do not change flags/filter or run again
+to repair that stopped attempt. The one-run budget is consumed; any later
+attempt needs a fresh explicitly bounded batch and review. No such execution
+has occurred in this documentation revision.
+
+### 6.2 Natural full-suite CI is not the controlled observation entry
+
+The frozen employee-config workflow selects pull_request changes under
+desktop/employee-config-switcher/**. An engine.rs source change therefore
+naturally runs the old full core suite in the core and platform jobs through
+cargo test --locked -p employee-config-core. It is not an observation-only
+entry. Default ignore prevents the new fixture's body running there; it does
+not prevent the existing old suite, or establish that #410 cannot recur.
+
+Do not modify workflow paths/jobs/commands, add ignore/skip/accept-WouldBlock
+to old cases, serialize the old suite or relax any assertion to bypass #410.
+Natural suite output is not the dedicated observation's one-run receipt.
+Source publication can itself trigger this full suite, independently of a
+later manually proposed observation command.
+
+Until an independently controlled execution entry, runner/image/tool pins,
+reviewed native actor/borrowed-observer interfaces, clock/deadline and full
+raw-receipt/cleanup protocol are frozen and separately authorized, all are
+NOT_READY: no fixture-bearing source PR and no actor/test execution is
+authorized. This document revision and its conditional docs-only transfer
+do not cross that gate. Root must assess any changed head's actual natural
+CI and new formal E/F review; old-head zero runs or static conclusions do
+not transfer to a new head.
+
+### 6.3 Single-execution resource limits remain frozen proposals
 
 - At most **one** top-level cargo compile/test invocation and one controller
   harness execution, plus only its frozen protocol actor instances. Actor entry
@@ -285,10 +414,31 @@ No AEAD/source/host proof, W3/W4, nonce/journal production capability, real
 configuration recovery or old failure closure follows. PR133 fixed-head CI,
 dynamic acceptance and production remain NO-GO; all PRs stay Draft.
 
-This one-file local batch permits only document-link/anchor and git diff/scope
-checks, followed by one local commit. Results and the resulting tree/blob are
-reported separately; no test PASS is asserted here. Stop before any push or
-remote PR. Any later connector-equivalent transfer, fixture implementation or
-single execution requires a fresh explicitly bounded batch and original
-independent review. First unexpected tool/check error stops this batch without
-hotfix, recovery/retry or a second commit.
+The initial one-file local batch permitted document-link/anchor and git
+diff/scope checks plus one local commit, then stopped before remote transfer.
+Its separately authorized connector batch subsequently created Draft PR134
+as recorded above. The later old-head E/F narrow reviews and retained E STOPs
+do not authorize fixture code or execution and are not new-head review evidence.
+
+This fresh revision permits only this document's admission-contract edits,
+document facts/links/anchors and single-file diff checks, then one local commit.
+No Rust, test, native actor, old case or manual CI is run. No other file,
+workflow, old PR or PR body may change; no test PASS or observed fix is claimed.
+
+A conditional same-PR GitHub connector transfer is allowed only after proving:
+the new local commit's parent is the pinned local d0d2b1a10690b2920d71e59c7ea4f54d79e5008d;
+its full parent tree equals remote head 024e047626c588fa42e16e70875f03e340be1f79's
+41b1efeae72d9a9029b6422bcb54e37545eaa034; remote PR134 remains open/Draft at
+that exact head, base f9c22ad4e2d7936b70ee85fe1ed79b52d6d751db and original body;
+and the new complete tree plus sole document blob/mode 100644 are identical
+between local and connector objects. Local/remote parent SHAs remain different.
+
+Only then may an equivalent remote commit use that exact old remote head as
+sole parent and update the existing PR134 branch once with expected-old-head
+lease and force=false. No new branch/PR, blind Git push, trust/credential change,
+reset, second local commit or body update is authorized. If any proof or lease
+cannot be guaranteed, stop and hand the preserved candidate/evidence to root.
+Root must freshly pin the changed head's natural CI and arrange original E/F
+new independent formal same-head review. All PRs remain Draft and production
+NO-GO. First unexpected tool/check error or scope drift stops without hotfix,
+recovery/retry or further mutation.
