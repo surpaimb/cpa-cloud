@@ -807,3 +807,73 @@ tests to be verified then. No producer/nonce reservation, W4 proof, real
 restore/apply, persistent-Key, old C#9 closure or production GO follows.
 Prior STOP batches stay STOP. No archived implementation/tests are copied;
 this source is independently authored from this project's frozen contract.
+
+### W2P. Private unauthenticated payload byte-check source candidate
+
+This is a fresh independent local SOURCE ONLY batch after the retained
+read-output, identity-collector and worktree-progress STOP batches. It does
+not resume those batches or change their evidence. The implementation base
+is local commit 651d4a482c85def7ca940242b2f3889929725af1, tree
+72c2ac152c39b62036249d55dee60c5c39e7376c. PR132 remote head
+1081e7c8c30f3ca875c66ce46ddfb986e18fd430 has the same tree, not the same
+commit metadata/parent. No remote transfer is authorized in this batch.
+
+Only four paths may change: the new private
+[payload module](../../desktop/employee-config-switcher/crates/employee-config-core/src/live/windows_preimage_payload.rs),
+its private declaration in live/mod.rs, this incremental appendix and the
+[source provenance](../../desktop/employee-config-switcher/PROVENANCE.md).
+The earlier frame parser, its thirteen tests, Cargo manifests/lock,
+dependencies, providers, backup, workflows and product callers stay frozen.
+
+The private logical interface is check_payload_bytes(UntrustedFrame,
+candidate_P, independent_expected_B, expected_original_length_u64,
+expected_original_SHA256) -> Result<(), fixed PayloadCheckError>.
+Success means only that the supplied bytes satisfy the checked relationships;
+it returns no bytes, authenticated type, key, receipt or restore/apply permit.
+The expected B is a separate caller input and is never learned from P.
+Its trusted production journal/source/constructor remains UNKNOWN.
+
+Check P = u32_little_endian(|B|) || B || original with exact expected-B equality,
+SHA-256(B) equal to the public header commitment, and exact original length
+and SHA-256. Cross-check raw-header and parsed payload lengths, ciphertext
+length and candidate length, and raw/parsed binding commitments. The fixed
+profile header is 158 bytes; B <=128 KiB, original <=4 MiB, P <=4325380,
+and the general frame bound remains 4325600. Use checked conversions/addition
+and bounded slices before hashing; reject truncation, tails, forged lengths,
+oversize and redundant-field conflicts without allocation from supplied lengths.
+
+This module neither decrypts nor checks a tag. It does not validate B/T/M
+grammar, journal ownership, other header/journal matches, nonce freshness,
+set-wide buffering or native identity/security/durability. It performs no I/O,
+provider call, entropy, reservation, encryption or plaintext release, and has
+no product caller. W3/W4 and actual restore/apply remain unimplemented here.
+Changing a tag may still pass this byte check: that is an explicit
+non-authentication witness, not successful tamper detection or AEAD evidence.
+
+Tests are authored before the checker from the project's frozen W1/W2
+contract and independent public synthetic input file SHA-256
+f2513d2a444c5f1129386bdad4a59a3183313801fe8a987dd3074311f8ad0b99.
+Embed B395, P402 and H158 as separate reviewed literals and original abc/3
+with its fixed SHA-256. Dummy ciphertext/tag supply only framing; no public
+DEK/nonce pair is encrypted again, and outside-repository Go Open evidence
+is not a Rust/product test. Negative cases include same-length wrong B,
+wrong original digest/length, truncation/tail, forged LP, each size bound,
+raw/parsed header conflicts and commitment mismatch. Include an accepted
+upper-size boundary and changed-tag witness. All tests are unconditional.
+
+Validation recorded for this local candidate: fixed Rust 1.90.0 rustfmt and
+full-workspace cargo fmt --all -- --check completed with exit 0. Static checks
+confirmed the separate frozen literals/digests, three new local document links,
+private declaration, no implementation allocation/I/O or additional imports,
+and unchanged original contract/provenance prefixes and old parser bytes.
+The first git diff --check returned 0; final scope/diff checks accompany the
+single local commit. These are formatting/static checks, not a Rust test PASS.
+There are 24 new unconditional test declarations; the old thirteen remain
+unchanged. link.exe is not available on the current PATH and the MSVC linkage
+prerequisite is not established. Cargo check/build, all 24 new tests, the old
+thirteen regressions, full core tests and race are NOT EXECUTED in this batch.
+Do not replace the toolchain, borrow old green CI or count static declarations
+or the outside-repository Go observations as executed Rust tests.
+Any later CI needs the changed head and its actual checkout/tests verified
+separately. Highest claim: BYTE_PAYLOAD_CHECK_SOURCE_ONLY.
+All prior STOP/FAIL records, Draft, real migration and production NO-GO remain.

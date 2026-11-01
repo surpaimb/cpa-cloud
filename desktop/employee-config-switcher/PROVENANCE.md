@@ -267,3 +267,24 @@ SHA-256
 every registry package in that locked workspace graph. Packaging remains
 disabled; any later distribution must also retain the applicable full license
 texts and notices.
+
+### Windows W2 payload byte-check source candidate (2026-11-01)
+
+The private live/windows_preimage_payload.rs and its inline tests are newly
+authored CPA source from the project's frozen PR130 W1/W2 contract
+ff6093ff5d4ef81a050725de86e4761612d74f4c, lines 562-657, and the local
+[W2P scope appendix](../../docs/research/employee-config-replacement-transaction-contract.md#w2p-private-unauthenticated-payload-byte-check-source-candidate).
+No archived implementation, external codec or Go verifier source was copied,
+translated or ported; this is not a strict clean-room claim.
+
+B395/P402/H158 and the abc original digest are independently frozen public
+synthetic data, input-file SHA-256
+f2513d2a444c5f1129386bdad4a59a3183313801fe8a987dd3074311f8ad0b99.
+Expected B and candidate P are separate literals. Ciphertext/tag are dummy
+bytes; SID/SD/IDs have no native validity claim. No DEK, AEAD backend,
+encryption or nonce reservation is used. Prior Node/Go observations are not
+Rust product tests and do not supply authentication to this byte checker.
+Only the already-declared sha2 0.10.9 dependency and test-only hex 0.4.3 are
+used, with their existing license notices retained; no dependency changes.
+The module returns unit/fixed errors only, is private and has no product
+caller. Source-only status grants no native, recovery, apply or production GO.
