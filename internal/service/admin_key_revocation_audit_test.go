@@ -12,10 +12,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -597,4 +601,471 @@ func TestAdminKeyRevocationAuditMetadataCanary(t *testing.T) {
 		}
 	}
 	f.reader(t, k.ID, f.actor)
+}
+
+// Independently authored from the 2026-11-06 PR136 E/F findings and CPA Cloud's
+// confirmation/audit contracts. These are synthetic owned SQLite/HTTP fixtures.
+type akrp2Event struct {
+	id, actor, action, kind, target, result, stamp string
+	rowid                                          int64
+}
+
+func akrp2Events(t *testing.T, db *sql.DB) []akrp2Event {
+	t.Helper()
+	rows, err := db.QueryContext(t.Context(), "SELECT id,actor_id,action,target_type,target_id,result,occurred_at,rowid FROM account_lifecycle_audit ORDER BY rowid")
+	if err != nil {
+		t.Fatal("AKRP2_EVENT_QUERY")
+	}
+	defer rows.Close()
+	events := []akrp2Event{}
+	for rows.Next() {
+		var e akrp2Event
+		if rows.Scan(&e.id, &e.actor, &e.action, &e.kind, &e.target, &e.result, &e.stamp, &e.rowid) != nil {
+			t.Fatal("AKRP2_EVENT_SCAN")
+		}
+		events = append(events, e)
+	}
+	rowErr, closeErr := rows.Err(), rows.Close()
+	if rowErr != nil || closeErr != nil {
+		t.Fatal("AKRP2_EVENT_EOF")
+	}
+	return events
+}
+
+func akrp2NewEvents(t *testing.T, f *adminKeyRevocationFixture, before []akrp2Event, count int) {
+	t.Helper()
+	after := akrp2Events(t, f.app.store.db)
+	if len(after) != len(before)+count || !reflect.DeepEqual(before, after[:len(before)]) {
+		t.Fatal("AKRP2_EVENT_DELTA")
+	}
+	var high int64
+	ids := map[string]bool{}
+	for _, e := range before {
+		ids[e.id] = true
+		if e.rowid > high {
+			high = e.rowid
+		}
+	}
+	for _, e := range after[len(before):] {
+		if ids[e.id] || e.id == "" || e.rowid <= high || e.actor != f.adminLogoutFixture.admin || e.action != "access_key.revoke" || e.kind != "access_key" || e.target != f.target.ID || e.result != "succeeded" {
+			t.Fatal("AKRP2_EVENT_IDENTITY")
+		}
+		if _, err := parseTime(e.stamp); err != nil {
+			t.Fatal("AKRP2_EVENT_TIME")
+		}
+		ids[e.id] = true
+	}
+}
+
+func akrp2Protected(facts map[string]string) map[string]string {
+	result := map[string]string{}
+	for k, v := range facts {
+		if k != "access_keys" && k != "employee_self_key_slots" && k != "account_lifecycle_audit" {
+			result[k] = v
+		}
+	}
+	return result
+}
+
+func TestAdminKeyRevocationAuditP2Windows(t *testing.T) {
+	old := os.Getenv("CPA_REVOKE_P2_OLD_ORACLE") == "1"
+	names := []string{"ordinary", "write_trigger_extra", "before_commit_delete", "retry_hook_changes"}
+	if old {
+		names = names[:3]
+	}
+	for _, name := range names {
+		expectedOld := false
+		passed := t.Run(name, func(t *testing.T) { expectedOld = akrp2Case(t, name, old) })
+		if !passed && !expectedOld {
+			t.Fatal("AKRP2_STOP_UNEXPECTED")
+		}
+	}
+}
+
+func akrp2Case(t *testing.T, name string, old bool) bool {
+	expectedOld := old && (name == "write_trigger_extra" || name == "before_commit_delete")
+	if expectedOld {
+		label := "REVOKE_P2_OLD_200_TWO_AUDITS"
+		if name == "before_commit_delete" {
+			label = "REVOKE_P2_OLD_200_WITHOUT_AUDIT"
+		}
+		// Registered before fixture cleanup: LIFO emits the expected label only
+		// after every original/reopened owner has closed without another failure.
+		t.Cleanup(func() {
+			if !t.Failed() {
+				t.Error(label)
+			}
+		})
+	}
+	modes := []string{"key"}
+	if name == "write_trigger_extra" {
+		modes = []string{"key", "slot"}
+	}
+	if name == "retry_hook_changes" {
+		modes = []string{"insert", "delete"}
+	}
+	for _, mode := range modes {
+		f := newAdminKeyRevocationFixture(t)
+		var version string
+		var fk int
+		if f.app.store.db.QueryRow("SELECT sqlite_version()").Scan(&version) != nil || version != "3.51.3" || f.app.store.db.QueryRow("PRAGMA foreign_keys").Scan(&fk) != nil || fk != 1 {
+			t.Fatal("AKRP2_NATIVE_SQLITE_PROFILE")
+		}
+		t.Log("AKRP2_SQLITE_VERSION=" + version)
+		if mode == "slot" {
+			adminAuditInstallSlot(t, &adminRevokeAuditFixture{app: f.app}, f.target.ID, "armed")
+		}
+		if name == "retry_hook_changes" {
+			f.assert200(f.admin(http.MethodPost, "/keys/"+f.target.ID+"/revoke", `{}`))
+		}
+		beforeEvents := akrp2Events(t, f.app.store.db)
+		var high int64
+		for _, e := range beforeEvents {
+			if e.rowid > high {
+				high = e.rowid
+			}
+			if e.id == "akrp2-extra" {
+				t.Fatal("AKRP2_EXTRA_PREEXISTS")
+			}
+		}
+		quote := func(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + "'" }
+		insert := "INSERT INTO account_lifecycle_audit(id,actor_id,action,target_type,target_id,result,occurred_at) VALUES('akrp2-extra'," + quote(f.adminLogoutFixture.admin) + ",'access_key.revoke','access_key'," + quote(f.target.ID) + ",'succeeded'," + quote(utcNow()) + ")"
+		if name == "write_trigger_extra" {
+			trigger := "CREATE TRIGGER akrp2_extra AFTER UPDATE OF revoked_at ON access_keys WHEN NEW.id=" + quote(f.target.ID) + " AND OLD.revoked_at IS NULL BEGIN " + insert + "; END"
+			if mode == "slot" {
+				trigger = "CREATE TRIGGER akrp2_extra AFTER UPDATE OF state ON employee_self_key_slots WHEN NEW.key_id=" + quote(f.target.ID) + " AND OLD.state='armed' AND NEW.state='cancelled' BEGIN " + insert + "; END"
+			}
+			f.exec(trigger)
+			var installed string
+			if f.app.store.db.QueryRow("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='akrp2_extra'").Scan(&installed) != nil || installed != trigger {
+				t.Fatal("AKRP2_TRIGGER_INSTALL")
+			}
+		}
+		before := adminAuditFacts(t, f.app.store.db)
+		controls := f.controls()
+		priorRevoked := f.revoked(f.target.ID)
+		var commits, notifications, hookCalls, hookRows atomic.Int32
+		var nativeError atomic.Bool
+		hooks := adminKeyRevocationHooks{
+			afterCommit: func(real error) error { commits.Add(1); nativeError.Store(real != nil); return real },
+			afterNotify: func() { notifications.Add(1) },
+		}
+		if name == "before_commit_delete" || name == "retry_hook_changes" {
+			hooks.beforeCommit = func(tx *sql.Tx) error {
+				hookCalls.Add(1)
+				var r sql.Result
+				var err error
+				if name == "retry_hook_changes" && mode == "insert" {
+					r, err = tx.ExecContext(t.Context(), insert)
+				} else {
+					minimum := high
+					if name == "retry_hook_changes" {
+						minimum = 0
+					}
+					r, err = tx.ExecContext(t.Context(), "DELETE FROM account_lifecycle_audit WHERE rowid>? AND actor_id=? AND action='access_key.revoke' AND target_type='access_key' AND target_id=?", minimum, f.adminLogoutFixture.admin, f.target.ID)
+				}
+				if err != nil {
+					return err
+				}
+				n, err := r.RowsAffected()
+				if err != nil || n != 1 {
+					return fmt.Errorf("AKRP2_HOOK_AFFECTED")
+				}
+				hookRows.Add(1)
+				return nil
+			}
+		}
+		f.setHooks(hooks)
+		response := f.admin(http.MethodPost, "/keys/"+f.target.ID+"/revoke", `{}`)
+		fault := name != "ordinary"
+		rejected := fault && !old
+		if rejected {
+			f.assert503(response)
+		} else {
+			f.assert200(response)
+		}
+		if (name == "before_commit_delete" || name == "retry_hook_changes") && (hookCalls.Load() != 1 || hookRows.Load() != 1) {
+			t.Fatal("AKRP2_LAST_HOOK_NOT_HIT")
+		}
+		if nativeError.Load() {
+			t.Fatal("AKRP2_UNEXPECTED_NATIVE_COMMIT_ERROR")
+		}
+		after := adminAuditFacts(t, f.app.store.db)
+		if rejected {
+			if commits.Load() != 0 || notifications.Load() != 0 || !reflect.DeepEqual(before, after) || f.revoked(f.target.ID) != priorRevoked {
+				t.Fatal("AKRP2_REJECTION_ROLLBACK")
+			}
+		} else {
+			if commits.Load() != 1 || notifications.Load() != 1 || !f.revoked(f.target.ID).Valid || !reflect.DeepEqual(akrp2Protected(before), akrp2Protected(after)) {
+				t.Fatal("AKRP2_COMMITTED_FACTS")
+			}
+			count := 1
+			if name == "write_trigger_extra" {
+				count = 2
+			}
+			if name == "before_commit_delete" {
+				count = 0
+			}
+			akrp2NewEvents(t, f, beforeEvents, count)
+			if mode == "slot" {
+				var state string
+				var cleared bool
+				if f.app.store.db.QueryRow("SELECT state,armed_at IS NULL FROM employee_self_key_slots WHERE key_id=?", f.target.ID).Scan(&state, &cleared) != nil || state != "cancelled" || !cleared {
+					t.Fatal("AKRP2_SLOT_COMMITTED")
+				}
+			}
+			if name == "ordinary" {
+				f.assert200(f.admin(http.MethodPost, "/keys/"+f.target.ID+"/revoke", `{}`))
+				if commits.Load() != 2 || notifications.Load() != 2 || !reflect.DeepEqual(after, adminAuditFacts(t, f.app.store.db)) {
+					t.Fatal("AKRP2_RETRY_ZERO_NEW")
+				}
+			}
+		}
+		f.assertControls(controls)
+		persisted := adminAuditFacts(t, f.app.store.db)
+		var reopened map[string]string
+		if name == "ordinary" || name == "write_trigger_extra" || name == "before_commit_delete" || name == "retry_hook_changes" {
+			reopened = akrp2ReopenFacts(t, f, persisted)
+		} else {
+			f.reopen()
+			reopened = adminAuditFacts(t, f.app.store.db)
+		}
+		if !reflect.DeepEqual(persisted, reopened) {
+			t.Fatal("AKRP2_REOPEN_FACTS")
+		}
+		f.assertControls(controls)
+	}
+	return expectedOld
+}
+
+// These observations retain the original complete typed-row facts.
+// Column summaries are sorted typed-value multisets, not row-identity traces.
+// The P2 transition and no-op post-Open checks share the independently observed
+// budget clock exception; every other typed cell still participates in full equality.
+type akrp2DiagnosticFacts struct {
+	facts       map[string]string
+	columns     map[string][]string
+	columnSHA   map[string][]string
+	rowCounts   map[string]int
+	rows        int
+	completeSHA string
+}
+
+func akrp2DiagnosticSnapshot(t *testing.T, db *sql.DB, facts map[string]string) akrp2DiagnosticFacts {
+	t.Helper()
+	result := akrp2DiagnosticFacts{facts: facts, columns: map[string][]string{}, columnSHA: map[string][]string{}, rowCounts: map[string]int{}}
+	for table, encoded := range facts {
+		rows, err := db.Query(`SELECT * FROM "` + strings.ReplaceAll(table, `"`, `""`) + `" LIMIT 0`)
+		if err != nil {
+			t.Fatal("AKRP2_DIAGNOSTIC_COLUMNS")
+		}
+		columns, columnsErr := rows.Columns()
+		closeErr := rows.Close()
+		if columnsErr != nil || closeErr != nil {
+			t.Fatal("AKRP2_DIAGNOSTIC_COLUMNS_CLOSE")
+		}
+		result.columns[table] = columns
+		var encodedRows []string
+		if json.Unmarshal([]byte(encoded), &encodedRows) != nil {
+			t.Fatal("AKRP2_DIAGNOSTIC_ROWS_DECODE")
+		}
+		result.rowCounts[table] = len(encodedRows)
+		result.rows += len(encodedRows)
+		values := make([][]string, len(columns))
+		for i := range values {
+			values[i] = []string{}
+		}
+		for _, encodedRow := range encodedRows {
+			var typed []json.RawMessage
+			if json.Unmarshal([]byte(encodedRow), &typed) != nil || len(typed) != 2*len(columns) {
+				t.Fatal("AKRP2_DIAGNOSTIC_TYPED_ROW")
+			}
+			for i := range columns {
+				pair, err := json.Marshal([2]json.RawMessage{typed[2*i], typed[2*i+1]})
+				if err != nil {
+					t.Fatal("AKRP2_DIAGNOSTIC_COLUMN_ENCODE")
+				}
+				values[i] = append(values[i], string(pair))
+			}
+		}
+		for _, column := range values {
+			sort.Strings(column)
+			encodedColumn, err := json.Marshal(column)
+			if err != nil {
+				t.Fatal("AKRP2_DIAGNOSTIC_COLUMN_SUMMARY")
+			}
+			digest := sha256.Sum256(encodedColumn)
+			result.columnSHA[table] = append(result.columnSHA[table], hex.EncodeToString(digest[:]))
+		}
+	}
+	encoded, err := json.Marshal(facts)
+	if err != nil {
+		t.Fatal("AKRP2_DIAGNOSTIC_SNAPSHOT_SUMMARY")
+	}
+	digest := sha256.Sum256(encoded)
+	result.completeSHA = hex.EncodeToString(digest[:])
+	return result
+}
+
+func akrp2DiagnosticDifference(t *testing.T, stage string, before, after akrp2DiagnosticFacts) {
+	t.Helper()
+	tables := map[string]bool{}
+	for table := range before.facts {
+		tables[table] = true
+	}
+	for table := range after.facts {
+		tables[table] = true
+	}
+	ordered := make([]string, 0, len(tables))
+	for table := range tables {
+		ordered = append(ordered, table)
+	}
+	sort.Strings(ordered)
+	changed := 0
+	for _, table := range ordered {
+		prior, priorExists := before.facts[table]
+		next, nextExists := after.facts[table]
+		if priorExists == nextExists && prior == next && reflect.DeepEqual(before.columns[table], after.columns[table]) {
+			continue
+		}
+		changed++
+		columns := []string{}
+		if reflect.DeepEqual(before.columns[table], after.columns[table]) {
+			for i, column := range before.columns[table] {
+				if before.columnSHA[table][i] != after.columnSHA[table][i] {
+					columns = append(columns, column)
+				}
+			}
+		}
+		priorSHA, nextSHA := sha256.Sum256([]byte(prior)), sha256.Sum256([]byte(next))
+		encodedColumns, err := json.Marshal(columns)
+		if err != nil {
+			t.Fatal("AKRP2_DIAGNOSTIC_CHANGED_COLUMNS")
+		}
+		t.Logf("AKRP2_DIAGNOSTIC_TABLE stage=%s table=%s before_exists=%t after_exists=%t before_rows=%d after_rows=%d columns=%s column_basis=typed_multiset schema_equal=%t before_sha256=%x after_sha256=%x", stage, table, priorExists, nextExists, before.rowCounts[table], after.rowCounts[table], encodedColumns, reflect.DeepEqual(before.columns[table], after.columns[table]), priorSHA, nextSHA)
+	}
+	t.Logf("AKRP2_DIAGNOSTIC_STAGE stage=%s changed_tables=%d before_tables=%d after_tables=%d before_rows=%d after_rows=%d before_sha256=%s after_sha256=%s", stage, changed, len(before.facts), len(after.facts), before.rows, after.rows, before.completeSHA, after.completeSHA)
+}
+
+func akrp2ReopenFacts(t *testing.T, f *adminKeyRevocationFixture, persisted map[string]string) map[string]string {
+	t.Helper()
+	beforeClose := akrp2DiagnosticSnapshot(t, f.app.store.db, persisted)
+	if f.closeOwned() != nil {
+		t.Fatal("AKRP2_DIAGNOSTIC_CLOSE")
+	}
+	dbPath := filepath.Join(f.dir, "cpa-cloud.db")
+	info, err := os.Stat(dbPath)
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatal("AKRP2_DIAGNOSTIC_EXISTING_DB")
+	}
+	filePath := filepath.ToSlash(dbPath)
+	if !strings.HasPrefix(filePath, "/") {
+		filePath = "/" + filePath
+	}
+	query := url.Values{"mode": {"ro"}, "_pragma": {"query_only(1)", "foreign_keys(1)", "busy_timeout(5000)"}}
+	dsn := (&url.URL{Scheme: "file", Path: filePath, RawQuery: query.Encode()}).String()
+	readOnly, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal("AKRP2_DIAGNOSTIC_RO_OPEN")
+	}
+	readOnly.SetMaxOpenConns(1)
+	readOnly.SetMaxIdleConns(1)
+	roCloseAttempted := false
+	t.Cleanup(func() {
+		if !roCloseAttempted {
+			roCloseAttempted = true
+			if readOnly.Close() != nil {
+				t.Error("AKRP2_DIAGNOSTIC_RO_CLEANUP")
+			}
+		}
+	})
+	var queryOnly, foreignKeys int
+	if readOnly.QueryRow("PRAGMA query_only").Scan(&queryOnly) != nil || queryOnly != 1 || readOnly.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys) != nil || foreignKeys != 1 {
+		t.Fatal("AKRP2_DIAGNOSTIC_RO_PROFILE")
+	}
+	var databaseIndex int
+	var databaseName, openedPath string
+	if readOnly.QueryRow("PRAGMA database_list").Scan(&databaseIndex, &databaseName, &openedPath) != nil || databaseIndex != 0 || databaseName != "main" || !strings.EqualFold(filepath.Clean(openedPath), filepath.Clean(dbPath)) {
+		t.Fatal("AKRP2_DIAGNOSTIC_RO_IDENTITY")
+	}
+	afterClose := akrp2DiagnosticSnapshot(t, readOnly, adminAuditFacts(t, readOnly))
+	roCloseAttempted = true
+	if readOnly.Close() != nil {
+		t.Fatal("AKRP2_DIAGNOSTIC_RO_CLOSE")
+	}
+	akrp2DiagnosticDifference(t, "before_close_to_after_close_ro", beforeClose, afterClose)
+	if !reflect.DeepEqual(beforeClose.facts, afterClose.facts) || !reflect.DeepEqual(beforeClose.columns, afterClose.columns) {
+		t.Fatal("AKRP2_REOPEN_RO_FACTS")
+	}
+	// closeOwned is now a guarded no-op; the original reopen clears request hooks
+	// and performs exactly the same complete Open without creating another login.
+	f.reopen()
+	afterOpen := akrp2DiagnosticSnapshot(t, f.app.store.db, adminAuditFacts(t, f.app.store.db))
+	akrp2DiagnosticDifference(t, "after_close_ro_to_after_open", afterClose, afterOpen)
+	akrp2DiagnosticDifference(t, "before_close_to_after_open", beforeClose, afterOpen)
+	t.Log("AKRP2_DIAGNOSTIC_RO_VERIFIED mode_ro=true no_create=true query_only=true same_database=true closed=true")
+	return akrp2ReopenClockFacts(t, beforeClose, afterOpen)
+}
+
+func akrp2ReopenClockFacts(t *testing.T, before, after akrp2DiagnosticFacts) map[string]string {
+	t.Helper()
+	const table = "governance_budget_clock"
+	const layout = "2006-01-02T15:04:05.000000000Z"
+	if !reflect.DeepEqual(before.columns, after.columns) {
+		t.Fatal("AKRP2_REOPEN_COLUMNS")
+	}
+	clockColumn := -1
+	for i, column := range before.columns[table] {
+		if column == "last_effective_at" {
+			if clockColumn != -1 {
+				t.Fatal("AKRP2_REOPEN_CLOCK_COLUMN")
+			}
+			clockColumn = i
+		}
+	}
+	if clockColumn == -1 || before.rowCounts[table] != 1 || after.rowCounts[table] != 1 {
+		t.Fatal("AKRP2_REOPEN_CLOCK_SHAPE")
+	}
+	var priorRows, nextRows []string
+	if json.Unmarshal([]byte(before.facts[table]), &priorRows) != nil || json.Unmarshal([]byte(after.facts[table]), &nextRows) != nil || len(priorRows) != 1 || len(nextRows) != 1 {
+		t.Fatal("AKRP2_REOPEN_CLOCK_ROWS")
+	}
+	var priorTyped, nextTyped []json.RawMessage
+	if json.Unmarshal([]byte(priorRows[0]), &priorTyped) != nil || json.Unmarshal([]byte(nextRows[0]), &nextTyped) != nil || len(priorTyped) != 2*len(before.columns[table]) || len(nextTyped) != len(priorTyped) {
+		t.Fatal("AKRP2_REOPEN_CLOCK_TYPED_ROW")
+	}
+	typeIndex, valueIndex := 2*clockColumn, 2*clockColumn+1
+	var priorType, nextType, priorValue, nextValue string
+	if json.Unmarshal(priorTyped[typeIndex], &priorType) != nil || json.Unmarshal(nextTyped[typeIndex], &nextType) != nil || priorType != "string" || nextType != priorType || json.Unmarshal(priorTyped[valueIndex], &priorValue) != nil || json.Unmarshal(nextTyped[valueIndex], &nextValue) != nil {
+		t.Fatal("AKRP2_REOPEN_CLOCK_TYPE")
+	}
+	priorTime, priorErr := time.Parse(layout, priorValue)
+	nextTime, nextErr := time.Parse(layout, nextValue)
+	if priorErr != nil || nextErr != nil || priorTime.IsZero() || nextTime.IsZero() || priorTime.Year() < 1 || priorTime.Year() > 9999 || nextTime.Year() < 1 || nextTime.Year() > 9999 || priorTime.UTC().Format(layout) != priorValue || nextTime.UTC().Format(layout) != nextValue {
+		t.Fatal("AKRP2_REOPEN_CLOCK_INVALID")
+	}
+	if nextTime.Before(priorTime) {
+		t.Fatal("AKRP2_REOPEN_CLOCK_NONMONOTONIC")
+	}
+	// Restore only the validated clock value for the original full-map oracle.
+	// Its type, singleton identity, every other cell and every table remain exact.
+	nextTyped[valueIndex] = priorTyped[valueIndex]
+	normalizedRow, err := json.Marshal(nextTyped)
+	if err != nil {
+		t.Fatal("AKRP2_REOPEN_CLOCK_ROW_ENCODE")
+	}
+	normalizedTable, err := json.Marshal([]string{string(normalizedRow)})
+	if err != nil {
+		t.Fatal("AKRP2_REOPEN_CLOCK_TABLE_ENCODE")
+	}
+	normalized := make(map[string]string, len(after.facts))
+	for name, facts := range after.facts {
+		normalized[name] = facts
+	}
+	normalized[table] = string(normalizedTable)
+	if !reflect.DeepEqual(before.facts, normalized) {
+		t.Fatal("AKRP2_REOPEN_OTHER_FACTS")
+	}
+	t.Logf("AKRP2_REOPEN_CLOCK_VALIDATED valid=true monotonic=true changed=%t other_typed_facts_equal=true", !nextTime.Equal(priorTime))
+	return normalized
 }

@@ -204,6 +204,86 @@ const admissionBoundaryCall = "\t\t\tf := newSlog21Admitted(t, admissionBoundary
 const admissionInitShim = "\tsrc, admissionLabel := projectConstructorAdmissionFixture(src)\n\tif admissionLabel != \"\" {\n\t\treturn \"\", admissionLabel\n\t}\n"
 const admissionB1Shim = "\ts, admissionLabel := projectConstructorAdmissionB1Inputs(s)\n\tif admissionLabel != \"\" {\n\t\treturn admissionLabel\n\t}\n"
 
+// This integration adds exactly one Handler route to the pinned old App blob.
+// Older source oracles keep every original hash; only exact new shims are removed.
+const pr136ClientConfigurationRoute = "\tmux.HandleFunc(\"GET /v1/client-configuration\", a.clientConfiguration)\n"
+const pr136OwnerShim = "\tapp, routeLabel := pr136ProjectApp(app)\n\tif routeLabel != \"\" {\n\t\treturn routeLabel\n\t}\n"
+const pr136OriginShim = "\townerGuard, routeLabel := pr136RequireGuard(ownerGuard, \"owner\")\n\tif routeLabel != \"\" {\n\t\treturn routeLabel\n\t}\n"
+const pr136B1Shim = "\ts, routeLabel := pr136ProjectInputs(s)\n\tif routeLabel != \"\" {\n\t\treturn routeLabel\n\t}\n"
+
+func pr136ProjectApp(app string) (string, string) {
+	anchor := "\tmux.HandleFunc(\"GET /v1/models\", a.listModels)\n" + pr136ClientConfigurationRoute + "\tmux.HandleFunc(\"POST /v1/chat/completions\", a.chatCompletions)\n"
+	if strings.Count(app, pr136ClientConfigurationRoute) != 1 || strings.Count(app, "/v1/client-configuration") != 1 || strings.Count(app, anchor) != 1 {
+		return "", "CI_GUARD_PR136_ROUTE_SEAM"
+	}
+	old := strings.Replace(app, pr136ClientConfigurationRoute, "", 1)
+	if b1Blob(old) != "22444c3687485b71f58d9b367697c99acb9e7892" {
+		return "", "CI_GUARD_PR136_APP_BOUNDARY"
+	}
+	return old, ""
+}
+
+func pr136GuardSpec(kind string) (string, string, string) {
+	switch kind {
+	case "owner":
+		return "func eioAudit(app, worker, fixture string) string {\n", pr136OwnerShim, "3f309a171577922d18e8193f093326365fbc4e05"
+	case "origin":
+		return "func idocAudit(config, fixture, ownerGuard string) string {\n", pr136OriginShim, "10909de2a76080171f8053f9482ee3e1f2e75b1c"
+	case "b1":
+		return "func b1Audit(s map[string]string) string {\n", pr136B1Shim, "638dc621a91a5214346be3c517821cf2413226ee"
+	default:
+		return "", "", ""
+	}
+}
+
+func pr136ProjectGuard(src, kind string) (string, string) {
+	seam, shim, blob := pr136GuardSpec(kind)
+	if blob == "" {
+		return "", "CI_GUARD_PR136_GUARD_KIND"
+	}
+	// Nested historical audits may receive the already projected exact old blob.
+	// Actual current-source entry points separately require the one new shim.
+	if b1Blob(src) == blob {
+		return src, ""
+	}
+	if strings.Count(src, shim) != 1 || !strings.Contains(src, seam+shim) {
+		return "", "CI_GUARD_PR136_GUARD_SEAM"
+	}
+	old := strings.Replace(src, shim, "", 1)
+	if b1Blob(old) != blob {
+		return "", "CI_GUARD_PR136_GUARD_BOUNDARY"
+	}
+	return old, ""
+}
+
+func pr136RequireGuard(src, kind string) (string, string) {
+	seam, shim, blob := pr136GuardSpec(kind)
+	if blob == "" || strings.Count(src, shim) != 1 || !strings.Contains(src, seam+shim) {
+		return "", "CI_GUARD_PR136_CURRENT_GUARD_SEAM"
+	}
+	return pr136ProjectGuard(src, kind)
+}
+
+func pr136ProjectInputs(s map[string]string) (map[string]string, string) {
+	app, label := pr136ProjectApp(s["app.go"])
+	if label != "" {
+		return nil, label
+	}
+	copy := make(map[string]string, len(s))
+	for name, src := range s {
+		copy[name] = src
+	}
+	copy["app.go"] = app
+	for _, spec := range [][2]string{{"expiry_invocation_owner_20261022_test.go", "owner"}, {"initialize_driver_origin_caller_20261022_test.go", "origin"}} {
+		old, label := pr136RequireGuard(s[spec[0]], spec[1])
+		if label != "" {
+			return nil, label
+		}
+		copy[spec[0]] = old
+	}
+	return copy, ""
+}
+
 // Nested old audits need baseline acceptance, but the NEW top oracle separately
 // requires both actual wiring sites. Reverting both cannot make B2 green.
 func projectConstructorAdmissionFixture(src string) (string, string) {
@@ -240,7 +320,11 @@ func projectConstructorAdmissionB1Inputs(s map[string]string) (map[string]string
 	if label != "" {
 		return nil, label
 	}
-	initTest, label := admissionStripShim(s["initialize_driver_origin_caller_20261022_test.go"], "func projectInitializeOriginCallerFixture(src string) (string, string) {\n", admissionInitShim, "84d470203f9f5cbcadef2d96bc49b49ec9efbd17")
+	initSource, label := pr136ProjectGuard(s["initialize_driver_origin_caller_20261022_test.go"], "origin")
+	if label != "" {
+		return nil, label
+	}
+	initTest, label := admissionStripShim(initSource, "func projectInitializeOriginCallerFixture(src string) (string, string) {\n", admissionInitShim, "84d470203f9f5cbcadef2d96bc49b49ec9efbd17")
 	if label != "" {
 		return nil, label
 	}
@@ -292,7 +376,14 @@ func constructorAdmissionAudit(s map[string]string, self, b1Test string) string 
 	if _, label := projectConstructorAdmissionFixture(fixture); label != "" {
 		return label
 	}
-	initTest := s["initialize_driver_origin_caller_20261022_test.go"]
+	initTest, routeLabel := pr136RequireGuard(s["initialize_driver_origin_caller_20261022_test.go"], "origin")
+	if routeLabel != "" {
+		return routeLabel
+	}
+	b1Test, routeLabel = pr136RequireGuard(b1Test, "b1")
+	if routeLabel != "" {
+		return routeLabel
+	}
 	if strings.Count(initTest, admissionInitShim) != 1 || strings.Count(b1Test, admissionB1Shim) != 1 {
 		return "B2_ADMISSION_PROJECTION_MISSING"
 	}
@@ -315,6 +406,75 @@ func constructorAdmissionAudit(s map[string]string, self, b1Test string) string 
 		return "B2_ADMISSION_INHERITED_GUARD"
 	}
 	return ""
+}
+
+func TestPR136ClientConfigurationGuardProjection(t *testing.T) {
+	s := b1Sources(t)
+	app, worker, fixture := s["app.go"], s["subscription_expiry_worker.go"], s["self_logout_confirmation_20261021_test.go"]
+	self := b1Source(t, "self_logout_constructor_admission_20261022_test.go")
+	b1Test := b1Source(t, "initialize_first_open_entry_relay_20261022_test.go")
+	old, label := pr136ProjectApp(app)
+	if label != "" || b1Blob(old) != "22444c3687485b71f58d9b367697c99acb9e7892" || eioAudit(app, worker, fixture) != "" || idocAudit(s["config.go"], fixture, s["expiry_invocation_owner_20261022_test.go"]) != "" || b1Audit(s) != "" || constructorAdmissionAudit(s, self, b1Test) != "" {
+		t.Fatal("CI_GUARD_PR136_CURRENT_SOURCE")
+	}
+	models := "\tmux.HandleFunc(\"GET /v1/models\", a.listModels)\n"
+	for _, mutation := range []struct{ name, source string }{
+		{"route_missing", strings.Replace(app, pr136ClientConfigurationRoute, "", 1)},
+		{"route_duplicate", strings.Replace(app, pr136ClientConfigurationRoute, pr136ClientConfigurationRoute+pr136ClientConfigurationRoute, 1)},
+		{"route_method", strings.Replace(app, pr136ClientConfigurationRoute, strings.Replace(pr136ClientConfigurationRoute, "GET", "POST", 1), 1)},
+		{"route_handler", strings.Replace(app, pr136ClientConfigurationRoute, strings.Replace(pr136ClientConfigurationRoute, "a.clientConfiguration", "a.listModels", 1), 1)},
+		{"route_path", strings.Replace(app, pr136ClientConfigurationRoute, strings.Replace(pr136ClientConfigurationRoute, "client-configuration", "client-configuration-extra", 1), 1)},
+		{"route_position", strings.Replace(app, models+pr136ClientConfigurationRoute, pr136ClientConfigurationRoute+models, 1)},
+		{"route_extra", strings.Replace(app, pr136ClientConfigurationRoute, pr136ClientConfigurationRoute+"\tmux.HandleFunc(\"GET /v1/other-configuration\", a.clientConfiguration)\n", 1)},
+		{"unrelated_app_change", strings.Replace(app, "\topened := false", "\topened := true", 1)},
+	} {
+		if !t.Run(mutation.name, func(t *testing.T) {
+			mutant := b1Changed(s, "app.go", app, mutation.source)
+			_, label := pr136ProjectApp(mutation.source)
+			if mutation.source == app || label == "" || eioAudit(mutation.source, worker, fixture) == "" || b1Audit(mutant) == "" || constructorAdmissionAudit(mutant, self, b1Test) == "" {
+				t.Fatal("CI_GUARD_PR136_APP_MUTATION_ACCEPTED")
+			}
+		}) {
+			return
+		}
+	}
+	for _, spec := range []struct{ kind, file, pin string }{
+		{"owner", "expiry_invocation_owner_20261022_test.go", "82b469869a5ca87decd34e98f4acad477163c10da87cb638e783e66619876944"},
+		{"origin", "initialize_driver_origin_caller_20261022_test.go", "b6172898796aa43f62469f38c83e6f941af4e4006cd04b40a58ab3c44f9a33cd"},
+		{"b1", "initialize_first_open_entry_relay_20261022_test.go", "22444c3687485b71f58d9b367697c99acb9e7892"},
+	} {
+		src := b1Source(t, spec.file)
+		_, shim, blob := pr136GuardSpec(spec.kind)
+		projected, label := pr136RequireGuard(src, spec.kind)
+		if label != "" || b1Blob(projected) != blob {
+			t.Fatal("CI_GUARD_PR136_GUARD_PROJECTION")
+		}
+		for _, mutation := range []struct{ name, source string }{
+			{"missing", strings.Replace(src, shim, "", 1)},
+			{"duplicate", strings.Replace(src, shim, shim+shim, 1)},
+			{"changed", strings.Replace(src, shim, strings.Replace(shim, "routeLabel", "differentLabel", 1), 1)},
+			{"old_pin_refresh", strings.Replace(src, spec.pin, "changed", 1)},
+		} {
+			if !t.Run(spec.kind+"_"+mutation.name, func(t *testing.T) {
+				_, label := pr136RequireGuard(mutation.source, spec.kind)
+				if mutation.source == src || label == "" {
+					t.Fatal("CI_GUARD_PR136_GUARD_MUTATION_ACCEPTED")
+				}
+				if spec.kind == "b1" {
+					if constructorAdmissionAudit(s, self, mutation.source) == "" {
+						t.Fatal("CI_GUARD_PR136_B1_MUTATION_ACCEPTED")
+					}
+				} else {
+					mutant := b1Changed(s, spec.file, src, mutation.source)
+					if b1Audit(mutant) == "" || constructorAdmissionAudit(mutant, self, b1Test) == "" || spec.kind == "owner" && idocAudit(s["config.go"], fixture, mutation.source) == "" {
+						t.Fatal("CI_GUARD_PR136_INHERITED_MUTATION_ACCEPTED")
+					}
+				}
+			}) {
+				return
+			}
+		}
+	}
 }
 
 func TestSelfLogoutConstructorAdmission20261022SourceMutants(t *testing.T) {

@@ -61,6 +61,10 @@ func b1DeleteField(src, name, typ string) (string, bool) {
 }
 
 func b1Audit(s map[string]string) string {
+	s, routeLabel := pr136ProjectInputs(s)
+	if routeLabel != "" {
+		return routeLabel
+	}
 	s, admissionLabel := projectConstructorAdmissionB1Inputs(s)
 	if admissionLabel != "" {
 		return admissionLabel

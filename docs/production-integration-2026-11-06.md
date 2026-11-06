@@ -115,3 +115,77 @@ client is accessed. No real rotation, external anti-revival authority, Windows
 pre-image authenticated recovery/apply or employee provisioning is established.
 No release tooling was changed and no Ready, main merge, tag, package, release,
 deployment or old-CI rerun/dispatch is performed by this batch.
+
+## Independent revocation-audit P2 batch, 2026-11-06
+
+The preceding integration tree and its local passes remain historical facts.
+Remote head c30d1c4c156de651cda060d3144481bf9f3ceecb has subsequently received
+formal independent static E0/2/0 and F0/1/0 findings. Its audit baseline follows
+Key/slot writes, and its last writable beforeCommit seam follows audit confirmation.
+That old head is NO-GO; neither reviewer dynamically ran the counterexamples.
+
+This separately authorized three-file batch first freezes old-source bytes and
+tests two windows with synthetic owned native Windows SQLite and real authenticated
+HTTP: genuine Key/armed-slot write triggers add an extra valid audit; a private
+beforeCommit hook deletes the current audit. The latter is a private testing
+interface case, not an HTTP-injectable hook. Expected old200 labels are emitted
+only after durable facts, close/reopen equality and every fixture cleanup.
+
+The candidate must capture the retained-row baseline before any transactional
+writable seam or Key/slot write and confirm audits after the final writable hook.
+A transition requires one retained new real-actor event; a no-op retry requires
+zero new events and unchanged audit count. The original1000 trim and Commit/report/
+notification semantics remain. Rowid bounds concern currently retained rows,
+not a global immutable history or arbitrary hostile-schema execution trace.
+
+New baseline/candidate evidence is separate from all prior CI and old static red.
+No repair pass, new-head review, production readiness or release is claimed here
+before the new directed and regression gates actually finish. Issuance files and
+PR137 remain paused; no Ready/main merge/tag/release/deploy is authorized.
+
+## Independent local P2 product candidate, 2026-11-06
+
+All preceding STOPs, static findings and old-head CI failures remain historical.
+The old-product oracle raw SHA256 is
+`CAFCD2B538B3D05FB05B474BB01F07E407400EEBF191903980B4E38337AFA0D0`.
+It proves both Key/armed-slot trigger modes returned200 while adding two audits,
+and the private beforeCommit deletion returned200 without a new retained audit.
+Those expected labels were emitted only after their complete fact and owner
+cleanup gates. The hook remains a private test seam, not an HTTP-injectable input.
+
+This local candidate changes only revokeKey's audit confirmations: capture rowid
+and count before transaction-owned writable hooks or Key/slot writes; retain the
+one new real-administrator event's identity/time; then, after the last writable
+hook and full Key/slot confirmation, require exactly one retained matching new
+event for a transition or zero added events and unchanged count for a no-op.
+The shared lifecycle writer/1000-row trim and all other entry points are frozen.
+Explicit Commit success, notification ordering and post-real-Commit reported
+error503 semantics are unchanged; that503 never establishes rollback.
+
+The existing strict close/read-only/reopen fixture also covers no-op hook tests.
+It requires full typed equality after Close; complete Open permits only the
+previously observed valid monotonic budget-clock value change. No table or other
+typed cell is exempted. The one frozen offline Go1.26.9 Windows/native SQLite3.51.3
+serial, noncached, failfast gate completed in
+`integration-revoke-p2-product-20261106-2fe0b7a9`: 26 exact parent/child names each
+ran and passed once, native exit0/package PASS, 0fail/skip/missing/duplicate/extra,
+no old-oracle label or unexpected/cleanup output, empty stderr and complete raw EOF.
+Raw stdout SHA256:
+`C837852280D5D1FA58D0E2B7AB6A730A78DB52015F24E2CEF1EF878AED6FB2A3`.
+
+The selection covers ordinary and both new503 P2 negatives (both Key/armed-slot
+trigger modes), no-op hook insert/delete rejection with full rollback/no notify,
+existing retry/restart, all pending/armed/issued/cancelled slot states with and
+without previous revocation, retention999/1000/1001 and own-event eviction,
+CAS affected0, pre-Commit refusal, actual deferred-FK Commit rejection and the
+post-real-Commit reporting error. The last case still503/no-notify with committed
+revocation/audit facts; it is not described as rollback. Six P2 fixture paths also
+passed complete close/RO typed equality and the sole post-Open clock exception.
+
+Highest result: `LOCAL_P2_CANDIDATE_VALIDATED`. No source changed after this gate
+except this result text. The shared audit writer and other test/entry-point files
+remain unchanged. Root separately reports the old head's Code528 core/four-race
+failures and Employee synthetic-channel C failure: 35checks=26success+3conditional
+skipped+6failure. Skipped means unexecuted. Those old failures are not superseded
+by this local selected pass. No new commit/head, CI success, E/F GO or release is
+claimed; toolchain/source-guard and other old CI work remains a separate batch.

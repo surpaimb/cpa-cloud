@@ -93,6 +93,10 @@ func eioHashSource(src string) string {
 }
 
 func eioAudit(app, worker, fixture string) string {
+	app, routeLabel := pr136ProjectApp(app)
+	if routeLabel != "" {
+		return routeLabel
+	}
 	if !strings.Contains(app, "func Open(ctx context.Context, cfg Config) (*App, error) {\n\towner := beginExpiryInvocationOwner(ctx)\n\tctx, expiryObserver := takeExpiryOpenObserver(ctx)") {
 		return "FAPP_SOURCE_OPEN_ENTRY_MISSING"
 	}

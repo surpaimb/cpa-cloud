@@ -128,6 +128,10 @@ func projectInitializeOriginCallerFixture(src string) (string, string) {
 }
 
 func idocAudit(config, fixture, ownerGuard string) string {
+	ownerGuard, routeLabel := pr136RequireGuard(ownerGuard, "owner")
+	if routeLabel != "" {
+		return routeLabel
+	}
 	entry := "\tctx, initOrigin := takeInitializeOrigin(ctx)\n"
 	capture := "\tif initOrigin != nil && initOrigin.bindOriginalStore(s) {\n\t\tinitOrigin.captureFromStore(s, s.db.Driver())\n\t}\n"
 	prepared := "\tif initOrigin != nil {\n\t\tinitOrigin.nilResultPrepared()\n\t}\n"

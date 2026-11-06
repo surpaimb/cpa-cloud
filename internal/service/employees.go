@@ -673,6 +673,13 @@ func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, session adminSes
 		return
 	}
 	defer tx.Rollback()
+	// Freeze retained audit facts before any transaction-owned writable seam or
+	// Key/slot mutation, including write triggers reached by those mutations.
+	var previousAuditRow, previousAuditCount int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(rowid),0),COUNT(*) FROM account_lifecycle_audit`).Scan(&previousAuditRow, &previousAuditCount); err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	if hooks.afterBegin != nil && hooks.afterBegin(tx) != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
@@ -795,11 +802,13 @@ func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, session adminSes
 		failed()
 		return
 	}
+	wantedAuditCount := previousAuditCount
+	var ownAuditRow int64
+	var ownAuditID, ownAuditTime string
 	if transition {
-		var previousAuditRow int64
-		if err := tx.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(rowid),0) FROM account_lifecycle_audit`).Scan(&previousAuditRow); err != nil {
-			failed()
-			return
+		wantedAuditCount++
+		if wantedAuditCount > lifecycleAuditLimit {
+			wantedAuditCount = lifecycleAuditLimit
 		}
 		if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "access_key.revoke", "access_key", keyID, "succeeded"); err != nil {
 			failed()
@@ -807,7 +816,14 @@ func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, session adminSes
 		}
 		var total, added, retained int64
 		if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(CASE WHEN rowid>? THEN 1 END),COUNT(CASE WHEN rowid>? AND actor_id=? AND action='access_key.revoke' AND target_type='access_key' AND target_id=? AND result='succeeded' THEN 1 END) FROM account_lifecycle_audit`, previousAuditRow, previousAuditRow, session.AdminID, keyID).
-			Scan(&total, &added, &retained); err != nil || total > lifecycleAuditLimit || added != 1 || retained != 1 {
+			Scan(&total, &added, &retained); err != nil || total != wantedAuditCount || added != 1 || retained != 1 {
+			failed()
+			return
+		}
+		// Exactly one new row exists here. Retain its identity and timestamp so a
+		// later private hook cannot replace or change this operation's event.
+		if err := tx.QueryRowContext(r.Context(), `SELECT rowid,id,occurred_at FROM account_lifecycle_audit WHERE rowid>? AND actor_id=? AND action='access_key.revoke' AND target_type='access_key' AND target_id=? AND result='succeeded'`, previousAuditRow, session.AdminID, keyID).
+			Scan(&ownAuditRow, &ownAuditID, &ownAuditTime); err != nil || ownAuditRow <= previousAuditRow || ownAuditID == "" || !validAdminKeyRevocationTime(sql.NullString{String: ownAuditTime, Valid: true}) {
 			failed()
 			return
 		}
@@ -833,6 +849,26 @@ func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, session adminSes
 	if err != nil || !confirmAdminKeyRevocation(beforeState, finalState) {
 		failed()
 		return
+	}
+	// These audit confirmations follow the last writable hook and every final
+	// Key/slot check. A terminal retry must add zero rows and preserve the count.
+	wantedAdded := int64(0)
+	if transition {
+		wantedAdded = 1
+	}
+	var finalAuditCount, finalAdded, finalMatching int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(CASE WHEN rowid>? THEN 1 END),COUNT(CASE WHEN rowid>? AND actor_id=? AND action='access_key.revoke' AND target_type='access_key' AND target_id=? AND result='succeeded' THEN 1 END) FROM account_lifecycle_audit`, previousAuditRow, previousAuditRow, session.AdminID, keyID).
+		Scan(&finalAuditCount, &finalAdded, &finalMatching); err != nil || finalAuditCount != wantedAuditCount || finalAdded != wantedAdded || finalMatching != wantedAdded {
+		failed()
+		return
+	}
+	if transition {
+		var retainedOwn int64
+		if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM account_lifecycle_audit WHERE rowid=? AND id=? AND actor_id=? AND action='access_key.revoke' AND target_type='access_key' AND target_id=? AND result='succeeded' AND occurred_at=? AND typeof(occurred_at)='text'`, ownAuditRow, ownAuditID, session.AdminID, keyID, ownAuditTime).
+			Scan(&retainedOwn); err != nil || retainedOwn != 1 {
+			failed()
+			return
+		}
 	}
 	commitErr := tx.Commit()
 	if hooks.afterCommit != nil {
