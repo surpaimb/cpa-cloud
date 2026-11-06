@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/google-gemini/gemini-cli/v0.62.0/schemas/settings.schema.json",
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key"
+    },
+    "environmentVariableRedaction": {
+      "enabled": true,
+      "blocked": [
+        "GEMINI_API_KEY"
+      ]
+    }
+  },
+  "telemetry": {
+    "enabled": false,
+    "logPrompts": false
+  }
+}

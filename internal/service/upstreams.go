@@ -476,7 +476,13 @@ func (a *App) createModel(w http.ResponseWriter, r *http.Request, session adminS
 		writeAdminError(w, 400, "invalid_request", "The model kind and wire protocol are incompatible.")
 		return
 	}
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO models(id,model_kind,upstream_id,upstream_model,wire_protocol,enabled,revision,archived,created_at) VALUES(?,?,?,?,?,?,1,0,?)`, input.ID, input.ModelKind, input.UpstreamID, input.UpstreamModel, wireProtocol, 1, utcNow())
+	baseline, err := readModelCreateAuditSnapshot(r.Context(), tx, lifecycleAuditLimit, false)
+	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	modelTime := utcNow()
+	created, err := tx.ExecContext(r.Context(), `INSERT INTO models(id,model_kind,upstream_id,upstream_model,wire_protocol,enabled,revision,archived,created_at) VALUES(?,?,?,?,?,?,1,0,?)`, input.ID, input.ModelKind, input.UpstreamID, input.UpstreamModel, wireProtocol, 1, modelTime)
 	if err != nil {
 		if isConflict(err) {
 			writeAdminError(w, 409, "already_exists", "Model already exists.")
@@ -485,11 +491,250 @@ func (a *App) createModel(w http.ResponseWriter, r *http.Request, session adminS
 		}
 		return
 	}
-	if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "model.create", "model", input.ID, "succeeded"); err != nil || tx.Commit() != nil {
+	if affected, err := created.RowsAffected(); err != nil || affected != 1 {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	afterModel, err := readModelCreateAuditSnapshot(r.Context(), tx, lifecycleAuditLimit, false)
+	if err != nil || !modelCreateAuditSetsEqual(baseline, afterModel) {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	auditID, err := newID("aud")
+	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	for _, row := range baseline {
+		if row.Values[0] == auditID {
+			writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+			return
+		}
+	}
+	auditTime := utcNow()
+	expectedAudit := modelCreateAuditRow{RowIDType: "integer", Types: [7]string{"text", "text", "text", "text", "text", "text", "text"}, Values: [7]string{auditID, session.AdminID, "model.create", "model", input.ID, "succeeded", auditTime}}
+	audit, err := tx.ExecContext(r.Context(), `INSERT INTO account_lifecycle_audit(id,actor_id,action,target_type,target_id,result,occurred_at) VALUES(?,?,'model.create','model',?,'succeeded',?)`, auditID, session.AdminID, input.ID, auditTime)
+	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	if affected, err := audit.RowsAffected(); err != nil || affected != 1 {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	expectedAudit.RowID, err = audit.LastInsertId()
+	if err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	beforeTrim, err := readModelCreateAuditSnapshot(r.Context(), tx, lifecycleAuditLimit+1, false)
+	expectedAll := append(append(make([]modelCreateAuditRow, 0, len(baseline)+1), baseline...), expectedAudit)
+	if err != nil || !modelCreateAuditSetsEqual(expectedAll, beforeTrim) {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	// Derive E using the original SQLite ordering, while the already verified
+	// pre-trim state is unchanged. No Go date parsing or alternate collation.
+	expectedRetained, err := readModelCreateAuditSnapshot(r.Context(), tx, lifecycleAuditLimit, true)
+	expectedSize := len(beforeTrim)
+	if expectedSize > lifecycleAuditLimit {
+		expectedSize = lifecycleAuditLimit
+	}
+	if err != nil || len(expectedRetained) != expectedSize || !modelCreateAuditSubset(expectedRetained, beforeTrim) || modelCreateAuditOccurrences(expectedRetained, expectedAudit) != 1 {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM account_lifecycle_audit WHERE id IN (
+		SELECT id FROM account_lifecycle_audit ORDER BY occurred_at DESC,id DESC LIMIT -1 OFFSET ?
+	)`, lifecycleAuditLimit); err != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	afterTrim, err := readModelCreateAuditSnapshot(r.Context(), tx, lifecycleAuditLimit, false)
+	if err != nil || !modelCreateAuditSetsEqual(expectedRetained, afterTrim) || modelCreateAuditOccurrences(afterTrim, expectedAudit) != 1 {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	// Retention and its triggers are the last writes. Re-read the entire intended
+	// model after them; an earlier INSERT result cannot establish these facts.
+	var matchingModel int
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM models WHERE id=? AND model_kind=? AND upstream_id=? AND upstream_model=? AND wire_protocol=? AND enabled=1 AND revision=1 AND archived=0 AND archived_at IS NULL AND created_at=?`, input.ID, input.ModelKind, input.UpstreamID, input.UpstreamModel, wireProtocol, modelTime).Scan(&matchingModel); err != nil || matchingModel != 1 {
+		writeAdminError(w, 503, "storage_unavailable", "Storage is temporarily unavailable.")
+		return
+	}
+	if tx.Commit() != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
 	writeJSON(w, 201, modelView{ID: input.ID, ModelKind: input.ModelKind, UpstreamID: input.UpstreamID, UpstreamModel: input.UpstreamModel, WireProtocol: wireProtocol, Enabled: true, Revision: 1})
+}
+
+// Rowids are part of a checkpoint tuple, not proof of physical row identity.
+type modelCreateAuditRow struct {
+	RowIDType string
+	RowID     int64
+	Types     [7]string
+	Values    [7]string
+}
+
+type modelCreateAuditMetadata struct {
+	row   modelCreateAuditRow
+	bytes [7]int64
+}
+
+func modelCreateAuditQuery(top, values bool) string {
+	columns := [7]string{"id", "actor_id", "action", "target_type", "target_id", "result", "occurred_at"}
+	var query strings.Builder
+	query.WriteString("SELECT typeof(rowid),rowid")
+	for _, column := range columns {
+		query.WriteString(",typeof(" + column + "),COALESCE(length(CAST(" + column + " AS BLOB)),-1)")
+		if values {
+			query.WriteString(",CASE WHEN typeof(" + column + ")='text' AND length(CAST(" + column + " AS BLOB))<=4096 THEN " + column + " ELSE NULL END")
+		}
+	}
+	query.WriteString(" FROM account_lifecycle_audit ORDER BY ")
+	if top {
+		query.WriteString("occurred_at DESC,id DESC")
+	} else {
+		query.WriteString("rowid")
+	}
+	query.WriteString(" LIMIT ?")
+	return query.String()
+}
+
+func readModelCreateAuditMetadata(ctx context.Context, tx *sql.Tx, limit, maxRows int, top bool) (out []modelCreateAuditMetadata, err error) {
+	rows, err := tx.QueryContext(ctx, modelCreateAuditQuery(top, false), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err = errors.Join(err, rows.Err(), rows.Close())
+		if err != nil {
+			out = nil
+		}
+	}()
+	var total int64
+	for rows.Next() {
+		if len(out) >= maxRows {
+			return nil, errors.New("model creation audit row budget exceeded")
+		}
+		var meta modelCreateAuditMetadata
+		dest := []any{&meta.row.RowIDType, &meta.row.RowID}
+		for i := range meta.bytes {
+			dest = append(dest, &meta.row.Types[i], &meta.bytes[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		if meta.row.RowIDType != "integer" {
+			return nil, errors.New("model creation audit rowid type mismatch")
+		}
+		for i, size := range meta.bytes {
+			if meta.row.Types[i] != "text" || size < 0 || size > 4096 {
+				return nil, errors.New("model creation audit field type or budget mismatch")
+			}
+			total += size
+			if total > 4*1024*1024 {
+				return nil, errors.New("model creation audit snapshot byte budget exceeded")
+			}
+		}
+		out = append(out, meta)
+	}
+	return out, nil
+}
+
+func readModelCreateAuditValues(ctx context.Context, tx *sql.Tx, limit int, top bool, metadata []modelCreateAuditMetadata) (out []modelCreateAuditRow, err error) {
+	rows, err := tx.QueryContext(ctx, modelCreateAuditQuery(top, true), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err = errors.Join(err, rows.Err(), rows.Close())
+		if err != nil {
+			out = nil
+		}
+	}()
+	for rows.Next() {
+		if len(out) >= len(metadata) {
+			return nil, errors.New("model creation audit metadata row mismatch")
+		}
+		var meta modelCreateAuditMetadata
+		var values [7]any
+		dest := []any{&meta.row.RowIDType, &meta.row.RowID}
+		for i := range values {
+			dest = append(dest, &meta.row.Types[i], &meta.bytes[i], &values[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		if meta != metadata[len(out)] {
+			return nil, errors.New("model creation audit metadata changed")
+		}
+		for i, value := range values {
+			switch value := value.(type) {
+			case string:
+				meta.row.Values[i] = value
+			case []byte:
+				meta.row.Values[i] = string(value)
+			default:
+				return nil, errors.New("model creation audit text value mismatch")
+			}
+			if int64(len(meta.row.Values[i])) != meta.bytes[i] {
+				return nil, errors.New("model creation audit byte length mismatch")
+			}
+		}
+		out = append(out, meta.row)
+	}
+	if len(out) != len(metadata) {
+		return nil, errors.New("model creation audit metadata incomplete")
+	}
+	return out, nil
+}
+
+func readModelCreateAuditSnapshot(ctx context.Context, tx *sql.Tx, maxRows int, top bool) ([]modelCreateAuditRow, error) {
+	if maxRows < 0 || maxRows > lifecycleAuditLimit+1 || top && maxRows != lifecycleAuditLimit {
+		return nil, errors.New("invalid model creation audit snapshot budget")
+	}
+	limit := maxRows + 1
+	if top {
+		limit = maxRows
+	}
+	metadata, err := readModelCreateAuditMetadata(ctx, tx, limit, maxRows, top)
+	if err != nil {
+		return nil, err
+	}
+	return readModelCreateAuditValues(ctx, tx, limit, top, metadata)
+}
+
+func modelCreateAuditSubset(subset, all []modelCreateAuditRow) bool {
+	byRowID := make(map[int64]modelCreateAuditRow, len(all))
+	for _, row := range all {
+		if _, exists := byRowID[row.RowID]; exists {
+			return false
+		}
+		byRowID[row.RowID] = row
+	}
+	for _, row := range subset {
+		if expected, exists := byRowID[row.RowID]; !exists || expected != row {
+			return false
+		}
+		delete(byRowID, row.RowID)
+	}
+	return true
+}
+
+func modelCreateAuditSetsEqual(a, b []modelCreateAuditRow) bool {
+	return len(a) == len(b) && modelCreateAuditSubset(a, b)
+}
+
+func modelCreateAuditOccurrences(rows []modelCreateAuditRow, expected modelCreateAuditRow) int {
+	count := 0
+	for _, row := range rows {
+		if row == expected {
+			count++
+		}
+	}
+	return count
 }
 
 func validateEndpoint(ctx context.Context, raw string, allowLoopback bool) (string, error) {

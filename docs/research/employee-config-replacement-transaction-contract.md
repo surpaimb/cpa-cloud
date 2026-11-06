@@ -1,0 +1,879 @@
+# Employee configuration replacement transaction contract
+
+Status: security contract for a synthetic-root development preview; live writes
+remain disabled.
+
+This contract defines the minimum transaction that may eventually replace one
+or more existing employee-tool configuration files. It does not authorize the
+Tauri command to write a real client directory. The current implementation
+prepares and reloads encrypted rollback material for one existing Linux leaf,
+exercises single-leaf publication and rollback only behind a test-only
+synthetic-root approval, and persists a separate bounded Linux completion
+tombstone. Multi-target policy, native tool validation/locking, operating-
+system key custody, integrated cleanup and every production write path remain
+incomplete.
+
+## First-release local threat model
+
+The first release trusts processes running as the same logged-in operating-
+system account. A deliberately malicious same-account process that reads the
+employee Key from a native tool configuration, retains a pre-opened writer,
+ignores advisory locking, restores owner-write permission or actively swaps a
+directory entry is outside this contract. Administrator, root, kernel and OS
+compromise are also outside this contract.
+
+Different-account access, accidental concurrent switcher launches, ordinary
+overlapping edits, stale or replaced filesystem objects, crashes, restart and
+storage failures remain in scope. The transaction must still use private
+permissions or protected DACLs, stable directory handles and identities,
+compare-and-swap checks, compatible locks, atomic replacement, encrypted
+rollback material, durable recovery and a reviewed OS key provider with an
+explicit Key lifecycle. Every tool also needs fixed native acceptance and its
+own path, data-directory and lock semantics before real writes. This scope
+decision does not authorize the Tauri `apply_configuration` command or claim
+that any planned tool is ready for live mutation.
+
+## Scope and non-goals
+
+The first implementation is deliberately bounded to one canonical root, at
+most 16 existing regular files, 4 MiB per file and 16 MiB total plaintext. Every
+target must be owned by the current OS user, have one link, reside on the same
+volume as its transaction workspace and have private permissions. A transaction
+may modify only the exact target set recorded before its durable decision.
+
+The following are not part of this slice:
+
+- creating missing files or mixing create/delete/replace operations;
+- following symlinks, junctions, reparse points or mount changes;
+- replacing a file changed by another process after planning;
+- accepting group/world-readable Unix files, extended macOS ACL entries, or a
+  Windows owner/DACL that is not the current user-only policy;
+- storing a recovery key in a file, environment variable, command line,
+  journal, log, receipt or application database;
+- running against a real `HOME`, `CODEX_HOME`, `APPDATA`, `XDG_CONFIG_HOME` or
+  tool directory.
+
+## Required platform primitives
+
+All opens, publication and cleanup are relative to retained directory handles.
+The implementation must preserve the existing file's security metadata while
+ensuring that the resulting secret-bearing file remains private.
+
+- Linux uses `openat`/`fstatat`/`renameat2`-class descriptor-relative
+  operations. A live implementation must prove the exact atomic replacement
+  primitive on every supported filesystem. Falling back from a missing atomic
+  primitive to path-based remove-and-rename is forbidden.
+- macOS uses descriptor-relative opens and an atomic swap/replace primitive
+  whose behavior is covered by a fixed native test. Mode, owner and the complete
+  ACL/security metadata must be compared and preserved.
+- Windows opens every component without following reparse points, verifies the
+  current-user owner and protected owner-only DACL on the opened handles, and
+  uses a documented atomic replace primitive. The original security descriptor
+  is applied to the replacement and read back before success.
+
+If a platform or filesystem cannot provide the required primitive, replacement
+returns `unsupported_platform_or_filesystem` before backup or target mutation.
+The same-user Unix leaf-entry and pre-opened-writer races documented in
+[the write-safety gates](employee-config-switcher-security-gates.md) remain
+known limitations even if this synthetic state machine passes. Linux
+`unlinkat(..., AT_REMOVEDIR)` still resolves a leaf name at its own operation
+boundary, while `flock` is advisory; extra `fstat`/`openat2` checks or a
+quarantine rename only move, rather than close, the final same-UID exchange
+window. The first-release threat model explicitly accepts that limitation by
+trusting processes under the same login account; it does not claim that
+ordinary same-UID DAC authenticates one same-account process from another.
+Cross-account protection, accidental-concurrency locking and all identity/CAS
+checks remain mandatory. A later threat model that includes malicious
+same-account processes would require a separately owned broker/service or an
+equivalent mandatory kernel-enforced boundary.
+
+## Recovery-key custody interface
+
+Each transaction receives a fresh random 256-bit data-encryption key (DEK). The
+DEK is held in zeroizing memory and is never serialized in plaintext. Durable
+metadata contains only a random transaction identifier, a non-secret provider
+kind/version and a provider-specific opaque key reference or wrapped DEK. The
+recovery interface is logically:
+
+```text
+create(transaction_id) -> {key_reference, dek}
+open(transaction_id, key_reference) -> dek
+delete(transaction_id, key_reference)
+```
+
+`open` must work after process restart without reading target contents or
+contacting CPA Cloud. It must return exactly one of `available`, `locked`,
+`missing`, `wrong_identity`, `corrupt` or `unavailable`; none may silently
+generate a new key. Any result other than `available` preserves all transaction
+and target evidence, blocks new writes for that root and reports a redacted
+recovery-required condition.
+
+Planned platform providers are gated separately:
+
+- Windows: current-user DPAPI without `CRYPTPROTECT_LOCAL_MACHINE`; the wrapped
+  DEK may be stored beside the encrypted backup, but decryption must remain tied
+  to the same user credentials and normally the same machine.
+- macOS: a non-synchronizing Keychain generic-password item addressed by stable
+  service plus transaction attributes. Locked or unavailable Keychain state is
+  a recoverable stop, not a fallback to disk storage. The application must use
+  the Data Protection Keychain with a fixed dedicated access group and verify
+  its own signing entitlement before the first query; otherwise an unauthorized
+  query could be indistinguishable from a missing item. The reference must bind
+  the transaction, current-user UUID commitment, access-group commitment and
+  exact persistent reference. A temporary file-based Keychain is not evidence
+  for this production contract.
+- Linux desktop: a Secret Service item located by stable case-sensitive,
+  non-secret lookup attributes rather than a persisted object path. The current
+  Linux-only candidate is synthetic/integration-only: tests alone can approve
+  its owner-private reconciliation-lock directory. The private lock file
+  durably stores a magic/versioned checksummed record binding UID, lock
+  device/inode and a random seed; those same fields derive
+  the provider namespace carried by lookup attributes, references and
+  envelopes, so corruption or a copied record fails closed and two
+  independently approved roots cannot share a search namespace without sharing
+  a lock. It serializes create under the
+  namespace's cross-process `flock`. Only explicit one-time fresh provisioning
+  may create the record with create-exclusive; normal restart requires the
+  existing complete record and refuses missing, empty or truncated state. It
+  always calls `CreateItem` with `replace=false`, returns the same authenticated
+  key/reference on retry, and
+  refuses duplicate matches. It never invokes Unlock or Prompt; locked items or
+  prompt requirements are explicit `locked` states. A fixed isolated native
+  keyring restart/lock/delete fixture and encrypted transfer session remain
+  unproved, so headless and production Linux remain unsupported.
+
+Before production, each provider needs native restart, locked-store, deleted-
+item, wrong-user, corrupted-reference and cleanup-crash tests. Machine/profile
+loss is disaster recovery, not automatic rollback; deployment documentation
+must state that encrypted rollback material may become unrecoverable and give a
+manual evidence-preserving procedure.
+
+The key item is deleted last, after a durable terminal decision and durable
+workspace removal. Before workspace removal, the engine writes and flushes a
+non-secret completion tombstone outside that workspace containing the
+transaction ID, provider kind and key reference. A crash can therefore leak an
+orphan key item, but cannot leave an incomplete transaction without its
+recovery key. Startup uses the tombstone to retry key deletion, then removes and
+flushes the tombstone. Orphan key garbage collection must require this durable
+completed-transaction tombstone and must never infer completion from a missing
+workspace alone.
+
+## Durable state machine
+
+The journal is bounded, append-only, private and flushed after each transition.
+It contains no configuration bytes, employee Key, DEK or decrypted backup.
+
+1. `Begin`: records format version, transaction ID, root identity, key-provider
+   metadata and the complete sorted target-name set.
+2. `BackedUp(target)`: the authenticated encrypted pre-image, original digest,
+   stable identity, length and security metadata are durable. Every target must
+   reach this state before any desired stage is written.
+3. `Staged(target)`: a private desired-content stage is durable and its digest,
+   length, identity and intended security metadata are recorded. The platform's
+   fixed native test must prove that this identity is the expected published
+   identity; otherwise that platform/filesystem is unsupported.
+4. `CommitPrepared`: the complete old and desired target sets have been
+   revalidated, the recovery key has been reopened through the provider, and
+   enough journal budget remains for every terminal event. This is the durable
+   commit decision.
+5. `Published(target)`: atomic replacement has occurred and the new target
+   identity/digest/security metadata are recorded.
+6. `Verified(target)`: the exact opened target matches the published record and
+   strict tool-format validation succeeds.
+7. `RollbackPrepared`: strict validation failed, or a publication failure was
+   classified as permanently non-retryable without observing an external
+   identity. The redacted failure class, authenticated pre-image set and
+   reserved worst-case journal budget are durable. This marker changes restart
+   policy from roll-forward to rollback.
+8. `RollbackStaged(target)`: a private rollback stage has been created from the
+   authenticated pre-image, flushed, and its new stage identity, original bytes
+   digest and intended security metadata are durable. Every published target
+   must have this record before any restore begins.
+9. `Restored(target)`: a published target was atomically replaced by its recorded
+   rollback stage. The resulting `restored_identity` must equal the recorded
+   `rollback_stage_identity`; original bytes and security metadata are verified.
+10. `Complete` or `RolledBack`: every target is respectively verified as desired
+    or restored with original bytes and security metadata. Cleanup may proceed.
+
+Before `CommitPrepared`, restart recovery removes only exact known stages after
+snapshot revalidation; publication is forbidden in that phase. From
+`CommitPrepared` until `RollbackPrepared`, recovery rolls forward: an old target
+may be atomically replaced by its desired stage, and an already published target
+may be verified. A retryable publication failure remains in this state and
+stops the current attempt. A confirmed permanently non-retryable publication
+failure after any publication may transition to rollback only after every
+required pre-image is available and enough space remains to record and stage
+the complete rollback. An external identity or a failure that prevents safe
+rollback preparation preserves all evidence and enters a non-terminal
+`recovery_blocked` condition; it never overwrites the target or reports success.
+If strict validation fails, recovery likewise prepares rollback. It then
+persists `RollbackPrepared`, creates and durably records every
+`RollbackStaged(target)`, and only then restores the published set. After
+`RollbackPrepared`, every restart continues rollback and never returns to
+roll-forward.
+
+For every recovery action, the live target must match either the recorded old
+identity/digest/security metadata or this transaction's recorded staged/expected
+published identity, desired digest and security metadata. This lets recovery
+recognize the narrow crash window after atomic replacement but before the
+`Published` append without accepting a same-content third-party inode. Missing
+targets, third identities, digest or permission changes, extra hard links and
+unrecognized workspace entries are
+`recovery_conflict`; the engine preserves evidence and never overwrites or
+deletes the external state.
+
+`original_identity` is only a compare-before-replace fact for the pre-image.
+Reconstructing encrypted bytes necessarily creates a new inode/file ID. The
+durable `rollback_stage_identity` identifies that new object before restore,
+and `restored_identity` must equal it after an atomic restore. Rollback restores
+the original bytes and complete UID/GID/mode/ACL/DACL metadata, not the obsolete
+`original_identity`.
+
+## Ordering and crash requirements
+
+- The recovery key must be durably reopenable before the first encrypted backup
+  is accepted as durable.
+- Every encrypted pre-image uses a fresh nonce, is authenticated and flushed
+  before its manifest is published. The manifest binds root, target, identity,
+  digest, length, security metadata, transaction ID and intended desired digest.
+- All pre-images are durable before the first plaintext desired stage is
+  created, limiting the interval in which both old and new employee Keys are on
+  disk.
+- `CommitPrepared` is durable before the first target mutation.
+- A publication record is durable before strict post-write validation.
+- A validation failure never reports success. Before the durable
+  `RollbackPrepared` marker, rollback reopens and authenticates every required
+  pre-image and reserves worst-case journal space. After that marker, it creates
+  and flushes all private rollback stages, appends every `RollbackStaged` record,
+  and revalidates the full set before the first restore. It then rechecks each
+  published target, atomically replaces it, and records the new restored
+  identity plus verification of original bytes and metadata.
+- Directory durability is required after creating/removing workspaces and after
+  every atomic replacement. Unsupported directory flush semantics fail closed.
+- After `Complete` or `RolledBack`, stages and encrypted backups are removed and
+  directory removals flushed; only then is the key item deleted.
+
+## Fault-injection and review interface
+
+The security review interface is a pure synthetic-root API with an injected key
+provider and an injected fault after every durable boundary. It must expose
+only redacted receipts: transaction ID, target names and state; never bytes,
+digests derived from a secret for logging purposes, keys or provider blobs.
+
+Required negative tests cover crashes before/after every state above; wrong,
+missing and locked recovery keys; ciphertext/manifest/journal tampering; target,
+parent and workspace rename/replacement; pre-opened writers; permission, owner,
+ACL, DACL, hard-link and volume changes; one target failing in a multi-target
+transaction; rollback failure; cleanup failure; restart from every partially
+published prefix; and concurrent recovery attempts. Tests must prove that an
+external edit is preserved, no plaintext pre-image survives durable completion,
+and no success receipt is produced before every target is verified.
+
+Review should approve these interfaces before publication code is added:
+
+1. key-provider outcome taxonomy and deletion ordering;
+2. per-platform atomic replacement and directory-flush primitives;
+3. exact security metadata captured, authenticated and restored;
+4. decision point and roll-forward versus rollback policy;
+5. the documented same-login-account trust assumption, accidental-concurrency
+   behavior and explicit unsupported filesystems;
+6. the complete fault matrix and evidence-preservation behavior.
+
+## Current implemented subset
+
+`live/backup.rs` remains a non-publishing Linux-only foundation. Format version 3
+authenticates the exact nonzero transaction ID, recovery-key provider
+kind/version and SHA-256 commitment of its opaque reference together with the
+original owner UID, group GID and mode, root and target identities, digest and
+length. The raw opaque reference is not copied into the backup manifest.
+Preparation requires owner-read access
+and refuses group/world bits or special permission bits before creating backup
+material. Backup root/workspace directories are set and read back as exact
+owner-only `0700`; ciphertext and manifest files are set and read back as exact
+owner-only, single-link `0600` objects. Reload rejects a target identity change
+or a backup-artifact type, link-count, permission or owner change without
+modifying the target; backup contents remain authenticated by digest and
+AES-GCM, but artifact inode identities are not persisted. The public receipt
+exposes no content digest. Preparation still accepts only one UTF-8 leaf and a
+caller-supplied in-memory key. Restart reload has no public raw-key bypass: it
+first validates the durable path, private metadata, manifest binding, root and
+target identities and ciphertext digest, then calls `RecoveryKeyProvider::open`
+once with the exact durable transaction/reference. It then reopens the current
+root-to-artifact namespace chain and requires the root, backup directory,
+workspace, manifest, target and ciphertext identities to match the held objects
+before decrypting. Every non-available provider outcome blocks without
+calling `create` or `delete`. The slice does not implement a production Linux
+key provider, desired stage, journal decision, publication, rollback, cleanup or
+Windows/macOS backup support. macOS returns `UnsupportedPlatform` before
+creating the backup directory, including for a private-mode target carrying an
+extended ACL.
+
+Format version 3 is intentionally discontinuous in this development preview.
+Version 1 and version 2 manifests both fail closed and have no automatic
+migration; they contain no published target mutation and require operator
+removal or an explicitly reviewed offline inspection path. A future format
+change must define recovery before any new writer is enabled.
+
+`live/replacement.rs` now makes only the redacted event ordering executable in
+memory. It enforces the 16-target sorted unique UTF-8 leaf set with a 4 KiB
+per-name bound, the requirement that all backups precede every desired stage,
+the durable-decision boundary,
+publish-before-verify, every published target's rollback stage before any
+restore, and terminal completion predicates. It is not serializable, carries no
+identities/digests/security metadata, performs no I/O, and does not implement
+the durable journal, recovery-blocked handling, publication, tool-format
+validation, rollback or cleanup.
+
+`live/linux_replacement.rs` now makes one smaller filesystem slice executable
+only for a Linux synthetic root whose approval has no production constructor.
+It accepts exactly one existing UTF-8 leaf, bounded to 4 MiB, owned by the
+effective user, single-linked and private, under an owner-private `0700` root.
+The module creates an owner-private transaction workspace and a bounded,
+flushed JSON-lines journal containing identities, digests,
+lengths, original UID/GID/mode, the non-secret provider reference and durable
+phase events, but no configuration bytes or DEK. Before the commit decision it
+physically allocates the complete journal plus a fixed owner-private pending
+slot for every bounded event. Post-commit append reuses one slot exactly once;
+restart verifies its length, checksum and event sequence, then overwrites or
+extends only the incomplete journal suffix without truncating reserved extents.
+A key-create intent is durable before the provider call, and the provider trait
+must explicitly advertise transaction-idempotent creation before this slice
+will call it.
+Before `CommitPrepared` it
+requires the version-3 encrypted pre-image, a flushed desired stage, a current
+old-target comparison, physically allocated journal capacity and rollback-stage
+inode, and a successful exact provider reopen/decrypt of the
+pre-image.
+
+Publication and restoration hold one synthetic-root target lock and use
+`renameat2(RENAME_EXCHANGE)` between held workspace/root descriptors after
+rechecking the expected current inode, digest, length, link count and security
+metadata. Both post-exchange names are verified; a check-to-syscall mismatch is
+undone only while the target remains the exact replacement and the displaced
+entry retains the raw no-follow device/inode/type/metadata observed in the
+workspace. The same bounded undo runs after restart if a crash occurs before
+live verification, including for a symlink, public-mode file or multiply-linked
+entry. The displaced entry remains durable recovery evidence until `Published`
+or `Restored` is flushed. Other stale identity, content or metadata changes are
+preserved as a recovery conflict. Synthetic validation
+rejection authenticates the complete pre-image and records a rollback-stage
+intent before rewriting the preallocated pending inode, flushing it and
+publishing it no-replace. Terminal recovery is idempotent and revalidates the
+exact desired or restored inode.
+
+Tests interrupt after each key-intent/create/backup/stage/decision/publication/
+verification/rollback-stage/restore/terminal boundary, repair torn journal
+tails from preallocated slots after mutation, exercise deterministic
+check-to-exchange edits including crash/restart with symlink, public-mode and
+hard-linked entries, and overlap two real transactions at the shared target
+lock. Tests also cover owner-read-only `0400`/`0500` rollback, physical journal/
+slot allocation, stale targets plus symlink and hard-link changes,
+preserve a post-publication external edit, scan durable
+metadata for the original Key and DEK, and repeat terminal recovery. Before the
+commit decision, restart returns a non-mutating `Uncommitted` blocker and
+retains evidence; this slice does not yet define abandoned-workspace/key
+cleanup. It also omits multi-target rollback, native tool-format validation and
+tool lock compatibility, journal/artifact retirement, a production Linux key
+provider, Windows/macOS primitives, automatic startup orchestration and all
+real client paths. `apply_configuration` and the UI remain fail-closed.
+
+`live/recovery_key.rs` fixes the provider-call boundary and redacted outcome
+taxonomy. Recovery opens one exact non-zero transaction ID and
+bounded provider reference and maps `locked`, `missing`, `wrong_identity`,
+`corrupt` and `unavailable` to distinct blocking results. The recovery helper
+has no create or delete path, so a failed open cannot silently generate a new
+key or remove evidence. Provider references and key material are redacted from
+`Debug`. `live/windows_dpapi.rs` now implements one Windows-only synthetic-root
+provider using current-user DPAPI, `CRYPTPROTECT_UI_FORBIDDEN`, transaction-bound
+optional entropy, a checked plaintext envelope, an exact protected-blob digest
+reference, owner-only protected DACLs, stable directory handles and a compatible
+exclusive lock. Create is no-replace and read-back verified; open after a fresh
+provider instance never creates or replaces a missing value. Creation writes
+and flushes an owner-private `.pending` blob, performs one same-directory
+`NtSetInformationFile(FileRenameInformation)` operation on that file handle
+with `RootDirectory` null, a fixed simple final leaf and replacement disabled,
+verifies the staged/final 64-bit volume serial and complete 128-bit
+`FILE_ID_INFO` plus the retained store-directory identity, flushes
+the directory, and authenticates the final value. An exact create retry may
+remove only a bounded private unpublished stage when no final exists, or return
+the authenticated already-published value only after revalidating and flushing
+the retained store directory; repeated flush failure remains unavailable.
+Simultaneous final/stage state is preserved and refused. Tests inject
+interruption after stage creation, write,
+flush, publication, and directory flush, and prove no-overwrite conflict
+preservation plus restart reopen/delete behavior. The provider rejects
+`GetFileInformationByHandleEx(FileIdInfo)` failure and an all-zero unsupported
+128-bit ID instead of falling back to the ReFS-unsafe legacy 64-bit file index;
+tests cover an upper-half collision invisible to that legacy index, missing-ID
+refusal, two distinct live objects, same-path object replacement, and same-
+provider post-publish retry under persistent directory-flush failure. Delete
+authenticates the exact
+existing value first and flushes its directory. DPAPI plaintext output
+and intermediate key arrays are zeroized, and neither key nor DPAPI blob enters
+the journal, receipt, `Debug`, environment, command line, database or network.
+Linux and macOS return `UnsupportedPlatform` before namespace creation. This
+provider is not wired to a durable replacement transaction or real client write.
+A separate macOS boundary now keeps production construction unavailable until
+signing/access-group identity can be verified and exercises the intended
+Data-Protection-Keychain request/state contract against an in-memory fake only.
+The Linux Secret Service candidate similarly requires a test-only synthetic
+approval, uses stable non-secret transaction/UID/lock-namespace/item attributes plus a
+checksummed identity-bound envelope/reference, and exercises no-prompt,
+no-replace create/open/delete behavior against a fake service fault matrix.
+Its typed plain-session negotiation requires an exact empty output string and
+non-root session path. The session-bus transport compiles only on Linux, but no fixed native keyring
+fixture has yet established restart, locked-session or deletion behavior; it is
+not a production provider.
+
+The same module includes a provider-agnostic terminal-cleanup ordering gate. It
+accepts only an already durable `Complete` or `RolledBack` decision, requires
+the completion tombstone before workspace removal, refuses to call provider
+deletion before both are recorded durable, and permits tombstone removal only
+after deletion is confirmed as `deleted` or already `missing`. Locked,
+wrong-identity, corrupt or unavailable deletion leaves the tombstone phase
+retryable. The pure gate now accepts only the exact durable tombstone receipt
+bound to its terminal, transaction, complete recovery-key reference and root
+identity; the workspace transition requires the concrete removal receipt
+described below. A
+separate Linux-only synthetic-root module now stages a versioned non-secret
+completion tombstone as an owner-private single-link file, flushes it, and
+publishes it under the final name with no-replace `renameat2`. A crash before
+publication leaves an explicitly blocked `.pending` record rather than a
+partial final tombstone. Restart revalidates and flushes every visible complete
+record plus its directory and root before returning it as durable, binds it to
+the held root identity and exact transaction/provider reference, and
+reconstructs a bounded sorted set. It reopens the named file and directory to
+reject replacement during the operation. A stable directory descriptor plus a
+shared/exclusive advisory lock now spans enumeration and every duplicate or
+capacity decision through publication, authorized logical removal, or inactive-
+proof verification. Deterministic concurrency tests cover the 63-to-64 boundary
+and a duplicate publisher racing an authorized removal. After the provider-
+agnostic cleanup
+gate reaches `KeyDeletionConfirmed`, it can issue a non-serializable
+authorization for the Linux store to revalidate the exact
+transaction/reference, rename that one final tombstone to a `.deleting` intent,
+flush it, then rename the intent to an inactive `.removed` completion proof and
+flush the namespace and root again. A restart with fresh exact authorization
+can resume either durable state, and an already durable proof can reproduce the
+exact receipt without treating an absent record as success. The receipt has no
+production constructor outside the tombstone store; only the exact receipt
+returned after the inactive proof and both final flushes can advance the cleanup
+gate to `Complete`. Public restart enumeration validates but excludes inactive
+proofs, and transaction IDs represented by a proof cannot be reused. Proofs are
+bounded by the same 64-entry namespace limit and deliberately retained because
+this slice does not implement safe proof garbage collection. Mismatched or
+fully missing records still fail closed.
+
+The separate Linux-only synthetic-root cleanup journal now persists the five
+provider-agnostic cleanup phases as immutable, bounded, owner-private event
+files. Every event repeats and validates the root, terminal decision,
+transaction, provider-reference, and expected workspace leaf/device/inode
+binding; restart requires a contiguous
+phase prefix and reconstructs the exact cleanup sequence. Event publication is
+stage-and-flush followed by no-replace rename and directory/root flush. One
+stable directory descriptor and advisory lock cover namespace enumeration,
+phase-zero duplicate/capacity validation or append-prefix validation, and the
+publication itself; concurrent 63-to-64 creation cannot publish a 65th
+transaction, and concurrent duplicate appends cannot leave a pending record. A
+visible `.pending` event blocks recovery rather than being inferred complete.
+The durable wrapper records provider deletion only after the provider returns
+`deleted` or `missing`, and an append failure rolls the in-memory sequence back
+to its preceding durable phase so a restart can retry. The replacement journal
+now issues the cleanup journal's only production input: a crate-private,
+non-serializable `DurableTerminalHandoff` created only after the exact terminal
+event is flushed, replayed and matched to revalidated root/workspace
+descriptors. It binds journal version, outcome, transaction, root identity,
+canonical workspace identity and complete recovery-key reference. The
+completion-tombstone transition requires the store's exact non-serializable
+durable receipt; cross-bound receipts fail without advancing. This integration
+is fixed by the [durable terminal handoff contract](durable-terminal-handoff-contract.md)
+and deliberately stops at `CompletionTombstoneDurable`, with the replacement
+workspace still non-empty and provider deletion uncalled. The later workspace
+transition is also no longer a caller assertion:
+a separate Linux-only synthetic-root store accepts only one exact empty `0700`
+transaction workspace while holding the existing transaction lock, flushes a
+private pending proof before descriptor-relative removal, flushes the
+transaction directory and root, then atomically publishes and flushes a bounded
+`.removed.json` proof. The receipt is non-serializable and is the only production
+path into `WorkspaceRemovalDurable`. Restart and every key-deletion attempt
+revalidate the exact root, transaction-directory and proof identity bindings
+plus absence of the original workspace name. A crash after directory removal
+but before proof publication leaves `.pending` and blocks automatic cleanup
+rather than inferring success from absence. Renamed, replaced, non-empty,
+missing, cross-workspace or mismatched state likewise fails closed. The
+authorization, caller path and proof must all match the workspace leaf and
+device/inode already recorded in the durable cleanup journal. The synthetic
+Linux replacement journal now supplies the only production constructor input:
+its exact durable terminal handoff. Cleanup restart accepts only the current
+replacement-journal version and the canonical workspace leaf derived from the
+transaction; loose legacy workspace fixtures remain `cfg(test)` only. This path
+is still unavailable to real clients because the synthetic-root approval has
+no production constructor. The store does not delete
+transaction contents; its reviewed slice begins only after another component
+has safely removed every known child and left the exact workspace empty. It
+does not remove completed journals/proofs, authenticate against a hostile
+same-user process, or orchestrate startup automatically. The separate Windows
+DPAPI synthetic provider is not integrated with this Linux cleanup path. This
+does not implement cleanup/proof garbage collection, automatic restart
+orchestration or real client writes.
+As the first bounded prerequisite for later garbage collection, a durably
+`Complete` cleanup sequence can now authorize a non-mutating revalidation of
+the exact inactive completion-tombstone proof. Only the resulting exact receipt
+can produce an opaque artifact-retirement authorization carrying the same
+terminal/transaction/provider and workspace leaf/device/inode binding. No code
+accepts that authorization for unlink yet: a future slice must define a
+crash-resumable cross-namespace deletion order, revalidation/locking at the
+mutation boundary, transaction-ID non-reuse, and recovery from every partial
+retirement state. Therefore all 64-entry journal/proof limits still apply.
+The owner-private filesystem boundary is not authentication against another
+process running as the same user. That deliberate-adversary case is an accepted
+first-release non-goal, not a security property of this implementation.
+Cross-account isolation, accidental-concurrency handling and every other live-
+write gate remain unresolved requirements.
+
+## Public platform references
+
+- [Microsoft `CryptProtectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
+- [Microsoft `SetFileInformationByHandle`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle)
+- [Microsoft `NtSetInformationFile`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile)
+- [Microsoft `FileRenameInformationEx`](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/4217551b-d2c0-42cb-9dc1-69a716cf6d0c)
+- [Apple: Using the keychain to manage user secrets](https://developer.apple.com/documentation/security/using-the-keychain-to-manage-user-secrets)
+- [freedesktop.org Secret Service: collections and items](https://specifications.freedesktop.org/secret-service/latest/ch03.html)
+- [freedesktop.org Secret Service: lookup attributes](https://specifications.freedesktop.org/secret-service/latest/lookup-attributes.html)
+- [freedesktop.org Secret Service: service methods](https://specifications.freedesktop.org/secret-service/latest/org.freedesktop.Secret.Service.html)
+- [freedesktop.org Secret Service: collection methods](https://specifications.freedesktop.org/secret-service/latest/org.freedesktop.Secret.Collection.html)
+- [freedesktop.org Secret Service: item methods](https://specifications.freedesktop.org/secret-service/latest/org.freedesktop.Secret.Item.html)
+- [freedesktop.org Secret Service: plain session](https://specifications.freedesktop.org/secret-service/latest/ch07s02.html)
+- [freedesktop.org Secret Service: locking and unlocking](https://specifications.freedesktop.org/secret-service/latest/unlocking.html)
+- [freedesktop.org Secret Service: prompts](https://specifications.freedesktop.org/secret-service/latest/prompts.html)
+- [freedesktop.org Secret Service: standard errors](https://specifications.freedesktop.org/secret-service/latest/errors.html)
+- [Linux `unlinkat(2)`](https://man7.org/linux/man-pages/man2/unlinkat.2.html)
+- [Linux `flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html)
+- [Linux `renameat2(2)`](https://man7.org/linux/man-pages/man2/renameat2.2.html)
+- [Linux `openat2(2)`](https://man7.org/linux/man-pages/man2/openat2.2.html)
+
+## Appendix: Windows pre-image and read-only reload candidate
+
+Status: specifications-only LOCAL DOC CANDIDATE, no implementation/test/E/F GO.
+Earlier scope/threat model/state machine, PR89 C#9 FAIL/0/15 and prior STOP
+history remain. Real apply, persistent-Key, B1a-C, three-platform acceptance
+and production stay NOT_READY/NO-GO.
+
+### W1. Version and canonical encoding
+
+The proposed Windows-only profile has 16-byte magic ASCII "CPA-WIN-PREIMG4"
+plus one NUL, pre-image version 4, platform 1 (Windows), algorithm 1
+(AES-256-GCM). Reject every other value, generic old v1/v2 and Linux pre-image
+v3; no migration, sniffing or downgrade. Its proposed journal binding is
+"windows-replacement"/1, a future contract identifier, not an implemented disk
+journal. Journal, pre-image, provider and wrapped-key-envelope versions are
+independent; an existing Linux journal is not this Windows journal.
+
+Unsigned integers are fixed-width little-endian except the nonce counter.
+LP(x) is u32 byte length plus x; no implicit padding/terminators/optional fields
+or trailing bytes. Constants are ASCII. Provider kind: 1..64 lowercase ASCII
+letters/digits/hyphens, alphanumeric ends. Leaf: LP(UTF-16LE), 1..255 code units,
+valid surrogate pairs. Reject NUL, separators, streams, dot/dot-dot, DOS/Win32
+reserved names/characters, trailing dot/space, absolute paths and aliases.
+No normalization/case/short-name substitution; native alias rejection is pending.
+
+Identity I is u64 VolumeSerialNumber plus full raw 16-byte FILE_ID_128 from an
+opened handle. Missing/all-zero IDs, omitted upper half, legacy 64-bit or
+path/hash substitutes are rejected. Comparison applies on one computer only.
+
+For the exact RecoveryKeyReference, opaque reference length 1..4096:
+
+    R = LP(provider_kind) || u32(provider_version) || LP(opaque_reference)
+    K = SHA-256(LP("CPA-WIN-KEYREF4") || R)
+
+Only windows-dpapi-user/version 1 is accepted. K commits the reference, but is
+no key/authorization. Keep R in private storage, not the clear header.
+
+Canonical target entry T, in order:
+
+    LP(leaf) || original I || u64(original_length)
+    || original_SHA256[32] || desired_SHA256[32] || u32(original_attributes)
+    || LP(owner_SID) || LP(self_relative_SD) || u16(SD_control) || u8(RM_control)
+
+SID is 8..68 bytes; complete SD is 20..65536 bytes; native validity is also
+required. Redundant SID/control/RM fields must match the SD. M is u32(count)
+followed by every T sorted lexicographically by UTF-16 code-unit values,
+without duplicate/native-equivalent leaves. Count is 1..16, M at most 2 MiB.
+Freeze/revalidate M before backup.
+
+Binding B, in order:
+
+    LP("CPA-WIN-BIND4") || nonzero_transaction_id[16]
+    || LP("windows-replacement") || u32(1)
+    || LP(provider_kind) || u32(provider_version) || K[32]
+    || root I || workspace I || u32(ordinal) || u32(count)
+    || SHA-256(M)[32] || T
+
+Ordinal is zero-based, less than count; T is that entry in M. B <=128 KiB.
+Expected B comes from a validated held-root-bound Windows journal, not backup
+assertions/loose strings. Its disk loader, authenticity/durability proof and
+production constructor are UNKNOWN/unimplemented; no receipt is supplied.
+
+### W2. AEAD, nonce ownership and bounds
+
+Use a fresh independent 32-byte transaction DEK only for this profile,
+AES-256-GCM, 12-byte nonce and full 16-byte tag. No compression, algorithm
+negotiation or derivation from employee credentials. Fix one freshly generated
+8-byte prefix per transaction; nonce is prefix || u32-big-endian(ordinal).
+At most 16 distinct ordinals/key; randomness excuses neither repeated DEKs nor
+repeated encryption at one key/ordinal.
+
+A future exclusive producer durably reserves transaction/reference/prefix/
+ordinal/B BEFORE its single AEAD invocation. Restart may reuse only identical
+complete durably bound ciphertext: no re-encryption, partial overwrite, changed
+prefix under uncertain reservation or non-use inferred from absence. Entropy/
+freshness failure or missing/partial/uncertain reservation/completion blocks.
+Reservation storage, transaction non-reuse and native crash proof are pending;
+the current provider does not supply them.
+
+    H = magic[16] || u32(4) || u32(1) || u32(1) || transaction_id[16]
+        || LP(provider_kind) || u32(provider_version) || K[32]
+        || u32(ordinal) || u32(count) || nonce[12]
+        || SHA-256(B)[32] || u32(payload_length)
+    P = LP(B) || original_file_bytes[original_length]
+    AAD = LP("CPA-WIN-PREIMAGE-AAD-v4") || H
+    file = H || AES-256-GCM-ciphertext(P, DEK, nonce, AAD) || tag[16]
+
+Transaction/reference, complete root/workspace/target identities, SID/SD,
+attributes, lengths, digests and target-set commitment are authenticated;
+sensitive metadata stays inside encrypted P. A header hash alone proves
+nothing. Release no plaintext until tag verification and byte-exact expected-B
+comparison succeed; recompute commitments and original-data SHA256.
+
+Original data: at most 4 MiB/file, 16 MiB/set. Payload: at most
+4 MiB + 128 KiB + 4 bytes; H: at most 204 bytes; artifact: at most
+4 MiB + 128 KiB + 4 + 204 + 16 bytes. Check exact length, all bounds and checked
+arithmetic before allocation/provider calls. Reject overflow, truncation,
+trailing bytes, unknown fields and inconsistent redundant lengths. Bound
+aggregate original-data buffering to 16 MiB and M to 2 MiB. No allocation from
+unchecked disk lengths or streaming unauthenticated plaintext.
+
+H must match journal transaction/reference/count/ordinal/reserved nonce and B
+commitment; reject every duplicated-field mismatch.
+
+### W3. Native security and durable preparation gates
+
+Capture owner SID/full self-relative SD from the original handle: owner/group,
+DACL/SACL state, all control/RM bits, ACL revisions, ACE types/flags/order/bytes.
+Validate offsets/bounds/coverage; reject malformed/unknown/unreadable/
+unrepresentable state. No SDDL/hash substitute, ACE sorting, ACL reconstruction,
+silent loss or privilege enabling. Backup objects' protected current-user-only
+DACL is separate from, and cannot replace, saved original security.
+
+Require the earlier owner-only protected DACL. Accept only file attribute 0x80
+(NORMAL alone) or 0x20 (ARCHIVE alone); reject every other value before backup,
+including readonly/reparse/compressed/encrypted/sparse/offline/recall/integrity/
+unknown flags. Ancestor directories need their own policy.
+
+Lossless full-SD/control/RM/ordered-ACE application/readback and same-identity
+reopen are REQUIRED NATIVE GATES, UNKNOWN/NOT_READY. API existence proves none.
+Reject states that cannot roundtrip exactly, without permission broadening or
+equivalence shortcuts. Required SACL access/directory flush may be unsupported.
+
+Retain root/workspace/parent handles; check every component without following
+reparse points, same volume, single-link regular files, exact entries and
+compatible locks. No unchecked absolute reopen. Create backup objects private,
+exclusive/no-replace. Journal full IDs/lengths/ciphertext digests; authenticated
+readback/exact-object reopen must agree. Names/content alone are insufficient.
+Hostile same-account writers stay outside scope.
+
+Producer order: key intent/availability; durable nonce reservation; private
+pending ciphertext; file flush; authenticated readback/ID comparison; no-replace
+publish; namespace/root flush; durable BackedUp for ALL targets before desired
+plaintext staging. Visible names/syscall success are not durability. Short
+write, interrupted publish, failed/unsupported flush, changed ID or uncertainty
+preserves evidence/blocks: no retry, delete-rename fallback or absence-as-success.
+Each filesystem needs native proof. Read-only reload cannot flush/repair/promote.
+
+### W4. Read-only reload and identity handoff
+
+Reload takes a validated journal and held root/workspace in the approved
+original machine/profile context. Open existing private objects only; check
+full IDs/sizes/DACLs/links/attributes/nofollow namespace, read bounded bytes.
+After public structural checks, call RecoveryKeyProvider::open EXACTLY ONCE
+for the exact transaction/full reference. No create/delete/unlock/prompt,
+provisioning/fallback, target write, stage/lock-file creation, journal append,
+ACL change or cleanup. A constructor/open creating directories/files/keys is
+unusable; the read-only adapter is unimplemented. OS-internal access-time/audit
+effects are not claimed absent.
+
+Recheck held/named backup/workspace IDs after AEAD/expected-B checks. Return
+bounded zeroizing pre-images, else none/preserve evidence. Reload obtains no
+Key/pre-image from target contents and grants no target-validation/recovery-
+admission receipt or CAS approval. Each recovery action must boundedly read
+the same controlled opened target and CAS-check journal digest/full ID/security.
+Same File ID/length with changed bytes: reject conflict, never overwrite.
+No implementation/host-safety claim.
+
+Original I is a compare-before-replace fact. Desired-stage I and rollback-stage
+I are new objects, distinct from original I and each other while bindings
+remain live. Durably record each stage's identity/digest/security before its
+replacement. Published must equal desired-stage I; Restored must equal
+rollback-stage I and original bytes/security/attributes, NOT obsolete original
+I. Earlier CommitPrepared/RollbackPrepared and all-target ordering remain.
+Reload creates no stage, publishes nothing and advances no state. Missing/
+third objects or external edits are conflicts, never overwritten.
+
+Require current-user DPAPI, never LOCAL_MACHINE. Its roaming exception means
+decryption is not original-host proof; FileIdInfo is not cross-machine proof.
+Reject imported/copied/moved workspaces or unknown host/profile continuity.
+That native gate is UNKNOWN; no hostname/registry/path authentication is invented.
+
+### W5. Planned public synthetic vectors: all UNEXECUTED
+
+Use public non-secret bytes/test-owned roots. No row is a measured PASS or real
+I/O fault injection; classification fixtures are separate from native failures.
+
+| Planned vector | Required result, still pending |
+| --- | --- |
+| Fresh/close/reopen | Same authenticated bytes/metadata/full IDs; zero application writes. |
+| Empty/nonempty files and two targets | Exact bytes, distinct per-key nonces, set bounds enforced. |
+| Published target followed by reload | Backup pre-image only; no target validation/recovery admission/CAS approval. |
+| Wrong transaction/key/reference/ordinal | Reject, no plaintext/create/delete/fallback. |
+| Tampered SID/DACL/control/ACE order/upper FileId half | Reject; no truncated identity or metadata shortcut. |
+| Truncation/oversize/trailing bytes/overflow | Reject before unchecked allocation/plaintext. |
+| Unknown format/journal/provider version or Linux v3 | Reject without migration/negotiation. |
+| Locked/missing provider or unknown host continuity | Preserve evidence; no bytes or repair. |
+| Reparse/alias/hardlink/attribute/object substitution or same-ID/length content edit | Recovery CAS rejects identity/security/digest conflicts on the same opened target. |
+| Publish/flush/reservation uncertain | Blocked; no re-encryption/retry/promotion/cleanup. |
+| Substituted stage or lossy SD roundtrip | Reject; Restored never matched to original identity alone. |
+
+OS identity/SD/durability/provider/concurrency/crash gates need implementation
+and separate E/F evidence; no persistent-Key/B1a-C/platform/production GO.
+
+### W6. Fixed public sources and provenance
+
+Independently authored encoding/bindings/vectors; no archived CPA/CLIProxyAPI/
+Sub2API copying/porting. No strict clean-room claim. Sources are not acceptance:
+
+- [Microsoft: Security Descriptor Operations](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-operations): handle/control APIs; no roundtrip proof.
+- [Microsoft: FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info): full volume/128-bit ID, one computer.
+- [Microsoft: CryptProtectData](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata): user/machine scope and roaming exception.
+- [NIST SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final): GCM basis; this profile remains unvalidated.
+
+Document link/anchor/diff checks execute no acceptance vector.
+
+### W1P. Unauthenticated public-frame static source candidate
+
+This separately scoped candidate is SOURCE ONLY / ALL TESTS UNEXECUTED.
+Its sole format basis is [W1](#w1-version-and-canonical-encoding) and
+[W2](#w2-aead-nonce-ownership-and-bounds) at PR130
+ff6093ff5d4ef81a050725de86e4761612d74f4c. Only three paths may change:
+the new [frame module](../../desktop/employee-config-switcher/crates/employee-config-core/src/live/windows_preimage_frame.rs),
+its crate-private declaration in live/mod.rs, and this bounded appendix.
+W4 reader work, Cargo manifests/lock, dependencies, workflows and product
+callers remain frozen. No new production constructor or admission is wired.
+
+The logical interface is parse_untrusted_frame(&[u8]) ->
+Result<UntrustedFrame<'_>, FrameParseError>. It returns borrowed H/ciphertext/tag
+and explicitly untrusted public fields; errors contain only fixed categories.
+ReplacementTransactionId supplies only the nonzero-byte check. K is not R,
+so no RecoveryKeyReference, BackupKey, BackupReceipt or authorization is minted.
+No parser I/O, unsafe block, crypto, provider call, entropy, journal or
+untrusted-length allocation is introduced. B/T/M, SID/SD and decrypted payload
+semantics are outside this parser.
+
+payload_length means |P| = |ciphertext|, excluding the full 16-byte tag.
+The necessary four-byte LP(B) prefix gives a payload lower bound of 4; this
+does not establish a valid B or authenticated plaintext. The strict provider
+windows-dpapi-user/1 gives H=158 bytes; the general H limit stays 204.
+Payload <=4325380 and artifact <=4325600 bytes; use checked conversions/addition,
+bounded slices and exact final consumption. Accept only magic16/4/1/1,
+nonzero transaction, count 1..16, ordinal<count and big-endian nonce suffix
+equal to ordinal; all other header integers are little-endian. Reject unknown
+public profile/version/provider values, truncation, oversize and trailing data.
+The fixed header admits no optional extension; encrypted unknown fields cannot
+be inspected by framing. No journal match or nonce freshness is inferred.
+
+Thirteen inline tests are independently authored from a handwritten 182-byte
+public literal, never a product encoder. Its ciphertext/tag are dummy bytes,
+not an authenticated pre-image. Planned vectors cover borrowed views, every
+proper prefix, unknown headers/provider, transaction/count/ordinal, nonce
+endianness, min/max and u32-max lengths, global oversize and exact tail.
+Tampering K/B commitment/ciphertext/tag and repeating a frame may still parse;
+these explicit witnesses preserve the unauthenticated/stateless boundary.
+Only the literal fixture skips rustfmt reflow to retain reviewed byte offsets.
+
+This batch runs no formatter/compiler/build/test/product/CI and makes no PASS,
+race, AEAD, native identity or platform-acceptance claim. Future execution needs
+fresh E/F static review and separate authorization; existing three-platform
+core-test CI is only a planned gate, with actual source checkout and named
+tests to be verified then. No producer/nonce reservation, W4 proof, real
+restore/apply, persistent-Key, old C#9 closure or production GO follows.
+Prior STOP batches stay STOP. No archived implementation/tests are copied;
+this source is independently authored from this project's frozen contract.
+
+### W2P. Private unauthenticated payload byte-check source candidate
+
+This is a fresh independent local SOURCE ONLY batch after the retained
+read-output, identity-collector and worktree-progress STOP batches. It does
+not resume those batches or change their evidence. The implementation base
+is local commit 651d4a482c85def7ca940242b2f3889929725af1, tree
+72c2ac152c39b62036249d55dee60c5c39e7376c. PR132 remote head
+1081e7c8c30f3ca875c66ce46ddfb986e18fd430 has the same tree, not the same
+commit metadata/parent. No remote transfer is authorized in this batch.
+
+Only four paths may change: the new private
+[payload module](../../desktop/employee-config-switcher/crates/employee-config-core/src/live/windows_preimage_payload.rs),
+its private declaration in live/mod.rs, this incremental appendix and the
+[source provenance](../../desktop/employee-config-switcher/PROVENANCE.md).
+The earlier frame parser, its thirteen tests, Cargo manifests/lock,
+dependencies, providers, backup, workflows and product callers stay frozen.
+
+The private logical interface is check_payload_bytes(UntrustedFrame,
+candidate_P, independent_expected_B, expected_original_length_u64,
+expected_original_SHA256) -> Result<(), fixed PayloadCheckError>.
+Success means only that the supplied bytes satisfy the checked relationships;
+it returns no bytes, authenticated type, key, receipt or restore/apply permit.
+The expected B is a separate caller input and is never learned from P.
+Its trusted production journal/source/constructor remains UNKNOWN.
+
+Check P = u32_little_endian(|B|) || B || original with exact expected-B equality,
+SHA-256(B) equal to the public header commitment, and exact original length
+and SHA-256. Cross-check raw-header and parsed payload lengths, ciphertext
+length and candidate length, and raw/parsed binding commitments. The fixed
+profile header is 158 bytes; B <=128 KiB, original <=4 MiB, P <=4325380,
+and the general frame bound remains 4325600. Use checked conversions/addition
+and bounded slices before hashing; reject truncation, tails, forged lengths,
+oversize and redundant-field conflicts without allocation from supplied lengths.
+
+This module neither decrypts nor checks a tag. It does not validate B/T/M
+grammar, journal ownership, other header/journal matches, nonce freshness,
+set-wide buffering or native identity/security/durability. It performs no I/O,
+provider call, entropy, reservation, encryption or plaintext release, and has
+no product caller. W3/W4 and actual restore/apply remain unimplemented here.
+Changing a tag may still pass this byte check: that is an explicit
+non-authentication witness, not successful tamper detection or AEAD evidence.
+
+Tests are authored before the checker from the project's frozen W1/W2
+contract and independent public synthetic input file SHA-256
+f2513d2a444c5f1129386bdad4a59a3183313801fe8a987dd3074311f8ad0b99.
+Embed B395, P402 and H158 as separate reviewed literals and original abc/3
+with its fixed SHA-256. Dummy ciphertext/tag supply only framing; no public
+DEK/nonce pair is encrypted again, and outside-repository Go Open evidence
+is not a Rust/product test. Negative cases include same-length wrong B,
+wrong original digest/length, truncation/tail, forged LP, each size bound,
+raw/parsed header conflicts and commitment mismatch. Include an accepted
+upper-size boundary and changed-tag witness. All tests are unconditional.
+
+Validation recorded for this local candidate: fixed Rust 1.90.0 rustfmt and
+full-workspace cargo fmt --all -- --check completed with exit 0. Static checks
+confirmed the separate frozen literals/digests, three new local document links,
+private declaration, no implementation allocation/I/O or additional imports,
+and unchanged original contract/provenance prefixes and old parser bytes.
+The first git diff --check returned 0; final scope/diff checks accompany the
+single local commit. These are formatting/static checks, not a Rust test PASS.
+There are 24 new unconditional test declarations; the old thirteen remain
+unchanged. link.exe is not available on the current PATH and the MSVC linkage
+prerequisite is not established. Cargo check/build, all 24 new tests, the old
+thirteen regressions, full core tests and race are NOT EXECUTED in this batch.
+Do not replace the toolchain, borrow old green CI or count static declarations
+or the outside-repository Go observations as executed Rust tests.
+Any later CI needs the changed head and its actual checkout/tests verified
+separately. Highest claim: BYTE_PAYLOAD_CHECK_SOURCE_ONLY.
+All prior STOP/FAIL records, Draft, real migration and production NO-GO remain.

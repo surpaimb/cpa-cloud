@@ -15,4 +15,5 @@ bin/
 .cache/
 coverage/
 test-results/
+*.tsbuildinfo
 .DS_Store

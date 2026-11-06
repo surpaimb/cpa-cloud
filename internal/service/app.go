@@ -18,6 +18,7 @@ import (
 
 	"cpacloud.local/server/internal/accounting"
 	"cpacloud.local/server/internal/egress"
+	"cpacloud.local/server/internal/financial"
 	"cpacloud.local/server/internal/governance"
 	"cpacloud.local/server/internal/keypolicy"
 )
@@ -26,6 +27,33 @@ const (
 	adminMaxBody       = 1 << 20
 	codexImportMaxBody = 8 << 20
 	modelMaxBody       = 4 << 20
+)
+
+// Independently authored for the 2026-10-21 passive Close-segments contract.
+// These private enums carry no product state or error result.
+type appClosePhase uint8
+type appCloseEdge uint8
+
+const (
+	appCloseOneShot appClosePhase = iota + 1
+	appCloseExpiry
+	appCloseBackupAutomation
+	appCloseBackgroundResponses
+	appCloseScheduledTests
+	appCloseChannelMonitors
+	appCloseGovernance
+	appCloseProxyTests
+	appCloseRecovery
+	appCloseHealthTests
+	appCloseAccountPool
+	appCloseRefresh
+	appCloseProxyClients
+	appCloseStore
+)
+const (
+	appCloseEnter appCloseEdge = iota + 1
+	appCloseReturn
+	appCloseSkipNil
 )
 
 type App struct {
@@ -64,6 +92,13 @@ type App struct {
 	logins                         map[string]*loginAttempt
 	selfLoginMu                    sync.Mutex
 	selfLogins                     map[string]*loginAttempt
+	// Per-App passive test observer; production leaves nil. RETURN is not a
+	// physical-close/join guarantee. The callback cannot return a decision.
+	closeObserver func(appClosePhase, appCloseEdge)
+	// Independently authored for the expiry SQL lifecycle diagnostic contract.
+	// Bound once before worker launch; no Config/HTTP entry and nil in production.
+	expiryObserver financial.ExpiryObserver
+	expiryOwner    *expiryInvocationOwner
 	// Independently authored for docs/employee-self-password-change-contract.md.
 	// SQL-boundary hooks exercise uncertain commits and mid-hash revocation.
 	// Production leaves both nil.
@@ -154,7 +189,31 @@ type loginAttempt struct {
 	lastSeen    time.Time
 }
 
+// This service-private startup carrier delegates the original Context but does
+// not expose a diagnostic Value. Open unwraps it before any initialization.
+type expiryOpenBinding struct {
+	context.Context
+	observer  financial.ExpiryObserver
+	ownerPlan *expiryInvocationPlan
+}
+
+func withExpiryOpenObserver(ctx context.Context, observer financial.ExpiryObserver) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	return expiryOpenBinding{Context: ctx, observer: observer}
+}
+
+func takeExpiryOpenObserver(ctx context.Context) (context.Context, financial.ExpiryObserver) {
+	if binding, ok := ctx.(expiryOpenBinding); ok {
+		return binding.Context, binding.observer
+	}
+	return ctx, nil
+}
+
 func Open(ctx context.Context, cfg Config) (*App, error) {
+	owner := beginExpiryInvocationOwner(ctx)
+	ctx, expiryObserver := takeExpiryOpenObserver(ctx)
 	if cfg.EmployeeSelfUpstreamEstimatedCostSummaryEnabled && !cfg.EmployeeSelfServiceEnabled {
 		return nil, errors.New("employee self upstream estimated cost summary requires employee self service")
 	}
@@ -216,7 +275,10 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	if err := ValidateCodexOAuthConfig(cfg); err != nil {
 		return nil, err
 	}
-	sec, err := loadSecrets(cfg.DataDir)
+	if err := validateMasterKeyProviderKind(cfg.MasterKeyProvider); err != nil {
+		return nil, err
+	}
+	sec, err := loadSecretsForConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -239,9 +301,12 @@ func Open(ctx context.Context, cfg Config) (*App, error) {
 	client := newUpstreamClient(cfg.AllowLoopbackUpstream)
 	app := &App{
 		cfg: cfg, store: s, secrets: sec, http: client,
-		oauthHTTP: newCodexOAuthHTTPClient(), codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(),
+		expiryObserver: expiryObserver,
+		expiryOwner:    owner,
+		oauthHTTP:      newCodexOAuthHTTPClient(), codex: newProductionCodexExecutor(), responses: newProductionCodexResponsesExecutor(),
 		logins: make(map[string]*loginAttempt), selfLogins: make(map[string]*loginAttempt), trustedProxies: trustedProxies,
 	}
+	owner.appConstructed(app)
 	opened := false
 	defer func() {
 		if !opened {
@@ -404,47 +469,108 @@ func (a *App) initializeGovernance(ctx context.Context) error {
 	return nil
 }
 
+func (a *App) observeClose(phase appClosePhase, edge appCloseEdge) {
+	if a.closeObserver != nil {
+		a.closeObserver(phase, edge)
+	}
+}
+
 func (a *App) Close() error {
 	if a.subscriptionOneShot != nil {
+		a.observeClose(appCloseOneShot, appCloseEnter)
 		a.subscriptionOneShot.Close()
+		a.observeClose(appCloseOneShot, appCloseReturn)
+	} else {
+		a.observeClose(appCloseOneShot, appCloseSkipNil)
 	}
 	if a.subscriptionExpiry != nil {
+		a.observeClose(appCloseExpiry, appCloseEnter)
 		a.subscriptionExpiry.Close()
+		a.observeClose(appCloseExpiry, appCloseReturn)
+	} else {
+		a.observeClose(appCloseExpiry, appCloseSkipNil)
 	}
 	if a.backupAutomation != nil {
+		a.observeClose(appCloseBackupAutomation, appCloseEnter)
 		a.backupAutomation.Close()
+		a.observeClose(appCloseBackupAutomation, appCloseReturn)
+	} else {
+		a.observeClose(appCloseBackupAutomation, appCloseSkipNil)
 	}
 	if a.backgroundResponses != nil {
+		a.observeClose(appCloseBackgroundResponses, appCloseEnter)
 		a.backgroundResponses.Close()
+		a.observeClose(appCloseBackgroundResponses, appCloseReturn)
+	} else {
+		a.observeClose(appCloseBackgroundResponses, appCloseSkipNil)
 	}
 	if a.scheduledTests != nil {
+		a.observeClose(appCloseScheduledTests, appCloseEnter)
 		a.scheduledTests.Close()
+		a.observeClose(appCloseScheduledTests, appCloseReturn)
+	} else {
+		a.observeClose(appCloseScheduledTests, appCloseSkipNil)
 	}
 	if a.channelMonitors != nil {
+		a.observeClose(appCloseChannelMonitors, appCloseEnter)
 		a.channelMonitors.Close()
+		a.observeClose(appCloseChannelMonitors, appCloseReturn)
+	} else {
+		a.observeClose(appCloseChannelMonitors, appCloseSkipNil)
 	}
 	if a.governance != nil {
+		a.observeClose(appCloseGovernance, appCloseEnter)
 		a.governance.Close()
+		a.observeClose(appCloseGovernance, appCloseReturn)
+	} else {
+		a.observeClose(appCloseGovernance, appCloseSkipNil)
 	}
 	if a.proxyTests != nil {
+		a.observeClose(appCloseProxyTests, appCloseEnter)
 		a.proxyTests.Close()
+		a.observeClose(appCloseProxyTests, appCloseReturn)
+	} else {
+		a.observeClose(appCloseProxyTests, appCloseSkipNil)
 	}
 	if a.recovery != nil {
+		a.observeClose(appCloseRecovery, appCloseEnter)
 		a.recovery.Close()
+		a.observeClose(appCloseRecovery, appCloseReturn)
+	} else {
+		a.observeClose(appCloseRecovery, appCloseSkipNil)
 	}
 	if a.healthTests != nil {
+		a.observeClose(appCloseHealthTests, appCloseEnter)
 		a.healthTests.Close()
+		a.observeClose(appCloseHealthTests, appCloseReturn)
+	} else {
+		a.observeClose(appCloseHealthTests, appCloseSkipNil)
 	}
 	if a.accountPool != nil {
+		a.observeClose(appCloseAccountPool, appCloseEnter)
 		a.accountPool.Close()
+		a.observeClose(appCloseAccountPool, appCloseReturn)
+	} else {
+		a.observeClose(appCloseAccountPool, appCloseSkipNil)
 	}
 	if a.refresh != nil {
+		a.observeClose(appCloseRefresh, appCloseEnter)
 		a.refresh.Close()
+		a.observeClose(appCloseRefresh, appCloseReturn)
+	} else {
+		a.observeClose(appCloseRefresh, appCloseSkipNil)
 	}
 	if a.proxyClients != nil {
+		a.observeClose(appCloseProxyClients, appCloseEnter)
 		a.proxyClients.Close()
+		a.observeClose(appCloseProxyClients, appCloseReturn)
+	} else {
+		a.observeClose(appCloseProxyClients, appCloseSkipNil)
 	}
-	return a.store.close()
+	a.observeClose(appCloseStore, appCloseEnter)
+	err := a.store.close()
+	a.observeClose(appCloseStore, appCloseReturn)
+	return err
 }
 
 func (a *App) Handler() http.Handler {
@@ -484,6 +610,7 @@ func (a *App) Handler() http.Handler {
 	}
 	mux.HandleFunc("POST /admin/api/v1/employees", a.requireAdmin(a.createEmployee, true))
 	mux.HandleFunc("PATCH /admin/api/v1/employees/{id}", a.requireAdmin(a.updateEmployee, true))
+	mux.HandleFunc("POST /admin/api/v1/employees/{id}/retire-credentials", a.requireAdmin(a.retireEmployeeCredentials, true))
 	mux.HandleFunc("PUT /admin/api/v1/employees/{id}/model-policy", a.requireAdmin(a.updateModelPolicy, true))
 	mux.HandleFunc("GET /admin/api/v1/employees/{id}/keys", a.requireAdmin(a.listKeys, false))
 	mux.HandleFunc("POST /admin/api/v1/employees/{id}/keys", a.requireAdmin(a.createKey, true))
@@ -511,6 +638,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("DELETE /admin/api/v1/models/{id}", a.requireAdmin(a.archiveModel, true))
 	mux.HandleFunc("GET /admin/api/v1/system/status", a.requireAdmin(a.systemStatus, false))
 	mux.HandleFunc("GET /v1/models", a.listModels)
+	mux.HandleFunc("GET /v1/client-configuration", a.clientConfiguration)
 	mux.HandleFunc("POST /v1/chat/completions", a.chatCompletions)
 	mux.HandleFunc("POST /v1/embeddings", a.embeddings)
 	mux.HandleFunc("POST /v1/responses", a.responsesAPI)

@@ -162,3 +162,44 @@ npm registry 的精确版本元数据可由 `https://registry.npmjs.org/<name>/<
 - 可以确认：当前浏览器产物包含 React/React DOM/Scheduler，Go 源码直接使用 x/crypto 与 modernc SQLite。
 - 尚不能确认：12 个 Go 清单模块在每个目标上分别是否链接、44 个未物化平台包的精确随包文本、六个缺原始许可证文件的 npm 包的最终版权行、未来安装器/容器会包含哪些构建工具。
 - 因此本盘点建立发布门禁和证据清单，但不作“无许可证问题”或“已满足所有义务”的保证。
+
+## 8. 2026-10-20 SQLite WAL-reset 兼容升级追加证据
+
+本节仅追加新批当前事实；上述 2026-09-22/24 历史表、散列、方法与结论不改写。
+合同见 [SQLite 兼容升级合同](../sqlite-wal-reset-compat-contract.md)。本批固定
+`modernc.org/sqlite v1.46.2`，官方标签提交
+`d7c9932b311af8741de8fa03011de3704940d210`，内嵌 SQLite 3.51.3。
+默认代理 IPv6 不通后仅在当前子进程使用备用 GOPROXY，保留 TLS 和官方
+`GOSUMDB=sum.golang.org`；没有改变配置、信任、凭据或 remote。
+
+Go 1.26.8 实际 `go list -m all` 解析、`go mod verify` 通过。go.mod 只升级
+SQLite 及其四个必要选中依赖；x/crypto 及其他 go.mod 版本不变：
+
+| 选中模块 | 当前版本 | 模块 h1 | go.mod h1 |
+| --- | --- | --- | --- |
+| modernc.org/sqlite | v1.46.2 | `gkXQ6R0+AjxFC/fTDaeIVLbNLNrRoOK7YYVz5BKhTcE=` | `hWjRO6Tj/5Ik8ieqxQybiEOUXy0NJFNp2tpvVpKlvig=` |
+| modernc.org/libc | v1.70.0 | `U58NawXqXbgpZ/dcdS9kMshu08aiA6b7gusEusqzNkw=` | `OVmxFGP1CI/Z4L3E0Q3Mf1PDE0BucwMkcXjjLntvHJo=` |
+| golang.org/x/sys | v0.42.0 | `omrd2nAlyT5ESRdCLYdm3+fMfNFE/+Rf4bDIQImRJeo=` | `4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=` |
+| golang.org/x/exp | v0.0.0-20251023183803-a4bb9ffd2546 | `mgKeJMpvi0yx/sU5GsxQ7p6s2wtOnGAHZWCHUM4KGzY=` | `j/pmGrbnkbPtQfxEe5D0VQhZC6qKbfKifgD0oM7sR70=` |
+| github.com/ncruces/go-strftime | v1.0.0 | `HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOFAw7w=` | `Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=` |
+
+选中图还含由 libc 要求的生成器/测试依赖版本变化：x/tools v0.42.0、
+x/mod v0.33.0、x/sync v0.19.0、modernc.org/cc/v4 v4.27.1、
+ccgo/v4 v4.32.0 等。它们没有被无故加入 runtime 清单，也没有仅凭 go.sum
+历史条目宣称链接；发布仍须按每一最终目标的实际二进制构建信息收集通知。
+
+本次逐项读取改变模块随包原文并核 SHA-256：
+
+| 模块原文 | SHA-256 | 结论 |
+| --- | --- | --- |
+| sqlite v1.46.2 LICENSE | `C6FE05491A60AE13BCD223088D2705E36DEDE24E5587226231D2459ADA5C4822` | BSD-3-Clause |
+| sqlite v1.46.2 SQLITE-LICENSE | `8438C9C89B849131EAD81D5435CB97FCF052DF5B0B286DDA8A2D4C29E6CB3FD0` | SQLite 公共领域声明 |
+| libc v1.70.0 LICENSE | `95FF867EB55A56935FA7492406CFA953FB7C13CA73F4C0A86AE05756B4605600` | BSD-3-Clause |
+| libc v1.70.0 LICENSE-3RD-PARTY.md | `F597097EFE3D97021F89170746BD3A0FB9A8B6FB26B82043ED68A4E0283BEE6C` | Go BSD-3-Clause；musl MIT 及其嵌入作品声明；go-netdb MIT；NixOS MIT |
+| x/sys v0.42.0 LICENSE | `911F8F5782931320F5B8D1160A76365B83AEA6447EE6C04FA6D5591467DB9DAD` | BSD-3-Clause |
+| x/exp 当前版本 LICENSE | `911F8F5782931320F5B8D1160A76365B83AEA6447EE6C04FA6D5591467DB9DAD` | BSD-3-Clause |
+| go-strftime v1.0.0 LICENSE | `38AE43959DAF953A393A585B2988672CB65A5A541ACA0D0BE5E72595A0A16883` | MIT |
+
+libc 新版不再使用旧表的 LICENSE-GO / honnef.co/go/netdb/LICENSE 布局，
+必须携带新的合并原文，不能沿用旧路径假装已经收齐。此处仍不是完整发行物
+许可证包，不授权 package/deploy，也不作法律或安全完整性保证。

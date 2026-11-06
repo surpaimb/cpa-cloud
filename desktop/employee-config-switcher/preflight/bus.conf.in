@@ -1,0 +1,37 @@
+<!-- Independently authored private, non-activating, metadata-only test bus. -->
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:path=@BUS_PATH@</listen>
+  <auth>EXTERNAL</auth>
+  <!-- No include, servicedir, standard_session_servicedirs or activation helper. -->
+  <policy context="default">
+    <allow user="@USER@"/>
+    <allow own="*"/>
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <!-- Restrict calls, not interface-less replies to metadata queries. -->
+    <deny send_type="method_call" send_interface="org.freedesktop.Secret.Service"/>
+    <deny send_type="method_call" send_interface="org.freedesktop.Secret.Collection"/>
+    <deny send_type="method_call" send_interface="org.freedesktop.Secret.Item"/>
+    <deny send_type="method_call" send_interface="org.freedesktop.Secret.Prompt"/>
+    <deny send_type="method_call" send_interface="org.freedesktop.DBus.Properties" send_member="Set"/>
+    <!-- Member rules require an interface or path. A wildcard path also
+         covers calls with the optional interface omitted, at every path. -->
+    <deny send_type="method_call" send_path="*" send_member="OpenSession"/>
+    <deny send_type="method_call" send_path="*" send_member="CreateCollection"/>
+    <deny send_type="method_call" send_path="*" send_member="SearchItems"/>
+    <deny send_type="method_call" send_path="*" send_member="GetSecrets"/>
+    <deny send_type="method_call" send_path="*" send_member="Unlock"/>
+    <deny send_type="method_call" send_path="*" send_member="Lock"/>
+    <deny send_type="method_call" send_path="*" send_member="ReadAlias"/>
+    <deny send_type="method_call" send_path="*" send_member="SetAlias"/>
+    <deny send_type="method_call" send_path="*" send_member="CreateItem"/>
+    <deny send_type="method_call" send_path="*" send_member="Delete"/>
+    <deny send_type="method_call" send_path="*" send_member="GetSecret"/>
+    <deny send_type="method_call" send_path="*" send_member="SetSecret"/>
+    <deny send_type="method_call" send_path="*" send_member="Prompt"/>
+    <deny send_type="method_call" send_path="*" send_member="Dismiss"/>
+    <deny send_type="method_call" send_path="*" send_member="Set"/>
+  </policy>
+</busconfig>

@@ -97,7 +97,11 @@ type updateEmployeeRequest struct {
 
 func (a *App) updateEmployee(w http.ResponseWriter, r *http.Request, _ adminSession) {
 	var input updateEmployeeRequest
-	if !decodeJSON(w, r, adminMaxBody, &input) || input.ExpectedRevision < 1 {
+	if !decodeJSON(w, r, adminMaxBody, &input) {
+		return
+	}
+	if input.ExpectedRevision < 1 {
+		writeAdminError(w, http.StatusBadRequest, "invalid_revision", "A valid expected_revision is required.")
 		return
 	}
 	if input.Name == nil && input.Department == nil && input.Note == nil && input.Status == nil {
@@ -197,7 +201,11 @@ type modelPolicyRequest struct {
 
 func (a *App) updateModelPolicy(w http.ResponseWriter, r *http.Request, _ adminSession) {
 	var input modelPolicyRequest
-	if !decodeJSON(w, r, adminMaxBody, &input) || input.ExpectedRevision < 1 {
+	if !decodeJSON(w, r, adminMaxBody, &input) {
+		return
+	}
+	if input.ExpectedRevision < 1 {
+		writeAdminError(w, http.StatusBadRequest, "invalid_revision", "A valid expected_revision is required.")
 		return
 	}
 	if input.Mode != "all" && input.Mode != "selected" {
@@ -540,54 +548,343 @@ func sameOptionalString(left, right *string) bool {
 	return *left == *right
 }
 
-func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, _ adminSession) {
+// Independently authored for docs/admin-key-revocation-confirmation-contract.md.
+// Private operation-owned test seams; production requests have none.
+type adminKeyRevocationHooksKey struct{}
+type adminKeyRevocationHooks struct {
+	beforeBegin  func(context.Context) error
+	afterBegin   func(*sql.Tx) error
+	afterRead    func(*sql.Tx) error
+	beforeCommit func(*sql.Tx) error
+	afterCommit  func(error) error
+	afterNotify  func()
+}
+
+type adminKeyRevocationSlot struct {
+	employeeID, keyID, state, createdAt                                  string
+	fingerprint                                                          []byte
+	employeeRevision, policyRevision, governanceRevision, budgetRevision sql.NullInt64
+	armedAt, issuedAt, cancelledAt                                       sql.NullString
+}
+
+type adminKeyRevocationState struct {
+	employeeID string
+	revoked    sql.NullString
+	slot       *adminKeyRevocationSlot
+}
+
+func validAdminKeyRevocationTime(value sql.NullString) bool {
+	if !value.Valid {
+		return false
+	}
+	parsed, err := parseTime(value.String)
+	return err == nil && !parsed.IsZero()
+}
+
+func readAdminKeyRevocationTx(ctx context.Context, tx *sql.Tx, keyID string) (adminKeyRevocationState, error) {
+	var state adminKeyRevocationState
+	var kind string
+	err := tx.QueryRowContext(ctx, `SELECT employee_id,revoked_at,typeof(revoked_at) FROM access_keys WHERE id=?`, keyID).Scan(&state.employeeID, &state.revoked, &kind)
+	if err != nil {
+		return state, err
+	} // Only this first lookup may mean a genuinely missing Key.
+	if state.employeeID == "" || (kind != "null" && kind != "text") || (state.revoked.Valid && !validAdminKeyRevocationTime(state.revoked)) {
+		return state, errors.New("invalid revocation Key state")
+	}
+	var owner string
+	if tx.QueryRowContext(ctx, `SELECT id FROM employees WHERE id=?`, state.employeeID).Scan(&owner) != nil || owner != state.employeeID {
+		return state, errors.New("invalid revocation Key owner")
+	}
+	slot := &adminKeyRevocationSlot{}
+	err = tx.QueryRowContext(ctx, `SELECT employee_id,key_id,state,created_at,arm_fingerprint,arm_employee_revision,arm_key_policy_revision,arm_governance_revision,arm_budget_revision,armed_at,issued_at,cancelled_at FROM employee_self_key_slots WHERE key_id=?`, keyID).Scan(
+		&slot.employeeID, &slot.keyID, &slot.state, &slot.createdAt, &slot.fingerprint, &slot.employeeRevision, &slot.policyRevision, &slot.governanceRevision, &slot.budgetRevision, &slot.armedAt, &slot.issuedAt, &slot.cancelledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return state, nil
+	}
+	if err != nil {
+		return state, errors.New("read revocation slot failed")
+	}
+	if slot.employeeID != state.employeeID || slot.keyID != keyID || !validAdminKeyRevocationTime(sql.NullString{String: slot.createdAt, Valid: true}) {
+		return state, errors.New("invalid revocation slot owner")
+	}
+	armed := slot.state == "armed" || slot.state == "issued"
+	if armed {
+		if len(slot.fingerprint) != 32 || !validAdminKeyRevocationTime(slot.armedAt) ||
+			!slot.employeeRevision.Valid || slot.employeeRevision.Int64 < 1 || !slot.policyRevision.Valid || slot.policyRevision.Int64 < 1 ||
+			!slot.governanceRevision.Valid || slot.governanceRevision.Int64 < 1 || !slot.budgetRevision.Valid || slot.budgetRevision.Int64 < 1 {
+			return state, errors.New("invalid revocation slot activation")
+		}
+	} else if len(slot.fingerprint) != 0 || slot.employeeRevision.Valid || slot.policyRevision.Valid || slot.governanceRevision.Valid || slot.budgetRevision.Valid {
+		return state, errors.New("invalid revocation slot inactive snapshot")
+	}
+	if (slot.issuedAt.Valid != (slot.state == "issued")) || (slot.issuedAt.Valid && !validAdminKeyRevocationTime(slot.issuedAt)) ||
+		(slot.cancelledAt.Valid != (slot.state == "cancelled")) || (slot.cancelledAt.Valid && !validAdminKeyRevocationTime(slot.cancelledAt)) ||
+		(slot.armedAt.Valid && !validAdminKeyRevocationTime(slot.armedAt)) {
+		return state, errors.New("invalid revocation slot times")
+	}
+	switch slot.state {
+	case "pending", "armed", "issued", "cancelled":
+	default:
+		return state, errors.New("invalid revocation slot state")
+	}
+	state.slot = slot
+	return state, nil
+}
+
+func sameAdminKeyRevocationSlot(left, right *adminKeyRevocationSlot) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.employeeID == right.employeeID && left.keyID == right.keyID && left.state == right.state && left.createdAt == right.createdAt &&
+		string(left.fingerprint) == string(right.fingerprint) && left.employeeRevision == right.employeeRevision && left.policyRevision == right.policyRevision &&
+		left.governanceRevision == right.governanceRevision && left.budgetRevision == right.budgetRevision && left.armedAt == right.armedAt &&
+		left.issuedAt == right.issuedAt && left.cancelledAt == right.cancelledAt
+}
+
+func confirmAdminKeyRevocation(before, after adminKeyRevocationState) bool {
+	if after.employeeID != before.employeeID || !validAdminKeyRevocationTime(after.revoked) || (before.revoked.Valid && before.revoked != after.revoked) {
+		return false
+	}
+	if before.slot != nil && (before.slot.state == "pending" || before.slot.state == "armed") {
+		slot := after.slot
+		return slot != nil && slot.employeeID == before.slot.employeeID && slot.keyID == before.slot.keyID && slot.createdAt == before.slot.createdAt &&
+			slot.state == "cancelled" && validAdminKeyRevocationTime(slot.cancelledAt) && !slot.armedAt.Valid && !slot.issuedAt.Valid &&
+			len(slot.fingerprint) == 0 && !slot.employeeRevision.Valid && !slot.policyRevision.Valid && !slot.governanceRevision.Valid && !slot.budgetRevision.Valid
+	}
+	return sameAdminKeyRevocationSlot(before.slot, after.slot)
+}
+
+func (a *App) revokeKey(w http.ResponseWriter, r *http.Request, session adminSession) {
+	// Integration keeps PR100 confirmation/hooks and PR122 retained audit checks.
 	var input struct{}
 	if !decodeJSON(w, r, adminMaxBody, &input) {
 		return
 	}
 	a.admission.Lock()
 	defer a.admission.Unlock()
+	hooks, _ := r.Context().Value(adminKeyRevocationHooksKey{}).(adminKeyRevocationHooks)
+	if hooks.beforeBegin != nil && hooks.beforeBegin(r.Context()) != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
+	}
 	tx, err := a.store.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
 	defer tx.Rollback()
-	keyID := r.PathValue("id")
-	var slotState string
-	err = tx.QueryRowContext(r.Context(), `SELECT state FROM employee_self_key_slots WHERE key_id=?`, keyID).Scan(&slotState)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	// Freeze retained audit facts before any transaction-owned writable seam or
+	// Key/slot mutation, including write triggers reached by those mutations.
+	var previousAuditRow, previousAuditCount int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(rowid),0),COUNT(*) FROM account_lifecycle_audit`).Scan(&previousAuditRow, &previousAuditCount); err != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
-	var count int64
-	if slotState == "pending" || slotState == "armed" {
-		if err := cancelSelfKeySlotTx(r.Context(), tx, keyID); err != nil {
-			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
-			return
-		}
-		count = 1
-	} else {
-		res, err := tx.ExecContext(r.Context(), `UPDATE access_keys SET revoked_at=COALESCE(revoked_at,?) WHERE id=?`, utcNow(), keyID)
-		if err != nil {
-			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
-			return
-		}
-		count, err = res.RowsAffected()
-		if err != nil {
-			writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
-			return
-		}
+	if hooks.afterBegin != nil && hooks.afterBegin(tx) != nil {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+		return
 	}
-	if count != 1 {
+	keyID := r.PathValue("id")
+	failed := func() {
+		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
+	}
+	type keyState struct {
+		owner, name, selector, digest, revokedType string
+		expires, revoked                           sql.NullString
+	}
+	readKey := func() (keyState, error) {
+		var state keyState
+		err := tx.QueryRowContext(r.Context(), `SELECT employee_id,name,selector,hex(digest),expires_at,revoked_at,typeof(revoked_at) FROM access_keys WHERE id=?`, keyID).
+			Scan(&state.owner, &state.name, &state.selector, &state.digest, &state.expires, &state.revoked, &state.revokedType)
+		return state, err
+	}
+	type slotState struct {
+		owner, state, fingerprint                                         string
+		employeeRevision, keyRevision, governanceRevision, budgetRevision sql.NullInt64
+		created, armed, issued, cancelled                                 sql.NullString
+	}
+	readSlot := func() (slotState, bool, error) {
+		var state slotState
+		err := tx.QueryRowContext(r.Context(), `SELECT employee_id,state,hex(arm_fingerprint),arm_employee_revision,arm_key_policy_revision,arm_governance_revision,arm_budget_revision,created_at,armed_at,issued_at,cancelled_at FROM employee_self_key_slots WHERE key_id=?`, keyID).
+			Scan(&state.owner, &state.state, &state.fingerprint, &state.employeeRevision, &state.keyRevision, &state.governanceRevision, &state.budgetRevision, &state.created, &state.armed, &state.issued, &state.cancelled)
+		if errors.Is(err, sql.ErrNoRows) {
+			return state, false, nil
+		}
+		return state, err == nil, err
+	}
+	beforeKey, err := readKey()
+	if errors.Is(err, sql.ErrNoRows) {
 		writeAdminError(w, 404, "not_found", "Key was not found.")
 		return
 	}
-	if err := tx.Commit(); err != nil {
+	if err != nil {
+		failed()
+		return
+	}
+	beforeSlot, hasSlot, err := readSlot()
+	if err != nil || (hasSlot && beforeSlot.owner != beforeKey.owner) {
+		failed()
+		return
+	}
+	beforeState, err := readAdminKeyRevocationTx(r.Context(), tx, keyID)
+	if err != nil {
+		failed()
+		return
+	}
+	if hooks.afterRead != nil && hooks.afterRead(tx) != nil {
+		failed()
+		return
+	}
+	cancelSlot := hasSlot && (beforeSlot.state == "pending" || beforeSlot.state == "armed")
+	transition := !beforeKey.revoked.Valid || cancelSlot
+	if cancelSlot {
+		if err := cancelSelfKeySlotTx(r.Context(), tx, keyID); err != nil {
+			failed()
+			return
+		}
+		// PR100 cancels the unused activation timestamp in this operation only.
+		cleared, err := tx.ExecContext(r.Context(), `UPDATE employee_self_key_slots SET armed_at=NULL WHERE key_id=? AND employee_id=?`, keyID, beforeKey.owner)
+		if err != nil {
+			failed()
+			return
+		}
+		if changed, err := cleared.RowsAffected(); err != nil || changed != 1 {
+			failed()
+			return
+		}
+	} else if !beforeKey.revoked.Valid {
+		res, err := tx.ExecContext(r.Context(), `UPDATE access_keys SET revoked_at=? WHERE id=? AND revoked_at IS NULL`, utcNow(), keyID)
+		if err != nil {
+			failed()
+			return
+		}
+		count, err := res.RowsAffected()
+		if err != nil || count != 1 {
+			failed()
+			return
+		}
+	}
+	expectedKey, err := readKey()
+	if err != nil || !expectedKey.revoked.Valid {
+		failed()
+		return
+	}
+	preservedKey := expectedKey
+	preservedKey.revoked, preservedKey.revokedType = beforeKey.revoked, beforeKey.revokedType
+	if preservedKey != beforeKey || (beforeKey.revoked.Valid && (expectedKey.revoked != beforeKey.revoked || expectedKey.revokedType != beforeKey.revokedType)) {
+		failed()
+		return
+	}
+	if !beforeKey.revoked.Valid {
+		if _, err := parseTime(expectedKey.revoked.String); err != nil || expectedKey.revokedType != "text" {
+			failed()
+			return
+		}
+	}
+	expectedSlot, found, err := readSlot()
+	if err != nil || found != hasSlot {
+		failed()
+		return
+	}
+	wantedSlot := beforeSlot
+	if cancelSlot {
+		wantedSlot.state, wantedSlot.fingerprint = "cancelled", ""
+		wantedSlot.employeeRevision, wantedSlot.keyRevision = sql.NullInt64{}, sql.NullInt64{}
+		wantedSlot.governanceRevision, wantedSlot.budgetRevision = sql.NullInt64{}, sql.NullInt64{}
+		wantedSlot.armed = sql.NullString{}
+		wantedSlot.cancelled = expectedSlot.cancelled
+		if _, err := parseTime(expectedSlot.cancelled.String); err != nil || !expectedSlot.cancelled.Valid {
+			failed()
+			return
+		}
+	}
+	if expectedSlot != wantedSlot {
+		failed()
+		return
+	}
+	wantedAuditCount := previousAuditCount
+	var ownAuditRow int64
+	var ownAuditID, ownAuditTime string
+	if transition {
+		wantedAuditCount++
+		if wantedAuditCount > lifecycleAuditLimit {
+			wantedAuditCount = lifecycleAuditLimit
+		}
+		if err := recordLifecycleAudit(r.Context(), tx, session.AdminID, "access_key.revoke", "access_key", keyID, "succeeded"); err != nil {
+			failed()
+			return
+		}
+		var total, added, retained int64
+		if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(CASE WHEN rowid>? THEN 1 END),COUNT(CASE WHEN rowid>? AND actor_id=? AND action='access_key.revoke' AND target_type='access_key' AND target_id=? AND result='succeeded' THEN 1 END) FROM account_lifecycle_audit`, previousAuditRow, previousAuditRow, session.AdminID, keyID).
+			Scan(&total, &added, &retained); err != nil || total != wantedAuditCount || added != 1 || retained != 1 {
+			failed()
+			return
+		}
+		// Exactly one new row exists here. Retain its identity and timestamp so a
+		// later private hook cannot replace or change this operation's event.
+		if err := tx.QueryRowContext(r.Context(), `SELECT rowid,id,occurred_at FROM account_lifecycle_audit WHERE rowid>? AND actor_id=? AND action='access_key.revoke' AND target_type='access_key' AND target_id=? AND result='succeeded'`, previousAuditRow, session.AdminID, keyID).
+			Scan(&ownAuditRow, &ownAuditID, &ownAuditTime); err != nil || ownAuditRow <= previousAuditRow || ownAuditID == "" || !validAdminKeyRevocationTime(sql.NullString{String: ownAuditTime, Valid: true}) {
+			failed()
+			return
+		}
+	}
+	// The private pre-Commit seam may write only before all final confirmations.
+	if hooks.beforeCommit != nil && hooks.beforeCommit(tx) != nil {
+		failed()
+		return
+	}
+	// Audit INSERT/retention triggers may undo a preceding mutation. No writes
+	// follow these final checks before the one Commit, including on a no-op retry.
+	finalKey, err := readKey()
+	if err != nil || finalKey != expectedKey {
+		failed()
+		return
+	}
+	finalSlot, found, err := readSlot()
+	if err != nil || found != hasSlot || finalSlot != expectedSlot {
+		failed()
+		return
+	}
+	finalState, err := readAdminKeyRevocationTx(r.Context(), tx, keyID)
+	if err != nil || !confirmAdminKeyRevocation(beforeState, finalState) {
+		failed()
+		return
+	}
+	// These audit confirmations follow the last writable hook and every final
+	// Key/slot check. A terminal retry must add zero rows and preserve the count.
+	wantedAdded := int64(0)
+	if transition {
+		wantedAdded = 1
+	}
+	var finalAuditCount, finalAdded, finalMatching int64
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(CASE WHEN rowid>? THEN 1 END),COUNT(CASE WHEN rowid>? AND actor_id=? AND action='access_key.revoke' AND target_type='access_key' AND target_id=? AND result='succeeded' THEN 1 END) FROM account_lifecycle_audit`, previousAuditRow, previousAuditRow, session.AdminID, keyID).
+		Scan(&finalAuditCount, &finalAdded, &finalMatching); err != nil || finalAuditCount != wantedAuditCount || finalAdded != wantedAdded || finalMatching != wantedAdded {
+		failed()
+		return
+	}
+	if transition {
+		var retainedOwn int64
+		if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM account_lifecycle_audit WHERE rowid=? AND id=? AND actor_id=? AND action='access_key.revoke' AND target_type='access_key' AND target_id=? AND result='succeeded' AND occurred_at=? AND typeof(occurred_at)='text'`, ownAuditRow, ownAuditID, session.AdminID, keyID, ownAuditTime).
+			Scan(&retainedOwn); err != nil || retainedOwn != 1 {
+			failed()
+			return
+		}
+	}
+	commitErr := tx.Commit()
+	if hooks.afterCommit != nil {
+		reported := hooks.afterCommit(commitErr)
+		if commitErr == nil {
+			commitErr = reported
+		}
+	}
+	if commitErr != nil {
 		writeAdminError(w, 503, "storage_unavailable", "Service is temporarily unavailable.")
 		return
 	}
 	a.notifyAccountPoolChanged()
+	if hooks.afterNotify != nil {
+		hooks.afterNotify()
+	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 

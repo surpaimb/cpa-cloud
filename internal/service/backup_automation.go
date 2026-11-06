@@ -22,6 +22,25 @@ const (
 
 const backupKeyProviderDDL = `CREATE TABLE backup_key_providers (
 	id TEXT NOT NULL PRIMARY KEY,
+	kind TEXT NOT NULL CHECK(kind IN ('windows-dpapi-user','linux-systemd-credential-v1')),
+	scope TEXT NOT NULL CHECK(scope IN ('current-user','systemd-service')),
+	instance_id TEXT,
+	key_id TEXT,
+	status TEXT NOT NULL CHECK(status IN ('ready','unavailable','degraded')),
+	reason_code TEXT,
+	active_version INTEGER NOT NULL CHECK(active_version BETWEEN 1 AND 9007199254740991),
+	revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991),
+	created_by_admin_id TEXT NOT NULL REFERENCES admins(id) ON DELETE RESTRICT,
+	updated_by_admin_id TEXT NOT NULL REFERENCES admins(id) ON DELETE RESTRICT,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	CHECK((status='ready' AND reason_code IS NULL) OR (status!='ready' AND reason_code IS NOT NULL)),
+	CHECK((kind='windows-dpapi-user' AND scope='current-user' AND instance_id IS NULL AND key_id IS NULL)
+	 OR (kind='linux-systemd-credential-v1' AND scope='systemd-service' AND length(instance_id)=36 AND length(key_id) BETWEEN 1 AND 64))
+)`
+
+const legacyBackupKeyProviderDDL = `CREATE TABLE backup_key_providers (
+	id TEXT NOT NULL PRIMARY KEY,
 	kind TEXT NOT NULL CHECK(kind IN ('windows-dpapi-user')),
 	scope TEXT NOT NULL CHECK(scope='current-user'),
 	status TEXT NOT NULL CHECK(status IN ('ready','unavailable','degraded')),
@@ -53,6 +72,39 @@ const backupPlanDDL = `CREATE TABLE backup_plans (
 )`
 
 const backupRunDDL = `CREATE TABLE backup_runs (
+	id TEXT NOT NULL PRIMARY KEY,
+	plan_id TEXT NOT NULL REFERENCES backup_plans(id) ON DELETE RESTRICT,
+	plan_revision INTEGER NOT NULL CHECK(plan_revision BETWEEN 1 AND 9007199254740991),
+	key_provider_id TEXT NOT NULL REFERENCES backup_key_providers(id) ON DELETE RESTRICT,
+	key_provider_kind TEXT NOT NULL CHECK(key_provider_kind IN ('windows-dpapi-user','linux-systemd-credential-v1')),
+	key_provider_instance_id TEXT,
+	key_provider_key_id TEXT,
+	key_provider_version INTEGER NOT NULL CHECK(key_provider_version BETWEEN 1 AND 9007199254740991),
+	trigger_kind TEXT NOT NULL CHECK(trigger_kind IN ('scheduled','manual')),
+	requested_by_admin_id TEXT REFERENCES admins(id) ON DELETE RESTRICT,
+	scheduled_for TEXT NOT NULL,
+	started_at TEXT NOT NULL,
+	finished_at TEXT,
+	status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','cancelled','interrupted')),
+	package_name TEXT NOT NULL,
+	package_size INTEGER CHECK(package_size IS NULL OR package_size>=0),
+	package_retained INTEGER NOT NULL CHECK(package_retained IN (0,1)),
+	package_deleted_at TEXT,
+	verified_at TEXT,
+	rehearsal_status TEXT NOT NULL CHECK(rehearsal_status IN ('pending','succeeded','failed','skipped')),
+	rehearsed_at TEXT,
+	error_code TEXT,
+	created_at TEXT NOT NULL,
+	CHECK((status='running' AND finished_at IS NULL AND package_size IS NULL AND package_retained=0 AND package_deleted_at IS NULL AND verified_at IS NULL AND rehearsal_status='pending' AND rehearsed_at IS NULL AND error_code IS NULL)
+	 OR (status!='running' AND finished_at IS NOT NULL)),
+	CHECK((package_retained=1 AND package_size IS NOT NULL AND package_deleted_at IS NULL) OR package_retained=0),
+	CHECK((rehearsal_status='pending' AND rehearsed_at IS NULL) OR (rehearsal_status!='pending')),
+	CHECK((trigger_kind='scheduled' AND requested_by_admin_id IS NULL) OR (trigger_kind='manual' AND requested_by_admin_id IS NOT NULL)),
+	CHECK((key_provider_kind='windows-dpapi-user' AND key_provider_instance_id IS NULL AND key_provider_key_id IS NULL)
+	 OR (key_provider_kind='linux-systemd-credential-v1' AND length(key_provider_instance_id)=36 AND length(key_provider_key_id) BETWEEN 1 AND 64))
+)`
+
+const legacyBackupRunDDL = `CREATE TABLE backup_runs (
 	id TEXT NOT NULL PRIMARY KEY,
 	plan_id TEXT NOT NULL REFERENCES backup_plans(id) ON DELETE RESTRICT,
 	plan_revision INTEGER NOT NULL CHECK(plan_revision BETWEEN 1 AND 9007199254740991),
@@ -91,6 +143,8 @@ type backupKeyProviderView struct {
 	ID               string  `json:"id"`
 	Kind             string  `json:"kind"`
 	Scope            string  `json:"scope"`
+	InstanceID       *string `json:"instance_id"`
+	KeyID            *string `json:"key_id"`
 	Status           string  `json:"status"`
 	ReasonCode       *string `json:"reason_code"`
 	ActiveVersion    int64   `json:"active_version"`
@@ -119,27 +173,29 @@ type backupPlanView struct {
 }
 
 type backupRunView struct {
-	ID                 string  `json:"id"`
-	PlanID             string  `json:"plan_id"`
-	PlanRevision       int64   `json:"plan_revision"`
-	KeyProviderID      string  `json:"key_provider_id"`
-	KeyProviderKind    string  `json:"key_provider_kind"`
-	KeyProviderVersion int64   `json:"key_provider_version"`
-	TriggerKind        string  `json:"trigger_kind"`
-	RequestedByAdminID *string `json:"requested_by_admin_id"`
-	ScheduledFor       string  `json:"scheduled_for"`
-	StartedAt          string  `json:"started_at"`
-	FinishedAt         *string `json:"finished_at"`
-	Status             string  `json:"status"`
-	PackageName        string  `json:"package_name"`
-	PackageSize        *int64  `json:"package_size"`
-	PackageRetained    bool    `json:"package_retained"`
-	PackageDeletedAt   *string `json:"package_deleted_at"`
-	VerifiedAt         *string `json:"verified_at"`
-	RehearsalStatus    string  `json:"rehearsal_status"`
-	RehearsedAt        *string `json:"rehearsed_at"`
-	ErrorCode          *string `json:"error_code"`
-	CreatedAt          string  `json:"created_at"`
+	ID                    string  `json:"id"`
+	PlanID                string  `json:"plan_id"`
+	PlanRevision          int64   `json:"plan_revision"`
+	KeyProviderID         string  `json:"key_provider_id"`
+	KeyProviderKind       string  `json:"key_provider_kind"`
+	KeyProviderInstanceID *string `json:"key_provider_instance_id"`
+	KeyProviderKeyID      *string `json:"key_provider_key_id"`
+	KeyProviderVersion    int64   `json:"key_provider_version"`
+	TriggerKind           string  `json:"trigger_kind"`
+	RequestedByAdminID    *string `json:"requested_by_admin_id"`
+	ScheduledFor          string  `json:"scheduled_for"`
+	StartedAt             string  `json:"started_at"`
+	FinishedAt            *string `json:"finished_at"`
+	Status                string  `json:"status"`
+	PackageName           string  `json:"package_name"`
+	PackageSize           *int64  `json:"package_size"`
+	PackageRetained       bool    `json:"package_retained"`
+	PackageDeletedAt      *string `json:"package_deleted_at"`
+	VerifiedAt            *string `json:"verified_at"`
+	RehearsalStatus       string  `json:"rehearsal_status"`
+	RehearsedAt           *string `json:"rehearsed_at"`
+	ErrorCode             *string `json:"error_code"`
+	CreatedAt             string  `json:"created_at"`
 }
 
 func migrateBackupAutomation(ctx context.Context, db *sql.DB) error {
@@ -164,7 +220,11 @@ func migrateBackupAutomation(ctx context.Context, db *sql.DB) error {
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name IN ('backup_key_providers','backup_plans','backup_runs','backup_plans_due_idx','backup_runs_plan_idx','backup_runs_single_running_idx')`).Scan(&existing); err != nil {
 		return err
 	}
-	if existing == 0 {
+	if existing == 6 {
+		if err := migrateLegacyBackupProviderSchema(ctx, tx); err != nil {
+			return err
+		}
+	} else if existing == 0 {
 		for _, object := range objects {
 			if _, err := tx.ExecContext(ctx, object.ddl); err != nil {
 				return fmt.Errorf("migrate backup automation: %w", err)
@@ -205,11 +265,44 @@ func migrateBackupAutomation(ctx context.Context, db *sql.DB) error {
 	return tx.Commit()
 }
 
+func migrateLegacyBackupProviderSchema(ctx context.Context, tx *sql.Tx) error {
+	var providerSQL, runSQL string
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='backup_key_providers'`).Scan(&providerSQL); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='backup_runs'`).Scan(&runSQL); err != nil {
+		return err
+	}
+	if normalizeBackupDDL(providerSQL) == normalizeBackupDDL(backupKeyProviderDDL) && normalizeBackupDDL(runSQL) == normalizeBackupDDL(backupRunDDL) {
+		return nil
+	}
+	if normalizeBackupDDL(providerSQL) != normalizeBackupDDL(legacyBackupKeyProviderDDL) || normalizeBackupDDL(runSQL) != normalizeBackupDDL(legacyBackupRunDDL) {
+		return errors.New("backup automation schema is incomplete or incompatible")
+	}
+	statements := []string{
+		`DROP INDEX backup_runs_single_running_idx`, `DROP INDEX backup_runs_plan_idx`, `DROP INDEX backup_plans_due_idx`,
+		`ALTER TABLE backup_runs RENAME TO backup_runs_legacy_systemd_v1`,
+		`ALTER TABLE backup_plans RENAME TO backup_plans_legacy_systemd_v1`,
+		`ALTER TABLE backup_key_providers RENAME TO backup_key_providers_legacy_systemd_v1`,
+		backupKeyProviderDDL, backupPlanDDL, backupRunDDL, backupPlanDueIndexDDL, backupRunPlanIndexDDL, backupSingleRunDDL,
+		`INSERT INTO backup_key_providers(id,kind,scope,instance_id,key_id,status,reason_code,active_version,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at) SELECT id,kind,scope,NULL,NULL,status,reason_code,active_version,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at FROM backup_key_providers_legacy_systemd_v1`,
+		`INSERT INTO backup_plans(id,name,key_provider_id,interval_seconds,retention_count,rehearsal_enabled,enabled,next_run_at,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at) SELECT id,name,key_provider_id,interval_seconds,retention_count,rehearsal_enabled,enabled,next_run_at,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at FROM backup_plans_legacy_systemd_v1`,
+		`INSERT INTO backup_runs(id,plan_id,plan_revision,key_provider_id,key_provider_kind,key_provider_instance_id,key_provider_key_id,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at) SELECT id,plan_id,plan_revision,key_provider_id,key_provider_kind,NULL,NULL,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at FROM backup_runs_legacy_systemd_v1`,
+		`DROP TABLE backup_runs_legacy_systemd_v1`, `DROP TABLE backup_plans_legacy_systemd_v1`, `DROP TABLE backup_key_providers_legacy_systemd_v1`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate Linux systemd backup provider schema: %w", err)
+		}
+	}
+	return nil
+}
+
 func validateBackupAutomationColumns(ctx context.Context, tx *sql.Tx) error {
 	wanted := map[string][]string{
-		"backup_key_providers": {"id", "kind", "scope", "status", "reason_code", "active_version", "revision", "created_by_admin_id", "updated_by_admin_id", "created_at", "updated_at"},
+		"backup_key_providers": {"id", "kind", "scope", "instance_id", "key_id", "status", "reason_code", "active_version", "revision", "created_by_admin_id", "updated_by_admin_id", "created_at", "updated_at"},
 		"backup_plans":         {"id", "name", "key_provider_id", "interval_seconds", "retention_count", "rehearsal_enabled", "enabled", "next_run_at", "revision", "created_by_admin_id", "updated_by_admin_id", "created_at", "updated_at"},
-		"backup_runs":          {"id", "plan_id", "plan_revision", "key_provider_id", "key_provider_kind", "key_provider_version", "trigger_kind", "requested_by_admin_id", "scheduled_for", "started_at", "finished_at", "status", "package_name", "package_size", "package_retained", "package_deleted_at", "verified_at", "rehearsal_status", "rehearsed_at", "error_code", "created_at"},
+		"backup_runs":          {"id", "plan_id", "plan_revision", "key_provider_id", "key_provider_kind", "key_provider_instance_id", "key_provider_key_id", "key_provider_version", "trigger_kind", "requested_by_admin_id", "scheduled_for", "started_at", "finished_at", "status", "package_name", "package_size", "package_retained", "package_deleted_at", "verified_at", "rehearsal_status", "rehearsed_at", "error_code", "created_at"},
 	}
 	for table, names := range wanted {
 		columns, err := schemaColumns(ctx, tx, table)
@@ -234,8 +327,8 @@ func normalizeBackupDDL(value string) string {
 
 func loadBackupKeyProvider(ctx context.Context, query schemaQueryer, id string) (backupKeyProviderView, error) {
 	var item backupKeyProviderView
-	err := query.QueryRowContext(ctx, `SELECT id,kind,scope,status,reason_code,active_version,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at FROM backup_key_providers WHERE id=?`, id).
-		Scan(&item.ID, &item.Kind, &item.Scope, &item.Status, &item.ReasonCode, &item.ActiveVersion, &item.Revision, &item.CreatedByAdminID, &item.UpdatedByAdminID, &item.CreatedAt, &item.UpdatedAt)
+	err := query.QueryRowContext(ctx, `SELECT id,kind,scope,instance_id,key_id,status,reason_code,active_version,revision,created_by_admin_id,updated_by_admin_id,created_at,updated_at FROM backup_key_providers WHERE id=?`, id).
+		Scan(&item.ID, &item.Kind, &item.Scope, &item.InstanceID, &item.KeyID, &item.Status, &item.ReasonCode, &item.ActiveVersion, &item.Revision, &item.CreatedByAdminID, &item.UpdatedByAdminID, &item.CreatedAt, &item.UpdatedAt)
 	return item, err
 }
 
@@ -252,8 +345,8 @@ func loadBackupPlan(ctx context.Context, query schemaQueryer, id string) (backup
 func loadBackupRun(ctx context.Context, query schemaQueryer, id string) (backupRunView, error) {
 	var item backupRunView
 	var retained int
-	err := query.QueryRowContext(ctx, `SELECT id,plan_id,plan_revision,key_provider_id,key_provider_kind,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at FROM backup_runs WHERE id=?`, id).
-		Scan(&item.ID, &item.PlanID, &item.PlanRevision, &item.KeyProviderID, &item.KeyProviderKind, &item.KeyProviderVersion, &item.TriggerKind, &item.RequestedByAdminID, &item.ScheduledFor, &item.StartedAt, &item.FinishedAt, &item.Status, &item.PackageName, &item.PackageSize, &retained, &item.PackageDeletedAt, &item.VerifiedAt, &item.RehearsalStatus, &item.RehearsedAt, &item.ErrorCode, &item.CreatedAt)
+	err := query.QueryRowContext(ctx, `SELECT id,plan_id,plan_revision,key_provider_id,key_provider_kind,key_provider_instance_id,key_provider_key_id,key_provider_version,trigger_kind,requested_by_admin_id,scheduled_for,started_at,finished_at,status,package_name,package_size,package_retained,package_deleted_at,verified_at,rehearsal_status,rehearsed_at,error_code,created_at FROM backup_runs WHERE id=?`, id).
+		Scan(&item.ID, &item.PlanID, &item.PlanRevision, &item.KeyProviderID, &item.KeyProviderKind, &item.KeyProviderInstanceID, &item.KeyProviderKeyID, &item.KeyProviderVersion, &item.TriggerKind, &item.RequestedByAdminID, &item.ScheduledFor, &item.StartedAt, &item.FinishedAt, &item.Status, &item.PackageName, &item.PackageSize, &retained, &item.PackageDeletedAt, &item.VerifiedAt, &item.RehearsalStatus, &item.RehearsedAt, &item.ErrorCode, &item.CreatedAt)
 	item.PackageRetained = retained == 1
 	return item, err
 }

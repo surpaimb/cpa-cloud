@@ -8,7 +8,8 @@
 | https://developers.openai.com/api/reference/resources/embeddings/methods/create | Embeddings 创建端点、请求/响应字段与 usage | 2026-09-29 已核实；首段只实现文本/string batch、float、非流式子集 |
 | https://developers.openai.com/api/docs/guides/embeddings | Embeddings 使用与向量语义 | 2026-09-29 已核实用于首段范围；不据此推断 tokenizer 上界或第三方兼容 |
 | https://platform.openai.com/docs/api-reference/responses | Responses 协议入口 | 本轮工具读取因页面过大失败，不视为协议已核实 |
-| https://platform.claude.com/docs/en/api/overview | Messages 与 Token Counting 端点 | 2026-09-23 已核实 `POST /v1/messages` 和 `POST /v1/messages/count_tokens` |
+| https://platform.claude.com/docs/en/api/overview | Messages 与 Token Counting 端点及请求大小 | 2026-10-14 已核实 `POST /v1/messages`、`POST /v1/messages/count_tokens`、两者 32 MiB 请求上限及超限 413 `request_too_large` |
+| https://platform.claude.com/docs/en/api/errors | Anthropic 错误形状与请求大小错误 | 2026-10-14 已核实顶层 `type=error`、嵌套 error type、`request_id`，以及 Messages/Token Counting 超过 32 MiB 时的 413 `request_too_large` |
 | https://platform.claude.com/docs/en/manage-claude/authentication | Anthropic API Key 认证 | 2026-09-23 已核实 Bearer 为当前推荐，`x-api-key` 为兼容方式 |
 | https://platform.claude.com/docs/en/build-with-claude/streaming | Messages SSE 事件 | 2026-09-23 已核实事件序列、工具 JSON 增量、思考/签名增量、error 与 `message_stop` |
 | https://platform.claude.com/docs/en/api/messages/count_tokens | Token Counting 请求与响应 | 2026-09-23 已核实独立端点及对 messages/tools/images/documents 的计数用途 |
@@ -25,6 +26,21 @@
 
 核心设计中的 API 路径和支持批次是产品目标，不代表所有官方接口字段已经验证。
 后续新增来源应记录具体章节、版本/日期、支持子集与独立测试证据；不抄录大段原文。
+
+## Linux 服务端主密钥托管
+
+查阅日期：2026-10-16。首个实现切片与未验证边界见
+[Linux systemd installation master-key provider](linux-systemd-master-key-provider-contract.md)。
+
+- systemd 服务凭据概念、`CREDENTIALS_DIRECTORY` 与加密凭据：<https://systemd.io/CREDENTIALS/>
+- `LoadCredentialEncrypted=` 与运行时 credential directory：<https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html>
+- systemd v258 credential 文件/目录 ACL 与 ownership fallback 实现：<https://github.com/systemd/systemd/blob/v258/src/core/exec-credential.c>
+- `systemd-creds` 加密、null-key 风险与 0400 安全状态：<https://www.freedesktop.org/software/systemd/man/latest/systemd-creds.html>
+- Linux POSIX ACL xattr v2 格式：<https://github.com/torvalds/linux/blob/master/include/uapi/linux/posix_acl_xattr.h>
+- AES-GCM：<https://csrc.nist.gov/pubs/sp/800/38/d/final>
+
+应用在激活后只能读取 systemd 提供的明文运行时文件，不能由该文件反推 unit 使用了哪种加载指令或
+host/TPM/null-key 策略；真实 unit 与主机策略核验仍是独立生产门禁。
 
 ## 跨协议转换、Responses 状态与工具
 
