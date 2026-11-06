@@ -40,7 +40,7 @@
   },
   "jobs": {
     "build": {
-      "name": "Read-only build validation; kernel NO-GO is not released by this local candidate",
+      "name": "Build and verify Linux amd64 release payload",
       "runs-on": "ubuntu-24.04",
       "timeout-minutes": 45,
       "permissions": {
@@ -111,7 +111,7 @@
           "run": "set -euo pipefail\ngo run ./scripts/release-package.go web-assets --source . --output \"$RUNNER_TEMP/release-web\"\n"
         },
         {
-          "name": "Build Linux amd64 two-binary package; frozen kernel P2 remains separately blocked",
+          "name": "Build Linux amd64 server/Web/backup CLI package",
           "run": "set -euo pipefail\ngo run ./scripts/release-package.go package --source . --web-assets \"$RUNNER_TEMP/release-web\" --output \"$RUNNER_TEMP/release-out\" --version v0.1.0 --target-os linux --target-arch amd64 --asset-os linux --include-backup-cli --source-sha \"$EXPECTED_SOURCE_SHA\"\n"
         },
         {
