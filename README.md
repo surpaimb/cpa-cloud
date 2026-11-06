@@ -4,7 +4,7 @@
 
 面向企业内部的自托管 AI 接入平台。管理员通过网页管理上游、模型和员工 Key；员工使用标准 API，无需微信或专用客户端。鉴权、权限检查和上游请求在同一个 Go 服务进程内完成。
 
-> 当前为开发预览，尚非生产发行版。preview.3 的 18 个主包已由对应架构的 GitHub runner 完成测试、构建及各格式的自动验收；尚未完成所有目标主机上的真实 GUI 操作和部署验收。
+> v0.1.0 发行源码候选仅面向 Linux amd64 单租户服务端、Web 管理后台与备份 CLI；范围、安装配置、已知 CI 红灯及未完成能力见[发行说明](docs/releases/v0.1.0.md)。这不是全 CI 绿色或完整产品生产安全验收。下方 preview.3 下载及桌面包记录是历史版本，不代表 v0.1.0 已发布或支持那些平台。
 
 ## 功能与边界
 
@@ -210,11 +210,15 @@ RPM 使用滚动 60 秒窗口；修改策略不会清空原窗口。Chat、Respo
 
 ### 自动加密备份（默认关闭）
 
-源码增加 `--automated-backups-enabled`、受限输出根、计划/运行历史、保留与恢复演练。当前只有 Windows 当前用户 DPAPI key provider 能进入 ready/running；Linux/macOS 不会降级到明文密钥，跨机器恢复材料、对象存储、远程复制和生产轮换仍未交付。离线密码 CLI 继续可用，细节见[备份与恢复](docs/backup-restore.md)。
+源码增加 `--automated-backups-enabled`、受限输出根、计划/运行历史、保留与恢复演练。既有 Windows 当前用户 DPAPI 路径保留；Linux 另有显式 `linux-systemd-credential-v1` 路径，要求独立 M/W 受保护 credential 及安装绑定，不能推定真实主机保管已验收。macOS 不会降级到明文密钥；真实轮换、旧备份防复活、对象存储与生产灾备仍未完成。离线密码 CLI 与 systemd v3 verify/restore 的边界见[备份与恢复](docs/backup-restore.md)。
 
 ## 1. 下载安装
 
-**当前下载版本：[v0.1.0-preview.3](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.3)**。下表链接直接下载该版本附件。
+**v0.1.0：仅 Linux amd64 服务端 / Web / 备份 CLI。** 请先读[发行说明与安装配置](docs/releases/v0.1.0.md)，并只下载 [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases) 中实际存在、身份与校验和已核实的产物。本源码 PR 不证明发行已完成，不预填产物 SHA 或未核实的下载 URL。员工安装器、真实 apply、真实 M1→M2 和旧备份防复活未交付/未验收。
+
+### 历史 preview.3 下载（不代表 v0.1.0）
+
+**历史下载版本：[v0.1.0-preview.3](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.3)**。下表保留该旧版附件及验收记录，不借作 v0.1.0 的构建、CI 或部署证据。
 
 在 [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases) 查看预览版本及附件。仅在对应版本的 Assets 中存在的文件才是可下载交付；尚无附件时请使用下文源码构建。预览版本不一定出现在 GitHub 的 latest 链接中。
 
