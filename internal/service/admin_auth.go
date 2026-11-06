@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/subtle"
 	"database/sql"
 	"net"
@@ -94,8 +95,72 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"csrf_token": csrf})
 }
 
+// Independently authored for docs/admin-logout-confirmation-contract.md.
+// These operation-private seams have no HTTP representation. Production requests
+// carry none; a reporting adapter cannot erase a real SQL or Commit error.
+type adminLogoutHooksKey struct{}
+type adminLogoutHooks struct {
+	beforeBegin  func(context.Context) error
+	afterBegin   func(*sql.Tx) error
+	result       func(*sql.Tx, sql.Result) (int64, error)
+	beforeCommit func(*sql.Tx) error
+	afterCommit  func(error) error
+}
+
 func (a *App) logout(w http.ResponseWriter, r *http.Request, session adminSession) {
-	_, _ = a.store.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE id=?`, session.SessionID)
+	unavailable := func() {
+		writeAdminError(w, http.StatusServiceUnavailable, "storage_unavailable", "Service is temporarily unavailable.")
+	}
+	hooks, _ := r.Context().Value(adminLogoutHooksKey{}).(adminLogoutHooks)
+	if hooks.beforeBegin != nil && hooks.beforeBegin(r.Context()) != nil {
+		unavailable()
+		return
+	}
+	tx, err := a.store.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		unavailable()
+		return
+	}
+	defer tx.Rollback()
+	if hooks.afterBegin != nil && hooks.afterBegin(tx) != nil {
+		unavailable()
+		return
+	}
+	result, err := tx.ExecContext(r.Context(), `DELETE FROM sessions WHERE id=? AND admin_id=?`, session.SessionID, session.AdminID)
+	if err != nil || result == nil {
+		unavailable()
+		return
+	}
+	count, err := result.RowsAffected()
+	if err != nil || count != 1 {
+		unavailable()
+		return
+	}
+	if hooks.result != nil {
+		reported, reportErr := hooks.result(tx, result)
+		if reportErr != nil || reported != count {
+			unavailable()
+			return
+		}
+	}
+	var remaining int
+	if tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM sessions WHERE id=?`, session.SessionID).Scan(&remaining) != nil || remaining != 0 {
+		unavailable()
+		return
+	}
+	if hooks.beforeCommit != nil && hooks.beforeCommit(tx) != nil {
+		unavailable()
+		return
+	}
+	commitErr := tx.Commit()
+	var reportErr error
+	if hooks.afterCommit != nil {
+		reportErr = hooks.afterCommit(commitErr)
+	}
+	if commitErr != nil || reportErr != nil {
+		unavailable()
+		return
+	}
 	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/admin/", MaxAge: -1, HttpOnly: true, Secure: a.cfg.TLSCert != "", SameSite: http.SameSiteLaxMode})
 	w.WriteHeader(http.StatusNoContent)
 }

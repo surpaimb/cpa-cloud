@@ -55,6 +55,12 @@ func Open(root string) (*Store, error) {
 	return &Store{root: absolute, rootIdentity: identity}, nil
 }
 
+func OpenForInstance(root string, _ InstanceBinding) (*Store, error) { return Open(root) }
+
+func (s *Store) ProviderKind() string { return KindWindowsDPAPIUser }
+
+func (s *Store) ConfiguredReference() (Reference, bool) { return Reference{}, false }
+
 // OpenExisting opens a provider store without creating it or changing its ACL.
 // It is used by read-only offline export paths.
 func OpenExisting(root string) (*Store, error) {
@@ -589,10 +595,4 @@ func syncDirectory(path string) error {
 		return nil
 	}
 	return err
-}
-
-func wipe(value []byte) {
-	for index := range value {
-		value[index] = 0
-	}
 }

@@ -1,0 +1,81 @@
+{
+  "observed_at": "2026-10-16",
+  "release": {
+    "repository": "https://github.com/openai/codex.git",
+    "license": "Apache-2.0",
+    "tag": "rust-v0.160.1",
+    "tag_object_sha": "c3e23d4c4385619ecec78408766e46b7fa7dd9ad",
+    "commit": "d27764b82f7118f674371e6d6e76271d9d606edb",
+    "tag_signature_verified": false,
+    "release_url": "https://github.com/openai/codex/releases/tag/rust-v0.160.1",
+    "schema_url": "https://raw.githubusercontent.com/openai/codex/d27764b82f7118f674371e6d6e76271d9d606edb/codex-rs/core/config.schema.json",
+    "schema_bytes": 229468,
+    "schema_sha256": "7ce31bde1ed6ef15c53a96ba460bb1d0fb7b99fd9ab719b567c94c474f62b023"
+  },
+  "artifact": {
+    "name": "codex-x86_64-pc-windows-msvc.exe.tar.gz",
+    "archive_bytes": 109286941,
+    "archive_sha256": "12cf8aa4f5e4ef3e6602f6c0e98838f8092f63357f01bd3c7379b216df27cc78",
+    "binary_name": "codex-x86_64-pc-windows-msvc.exe",
+    "binary_bytes": 326875440,
+    "binary_sha256": "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d",
+    "reported_version": "codex-cli 0.160.1",
+    "platform": "windows-x86_64"
+  },
+  "isolation": {
+    "temporary_codex_home": true,
+    "temporary_working_directory": true,
+    "shared_daemon_disabled": true,
+    "ephemeral_session": true,
+    "rules_loading_disabled": true,
+    "web_search_disabled": true,
+    "update_check_disabled_by_invocation_override": true,
+    "external_http_proxy_points_to_closed_loopback": true,
+    "external_https_proxy_points_to_closed_loopback": true,
+    "no_proxy_limited_to_loopback": true,
+    "production_provider_contacted": false
+  },
+  "invocation": {
+    "strict_config": true,
+    "prompt_argument_present_but_not_recorded": true,
+    "request_body_recorded": false,
+    "response_body_recorded": false,
+    "credential_process_environment_variables_cleared": [
+      "OPENAI_API_KEY",
+      "AZURE_OPENAI_API_KEY",
+      "CODEX_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "GEMINI_API_KEY"
+    ],
+    "expected_exit_code": 1,
+    "exit_was_from_synthetic_http_400": true,
+    "unknown_config_error_observed": false,
+    "stderr_contained_fixture_token": false
+  },
+  "planner_fixtures": {
+    "config_sha256": "73241aa5346531859c21bd64df0977a92d6b49ebbefcce98d120d493f08871e8",
+    "auth_sentinel_sha256": "eb44befd718e75ea032bbc706e42ea3b73b77f4674d79bfed42d438eb4ecad16"
+  },
+  "loopback_observation": {
+    "listen_address": "127.0.0.1:46161",
+    "request_method": "POST",
+    "request_path": "/v1/responses",
+    "authorization_present": true,
+    "authorization_matched_synthetic_fixture": true,
+    "model_matched_synthetic_fixture": true,
+    "request_body_logged": false
+  },
+  "auth_json_sentinel": {
+    "bytes_unchanged": true,
+    "sha256_unchanged": true,
+    "file_identity_unchanged": true,
+    "length_unchanged": true,
+    "creation_time_unchanged": true,
+    "modification_time_unchanged": true
+  },
+  "storage_observation": {
+    "fixture_token_found_only_in_config_toml": true,
+    "fixture_token_found_in_codex_state_databases": false
+  },
+  "scope": "Exact Windows x86_64 Codex CLI 0.160.1 acceptance only; no real user configuration, credential, provider endpoint, successful model response, live-write, redistribution, or cross-version claim."
+}

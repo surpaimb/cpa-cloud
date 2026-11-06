@@ -47,7 +47,7 @@ After restore, start CPA Cloud against the new directory and perform application
 ## Security and format / 安全与格式
 
 - Creation uses SQLite's online backup API through a read-only source connection. It includes committed WAL state without copying an active database/WAL pair and does not call `service.Open`, run migrations, or start workers.
-- The package is a versioned CPA Cloud binary container, not tar/zip. It accepts exactly `cpa-cloud.db` and `master.key`, in that order, and rejects duplicate, extra, truncated, or trailing records.
+- The package is a versioned CPA Cloud binary container, not tar/zip. Password v1 and Windows automated v2 accept exactly `cpa-cloud.db` and `master.key`; Linux systemd automated v3 accepts exactly `cpa-cloud.db` and `master-key-binding.json`. Every format rejects duplicate, extra, truncated, reordered, or trailing records.
 - A random 16-byte salt and fixed scrypt parameters (`N=32768`, `r=8`, `p=1`, 32-byte key; approximately 32 MiB scrypt working memory) derive the AES-256-GCM key. A random 12-byte nonce is used once. The fixed header is authenticated as additional data; encrypted payload metadata records source program/version, creation time, file sizes, and the authenticated checksum method. Root-key content and digest are not returned or printed.
 - Import refuses non-default KDF parameters before running scrypt. Passwords are limited to 1024 bytes, metadata to 64 KiB, SQLite snapshots to 128 MiB, and packages to 130 MiB. The 128 MiB database limit is a deliberate first-preview memory bound, not a recommended production database size.
 - Plaintext snapshots exist only in newly created restricted temporary directories. Known files and SQLite sidecars are removed on every normal error/cancellation exit. Output uses a same-directory restricted temporary file, file sync, an atomic no-overwrite hard link, and directory sync where the OS supports it. A failed commit removes the newly linked output.
@@ -55,7 +55,7 @@ After restore, start CPA Cloud against the new directory and perform application
 - Restore deletes administrator sessions and unfinished OAuth authorization sessions in the staged copy. A Codex refresh recorded as `in_progress` is changed to `paused` with reason `backup_restore_uncertain_refresh`; restore never calls an upstream or replays a refresh token. Completed OAuth bindings, employee-key digests, encrypted upstream credentials, pools, prices, ledgers, governance, and budget data remain in the snapshot.
 
 - 创建通过只读源连接使用 SQLite online backup API，包含 WAL 中已经提交的状态，不直接复制活动数据库/WAL 文件对；它不会调用 `service.Open`、执行迁移或启动 worker。
-- 包是带版本的 CPA Cloud 自有二进制容器，不是 tar/zip。只接受按固定顺序出现的 `cpa-cloud.db` 和 `master.key`，拒绝重复、多余、截断和尾随记录。
+- 包是带版本的 CPA Cloud 自有二进制容器，不是 tar/zip。口令 v1 与 Windows 自动 v2 只接受 `cpa-cloud.db` 和 `master.key`；Linux systemd 自动 v3 只接受 `cpa-cloud.db` 和 `master-key-binding.json`。所有格式都拒绝重复、多余、乱序、截断和尾随记录。
 - 随机 16 字节 salt 与固定 scrypt 参数（`N=32768`、`r=8`、`p=1`、32 字节密钥，scrypt 工作内存约 32 MiB）派生 AES-256-GCM 密钥，每个包使用随机 12 字节 nonce。固定头作为附加认证数据；加密元数据记录来源程序/版本、创建时间、文件大小和受认证的校验算法。根密钥内容和摘要不会返回或打印。
 - 导入在运行 scrypt 前拒绝非默认 KDF 参数。密码上限 1024 字节，元数据 64 KiB，SQLite 快照 128 MiB，包 130 MiB。128 MiB 是首批预览的明确内存保护限制，不是生产数据库容量建议。
 - 明文快照只短暂存在于新建的受限临时目录。正常错误/取消出口会清理已知文件和 SQLite sidecar。输出使用同目录受限临时文件、文件同步、原子无覆盖硬链接提交，并在操作系统支持时同步目录；提交失败会删除本次新链接的输出。
@@ -72,15 +72,15 @@ The latest source can run administrator-configured plans when the service starts
 
 最新源码在服务使用 `--automated-backups-enabled` 启动后可执行管理员配置的计划。输出根和 key-provider 根只能来自启动配置，网页不能提交任意服务器路径。每次运行创建并校验加密包；计划可选在受限临时目录恢复，再用关闭所有 worker 的配置完整打开/关闭应用做演练，最后执行有界保留。计划、provider 元数据、运行状态、revision 与失败原因持久化；重启不重放结果不确定的运行。
 
-The only ready automated key provider today is `windows-dpapi-user`, bound to the current Windows service identity. Linux/macOS explicitly remain unavailable and never fall back to plaintext, environment variables, command-line secrets, or a key stored beside ciphertext. This automated format is separate from the password+scrypt CLI above.
+The established automated provider is `windows-dpapi-user`, bound to the current Windows service identity. The current Linux development-preview candidate adds a read-only `linux-systemd-credential-v1` provider for fixed-user systemd services. It requires the separate `cpa-cloud-backup-wrapping-key` credential and an already authenticated `cpa-cloud-master-key` installation binding. It does not accept secret argv/plain environment values, store the wrapping key in SQLite or beside ciphertext, or use desktop Secret Service. macOS remains unavailable. This automated path is separate from the password+scrypt CLI above; details and current blockers are in [ADR 0005](adr/0005-linux-systemd-backup-wrapping-key.md).
 
-当前唯一可 ready 的自动 provider 是绑定 Windows 当前服务身份的 `windows-dpapi-user`。Linux/macOS 明确保持 unavailable，不会回退到明文、环境变量、命令行秘密或与密文同放的 key。此自动格式与上面的 password+scrypt 离线 CLI 相互独立。
+既有自动 provider 是绑定 Windows 当前服务身份的 `windows-dpapi-user`。当前 Linux 开发预览候选增加固定用户 systemd 服务只读的 `linux-systemd-credential-v1`：它要求独立的 `cpa-cloud-backup-wrapping-key`，并要求安装侧 `cpa-cloud-master-key` 已通过绑定认证；不接受秘密 argv/明文环境变量，不把 wrapping key 存入 SQLite 或密文旁文件，也不使用桌面 Secret Service。macOS 仍不可用。该自动路径与 password+scrypt CLI 独立；精确边界见 [ADR 0005](adr/0005-linux-systemd-backup-wrapping-key.md)。
 
 ## Scope not yet delivered / 尚未交付范围
 
-Cross-machine recovery material, a non-Windows protected provider, object storage, remote upload, production key rotation/re-wrapping, in-place upgrade rollback, and multi-host orchestration are not included. Automated plans and local retention do not complete OPS-01. Operators remain responsible for package passwords, backup files, host-administrator access, and tested off-host copies.
+Linux external key rotation/multi-version custody, Linux cross-machine recovery material, macOS protected providers, object storage, remote upload, production re-wrapping, in-place upgrade rollback, and multi-host orchestration are not included. Automated plans and local retention do not complete OPS-01. Operators remain responsible for package passwords, backup files, host-administrator access, and tested off-host copies.
 
-跨机器恢复材料、非 Windows 受保护 provider、对象存储、远程上传、生产密钥轮换/重新封装、原地升级回滚和多主机编排尚未包含。自动计划和本地保留不代表 OPS-01 已完成。运维人员仍需保护包密码、备份文件、主机管理员权限，并维护经过恢复演练的异机副本。
+Linux 外部密钥轮换/多版本托管、Linux 跨机器恢复材料、macOS 受保护 provider、对象存储、远程上传、生产重新封装、原地升级回滚和多主机编排尚未包含。自动计划和本地保留不代表 OPS-01 已完成。运维人员仍需保护包密码、备份文件、主机管理员权限，并维护经过恢复演练的异机副本。
 
 ## Independent implementation sources / 独立实现来源
 

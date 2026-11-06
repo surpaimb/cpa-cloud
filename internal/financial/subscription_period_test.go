@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	expirySQLite "modernc.org/sqlite"
 )
 
 func TestMonthlyPeriodEndClampsCalendarDay(t *testing.T) {
@@ -230,4 +232,129 @@ func TestSubscriptionCorruptFrozenEndFailsClosed(t *testing.T) {
 	if err := commercial.Migrate(context.Background()); !errors.Is(err, ErrSchema) {
 		t.Fatalf("restart validation err=%v", err)
 	}
+}
+
+// Independently authored pure observer controls; no SQL/DB/fixture is used.
+type expiryPurePanicError struct{}
+
+func (expiryPurePanicError) Error() string { panic("SYNTHETIC_EXPIRY_PUBLIC_CANARY") }
+
+type expiryPureWrappedError struct{ next error }
+
+func (expiryPureWrappedError) Error() string   { panic("SYNTHETIC_EXPIRY_PUBLIC_CANARY") }
+func (e expiryPureWrappedError) Unwrap() error { return e.next }
+
+func TestExpirySQLObservationPure20261021(t *testing.T) {
+	t.Run("context-equivalence", func(t *testing.T) {
+		type originalKey struct{}
+		parent, cancel := context.WithCancelCause(context.WithValue(context.Background(), originalKey{}, "synthetic-public-value"))
+		defer cancel(nil)
+		pass, stop := context.WithTimeout(parent, 5*time.Second)
+		defer stop()
+		var seen ExpiryObservation
+		calls := 0
+		sink := func(o ExpiryObservation) { seen = o; calls++ }
+		bound := WithExpiryObservation(pass, sink, 7)
+		check := func() {
+			a, aOK := bound.Deadline()
+			b, bOK := pass.Deadline()
+			if bound.Done() != pass.Done() || aOK != bOK || !a.Equal(b) || bound.Err() != pass.Err() || context.Cause(bound) != context.Cause(pass) || bound.Value(originalKey{}) != pass.Value(originalKey{}) {
+				t.Fatal("EXPIRY_CONTEXT_EQUIVALENCE")
+			}
+		}
+		check()
+		if WithExpiryObservation(pass, nil, 9) != pass || WithExpiryObservation(nil, sink, 1) != nil || calls != 0 {
+			t.Fatal("EXPIRY_CONTEXT_NIL_IDENTITY")
+		}
+		cause := errors.New("synthetic-public-cause")
+		cancel(cause)
+		check()
+		scope := expiryScopeFor(bound)
+		started := scope.enter(ExpiryBegin, 0)
+		scope.returned(ExpiryBegin, 0, started, context.Canceled, ExpiryCountNA)
+		if calls != 2 || seen.Pass != 7 || seen.Context != ExpiryContextCancelled || seen.Error != ExpiryErrorCancelled || !seen.Valid() {
+			t.Fatal("EXPIRY_CONTEXT_FINITE_CAPTURE")
+		}
+	})
+	t.Run("error-classes", func(t *testing.T) {
+		var typedNil *expirySQLite.Error
+		for _, tc := range []struct {
+			err  error
+			kind ExpiryError
+			code ExpirySQLite
+		}{
+			{nil, ExpiryErrorNone, ExpirySQLiteNone},
+			{context.Canceled, ExpiryErrorCancelled, ExpirySQLiteNone},
+			{context.DeadlineExceeded, ExpiryErrorDeadline, ExpirySQLiteNone},
+			{sql.ErrTxDone, ExpiryErrorTxDone, ExpirySQLiteNone},
+			{sql.ErrConnDone, ExpiryErrorConnDone, ExpirySQLiteNone},
+			{expiryPureWrappedError{context.Canceled}, ExpiryErrorCancelled, ExpirySQLiteNone},
+			{expiryPurePanicError{}, ExpiryErrorOther, ExpirySQLiteNone},
+			{typedNil, ExpiryErrorOther, ExpirySQLiteNone},
+			{&expirySQLite.Error{}, ExpiryErrorSQLite, ExpirySQLiteUnknown},
+			{expiryPureWrappedError{&expirySQLite.Error{}}, ExpiryErrorOther, ExpirySQLiteNone},
+		} {
+			kind, code := expiryErrorClass(tc.err)
+			if kind != tc.kind || code != tc.code {
+				t.Fatal("EXPIRY_ERROR_CLASS_CONTROL")
+			}
+		}
+	})
+	t.Run("sqlite-whitelist", func(t *testing.T) {
+		for i, code := range []int{1, 4, 5, 6, 9, 10, 19, 261, 517, 773, 262, 518, 4106} {
+			if expirySQLiteClass(code) != ExpirySQLite(i+2) {
+				t.Fatal("EXPIRY_SQLITE_WHITELIST_CONTROL")
+			}
+		}
+		for _, code := range []int{-1, 0, 99999} {
+			if expirySQLiteClass(code) != ExpirySQLiteUnknown {
+				t.Fatal("EXPIRY_SQLITE_UNKNOWN_CONTROL")
+			}
+		}
+	})
+	t.Run("finite-values", func(t *testing.T) {
+		base := ExpiryObservation{Pass: 1, Phase: ExpiryQuery, Edge: ExpiryReturn, Error: ExpiryErrorNone, Context: ExpiryContextNone, Elapsed: ExpiryLT1MS}
+		if !base.Valid() {
+			t.Fatal("EXPIRY_FINITE_VALID_CONTROL")
+		}
+		for _, mutate := range []func(*ExpiryObservation){
+			func(o *ExpiryObservation) { o.Phase = 255 },
+			func(o *ExpiryObservation) { o.Edge = 255 },
+			func(o *ExpiryObservation) { o.Error = 0 },
+			func(o *ExpiryObservation) { o.Context = 0 },
+			func(o *ExpiryObservation) { o.Pass = 0 },
+			func(o *ExpiryObservation) { o.Item = 1 },
+			func(o *ExpiryObservation) { o.Elapsed = ExpiryElapsedInvalid },
+			func(o *ExpiryObservation) { o.Error, o.SQLite = ExpiryErrorSQLite, ExpirySQLiteUnknown },
+			func(o *ExpiryObservation) { o.Count = ExpiryCountOne },
+		} {
+			v := base
+			mutate(&v)
+			if v.Valid() {
+				t.Fatal("EXPIRY_FINITE_REJECT_CONTROL")
+			}
+		}
+		for _, tc := range []struct {
+			d time.Duration
+			b ExpiryElapsed
+		}{{-1, ExpiryElapsedInvalid}, {0, ExpiryLT1MS}, {time.Millisecond, Expiry1MSLT100MS}, {100 * time.Millisecond, Expiry100MSLT1S}, {time.Second, Expiry1SLT10S}, {10 * time.Second, Expiry10SLT60S}, {time.Minute, ExpiryGE60S}} {
+			if expiryElapsedBucket(tc.d) != tc.b {
+				t.Fatal("EXPIRY_ELAPSED_CONTROL")
+			}
+		}
+	})
+	t.Run("synthetic-canary", func(t *testing.T) {
+		var seen ExpiryObservation
+		ctx := WithExpiryObservation(context.Background(), func(o ExpiryObservation) { seen = o }, 1)
+		scope := expiryScopeFor(ctx)
+		scope.returned(ExpiryQuery, 0, time.Now(), expiryPurePanicError{}, ExpiryCountNA)
+		if seen.Error != ExpiryErrorOther || seen.SQLite != ExpirySQLiteNone || !seen.Valid() {
+			t.Fatal("EXPIRY_CANARY_CLASS_CONTROL")
+		}
+		// No Error method, string field, arbitrary value or raw handle can be
+		// passed by this record. This is classification, not DB-fault coverage.
+		if expiryCount(-1) != ExpiryCountInvalid || expiryCount(0) != ExpiryCountZero || expiryCount(1) != ExpiryCountOne || expiryCount(100) != ExpiryCountMany {
+			t.Fatal("EXPIRY_COUNT_BUCKET_CONTROL")
+		}
+	})
 }

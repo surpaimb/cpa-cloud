@@ -50,6 +50,30 @@ describe('automated backups page', () => {
     expect(document.body.textContent).not.toContain('wrapping_key')
   })
 
+  it('binds the configured systemd provider without accepting key material', async () => {
+    const linuxProvider = { ...provider, kind: 'linux-systemd-credential-v1', scope: 'systemd-service', instance_id: 'instance-a', key_id: 'backup-a' }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/system/status')) return response(status(true, false, false))
+      if (url.endsWith('/backups/key-providers') && init?.method === 'POST') return response(linuxProvider, 201)
+      if (url.endsWith('/backups/key-providers')) return response({ items: [], ready: false, store_ready: true, configured_kind: 'linux-systemd-credential-v1', reason_code: null })
+      if (url.endsWith('/backups/plans')) return response({ items: [] })
+      if (url.includes('/backups/runs?')) return response({ items: [], next_cursor: null })
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<BackupsPage csrf="csrf-token" />)
+    await waitFor(() => expect(screen.getAllByRole('button', { name: '绑定 systemd 密钥' })).toHaveLength(2))
+    await userEvent.click(screen.getAllByRole('button', { name: '绑定 systemd 密钥' })[0])
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).queryByRole('textbox')).not.toBeInTheDocument()
+    expect(within(dialog).getByText(/接口不会接收或返回明文/)).toBeInTheDocument()
+    await userEvent.click(within(dialog).getByRole('button', { name: '验证并绑定' }))
+    const call = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/backups/key-providers') && (init as RequestInit)?.method === 'POST')
+    expect(JSON.parse(String((call?.[1] as RequestInit).body))).toEqual({ kind: 'linux-systemd-credential-v1' })
+    expect(String((call?.[1] as RequestInit).body)).not.toContain('wrapping_key')
+  })
+
   it('creates a bounded plan and starts a manual run with revision CAS', async () => {
     let plans: typeof plan[] = []
     const run = { id: 'brn_test', plan_id: plan.id, plan_revision: 1, key_provider_id: provider.id, key_provider_kind: 'windows-dpapi-user', key_provider_version: 1, trigger_kind: 'manual', requested_by_admin_id: 'adm_test', scheduled_for: '2026-09-24T09:00:00Z', started_at: '2026-09-24T09:00:00Z', finished_at: null, status: 'running', package_name: 'cpa-cloud-bpl_test-20260924T090000Z-brn_test.cpacb', package_size: null, package_retained: false, package_deleted_at: null, verified_at: null, rehearsal_status: 'pending', rehearsed_at: null, error_code: null, created_at: '2026-09-24T09:00:00Z' }

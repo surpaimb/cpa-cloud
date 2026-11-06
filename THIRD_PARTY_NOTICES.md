@@ -15,19 +15,32 @@ The server source directly imports `golang.org/x/crypto` and `modernc.org/sqlite
 | Component | Version | Source | License | Included material / required notice |
 | --- | --- | --- | --- | --- |
 | `golang.org/x/crypto` | `v0.42.0` | https://pkg.go.dev/golang.org/x/crypto@v0.42.0 | BSD-3-Clause | Compiled code; include the module `LICENSE` |
-| `modernc.org/sqlite` | `v1.38.2` | https://pkg.go.dev/modernc.org/sqlite@v1.38.2 | BSD-3-Clause; SQLite public-domain statement | Compiled code; include `LICENSE` and `SQLITE-LICENSE` |
+| `modernc.org/sqlite` | `v1.46.2` | https://pkg.go.dev/modernc.org/sqlite@v1.46.2 | BSD-3-Clause; SQLite public-domain statement | Compiled code; include `LICENSE` and `SQLITE-LICENSE` |
 | `github.com/dustin/go-humanize` | `v1.0.1` | https://pkg.go.dev/github.com/dustin/go-humanize@v1.0.1 | MIT | Indirect module; if linked, include `LICENSE` |
 | `github.com/google/uuid` | `v1.6.0` | https://pkg.go.dev/github.com/google/uuid@v1.6.0 | BSD-3-Clause | Indirect module; if linked, include `LICENSE` |
 | `github.com/mattn/go-isatty` | `v0.0.20` | https://pkg.go.dev/github.com/mattn/go-isatty@v0.0.20 | MIT | Indirect module; if linked, include `LICENSE` |
-| `github.com/ncruces/go-strftime` | `v0.1.9` | https://pkg.go.dev/github.com/ncruces/go-strftime@v0.1.9 | MIT | Indirect module; if linked, include `LICENSE` |
+| `github.com/ncruces/go-strftime` | `v1.0.0` | https://pkg.go.dev/github.com/ncruces/go-strftime@v1.0.0 | MIT | Indirect module; if linked, include `LICENSE` |
 | `github.com/remyoudompheng/bigfft` | `v0.0.0-20230129092748-24d4a6f8daec` | https://pkg.go.dev/github.com/remyoudompheng/bigfft@v0.0.0-20230129092748-24d4a6f8daec | BSD-3-Clause | Indirect module; if linked, include `LICENSE` |
-| `golang.org/x/exp` | `v0.0.0-20250620022241-b7579e27df2b` | https://pkg.go.dev/golang.org/x/exp@v0.0.0-20250620022241-b7579e27df2b | BSD-3-Clause | Indirect module; if linked, include `LICENSE` |
-| `golang.org/x/sys` | `v0.36.0` | https://pkg.go.dev/golang.org/x/sys@v0.36.0 | BSD-3-Clause | Indirect module; if linked, include `LICENSE` |
-| `modernc.org/libc` | `v1.66.3` | https://pkg.go.dev/modernc.org/libc@v1.66.3 | BSD-3-Clause plus embedded MIT/BSD-3-Clause material | Indirect module; if linked, include `LICENSE`, `LICENSE-GO`, and `honnef.co/go/netdb/LICENSE` when the corresponding platform code is present |
+| `golang.org/x/exp` | `v0.0.0-20251023183803-a4bb9ffd2546` | https://pkg.go.dev/golang.org/x/exp@v0.0.0-20251023183803-a4bb9ffd2546 | BSD-3-Clause | Indirect module; if linked, include `LICENSE` |
+| `golang.org/x/sys` | `v0.42.0` | https://pkg.go.dev/golang.org/x/sys@v0.42.0 | BSD-3-Clause | Direct Windows dependency; include `LICENSE` |
+| `modernc.org/libc` | `v1.70.0` | https://pkg.go.dev/modernc.org/libc@v1.70.0 | BSD-3-Clause plus embedded permissive material | If linked, include `LICENSE` and `LICENSE-3RD-PARTY.md`; the latter contains Go, musl, go-netdb and NixOS notices, including musl's embedded-work notices |
 | `modernc.org/mathutil` | `v1.7.1` | https://pkg.go.dev/modernc.org/mathutil@v1.7.1 | BSD-3-Clause | Indirect module; if linked, include `LICENSE` and `mersenne/LICENSE` |
 | `modernc.org/memory` | `v1.11.0` | https://pkg.go.dev/modernc.org/memory@v1.11.0 | BSD-3-Clause | Indirect module; if linked, include `LICENSE`, `LICENSE-GO`, and `LICENSE-MMAP-GO` |
 
 The `modernc.org/memory` logo license and `modernc.org/libc` test-data license are not runtime notices unless those source assets are separately redistributed. Re-evaluate this statement for source or vendor distributions.
+
+The 2026-10-20 bounded SQLite compatibility batch updates the five selected
+versions above from the historical inventory. Go 1.26.8 resolved the actual
+selected module graph and verified downloaded module checksums with the official
+Go checksum database enabled. SQLite v1.46.2 embeds 3.51.3 (upstream tag commit
+`d7c9932b311af8741de8fa03011de3704940d210`). The changed modules' original license
+files were inspected; libc v1.70.0 consolidates third-party notices in
+`LICENSE-3RD-PARTY.md`, so the older libc notice-file layout is not reused.
+See [the compatibility contract](docs/sqlite-wal-reset-compat-contract.md) and the
+append-only evidence in [dependency notices](docs/research/dependency-notices.md).
+Module-graph membership is not proof that all generator/test dependencies are
+linked. Native compatibility/build evidence is separate from a release-ready
+full-text license bundle, which remains a publication gate.
 
 ### Browser administration console
 

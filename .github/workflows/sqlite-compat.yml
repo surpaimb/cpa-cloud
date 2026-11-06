@@ -1,0 +1,117 @@
+# Independently authored for docs/sqlite-wal-reset-compat-contract.md.
+# Compatibility/build only: no packaging, signing, release, sudo or secrets.
+name: SQLite native compatibility
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: sqlite-native (${{ matrix.goos }}/${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+          - runner: windows-2022
+            goos: windows
+            goarch: amd64
+          - runner: windows-11-arm
+            goos: windows
+            goarch: arm64
+          - runner: macos-15-intel
+            goos: darwin
+            goarch: amd64
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+      CPA_SQLITE_EXPECT_GOOS: ${{ matrix.goos }}
+      CPA_SQLITE_EXPECT_GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Assert exact raw PR head
+        if: runner.os == 'Windows'
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $actual = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $env:EXPECTED_HEAD) { throw 'SQLITE_COMPAT_WRONG_HEAD' }
+      - name: Assert exact raw PR head (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.8'
+          architecture: ${{ matrix.goarch }}
+          cache: false
+      - name: Verify native Go host and target, pinned graph and checksums
+        if: runner.os == 'Windows'
+        run: |
+          $expectedRunnerArch = if ($env:CPA_SQLITE_EXPECT_GOARCH -eq 'arm64') { 'ARM64' } else { 'X64' }
+          if ($env:RUNNER_ARCH -ne $expectedRunnerArch) { throw 'SQLITE_COMPAT_WRONG_RUNNER_ARCH' }
+          $actual = @(go env GOHOSTOS GOHOSTARCH GOOS GOARCH)
+          if ($LASTEXITCODE -ne 0 -or ($actual -join ',') -ne "$env:CPA_SQLITE_EXPECT_GOOS,$env:CPA_SQLITE_EXPECT_GOARCH,$env:CPA_SQLITE_EXPECT_GOOS,$env:CPA_SQLITE_EXPECT_GOARCH") { throw 'SQLITE_COMPAT_NOT_NATIVE' }
+          $version = go version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch 'go1\.26\.8 ') { throw 'SQLITE_COMPAT_WRONG_GO' }
+          go mod verify
+          if ($LASTEXITCODE -ne 0) { throw 'SQLITE_COMPAT_MODULE_VERIFY_FAILED' }
+          go list -m all
+          if ($LASTEXITCODE -ne 0) { throw 'SQLITE_COMPAT_GRAPH_FAILED' }
+      - name: Verify native Go host and target, pinned graph and checksums (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          expected_runner_arch=X64
+          if [ "$CPA_SQLITE_EXPECT_GOARCH" = arm64 ]; then expected_runner_arch=ARM64; fi
+          test "$RUNNER_ARCH" = "$expected_runner_arch"
+          test "$(go env GOHOSTOS)" = "$CPA_SQLITE_EXPECT_GOOS"
+          test "$(go env GOHOSTARCH)" = "$CPA_SQLITE_EXPECT_GOARCH"
+          test "$(go env GOOS)" = "$CPA_SQLITE_EXPECT_GOOS"
+          test "$(go env GOARCH)" = "$CPA_SQLITE_EXPECT_GOARCH"
+          go version | grep -F 'go1.26.8 '
+          go mod verify
+          go list -m all
+      - name: Non-cached serial native compatibility and old-engine fixtures
+        if: runner.os == 'Windows'
+        run: |
+          go test -count=1 -p=1 -parallel=1 -timeout=5m -v ./internal/sqlitecompat
+          if ($LASTEXITCODE -ne 0) { throw 'SQLITE_COMPAT_NATIVE_TEST_FAILED' }
+      - name: Non-cached serial native compatibility and old-engine fixtures (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: go test -count=1 -p=1 -parallel=1 -timeout=5m -v ./internal/sqlitecompat
+      - name: Native build both CLIs, no packaging or publication
+        if: runner.os == 'Windows'
+        run: |
+          go build -trimpath -o "$env:RUNNER_TEMP/cpa-cloud-sqlite-native.exe" ./cmd/cpa-cloud
+          if ($LASTEXITCODE -ne 0) { throw 'SQLITE_COMPAT_SERVER_BUILD_FAILED' }
+          go build -trimpath -o "$env:RUNNER_TEMP/cpa-cloud-backup-sqlite-native.exe" ./cmd/cpa-cloud-backup
+          if ($LASTEXITCODE -ne 0) { throw 'SQLITE_COMPAT_BACKUP_BUILD_FAILED' }
+      - name: Native build both CLIs, no packaging or publication (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/cpa-cloud-sqlite-native" ./cmd/cpa-cloud
+          go build -trimpath -o "$RUNNER_TEMP/cpa-cloud-backup-sqlite-native" ./cmd/cpa-cloud-backup

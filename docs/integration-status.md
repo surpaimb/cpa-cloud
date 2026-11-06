@@ -1,5 +1,12 @@
 # 集成状态
 
+## 2026-10-16：Linux systemd 自动备份 wrapping key 前置切片（当前分支，待精确提交 CI）
+
+- 按 [ADR 0005](adr/0005-linux-systemd-backup-wrapping-key.md) 增加只读 `linux-systemd-credential-v1`：固定凭据名、严格 JSON、provider/instance/key/version 五元绑定，并在安装 credential canary 验证后以常量时间拒绝安装密钥与备份 wrapping key 同值。密钥不进入 argv、明文环境变量、日志、数据库或 provider-store；不使用桌面 Secret Service，也不提供明文回退。
+- Linux 使用独立认证备份 v3，只包含 SQLite 快照和 `master-key-binding.json`，明确不包含 `master.key`；Windows DPAPI v2 不变。错误/缺失/混合 key 或绑定在发布恢复目标前失败关闭。provider 与 run 元数据冻结 instance/key/version，旧 Windows schema 只在精确匹配后事务迁移，不能凭此声明异机可恢复。
+- PR78 复审修正：固定协调器启动时已认证 binding 的摘要，v3 创建/校验/恢复要求通过实际安装 canary 认证，并在包/恢复目录发布前重读安装 credential；补齐演练 binding 精确清理，以及 provider kind 不匹配时写库前拒绝。新增合成回归覆盖启动后篡改、伪造 canary、安装凭据缺失/变化、完整 v3 worker 演练与保留清理。Linux 专属运行结果仍以修正后的精确提交 CI 为准，旧提交 CI/复审不能替代新结果。
+- 当前本机已通过 v3 与迁移定向测试、Windows 编译及 Linux 交叉编译；Linux credential-reader 运行测试、全量 Go/race/vet、普通 GitHub CI 与固定 systemd 合成激活仍待最终 HEAD 验证。本段不启用生产，不支持 Linux 外部轮换、多版本历史窗口、key export/import、真实第二用户/第二机器恢复、打包、tag、部署或发布。
+
 ## 2026-10-02：ID-05/BILL-03 员工自助当前套餐目录（当前分支，待精确提交 CI）
 
 - 按[员工自助套餐目录独立契约](employee-self-plan-catalog-contract.md)，新增仅依赖员工自助总开关的默认关闭能力。有效员工自助会话显式指定币种后，按 ID 升序分页读取商业执行开启时该币种当前已启用套餐的现行 revision、周期及 micro 字符串金额。商业执行关闭的首读和续页都返回不可用/空列表；游标认证加密并绑定员工、会话、币种、页大小和时限。无员工购买、权益授予、财务写入、DDL、支付或上游调用。
