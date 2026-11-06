@@ -4,7 +4,7 @@
 
 A self-hosted AI access platform for internal enterprise use. Administrators manage upstreams, models, and employee keys through a web console; employees use standard APIs without WeChat or a dedicated client. Authentication, permission checks, and upstream requests all run in the same Go service process.
 
-> This project is a development preview, not a production release. All 18 preview.3 primary packages completed tests, builds, and format-specific automated acceptance on matching GitHub runner architectures. Real GUI interaction and deployment validation on every target host remain incomplete.
+> The v0.1.0 release-source candidate is limited to the Linux amd64 single-tenant server, Web admin console and backup CLI. See the [release notes](docs/releases/v0.1.0.md) for installation configuration, known CI failures and incomplete capabilities. This is not all-green CI or full-product production safety acceptance. The preview.3 downloads and desktop-package records below are historical, not evidence that v0.1.0 is published or supports those platforms.
 
 ## Features and boundaries
 
@@ -181,11 +181,15 @@ The payment callback is a local generic HMAC interface with a five-minute window
 
 ### Automated encrypted backup (off by default)
 
-Source builds add `--automated-backups-enabled`, restricted output roots, plans/run history, retention, and restore rehearsal. Only a Windows current-user DPAPI key provider can currently become ready/running. Linux and macOS do not fall back to plaintext key storage. Cross-machine recovery material, object storage, remote replication, and production rotation remain unavailable. The offline password CLI remains supported; see [backup and restore](docs/backup-restore.md).
+Source builds add `--automated-backups-enabled`, restricted output roots, plans/run history, retention, and restore rehearsal. The existing Windows current-user DPAPI path remains; Linux also has an explicit `linux-systemd-credential-v1` path requiring independent protected M/W credentials and an authenticated installation binding. This does not attest real-host custody. macOS does not fall back to plaintext key storage. Real rotation, old-backup anti-resurrection, object storage and production disaster recovery remain incomplete. See [backup and restore](docs/backup-restore.md) for the password CLI and systemd v3 verify/restore boundaries.
 
 ## 1. Download and installation
 
-**Current download: [v0.1.0-preview.3](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.3)**. The table links directly to these versioned assets.
+**v0.1.0: Linux amd64 server / Web / backup CLI only.** Read the [release and installation notes](docs/releases/v0.1.0.md), and download only assets actually present on [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases) with verified identity/checksums. This source PR does not prove publication; no artifact SHA or unverified download URL is prefilled. Employee installers/real apply, real M1→M2 rotation and old-backup anti-resurrection are not delivered/accepted capabilities.
+
+### Historical preview.3 downloads (not v0.1.0)
+
+**Historical download: [v0.1.0-preview.3](https://github.com/surpaimb/cpa-cloud/releases/tag/v0.1.0-preview.3)**. Its assets and acceptance records below are retained as history, not v0.1.0 build, CI or deployment evidence.
 
 See preview versions and their attachments on [GitHub Releases](https://github.com/surpaimb/cpa-cloud/releases). A file is downloadable only when it actually appears under the Assets section of that Release. If a Release has no attachments yet, build from source as described below. Preview versions may not appear through GitHub's `latest` link.
 

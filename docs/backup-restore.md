@@ -1,16 +1,16 @@
 # CPA Cloud encrypted backup CLI / CPA Cloud 加密备份命令行
 
-Status / 状态：development preview / 开发预览，2026-09-24。
+Status / 状态：v0.1.0 Linux amd64 发行范围说明，2026-11-06；既有格式的开发预览边界保留，真实灾备及生产安全验收未完成。See [release notes](releases/v0.1.0.md) / 见[发行说明](releases/v0.1.0.md)。
 
-`cpa-cloud-backup` is an offline administration CLI with `create`, `verify`, and `restore` subcommands. It has no HTTP endpoint and does not give the web console filesystem access. Passwords are read only from standard input; they are never accepted as command-line flags or printed.
+`cpa-cloud-backup` is an offline administration CLI. The legacy password path has `create`, `verify`, `restore` and key-material commands; the protected Linux systemd v3 path has only `systemd-v3-verify` and `systemd-v3-restore`. It has no HTTP endpoint and does not give the web console filesystem access. Password commands read passwords only from stdin, never argv; the systemd v3 commands do not read stdin.
 
-`cpa-cloud-backup` 是独立的离线运维命令，提供 `create`、`verify` 和 `restore`。它不增加 HTTP 接口，也不让网页后台读取文件系统。密码只从标准输入读取，不接受密码命令行参数，也不会打印密码。
+`cpa-cloud-backup` 是独立离线运维命令。旧口令路径提供 `create`、`verify`、`restore` 及 key-material 命令；Linux systemd v3 只有 `systemd-v3-verify`、`systemd-v3-restore`。它不增加 HTTP 接口，也不让网页后台读取文件系统。口令路径只从 stdin 读取密码，不接受密码 argv；systemd v3 不读 stdin。
 
 ## Usage / 使用方法
 
-Build locally from the repository; this preview does not publish a binary attachment:
+The v0.1.0 Linux amd64 payload includes this CLI. Download availability and hashes must be confirmed from the actual Release assets; this source guide does not assert that publication has happened. Local source builds remain available:
 
-从仓库本地构建；本预览不发布二进制附件：
+v0.1.0 Linux amd64 计划产物包含该 CLI；能否下载及产物摘要以实际 Release 附件回读为准，本源码说明不证明已经发布。仍可从仓库本地构建：
 
 ```powershell
 go build -o .\cpa-cloud-backup.exe .\cmd\cpa-cloud-backup
@@ -43,6 +43,41 @@ unset CPA_BACKUP_PASSWORD
 After restore, start CPA Cloud against the new directory and perform application-level checks before changing traffic. A successful `verify` confirms this format version and database snapshot; it does not promise compatibility with every future CPA Cloud version.
 
 恢复后应使用新目录启动 CPA Cloud，并在切换流量前执行应用级检查。`verify` 成功只确认当前格式版本和数据库快照，不承诺兼容所有未来 CPA Cloud 版本。
+
+## Protected Linux systemd v3 / 受保护的 Linux systemd v3
+
+The service's explicitly enabled automated backup plan creates v3 packages.
+There is no systemd v3 CLI `create`; password `create` does not replace that
+producer. Configure data/Web/output roots, loopback or TLS, backup destination
+and retention when installing. There is no unified `--config` file or wizard.
+Secrets, custodians and hosts are not build inputs.
+
+v3 由显式启用的服务备份计划创建，不存在 v3 CLI `create`，也不能用口令 `create` 替代。
+安装时配置 data/Web/备份目录、回环或 TLS、目标及保留政策；没有统一 `--config` 或向导。
+真实秘密、保管人和部署主机不是编译输入。
+
+The fixed recovery unit/user reads separate protected `cpa-cloud-master-key`
+and `cpa-cloud-backup-wrapping-key` references, authenticates a retained binding
+seed, and requires explicit public identity/version arguments and a nonexistent
+restore target. It neither reads the live service credential directory nor
+starts the application or switches traffic. `--instance-id` belongs only to
+server runtime, not `--init` or recovery bootstrap. Follow the complete
+[offline recovery contract](linux-systemd-offline-recovery-cli-contract.md),
+[installation-root contract](linux-systemd-master-key-provider-contract.md) and
+[wrapping-root ADR](adr/0005-linux-systemd-backup-wrapping-key.md).
+
+恢复必须通过固定独立 unit/用户、M/W 独立受保护引用、保留 seed 和显式身份/版本门；
+目标须不存在。它不读取在线服务的 runtime credential，不启动业务或切流。真实主机策略、
+恢复授权及 M/W 保管须另行核实；合成 VM 通过不证明这些前提已满足。
+
+**An error, cancellation or cleanup failure does not prove rollback.** A valid
+target may already have been published. Stop for independent inspection; do not
+automatically retry, overwrite, delete a target or switch traffic. / **错误、取消或
+清理失败不等于回滚**，有效目标可能已经发布；先独立核实，不自动重试、覆盖、删除或切流。
+Real M1→M2 rotation and old-backup anti-resurrection remain incomplete: old
+snapshots can restore historical keys/passwords/states. Default-off employee
+self service does not resolve the UNKNOWN shared App.Close/SQLite impact of the
+retained Code #529 failures; see the [known failures](releases/v0.1.0.md).
 
 ## Security and format / 安全与格式
 

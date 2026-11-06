@@ -6,7 +6,7 @@ The evidence review dated 2026-09-22 is recorded in `docs/research/dependency-no
 
 ## Material included in runtime distributions
 
-### Go server
+### Go server and optional backup CLI
 
 OPS-04 adds a pinned time-zone data asset at `internal/service/tzdata/zoneinfo.zip`, copied without modification from the official Go 1.26.8 distribution's `lib/time/zoneinfo.zip` (IANA tzdb 2025c; SHA-256 `8F55634D05F8BCA1F7BC7C69C5933428C69357E0BDF565E5BA224E3F88FF12E8`). The Go distribution's `lib/time/README` identifies the compiled IANA data and IANA's public-domain assertion; see [IANA tzdb](https://www.iana.org/time-zones). Go's standard-library code and zoneinfo generator retain the Go BSD-3-Clause license and its notice/disclaimer. Distributions embedding this asset must preserve the relevant Go license text and this provenance. No additional Go module is introduced. Future tzdb replacement requires a separate schedule-compatibility review; this asset is not fetched at runtime.
 
@@ -51,6 +51,8 @@ The production JavaScript bundle contains React, React DOM, and Scheduler code. 
 | `react` | `19.3.0` | https://registry.npmjs.org/react/19.3.0 | MIT | Bundled runtime code; include the package `LICENSE` |
 | `react-dom` | `19.3.0` | https://registry.npmjs.org/react-dom/19.3.0 | MIT | Bundled runtime code; include the package `LICENSE` |
 | `scheduler` | `0.28.0` | https://registry.npmjs.org/scheduler/0.28.0 | MIT | Bundled transitive runtime code; include the package `LICENSE` |
+| `vite` | `8.3.0` | https://registry.npmjs.org/vite/8.3.0 | MIT | Generated modulepreload/runtime helper; include the complete package `LICENSE.md` |
+| `rolldown` | `1.2.9` | https://registry.npmjs.org/rolldown/1.2.9 | MIT and retained third-party MIT notices | Vite delegates modulepreload generation through `rolldown/experimental`; include complete `LICENSE` and `THIRD-PARTY-LICENSE` |
 
 ## Build and test dependencies
 
@@ -61,6 +63,67 @@ If a release includes `node_modules`, a build container/toolchain, or source-ven
 - TypeScript `7.0.2` and its native package are Apache-2.0 and include both `LICENSE` and `NOTICE.txt`; retain both when redistributing them.
 - `lightningcss` and its native package declare MPL-2.0. They are build-time material in the inspected installation, not code identified in the current static output. Redistributing the tool or a modified covered file requires an MPL-specific review.
 - The installed dependency set also contains MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, ISC, BlueOak-1.0.0, and CC0-1.0 material. Exact package/version groupings are in `docs/research/dependency-notices.md`.
+
+## Bounded v0.1.0 package-kernel candidate (2026-11-06)
+
+The independently extended `scripts/release-package.go` keeps preview tags and
+native preview targets. Only the exact stable tag `v0.1.0` is added; it requires
+Linux amd64, `--include-backup-cli`, and an explicit 40-hex `--source-sha` matching
+the actual checkout HEAD. `GITHUB_SHA` is not a source-identity authority. The
+server and backup CLI are built separately from the same verified binary-source
+paths, with the same injected version and fixed Go 1.26.9 for this stable target.
+Cross-compilation is identified as such and does not claim native Linux execution.
+
+Each binary's Go build information is read separately. The linked-module union
+is deduplicated by reviewed module/version and retains the set of binaries that
+link each module. Unknown versions, replacements, duplicate entries, missing or
+empty required notices, nonregular files and symlink paths fail the package.
+In particular libc v1.70.0 uses `LICENSE` plus `LICENSE-3RD-PARTY.md`; it must not
+fall back to the retired separate-file layout. Required Go, module and browser
+notice files are copied in full. React, React DOM, Scheduler and the Vite runtime
+helper remain in the browser inventory even when their minified output omits
+inline license markers.
+
+The separate frontend-license kernel batch corrects the four-package inventory:
+the installed Vite 8.3.0 source imports `viteModulePreloadPolyfillPlugin` from
+`rolldown/experimental`, and the reviewed lock pins Rolldown 1.2.9. Its MIT
+`LICENSE` is 1302 bytes, SHA256
+`23ecfff35a5a2e80d92142f75228912c3b1abc4b5a8337a821ff4397e2f9f734`;
+`THIRD-PARTY-LICENSE` is 2209 bytes, SHA256
+`a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c`.
+The latter retains the Rollup-contributor and Evan Wallace MIT notices. Both
+unmodified full texts, package identity/version/license and their actual hashes
+are checked during collection and artifact validation, including when an input
+manifest has been recomputed after tampering. Vite's own notice is retained too;
+it is not treated as an umbrella Rolldown notice.
+
+The exact reviewed `web/bun.lock`, normalizing CRLF to LF only, has SHA256
+`a4eb191ae92b5545e6f8deb8ad504ebecb44c929a5d4146acf225988a27c2ade`.
+The collector rejects a different or missing lock, and records this identity in
+`WEB-ASSETS.json` and the frontend notice index. No lock or dependency update is
+part of this batch. A future graph change requires independent notice review.
+This establishes a bounded license-kernel rule, not universal provenance of an
+arbitrary JavaScript file: the actual final Web build and emitted helper source
+must still be checked against that frozen graph in the artifact-producing gate.
+If that real build cannot be inspected locally, its closure remains UNKNOWN;
+synthetic-Web dry-runs do not resolve it or clear previous STOP/CI history.
+
+`WEB-ASSETS.json` binds the complete collected static/notice file set;
+`MANIFEST.json` lists all ordinary payload files except itself and the root
+`SHA256SUMS.txt`. The latter also hashes `MANIFEST.json`, and an archive sidecar
+hashes the complete archive. Nested ordinary files named `SHA256SUMS.txt` are
+included. No data directory, private key material or `node_modules` is packaged.
+These hashes provide content closure, not an authenticated upstream attestation,
+a product-completeness claim or a substitute for independent source/CI review.
+
+This is a local packaging-kernel candidate only. Synthetic static assets or
+synthetic frontend notices in a dry-run are test fixtures, not a real Web build
+or a release-ready upstream license bundle. Existing integration CI failures,
+employee-C and Code513–515 history, unimplemented capabilities, real migration
+and old-backup anti-resurrection gaps remain disclosed and are not cleared by
+packaging tests. No publication, installer, deployment or production acceptance
+is established here. The earlier inventory and release checklist below remain
+historical requirements, to be evaluated against the actual future artifact.
 
 ## Release gate and unresolved evidence
 

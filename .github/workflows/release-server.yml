@@ -1,0 +1,187 @@
+{
+  "name": "Bounded v0.1.0 Linux server release",
+  "on": {
+    "pull_request": {
+      "paths": [
+        ".github/workflows/release-server.yml",
+        "scripts/release-package.go",
+        "scripts/release-package_test.go",
+        "scripts/verify-release-package.py",
+        "scripts/test-verify-release-package.py",
+        "THIRD_PARTY_NOTICES.md",
+        "web/**",
+        "docs/releases/v0.1.0.md"
+      ]
+    },
+    "push": {
+      "branches": [
+        "main"
+      ],
+      "paths": [
+        ".github/workflows/release-server.yml",
+        "docs/releases/v0.1.0.md"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "concurrency": {
+    "group": "release-server-v0.1.0-${{ github.event_name }}-${{ github.event.pull_request.number || 'main' }}",
+    "cancel-in-progress": false
+  },
+  "env": {
+    "RELEASE_TAG": "v0.1.0",
+    "GOTOOLCHAIN": "local",
+    "GOWORK": "off",
+    "GOENV": "off",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "EXPECTED_SOURCE_SHA": "${{ github.event.pull_request.head.sha || github.sha }}"
+  },
+  "jobs": {
+    "build": {
+      "name": "Build and verify Linux amd64 release payload",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 45,
+      "permissions": {
+        "contents": "read"
+      },
+      "outputs": {
+        "source_sha": "${{ steps.source.outputs.source_sha }}",
+        "archive_sha": "${{ steps.freeze.outputs.archive_sha }}",
+        "sidecar_sha": "${{ steps.freeze.outputs.sidecar_sha }}",
+        "proof_sha": "${{ steps.freeze.outputs.proof_sha }}",
+        "notes_sha": "${{ steps.freeze.outputs.notes_sha }}",
+        "artifact_id": "${{ steps.upload.outputs.artifact-id }}"
+      },
+      "steps": [
+        {
+          "name": "Checkout exact event source",
+          "uses": "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+          "with": {
+            "repository": "${{ github.event.pull_request.head.repo.full_name || github.repository }}",
+            "ref": "${{ github.event.pull_request.head.sha || github.sha }}",
+            "persist-credentials": false,
+            "fetch-depth": 1
+          }
+        },
+        {
+          "name": "Reject reruns and compare physical source with raw HEAD",
+          "id": "source",
+          "run": "set -euo pipefail\ntest \"$GITHUB_RUN_ATTEMPT\" = 1\ntest \"$(git rev-parse HEAD)\" = \"$EXPECTED_SOURCE_SHA\"\npython3 - <<'PY'\nimport os, re\nsha = os.environ[\"EXPECTED_SOURCE_SHA\"]\nassert re.fullmatch(r\"[0-9a-f]{40}\", sha)\nassert os.environ[\"GITHUB_EVENT_NAME\"] in (\"pull_request\", \"push\")\nif os.environ[\"GITHUB_EVENT_NAME\"] == \"push\":\n    assert os.environ[\"GITHUB_REF\"] == \"refs/heads/main\"\n    assert os.environ[\"GITHUB_SHA\"] == sha\nwith open(os.environ[\"GITHUB_OUTPUT\"], \"a\", encoding=\"utf-8\") as out:\n    out.write(\"source_sha=\" + sha + \"\\n\")\nPY\npython3 scripts/verify-release-package.py source --root . --source-sha \"$EXPECTED_SOURCE_SHA\" > \"$RUNNER_TEMP/source-before.json\"\n"
+        },
+        {
+          "name": "Set up fixed Go",
+          "uses": "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
+          "with": {
+            "go-version": "1.26.9",
+            "cache": false
+          }
+        },
+        {
+          "name": "Set up fixed Bun",
+          "uses": "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+          "with": {
+            "bun-version": "1.3.14"
+          }
+        },
+        {
+          "name": "Verify fixed tool versions",
+          "run": "set -euo pipefail\ntest \"$(go env GOVERSION)\" = go1.26.9\ntest \"$(bun --version)\" = 1.3.14\ngo run ./scripts/release-package.go validate-tag --tag v0.1.0\n"
+        },
+        {
+          "name": "Independent verifier, publisher and workflow tests",
+          "run": "set -euo pipefail\npython3 scripts/test-verify-release-package.py\n"
+        },
+        {
+          "name": "Install exact locked Web dependencies; downloads permitted",
+          "working-directory": "web",
+          "run": "set -euo pipefail\nexport BUN_INSTALL_CACHE_DIR=\"$RUNNER_TEMP/release-bun-cache\"\nbun install --frozen-lockfile\n"
+        },
+        {
+          "name": "Observe locked Web tests and build in private raw-HEAD snapshot; downloads permitted",
+          "run": "set -euo pipefail\nexport BUN_INSTALL_CACHE_DIR=\"$RUNNER_TEMP/release-bun-cache\"\npython3 scripts/verify-release-package.py web-build --root . --source-sha \"$EXPECTED_SOURCE_SHA\" --receipt \"$RUNNER_TEMP/web-build-receipt.json\"\n"
+        },
+        {
+          "name": "Prepare Go cache for offline package builds",
+          "run": "set -euo pipefail\ngo mod download\ngo mod verify\n"
+        },
+        {
+          "name": "Collect all five browser runtime and helper notices",
+          "run": "set -euo pipefail\ngo run ./scripts/release-package.go web-assets --source . --output \"$RUNNER_TEMP/release-web\"\n"
+        },
+        {
+          "name": "Build Linux amd64 server/Web/backup CLI package",
+          "run": "set -euo pipefail\ngo run ./scripts/release-package.go package --source . --web-assets \"$RUNNER_TEMP/release-web\" --output \"$RUNNER_TEMP/release-out\" --version v0.1.0 --target-os linux --target-arch amd64 --asset-os linux --include-backup-cli --source-sha \"$EXPECTED_SOURCE_SHA\"\n"
+        },
+        {
+          "name": "Check ELF, closed archive namespace, notices and producer receipt separately",
+          "run": "set -euo pipefail\npython3 scripts/verify-release-package.py verify --archive \"$RUNNER_TEMP/release-out/cpa-cloud_v0.1.0_linux_amd64.tar.gz\" --sidecar \"$RUNNER_TEMP/release-out/cpa-cloud_v0.1.0_linux_amd64.tar.gz.sha256\" --source-sha \"$EXPECTED_SOURCE_SHA\" --source-root . --go-root \"$(go env GOROOT)\" --module-cache \"$(go env GOMODCACHE)\" --web-build-receipt \"$RUNNER_TEMP/web-build-receipt.json\" > \"$RUNNER_TEMP/release-out/build-proof.json\"\n"
+        },
+        {
+          "name": "Recheck source and freeze this run's payload hashes",
+          "id": "freeze",
+          "run": "set -euo pipefail\npython3 scripts/verify-release-package.py source --root . --source-sha \"$EXPECTED_SOURCE_SHA\" > \"$RUNNER_TEMP/source-after.json\"\npython3 - <<'PY'\nimport hashlib, json, os, pathlib\nbase = pathlib.Path(os.environ[\"RUNNER_TEMP\"]) / \"release-out\"\narchive = \"cpa-cloud_v0.1.0_linux_amd64.tar.gz\"\nsidecar = archive + \".sha256\"\nassert {p.name for p in base.iterdir()} == {archive, sidecar, \"build-proof.json\"}\nproof = json.loads((base / \"build-proof.json\").read_text())\nassert proof[\"source_sha\"] == os.environ[\"EXPECTED_SOURCE_SHA\"]\nassert proof[\"web_structure_checked\"] is True and proof[\"web_build_receipt_checked\"] is True\nassert proof[\"producer_run\"] == {\"run_id\": os.environ[\"GITHUB_RUN_ID\"], \"attempt\": \"1\",\n    \"event\": os.environ[\"GITHUB_EVENT_NAME\"], \"source_sha\": os.environ[\"EXPECTED_SOURCE_SHA\"]}\nvalues = {\"archive_sha\": hashlib.sha256((base/archive).read_bytes()).hexdigest(),\n          \"sidecar_sha\": hashlib.sha256((base/sidecar).read_bytes()).hexdigest(),\n          \"proof_sha\": hashlib.sha256((base/\"build-proof.json\").read_bytes()).hexdigest(),\n          \"notes_sha\": \"not-applicable-to-pull-request\"}\nassert values[\"archive_sha\"] == proof[\"archive_sha256\"]\nassert values[\"sidecar_sha\"] == proof[\"sidecar_sha256\"]\nif os.environ[\"GITHUB_EVENT_NAME\"] == \"push\":\n    notes = pathlib.Path(\"docs/releases/v0.1.0.md\").read_bytes()\n    assert notes.strip() and b\"v0.1.0\" in notes and len(notes) <= 128 * 1024\n    values[\"notes_sha\"] = hashlib.sha256(notes).hexdigest()\nwith open(os.environ[\"GITHUB_OUTPUT\"], \"a\", encoding=\"utf-8\") as output:\n    for name, value in values.items():\n        output.write(name + \"=\" + value + \"\\n\")\nPY\n"
+        },
+        {
+          "name": "Upload only this run's validated payload and proof",
+          "id": "upload",
+          "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+          "with": {
+            "name": "release-server-${{ github.run_id }}",
+            "path": "${{ runner.temp }}/release-out/",
+            "if-no-files-found": "error",
+            "retention-days": 3,
+            "overwrite": false
+          }
+        }
+      ]
+    },
+    "publish": {
+      "name": "One-shot main-push publication with asset-ID readback and explicit uncertainty",
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'surpaimb/cpa-cloud' && github.run_attempt == 1",
+      "needs": "build",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 20,
+      "permissions": {
+        "contents": "write",
+        "actions": "read"
+      },
+      "env": {
+        "SOURCE_SHA": "${{ needs.build.outputs.source_sha }}",
+        "FROZEN_ARCHIVE_SHA": "${{ needs.build.outputs.archive_sha }}",
+        "FROZEN_SIDECAR_SHA": "${{ needs.build.outputs.sidecar_sha }}",
+        "FROZEN_PROOF_SHA": "${{ needs.build.outputs.proof_sha }}",
+        "FROZEN_NOTES_SHA": "${{ needs.build.outputs.notes_sha }}",
+        "BUILD_ARTIFACT_ID": "${{ needs.build.outputs.artifact_id }}"
+      },
+      "steps": [
+        {
+          "name": "Checkout exact source M used by build",
+          "uses": "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+          "with": {
+            "ref": "${{ needs.build.outputs.source_sha }}",
+            "persist-credentials": false,
+            "fetch-depth": 1
+          }
+        },
+        {
+          "name": "Download immutable artifact by ID from this run",
+          "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+          "with": {
+            "artifact-ids": "${{ needs.build.outputs.artifact_id }}",
+            "path": "${{ runner.temp }}/release-payload"
+          }
+        },
+        {
+          "name": "Absent-only transaction; PUBLICATION_UNKNOWN after ambiguous publish PATCH",
+          "env": {
+            "GH_TOKEN": "${{ github.token }}",
+            "RELEASE_PAYLOAD": "${{ runner.temp }}/release-payload"
+          },
+          "run": "set -euo pipefail\npython3 - <<'PY'\nimport importlib.util\nimport json\nimport os\nfrom pathlib import Path\nimport re\nimport sys\nimport tempfile\nimport urllib.error\nimport urllib.parse\nimport urllib.request\n\n# Independently authored single-run transaction coordinator; no repair or write retry.\n# REST: docs.github.com/en/rest/git/refs and /rest/releases/{releases,assets}.\nspec = importlib.util.spec_from_file_location(\"release_reader\", \"scripts/verify-release-package.py\")\nv = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(v)\nREPO = \"surpaimb/cpa-cloud\"\nTAG = \"v0.1.0\"\nASSETS = (v.ARCHIVE, v.SIDECAR)\nclass Stop(RuntimeError):\n    pass\ndef check(value, label):\n    if not value:\n        raise Stop(label)\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, request, fp, code, message, headers, newurl):\n        return None\nclass Client:\n    def __init__(self, token):\n        check(bool(token), \"RREL_TOKEN_MISSING\")\n        self.token = token\n        self.opener = urllib.request.build_opener(NoRedirect())\n    def response(self, url, method, data, accept, content_type=None, auth=True, allowed=(200,)):\n        headers = {\"Accept\": accept, \"User-Agent\": \"cpa-cloud-single-run-release\",\n                   \"X-GitHub-Api-Version\": \"2022-11-28\"}\n        if auth:\n            headers[\"Authorization\"] = \"Bearer \" + self.token\n        if content_type:\n            headers[\"Content-Type\"] = content_type\n        request = urllib.request.Request(url, data=data, headers=headers, method=method)\n        try:\n            response = self.opener.open(request, timeout=180)\n        except urllib.error.HTTPError as error:\n            response = error\n        check(response.status in allowed, \"RREL_UNEXPECTED_HTTP\")\n        return response\n    def api(self, method, path, payload=None, allowed=(200,)):\n        body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()\n        with self.response(\"https://api.github.com/repos/\" + REPO + path, method, body,\n                           \"application/vnd.github+json\", \"application/json\", allowed=allowed) as r:\n            data = r.read(8 * 1024 * 1024 + 1)\n            check(len(data) <= 8 * 1024 * 1024, \"RREL_API_LIMIT\")\n            return r.status, v.decode_json(data)\n    def pages(self, path):\n        items = []\n        for page in range(1, 101):\n            separator = \"&\" if \"?\" in path else \"?\"\n            _, rows = self.api(\"GET\", path + separator + \"per_page=100&page=\" + str(page))\n            check(isinstance(rows, list) and len(rows) <= 100, \"RREL_LIST_SCHEMA\")\n            items.extend(rows)\n            if len(rows) < 100:\n                return items\n        raise Stop(\"RREL_PAGINATION_UNKNOWN\")\n    def upload(self, release_id, name, data):\n        check(name in ASSETS, \"RREL_ASSET_WHITELIST\")\n        url = \"https://uploads.github.com/repos/\" + REPO + \"/releases/\" + str(release_id)\n        url += \"/assets?name=\" + urllib.parse.quote(name, safe=\"\")\n        with self.response(url, \"POST\", data, \"application/vnd.github+json\",\n                           \"application/octet-stream\", allowed=(201,)) as r:\n            return v.decode_json(r.read(1024 * 1024))\n    def download(self, asset_id, size):\n        url = \"https://api.github.com/repos/\" + REPO + \"/releases/assets/\" + str(asset_id)\n        for hop in range(4):\n            with self.response(url, \"GET\", None, \"application/octet-stream\",\n                               auth=(hop == 0), allowed=(200, 302)) as r:\n                if r.status == 200:\n                    data = r.read(size + 1)\n                    check(len(data) == size, \"RREL_DOWNLOAD_SIZE\")\n                    return data\n                location = r.headers.get(\"Location\", \"\")\n                parsed = urllib.parse.urlsplit(location)\n                check(parsed.scheme == \"https\" and parsed.hostname in\n                      {\"release-assets.githubusercontent.com\", \"objects.githubusercontent.com\",\n                       \"github-releases.githubusercontent.com\"} and\n                      parsed.port in (None, 443) and not parsed.username and\n                      not parsed.password and not parsed.fragment, \"RREL_DOWNLOAD_REDIRECT\")\n                # Authorization is deliberately not forwarded to asset CDN hosts.\n                url = location\n        raise Stop(\"RREL_DOWNLOAD_REDIRECT_LIMIT\")\n\ndef exact_tag(client, source):\n    _, ref = client.api(\"GET\", \"/git/ref/tags/\" + TAG)\n    check(ref.get(\"ref\") == \"refs/tags/\" + TAG and\n          ref.get(\"object\", {}).get(\"type\") == \"commit\" and\n          ref[\"object\"][\"sha\"] == source, \"RREL_TAG_READBACK\")\n\ndef main_tip(client, source):\n    _, ref = client.api(\"GET\", \"/git/ref/heads/main\")\n    check(ref.get(\"ref\") == \"refs/heads/main\" and\n          ref.get(\"object\", {}).get(\"type\") == \"commit\" and\n          ref[\"object\"][\"sha\"] == source, \"RREL_MAIN_MOVED\")\n\ndef absence(client):\n    _, repository = client.api(\"GET\", \"\")\n    check(repository.get(\"full_name\") == REPO and repository.get(\"default_branch\") == \"main\",\n          \"RREL_REPOSITORY_IDENTITY\")\n    status, ref = client.api(\"GET\", \"/git/ref/tags/\" + TAG, allowed=(200, 404))\n    check(status == 404 and isinstance(ref, dict) and ref.get(\"message\") == \"Not Found\",\n          \"RREL_TAG_PRESENT_OR_UNKNOWN\")\n    _, matching = client.api(\"GET\", \"/git/matching-refs/tags/\" + TAG)\n    check(isinstance(matching, list) and all(isinstance(row, dict) and\n          isinstance(row.get(\"ref\"), str) and row[\"ref\"].startswith(\"refs/tags/\") and\n          isinstance(row.get(\"object\"), dict) and v.HEX40.fullmatch(row[\"object\"].get(\"sha\", \"\")) and\n          row[\"ref\"] != \"refs/tags/\" + TAG for row in matching), \"RREL_TAG_PRESENT_OR_UNKNOWN\")\n    status, release = client.api(\"GET\", \"/releases/tags/\" + TAG, allowed=(200, 404))\n    check(status == 404 and isinstance(release, dict) and release.get(\"message\") == \"Not Found\",\n          \"RREL_RELEASE_PRESENT_OR_UNKNOWN\")\n    # The published-by-tag endpoint alone cannot prove absence of drafts.\n    for release in client.pages(\"/releases\"):\n        check(type(release.get(\"id\")) is int and release[\"id\"] > 0, \"RREL_RELEASE_SCHEMA\")\n        check(release.get(\"tag_name\") != TAG and release.get(\"name\") != \"CPA Cloud \" + TAG,\n              \"RREL_RELEASE_ALREADY_EXISTS\")\n        for asset in client.pages(\"/releases/\" + str(release[\"id\"]) + \"/assets\"):\n            check(isinstance(asset, dict) and type(asset.get(\"id\")) is int and\n                  isinstance(asset.get(\"name\"), str) and asset[\"name\"] not in ASSETS,\n                  \"RREL_ASSET_ALREADY_EXISTS_OR_UNKNOWN\")\n\ndef release_identity(release, release_id, source, notes, draft):\n    check(release.get(\"id\") == release_id and release.get(\"tag_name\") == TAG and\n          release.get(\"name\") == \"CPA Cloud \" + TAG and release.get(\"target_commitish\") == source\n          and release.get(\"body\") == notes and release.get(\"draft\") is draft and\n          release.get(\"prerelease\") is False, \"RREL_RELEASE_READBACK\")\n\ndef asset_set(client, release_id, ids, hashes, sizes):\n    rows = client.pages(\"/releases/\" + str(release_id) + \"/assets\")\n    check(len(rows) == len(ASSETS), \"RREL_ASSET_SET\")\n    seen = set()\n    for row in rows:\n        name = row.get(\"name\")\n        check(name in ASSETS and name not in seen and row.get(\"id\") == ids[name] and\n              row.get(\"state\") == \"uploaded\" and row.get(\"size\") == sizes[name],\n              \"RREL_ASSET_READBACK\")\n        if row.get(\"digest\") is not None:\n            check(row[\"digest\"] == \"sha256:\" + hashes[name], \"RREL_ASSET_DIGEST\")\n        seen.add(name)\n    check(seen == set(ASSETS), \"RREL_ASSET_SET\")\n\ndef publish(client, source, notes, payload, proof, hashes, sizes):\n    main_tip(client, source)\n    absence(client)\n    # Each mutation below is attempted once. Any ambiguous result leaves a partial\n    # tag/draft for manual investigation; nothing is deleted, overwritten or retried.\n    _, created_tag = client.api(\"POST\", \"/git/refs\",\n                                {\"ref\": \"refs/tags/\" + TAG, \"sha\": source}, allowed=(201,))\n    check(created_tag.get(\"object\", {}).get(\"sha\") == source, \"RREL_TAG_CREATE_RESPONSE\")\n    exact_tag(client, source)\n    main_tip(client, source)\n    _, release = client.api(\"POST\", \"/releases\",\n        {\"tag_name\": TAG, \"target_commitish\": source, \"name\": \"CPA Cloud \" + TAG,\n         \"body\": notes, \"draft\": True, \"prerelease\": False, \"make_latest\": \"false\",\n         \"generate_release_notes\": False}, allowed=(201,))\n    release_id = release.get(\"id\")\n    check(type(release_id) is int and release_id > 0, \"RREL_RELEASE_ID\")\n    _, release = client.api(\"GET\", \"/releases/\" + str(release_id))\n    release_identity(release, release_id, source, notes, True)\n    check(client.pages(\"/releases/\" + str(release_id) + \"/assets\") == [], \"RREL_DRAFT_PARTIAL\")\n    ids = {}\n    for name in ASSETS:\n        data = v.read_file(payload / name, 512 << 20)\n        check(v.sha(data) == hashes[name] and len(data) == sizes[name], \"RREL_LOCAL_ASSET_CHANGED\")\n        asset = client.upload(release_id, name, data)\n        check(type(asset.get(\"id\")) is int and asset[\"id\"] > 0 and\n              asset[\"id\"] not in ids.values() and asset.get(\"name\") == name and\n              asset.get(\"state\") == \"uploaded\" and asset.get(\"size\") == sizes[name],\n              \"RREL_UPLOAD_RESPONSE\")\n        ids[name] = asset[\"id\"]\n    asset_set(client, release_id, ids, hashes, sizes)\n    with tempfile.TemporaryDirectory(prefix=\"cpa-release-readback-\") as tmp:\n        downloaded = Path(tmp)\n        for name in ASSETS:\n            data = client.download(ids[name], sizes[name])\n            check(v.sha(data) == hashes[name], \"RREL_DOWNLOADED_HASH\")\n            with (downloaded / name).open(\"xb\") as output:\n                output.write(data)\n        v.verify(downloaded / v.ARCHIVE, downloaded / v.SIDECAR, source, proof=proof,\n                 expected_archive=hashes[v.ARCHIVE], expected_sidecar=hashes[v.SIDECAR])\n    main_tip(client, source)\n    exact_tag(client, source)\n    _, release = client.api(\"GET\", \"/releases/\" + str(release_id))\n    release_identity(release, release_id, source, notes, True)\n    asset_set(client, release_id, ids, hashes, sizes)\n    # A sent PATCH may have committed even if its response or readback is lost.\n    # Preserve uncertainty; never assert draft, roll back, or repeat the PATCH.\n    try:\n        _, published = client.api(\"PATCH\", \"/releases/\" + str(release_id),\n                                  {\"draft\": False, \"prerelease\": False, \"make_latest\": \"true\"})\n        release_identity(published, release_id, source, notes, False)\n        _, final = client.api(\"GET\", \"/releases/\" + str(release_id))\n        release_identity(final, release_id, source, notes, False)\n        check(isinstance(final.get(\"published_at\"), str) and final[\"published_at\"],\n              \"RREL_PUBLICATION_UNKNOWN\")\n        exact_tag(client, source)\n        asset_set(client, release_id, ids, hashes, sizes)\n    except Exception as error:\n        raise Stop(\"RREL_PUBLICATION_UNKNOWN\") from error\n    print(json.dumps({\"result\": \"RELEASE_PUBLISHED_AND_READ_BACK\", \"release_id\": release_id,\n                      \"tag\": TAG, \"source_sha\": source, \"assets\": ids}, sort_keys=True))\n\ndef main():\n    check(os.environ.get(\"GITHUB_EVENT_NAME\") == \"push\" and\n          os.environ.get(\"GITHUB_REF\") == \"refs/heads/main\" and\n          os.environ.get(\"GITHUB_REPOSITORY\") == REPO and\n          os.environ.get(\"GITHUB_RUN_ATTEMPT\") == \"1\", \"RREL_EVENT_REJECTED\")\n    source = os.environ[\"SOURCE_SHA\"]\n    check(v.HEX40.fullmatch(source) and os.environ.get(\"GITHUB_SHA\") == source,\n          \"RREL_SOURCE_IDENTITY\")\n    v.verify_source(\".\", source)\n    payload = Path(os.environ[\"RELEASE_PAYLOAD\"])\n    check({p.name for p in payload.iterdir()} == {*ASSETS, \"build-proof.json\"},\n          \"RREL_PAYLOAD_WHITELIST\")\n    proof_bytes = v.read_file(payload / \"build-proof.json\", 8 << 20)\n    check(v.sha(proof_bytes) == os.environ[\"FROZEN_PROOF_SHA\"], \"RREL_PROOF_DIGEST\")\n    proof = v.decode_json(proof_bytes)\n    check(proof.get(\"web_structure_checked\") is True and\n          proof.get(\"web_build_receipt_checked\") is True and proof.get(\"producer_run\") ==\n          {\"run_id\": os.environ[\"GITHUB_RUN_ID\"], \"attempt\": \"1\", \"event\": \"push\",\n           \"source_sha\": source}, \"RREL_PRODUCER_RUN\")\n    hashes = {v.ARCHIVE: os.environ[\"FROZEN_ARCHIVE_SHA\"],\n              v.SIDECAR: os.environ[\"FROZEN_SIDECAR_SHA\"]}\n    check(all(v.HEX64.fullmatch(h) for h in hashes.values()), \"RREL_HASH_SCHEMA\")\n    v.verify(payload / v.ARCHIVE, payload / v.SIDECAR, source, proof=proof,\n             expected_archive=hashes[v.ARCHIVE], expected_sidecar=hashes[v.SIDECAR])\n    notes_bytes = v.read_file(Path(\"docs/releases/v0.1.0.md\"), 128 << 10)\n    check(v.sha(notes_bytes) == os.environ[\"FROZEN_NOTES_SHA\"], \"RREL_NOTES_DIGEST\")\n    notes = notes_bytes.decode(\"utf-8\")\n    check(notes.strip() and TAG in notes, \"RREL_NOTES_MISSING\")\n    sizes = {name: len(v.read_file(payload / name, 512 << 20)) for name in ASSETS}\n    client = Client(os.environ[\"GH_TOKEN\"])\n    artifact_id = os.environ[\"BUILD_ARTIFACT_ID\"]\n    check(re.fullmatch(r\"[1-9][0-9]*\", artifact_id), \"RREL_ARTIFACT_ID\")\n    _, run = client.api(\"GET\", \"/actions/runs/\" + os.environ[\"GITHUB_RUN_ID\"])\n    check(run.get(\"id\") == int(os.environ[\"GITHUB_RUN_ID\"]) and run.get(\"run_attempt\") == 1 and\n          run.get(\"event\") == \"push\" and run.get(\"head_sha\") == source and\n          run.get(\"head_branch\") == \"main\" and\n          run.get(\"path\") == \".github/workflows/release-server.yml\", \"RREL_RUN_IDENTITY\")\n    _, artifact = client.api(\"GET\", \"/actions/artifacts/\" + artifact_id)\n    check(artifact.get(\"id\") == int(artifact_id) and artifact.get(\"expired\") is False and\n          artifact.get(\"name\") == \"release-server-\" + os.environ[\"GITHUB_RUN_ID\"] and\n          artifact.get(\"workflow_run\", {}).get(\"id\") == int(os.environ[\"GITHUB_RUN_ID\"]) and\n          artifact[\"workflow_run\"].get(\"head_sha\") == source, \"RREL_ARTIFACT_IDENTITY\")\n    publish(client, source, notes, payload, proof, hashes, sizes)\n\nif __name__ == \"__main__\":\n    try:\n        main()\n    except Exception as error:\n        print(str(error) if isinstance(error, (Stop, v.Reject)) else \"RREL_UNKNOWN_STOP\",\n              file=sys.stderr)\n        sys.exit(1)\nPY\n"
+        }
+      ]
+    }
+  }
+}
