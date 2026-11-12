@@ -368,10 +368,19 @@ func TestSelfPlanCatalogRouteBoundaryWireAndNeighbors(t *testing.T) {
 					t.Fatalf("original owner %s %s: %+v", tc.method, tc.target, got)
 				}
 			}
-			redirect := catalogWire(t, f.server.URL, http.MethodGet,
-				"/self/api/v1/billing/./subscriptions", f.cookie, f.server.URL, false)
-			if redirect.status != http.StatusTemporaryRedirect || redirect.location != selfPlanPurchasePath || redirect.cache != "no-store" {
-				t.Fatalf("GET subscription dot-segment original owner: %+v", redirect)
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				statusOwner := catalogWire(t, f.server.URL, method,
+					"/self/api/v1/billing/./subscriptions", f.cookie, f.server.URL, false)
+				if statusOwner.status != http.StatusBadRequest || statusOwner.location != "" || statusOwner.allow != "" ||
+					statusOwner.cache != "no-store" || statusOwner.contentType != "application/json; charset=utf-8" || statusOwner.marker {
+					t.Fatalf("%s subscription dot-segment status owner: %+v", method, statusOwner)
+				}
+				if method == http.MethodGet && statusOwner.code != "invalid_request" {
+					t.Fatalf("GET subscription dot-segment code=%q", statusOwner.code)
+				}
+				if method == http.MethodHead && statusOwner.bodyBytes != 0 {
+					t.Fatalf("HEAD subscription dot-segment returned %d body bytes", statusOwner.bodyBytes)
+				}
 			}
 			for _, tc := range []struct {
 				name   string

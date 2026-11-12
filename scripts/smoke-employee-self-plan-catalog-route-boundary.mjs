@@ -234,11 +234,22 @@ try {
     rows.push({ mode, name: 'subscription-GET-owner', method: 'GET', auth: 'valid', ...subscription });
     assert.equal(subscription.status, 200);
     assert.equal(subscription.location, '');
-    const subscriptionDot = await wire('GET', '/self/api/v1/billing/./subscriptions', { auth: 'valid' });
-    rows.push({ mode, name: 'subscription-dot-owner', method: 'GET', auth: 'valid', ...subscriptionDot });
-    assert.equal(subscriptionDot.status, 307);
-    assert.equal(subscriptionDot.location, S);
-    assert.equal(subscriptionDot.cache, 'no-store');
+    for (const method of ['GET', 'HEAD']) {
+      const subscriptionDot = await wire(method, '/self/api/v1/billing/./subscriptions', { auth: 'valid' });
+      rows.push({ mode, name: 'subscription-dot-owner', method, auth: 'valid', ...subscriptionDot });
+      assert.equal(subscriptionDot.status, 400);
+      assert.equal(subscriptionDot.location, '');
+      assert.equal(subscriptionDot.allow, '');
+      assert.equal(subscriptionDot.cache, 'no-store');
+      assert.equal(subscriptionDot.contentType, 'application/json; charset=utf-8');
+      assert.equal(subscriptionDot.marker, false);
+      if (method === 'GET') {
+        assert.equal(subscriptionDot.bodyKind, 'json');
+        assert.equal(subscriptionDot.code, 'invalid_request');
+      } else {
+        assert.equal(subscriptionDot.bodyBytes, 0);
+      }
+    }
     await stopCurrent();
   }
 
