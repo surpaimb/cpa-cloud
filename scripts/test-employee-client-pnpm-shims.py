@@ -149,6 +149,120 @@ def tiny_archive(extra_link: bool = False,
     return buffer.getvalue()
 
 
+def reconcile_diagnostic_cases(temp: Path) -> None:
+    """Pin refusal stages without changing graph comparison or deletion gates."""
+    def expect(label: str, stage: str, reason: str,
+               mutation: bool = False, setup=None, patcher=None) -> None:
+        actual, reference, a_bin, _ = paired(temp / label)
+        if setup is not None:
+            setup(actual, reference, a_bin)
+        trace = MODULE.ReconcileTrace()
+        try:
+            if patcher is None:
+                MODULE.reconcile(actual, reference, trace)
+            else:
+                with patcher(actual, reference, a_bin):
+                    MODULE.reconcile(actual, reference, trace)
+        except (MODULE.ShimError, OSError) as error:
+            assert trace.stage == stage, (label, trace.stage)
+            assert MODULE.refusal_reason(error) == reason, label
+            assert trace.mutation_possible == mutation, label
+        else:
+            raise AssertionError(f"diagnostic refusal accepted: {label}")
+        if not mutation:
+            assert (a_bin / "fake").exists(), label
+
+    expect("reference_inputs", "reference_inputs", "reference_input_mismatch",
+           setup=lambda _a, r, _b: (r / "pnpm-lock.yaml").write_bytes(
+               b"lockfileVersion: '9.0'\nchanged"))
+    expect("source_scan", "source_scan", "linked_content",
+           patcher=lambda _a, _r, _b: mock.patch.object(
+               MODULE, "scan_store",
+               side_effect=MODULE.ShimError("linked package content refused")))
+
+    def scan_fault(actual, _reference, _bin):
+        snapshot = MODULE.scan_store(actual)
+        return mock.patch.object(MODULE, "scan_store", side_effect=[
+            snapshot, MODULE.ShimError("linked package content refused")])
+    expect("reference_scan", "reference_scan", "linked_content",
+           patcher=scan_fault)
+
+    def snapshots(actual, reference, change):
+        left, right = MODULE.scan_store(actual), MODULE.scan_store(reference)
+        change(left, right)
+        return mock.patch.object(MODULE, "scan_store", side_effect=[left, right])
+    expect("graph", "graph", "graph_mismatch",
+           patcher=lambda a, r, _b: snapshots(
+               a, r, lambda _l, right: right.roots.add("different@1.0.0")))
+    expect("shape", "shape", "entry_set_mismatch",
+           patcher=lambda a, r, _b: snapshots(
+               a, r, lambda _l, right: right.shape.add("unexpected")))
+    expect("byte_compare", "byte_compare", "shim_bytes_mismatch",
+           patcher=lambda a, r, _b: snapshots(
+               a, r, lambda _l, right: right.shims.update(
+                   {next(iter(right.shims)): b"different"})))
+
+    original_normalized = MODULE.normalized
+    def change_before_unlink(_a, reference, a_bin):
+        def mutate(content: bytes, root: Path) -> bytes:
+            result = original_normalized(content, root)
+            if root == reference:
+                (a_bin / "fake").write_bytes(b"changed after comparison")
+            return result
+        return mock.patch.object(MODULE, "normalized", side_effect=mutate)
+    expect("pre_unlink", "pre_unlink", "pre_unlink_changed",
+           patcher=change_before_unlink)
+    expect("unlink", "unlink", "non_refusal_exception", True,
+           patcher=lambda _a, _r, _b: mock.patch.object(
+               Path, "unlink", side_effect=OSError("private path")))
+    expect("remove_dirs", "remove_dirs", "non_refusal_exception", True,
+           patcher=lambda _a, _r, _b: mock.patch.object(
+               Path, "rmdir", side_effect=OSError("private path")))
+
+    def post_scan_fault(actual, reference, _bin):
+        left, right = MODULE.scan_store(actual), MODULE.scan_store(reference)
+        return mock.patch.object(MODULE, "scan_store", side_effect=[
+            left, right, MODULE.ShimError("generated nested directory regrew")])
+    expect("post_scan", "post_scan", "post_scan_regrowth", True,
+           patcher=post_scan_fault)
+
+    actual, reference, a_bin, _ = paired(temp / "trace_reuse")
+    (reference / "pnpm-lock.yaml").write_bytes(b"lockfileVersion: '9.0'\nchanged")
+    trace = MODULE.ReconcileTrace(stage="post_scan", mutation_possible=True)
+    refused(lambda: MODULE.reconcile(actual, reference, trace),
+            "reference input differs")
+    assert trace.stage == "reference_inputs" and not trace.mutation_possible
+    assert (a_bin / "fake").exists()
+    assert MODULE.refusal_reason(MODULE.ShimError(
+        "reference inputs are not isolated")) == "reference_not_isolated"
+    assert MODULE.refusal_reason(MODULE.ShimError(
+        "unreviewed fixed refusal")) == "unmapped_refusal"
+
+    stderr = io.StringIO()
+    runner = temp / "runner"
+    runner.mkdir()
+    workspace = temp / "main_case"
+    workspace.mkdir()
+    reference = runner / "employee-pnpm-reference"
+    reference.mkdir()
+    def fixed_refusal(_a, _b, trace):
+        trace.stage = "byte_compare"
+        raise MODULE.ShimError("generated shim bytes differ")
+    argv = ["shim", "reconcile", "--workspace", str(workspace),
+            "--reference", str(reference), "--runner-temp", str(runner),
+            "--pnpm-version", "11.25.0"]
+    with mock.patch.object(sys, "argv", argv), \
+         mock.patch.object(sys, "stderr", stderr), \
+         mock.patch.object(MODULE, "check_config"), \
+         mock.patch.object(MODULE, "check_source_inputs"), \
+         mock.patch.object(MODULE, "reconcile", side_effect=fixed_refusal):
+        assert MODULE.main() == 1
+    assert stderr.getvalue() == (
+        "pnpm generated-shim verification refused phase=reconcile "
+        "category=other_refusal stage=byte_compare reason=shim_bytes_mismatch "
+        "mutation_possible=false\n")
+
+
 def main():
     names = []
     with tempfile.TemporaryDirectory(prefix="employee-pnpm-shim-test-") as tempdir:
@@ -362,6 +476,9 @@ def main():
                 assert MODULE.normalized(spelling, root) == b"@CPA_PNPM_WORKSPACE_ROOT@"
             assert MODULE.normalized(b"UNTRUSTED-OTHER-ROOT", root) == b"UNTRUSTED-OTHER-ROOT"
         names.append("exact_root_variants_only")
+
+        reconcile_diagnostic_cases(temp / "diagnostics")
+        names.append("fixed_reconcile_stages_reasons_and_mutation_boundary")
 
     print(json.dumps({"passed": names, "count": len(names)}, sort_keys=True))
 

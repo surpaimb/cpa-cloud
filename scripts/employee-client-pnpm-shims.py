@@ -72,6 +72,41 @@ REFUSAL_CATEGORIES = {
     "generated nested directory regrew": "shim_regrowth",
 }
 
+# These names are fixed source literals. Never print exception text, paths,
+# environment entries, or shim bytes from a runner refusal.
+RECONCILE_REASONS = {
+    "reference is not independent": "reference_not_independent",
+    "reference inputs are not isolated": "reference_not_isolated",
+    "reference input differs": "reference_input_mismatch",
+    "directory changed during scan": "directory_changed",
+    "package count exceeded": "package_count",
+    "pnpm physical package roots absent": "package_roots_absent",
+    "package scan budget exceeded": "scan_budget",
+    "linked package content refused": "linked_content",
+    "unknown nested node_modules shape": "nested_shape",
+    "nested node_modules has unknown entries": "nested_entries",
+    "empty generated bin directory": "empty_bin",
+    "generated shim is hard-linked": "hard_linked_shim",
+    "shim total byte budget exceeded": "shim_bytes",
+    "duplicate generated shim": "duplicate_shim",
+    "shim count budget exceeded": "shim_count",
+    "unsupported package content kind": "package_kind",
+    "pnpm physical graph differs": "graph_mismatch",
+    "pnpm nested entry set differs": "entry_set_mismatch",
+    "generated shim bytes differ": "shim_bytes_mismatch",
+    "workspace root remained in shim": "root_normalization",
+    "generated shim changed before removal": "pre_unlink_changed",
+    "generated nested directory regrew": "post_scan_regrowth",
+}
+
+
+def refusal_reason(error: Exception) -> str:
+    if isinstance(error, ShimError):
+        literal = error.args[0] if error.args else None
+        return RECONCILE_REASONS.get(
+            literal, REFUSAL_CATEGORIES.get(literal, "unmapped_refusal"))
+    return "non_refusal_exception"
+
 
 def refusal_category(error: Exception) -> str:
     """Return only reviewed fixed categories, never exception text or values."""
@@ -373,6 +408,12 @@ class Snapshot:
     nested: set[str]
 
 
+@dataclass
+class ReconcileTrace:
+    stage: str = "reference_inputs"
+    mutation_possible: bool = False
+
+
 def scan_store(workspace: Path) -> Snapshot:
     plain_info(workspace / "node_modules", "directory")
     store = workspace / "node_modules" / ".pnpm"
@@ -458,14 +499,23 @@ def normalized(content: bytes, root: Path) -> bytes:
     return result
 
 
-def reconcile(workspace: Path, reference: Path) -> tuple[int, int]:
+def reconcile(workspace: Path, reference: Path,
+              trace: ReconcileTrace | None = None) -> tuple[int, int]:
+    trace = trace if trace is not None else ReconcileTrace()
+    trace.stage = "reference_inputs"
+    trace.mutation_possible = False
     check_inputs(workspace, reference)
+    trace.stage = "source_scan"
     actual = scan_store(workspace)
+    trace.stage = "reference_scan"
     expected = scan_store(reference)
+    trace.stage = "graph"
     require(actual.roots == expected.roots, "pnpm physical graph differs")
+    trace.stage = "shape"
     require(actual.shape == expected.shape
             and actual.shims.keys() == expected.shims.keys(),
             "pnpm nested entry set differs")
+    trace.stage = "byte_compare"
     for key in sorted(actual.shims):
         require(normalized(actual.shims[key], workspace)
                 == normalized(expected.shims[key], reference),
@@ -473,6 +523,7 @@ def reconcile(workspace: Path, reference: Path) -> tuple[int, int]:
 
     store = workspace / "node_modules" / ".pnpm"
     # All graph and byte comparisons above complete before the first unlink.
+    trace.stage = "pre_unlink"
     for key in sorted(actual.shims):
         leaf = store / Path(key)
         plain_info(leaf.parent.parent, "directory")
@@ -482,14 +533,20 @@ def reconcile(workspace: Path, reference: Path) -> tuple[int, int]:
                 and identity(before) == actual.shim_ids[key]
                 and read_regular(leaf, MAX_SHIM_BYTES)[0] == actual.shims[key],
                 "generated shim changed before removal")
+        trace.stage = "unlink"
+        trace.mutation_possible = True
         leaf.unlink()
+        trace.stage = "pre_unlink"
+    trace.stage = "remove_dirs"
     for key in sorted(actual.nested):
         nested = store / Path(key)
         bin_dir = nested / ".bin"
         plain_info(bin_dir, "directory")
+        trace.mutation_possible = True
         bin_dir.rmdir()
         plain_info(nested, "directory")
         nested.rmdir()
+    trace.stage = "post_scan"
     after = scan_store(workspace)
     require(after.roots == actual.roots
             and not after.nested and not after.shims,
@@ -538,7 +595,8 @@ def main() -> int:
                     and reference.name == "employee-pnpm-reference",
                     "reference location not pinned")
             phase = "reconcile"
-            directories, leaves = reconcile(workspace, reference)
+            trace = ReconcileTrace()
+            directories, leaves = reconcile(workspace, reference, trace)
             print(f"verified generated nested dirs={directories} shims={leaves}")
         else:
             require(args.reference is None, "unexpected reference")
@@ -548,8 +606,11 @@ def main() -> int:
                     "generated nested directory regrew")
             print("verified generated nested dirs=0 shims=0")
     except Exception as error:
+        detail = (f" stage={trace.stage} reason={refusal_reason(error)}"
+                  f" mutation_possible={str(trace.mutation_possible).lower()}"
+                  if phase == "reconcile" else "")
         print("pnpm generated-shim verification refused "
-              f"phase={phase} category={refusal_category(error)}",
+              f"phase={phase} category={refusal_category(error)}{detail}",
               file=sys.stderr)
         return 1
     return 0

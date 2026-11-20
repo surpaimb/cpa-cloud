@@ -73,7 +73,7 @@ The repository's locked Cargo and pnpm dependencies retain their own licenses.
 The distribution process must obtain the relevant full license and notice texts
 from integrity-verified archives or independently verified upstream sources,
 record each text's source and digest, and embed them in both installers. The
-ten plain-text source supplements in
+eleven unique plain-text source supplements in
 `desktop/employee-config-switcher/third_party/notice-fallbacks/` preserve
 verified upstream license or source declarations for archives that omit those
 texts. The notice collector binds their Git blobs, origin commits and hashes;
@@ -98,6 +98,43 @@ collector requires both pinned files, records the upstream declaration as
 `EXTERNAL_ORIGIN/UPSTREAM_DECLARATION.md` outside the authorization-name
 check, and records the separate template as `EXTERNAL_ORIGIN/LICENSE-MIT.txt`.
 Both outputs are checked against the committed source bytes during verification.
+
+For `dispatch2@0.3.1`, the fixed official crate SHA-256 is
+`1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38`
+(55,299 bytes, 26 regular members). The crate's `.cargo_vcs_info.json` must
+identify [`objc2` commit `8852b424193ca41602281b3d7540d7c8ed51e49a`](https://github.com/madsmtm/objc2/commit/8852b424193ca41602281b3d7540d7c8ed51e49a)
+and `crates/dispatch2`; Cargo metadata must identify the same repository and
+the `Zlib OR Apache-2.0 OR MIT` license expression. That commit's root
+[`LICENSE.md`](https://github.com/madsmtm/objc2/blob/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md)
+is byte-identical to the existing block2 upstream declaration. Its “All
+other crates” clause includes dispatch2 and permits MIT. The collector uses
+that declaration only as an origin statement and separately reuses the pinned
+[SPDX MIT template](https://github.com/spdx/license-list-data/blob/ab9b0904b43db6f4b67431efd8821feb821f1c8b/text/MIT.txt)
+as the complete license text. Literal `<year>` and `<copyright holders>`
+placeholders remain; no upstream copyright holder is invented. Both output
+files must match the committed source bytes during verification. The synthetic
+tests override the archive hash/length with a small local fixture only to
+exercise the branch; they do not authenticate the official crate.
+
+For [`dlopen2@0.8.2`](https://static.crates.io/crates/dlopen2/dlopen2-0.8.2.crate)
+and [`dlopen2_derive@0.4.3`](https://static.crates.io/crates/dlopen2_derive/dlopen2_derive-0.4.3.crate),
+the separate official archive SHA-256 and size pins are respectively
+`5e2c5bd4158e66d1e215c49b837e11d62f3267b30c92f1d171c4d3105e3dc4d4`
+at 27,695 bytes and
+`0fbbb781877580993a8707ec48672673ec7b81eeba04cfd2310bd28c08e47c8f`
+at 7,032 bytes. The archives contain 43 and 10 ordinary files and no full
+license member. Both `.cargo_vcs_info.json` files identify
+[`OpenByteDev/dlopen2` commit `cc80e4a0a90d499b677fdf7743699b4b3a43a989`](https://github.com/OpenByteDev/dlopen2/commit/cc80e4a0a90d499b677fdf7743699b4b3a43a989)
+with distinct paths `dlopen2` and `dlopen2-derive`. Both Cargo metadata labels
+are MIT and name that repository. The root
+[`LICENSE`](https://github.com/OpenByteDev/dlopen2/blob/cc80e4a0a90d499b677fdf7743699b4b3a43a989/LICENSE)
+at that exact VCS commit is a complete MIT text with three recorded copyright
+holders. Its 1,184 committed bytes are shared as one vendor source, but each
+crate must independently pass its own archive, metadata, VCS, and installed
+notice readback checks. Earlier review of a different upstream commit is not
+used to claim the archives' VCS identity. Local synthetic tests replace
+archive pins only to exercise refusal branches; the official archive bytes
+and checksums are separate frozen source evidence.
 
 For `cesu8@1.1.0`, the
 [official crate archive](https://static.crates.io/crates/cesu8/cesu8-1.1.0.crate)
@@ -176,6 +213,15 @@ wholly CRLF input only after canonical LF bytes pass the fixed length and
 SHA-256 pin; production notice source checks are unchanged. Both jobs failed,
 publication was skipped, and neither installer was accepted.
 
+The [eleventh](https://github.com/surpaimb/cpa-cloud/actions/runs/44797802645)
+also produced no installer. macOS passed the clean-tree and shim gates but
+stopped at `Cargo package lacks full license text: dispatch2@0.3.1`;
+Windows stopped after the offline reference install with `phase=reconcile
+category=other_refusal`. The exact Windows comparison or cleanup branch and
+whether a shim unlink began were not recorded. This candidate adds only fixed
+stage, reason, and `mutation_possible` diagnostics to that fail-closed path;
+it does not change the comparison, removal, or exit order.
+
 Local evidence also retains the v25 sanitizer stress timeout, the first v26
 allowlist-verifier error, the v27 empty-stderr summary error, and the v28
 Windows-newline oracle harness error. Those were local tool or evidence stops,
@@ -189,6 +235,17 @@ a Git line-ending warning; v37 stopped on truncated patch-tool output after
 partial isolated edits. Neither stopped batch is retroactively accepted.
 This v38 copy has only a static source seal; its new `cesu8` fallback has not
 run a collector test or native Mac/Windows package workflow.
+The v39 isolated notice test had a local 20/20 aggregate pass, but its AST
+evidence verifier stopped; v40 and v41 evidence preparation also stopped.
+The first #12 read-only/preflight batches stopped on truncated tool output,
+and #13 stopped on a document patch context mismatch after partial isolated
+edits. None of these stops is a completed seal or native package acceptance.
+The #14 isolated candidate locally passed 24 notice and 23 shim synthetic
+cases but stopped on a truncated read-only allowlist query before its full
+static seal. #15 stopped on a document patch context mismatch after partial
+isolated edits. Neither stopped batch is promoted into a completed source
+seal or native package result. The real Mac and Windows installers remain
+unverified by this candidate.
 
 The packages deliberately do not enable `apply_configuration`. Installation
 and static package inspection do not prove that an employee can apply settings,

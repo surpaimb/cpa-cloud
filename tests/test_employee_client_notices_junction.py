@@ -56,6 +56,10 @@ MIT_TEMPLATE_BYTES = committed_fixture(
     (FALLBACKS / "block2-0.6.2-LICENSE-MIT.txt").read_bytes(), 1078,
     "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
 )
+MIT_DLOPEN2_BYTES = committed_fixture(
+    (FALLBACKS / "dlopen2-rs-LICENSE.txt").read_bytes(), 1184,
+    "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2",
+)
 
 
 def block2_archive(vcs: str, path: str) -> bytes:
@@ -433,6 +437,348 @@ CESU8_MIT = committed_fixture(
     (FALLBACKS / "cesu8-1.1.0-LICENSE-MIT.txt").read_bytes(), 1071,
     "0621878e61f0d0fda054bcbe02df75192c28bde1ecc8289cbd86aeba2dd72720",
 )
+
+
+class Dispatch2FallbackTests(unittest.TestCase):
+    """Exercise the shared objc2 declaration with an isolated synthetic crate."""
+
+    def setUp(self) -> None:
+        self.scratch = Path(tempfile.mkdtemp(prefix="cpa-dispatch2-notice-")).resolve(strict=True)
+        self.case_number = 0
+
+    def cargo_case(self, *, label: str = "Zlib OR Apache-2.0 OR MIT",
+                   repository: str = "https://github.com/madsmtm/objc2",
+                   vcs: str = "8852b424193ca41602281b3d7540d7c8ed51e49a",
+                   vcs_path: str = "crates/dispatch2",
+                   checksum_valid: bool = True,
+                   declaration: bytes = BLOCK2_DECLARATION_BYTES,
+                   license_text: bytes = MIT_TEMPLATE_BYTES,
+                   member_count: int = 26,
+                   nonregular: bool = False) -> dict:
+        self.case_number += 1
+        case = self.scratch / str(self.case_number)
+        home = case / "cargo-home"
+        source = home / "registry" / "src" / "index" / "dispatch2-0.3.1"
+        cache = home / "registry" / "cache" / "index"
+        workspace = case / "workspace"
+        for directory in (source, cache, workspace):
+            directory.mkdir(parents=True)
+        (source / "Cargo.toml").write_text("[package]\nname='dispatch2'\nversion='0.3.1'\n")
+        local = []
+        for name, version in sorted(notices.FIRST_PARTY_CARGO):
+            local_manifest = workspace / name / "Cargo.toml"
+            local_manifest.parent.mkdir()
+            local_manifest.write_text("[package]\nname='synthetic'\nversion='0.1.0'\n")
+            local.append({"name": name, "version": version, "source": None,
+                          "manifest_path": str(local_manifest)})
+        vcs_bytes = json.dumps({"git": {"sha1": vcs},
+                                "path_in_vcs": vcs_path}).encode()
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            for index in range(member_count):
+                name = ("dispatch2-0.3.1/.cargo_vcs_info.json" if index == 0
+                        else f"dispatch2-0.3.1/src/synthetic-{index:02d}.txt")
+                item = tarfile.TarInfo(name)
+                if nonregular and index == member_count - 1:
+                    item.type = tarfile.DIRTYPE
+                    tar.addfile(item)
+                else:
+                    data = vcs_bytes if index == 0 else b"synthetic"
+                    item.size = len(data)
+                    tar.addfile(item, io.BytesIO(data))
+        data = buffer.getvalue()
+        (cache / "dispatch2-0.3.1.crate").write_bytes(data)
+        metadata = {"packages": local + [{
+            "name": "dispatch2", "version": "0.3.1", "source": notices.CRATES_IO,
+            "manifest_path": str(source / "Cargo.toml"), "license": label,
+            "repository": repository,
+        }]}
+        checksum = notices.sha(data) if checksum_valid else "0" * 64
+        committed = {
+            notices.BLOCK2_DECLARATION: declaration,
+            notices.VENDORED_CARGO[("dispatch2", "0.3.1", "LICENSE-MIT.txt")]:
+                license_text,
+        }
+
+        def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            self.assertEqual(argv[:2], ["cargo", "metadata"])
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+
+        # The fixed official checksum is independently pinned. Overriding it here
+        # covers the fallback branch with a small synthetic 26-member archive.
+        with patch.dict(os.environ, {"CARGO_HOME": str(home)}), \
+             patch.object(notices.subprocess, "run", side_effect=cargo_metadata), \
+             patch.object(notices, "archive_files", return_value=({}, None)), \
+             patch.object(notices, "git_blob",
+                          side_effect=lambda _workspace, name: committed.get(name, b"")), \
+             patch.object(notices, "DISPATCH2_ARCHIVE_SHA256", notices.sha(data)), \
+             patch.object(notices, "DISPATCH2_ARCHIVE_BYTES", len(data)):
+            return notices.cargo_packages(workspace,
+                                          {("dispatch2", "0.3.1"): checksum})[0]
+
+    def test_shared_declaration_and_distinct_full_text(self) -> None:
+        self.assertFalse(notices.has_authorization_text({
+            "EXTERNAL_ORIGIN/UPSTREAM_DECLARATION.md": BLOCK2_DECLARATION_BYTES,
+        }))
+        package = self.cargo_case()
+        self.assertEqual(package["license"], "Zlib OR Apache-2.0 OR MIT")
+        self.assertEqual(package["notice_status"], "vendored_external")
+        self.assertEqual(package["texts"], {
+            "EXTERNAL_ORIGIN/UPSTREAM_DECLARATION.md": BLOCK2_DECLARATION_BYTES,
+            "EXTERNAL_ORIGIN/LICENSE-MIT.txt": MIT_TEMPLATE_BYTES,
+        })
+        self.assertEqual([item["role"] for item in package["external_sources"]],
+                         ["upstream-license-declaration", "full-license-text"])
+        self.assertEqual(package["external_sources"][0]["url"],
+                         "https://raw.githubusercontent.com/madsmtm/objc2/"
+                         "8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md")
+
+    def test_archive_identity_and_member_shape_are_bound(self) -> None:
+        for change, reason in (
+            ({"checksum_valid": False}, "archive checksum mismatch"),
+            ({"member_count": 25}, "archive member shape differs"),
+            ({"member_count": 27}, "archive member shape differs"),
+            ({"nonregular": True}, "archive member shape differs"),
+            ({"vcs": "0" * 40}, "archive VCS origin differs"),
+            ({"vcs_path": "crates/other"}, "archive VCS origin differs"),
+            ({"repository": "https://example.invalid/objc2"},
+             "external license identity differs"),
+            ({"label": "MIT"}, "external license identity differs"),
+        ):
+            with self.subTest(change=change):
+                with self.assertRaisesRegex(notices.NoticeError, reason):
+                    self.cargo_case(**change)
+
+    def test_both_committed_sources_are_required(self) -> None:
+        for field in ("declaration", "license_text"):
+            for bad in (b"", b"changed"):
+                with self.subTest(field=field, bad=bad):
+                    with self.assertRaisesRegex(notices.NoticeError,
+                                                "vendored committed notice differs"):
+                        self.cargo_case(**{field: bad})
+
+    def test_synthetic_collect_verify_and_source_readback(self) -> None:
+        package = self.cargo_case()
+        workspace = self.scratch / "distribution-workspace"
+        workspace.mkdir()
+        output = self.scratch / "notice-output"
+        source_names = [
+            "Cargo.lock", "pnpm-lock.yaml", "package.json", "Cargo.toml",
+            "third_party/cc-switch/LICENSE", "PROVENANCE.md",
+            "DEPENDENCY-LICENSES.md", *sorted(notices.VENDORED_FILES),
+        ]
+        committed = {name: (name + "\n").encode() for name in source_names}
+        committed[notices.BLOCK2_DECLARATION] = BLOCK2_DECLARATION_BYTES
+        committed[notices.VENDORED_CARGO[("dispatch2", "0.3.1", "LICENSE-MIT.txt")]] = (
+            MIT_TEMPLATE_BYTES
+        )
+        cargo = {("dispatch2", "0.3.1"):
+                 package["integrity"].removeprefix("sha256-")}
+
+        def fake_git(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            self.assertEqual(argv[0], "git")
+            if argv[-1] == "--show-toplevel":
+                value = str(workspace)
+            elif argv[-1] == "HEAD":
+                value = "a" * 40
+            elif "status" in argv:
+                value = ""
+            else:
+                self.fail("unexpected synthetic Git operation")
+            return SimpleNamespace(returncode=0, stdout=value, stderr="")
+
+        with patch.object(notices.subprocess, "run", side_effect=fake_git), \
+             patch.object(notices, "git_blob",
+                          side_effect=lambda _workspace, name: committed[name]), \
+             patch.object(notices, "cargo_lock", return_value=cargo), \
+             patch.object(notices, "pnpm_lock", return_value={}), \
+             patch.object(notices, "pnpm_graph", return_value=([], {})), \
+             patch.object(notices, "bundle_packages", return_value=set()), \
+             patch.object(notices, "pnpm_packages", return_value=([], [])), \
+             patch.object(notices, "cargo_packages", return_value=[package]):
+            notices.collect(workspace, output, workspace / "synthetic-bundle")
+            manifest_data = (output / "manifest.json").read_bytes()
+            manifest = json.loads(manifest_data)
+            prefix = "cargo/dispatch2@0.3.1/EXTERNAL_ORIGIN/"
+            declaration_file = output / (prefix + "UPSTREAM_DECLARATION.md")
+            license_file = output / (prefix + "LICENSE-MIT.txt")
+            self.assertEqual(declaration_file.read_bytes(), BLOCK2_DECLARATION_BYTES)
+            self.assertEqual(license_file.read_bytes(), MIT_TEMPLATE_BYTES)
+            notices.verify(output, workspace, notices.sha(manifest_data),
+                           workspace / "synthetic-bundle")
+            license_file.write_bytes(b"tampered")
+            with self.assertRaisesRegex(notices.NoticeError,
+                                        "notice hash/size mismatch"):
+                notices.verify(output, workspace, notices.sha(manifest_data),
+                               workspace / "synthetic-bundle")
+            license_file.write_bytes(MIT_TEMPLATE_BYTES)
+            committed[notices.BLOCK2_DECLARATION] = b"changed"
+            with self.assertRaisesRegex(notices.NoticeError,
+                                        "committed source file changed"):
+                notices.verify(output, workspace, notices.sha(manifest_data),
+                               workspace / "synthetic-bundle")
+
+
+class Dlopen2SharedLicenseTests(unittest.TestCase):
+    """Each crate proves its own archive/VCS before using one MIT source.
+
+    These are small synthetic archives; the two official archive checksums and
+    member inventories are separate frozen source evidence, not mocked here.
+    """
+
+    CASES = (("dlopen2", "0.8.2", "dlopen2"),
+             ("dlopen2_derive", "0.4.3", "dlopen2-derive"))
+    VCS = "cc80e4a0a90d499b677fdf7743699b4b3a43a989"
+    REPO = "https://github.com/OpenByteDev/dlopen2"
+
+    def setUp(self) -> None:
+        self.scratch = Path(tempfile.mkdtemp(prefix="cpa-dlopen2-notice-")).resolve(strict=True)
+        self.case_number = 0
+
+    def cargo_case(self, name: str, version: str, vcs_path: str, *,
+                   checksum_valid: bool = True, pin_valid: bool = True,
+                   vcs: str = VCS, path: str | None = None,
+                   label: str = "MIT", repository: str = REPO,
+                   license_text: bytes | None = None) -> dict:
+        self.case_number += 1
+        case = self.scratch / str(self.case_number)
+        home = case / "cargo-home"
+        source = home / "registry" / "src" / "index" / f"{name}-{version}"
+        cache = home / "registry" / "cache" / "index"
+        workspace = case / "workspace"
+        for directory in (source, cache, workspace):
+            directory.mkdir(parents=True)
+        cargo_manifest = ("[package]\n" + f"name='{name}'\n" +
+                          f"version='{version}'\nlicense='MIT'\n").encode()
+        vcs_bytes = json.dumps({"git": {"sha1": vcs},
+                                "path_in_vcs": path or vcs_path}).encode()
+        (source / "Cargo.toml").write_bytes(cargo_manifest)
+        (source / ".cargo_vcs_info.json").write_bytes(vcs_bytes)
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            for relative, data in (("Cargo.toml", cargo_manifest),
+                                   (".cargo_vcs_info.json", vcs_bytes)):
+                item = tarfile.TarInfo(f"{name}-{version}/{relative}")
+                item.size = len(data)
+                tar.addfile(item, io.BytesIO(data))
+        data = buffer.getvalue()
+        (cache / f"{name}-{version}.crate").write_bytes(data)
+        local = []
+        for local_name, local_version in sorted(notices.FIRST_PARTY_CARGO):
+            local_manifest = workspace / local_name / "Cargo.toml"
+            local_manifest.parent.mkdir()
+            local_manifest.write_text("[package]\nname='synthetic'\nversion='0.1.0'\n")
+            local.append({"name": local_name, "version": local_version,
+                          "source": None, "manifest_path": str(local_manifest)})
+        metadata = {"packages": local + [{
+            "name": name, "version": version, "source": notices.CRATES_IO,
+            "manifest_path": str(source / "Cargo.toml"),
+            "license": label, "repository": repository,
+        }]}
+        checksum = notices.sha(data) if checksum_valid else "0" * 64
+        pinned = (notices.sha(data) if pin_valid else "0" * 64, len(data))
+        vendored = notices.VENDORED_CARGO[(name, version, "LICENSE")]
+        committed = {vendored: (MIT_DLOPEN2_BYTES if license_text is None
+                                else license_text)}
+
+        def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            self.assertEqual(argv[:2], ["cargo", "metadata"])
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+
+        with patch.dict(os.environ, {"CARGO_HOME": str(home)}), \
+             patch.object(notices.subprocess, "run", side_effect=cargo_metadata), \
+             patch.object(notices, "git_blob",
+                          side_effect=lambda _workspace, item: committed.get(item, b"")), \
+             patch.dict(notices.DLOPEN2_ARCHIVES, {(name, version): pinned}):
+            return notices.cargo_packages(workspace, {(name, version): checksum})[0]
+
+    def test_each_archive_needs_its_own_identity_and_full_text(self) -> None:
+        for name, version, vcs_path in self.CASES:
+            with self.subTest(name=name):
+                package = self.cargo_case(name, version, vcs_path)
+                self.assertEqual(package["license"], "MIT")
+                self.assertEqual(package["texts"],
+                                 {"EXTERNAL_ORIGIN/LICENSE": MIT_DLOPEN2_BYTES})
+                self.assertEqual(package["notice_status"], "vendored_external")
+                self.assertEqual(package["external_sources"][0]["role"],
+                                 "full-license-text")
+                self.assertEqual(package["external_sources"][0]["vendored_source"],
+                                 notices.VENDORED_CARGO[(name, version, "LICENSE")])
+
+    def test_each_archive_rejects_checksum_vcs_path_meta_and_source(self) -> None:
+        for name, version, vcs_path in self.CASES:
+            cases = (
+                ({"checksum_valid": False}, "archive checksum mismatch"),
+                ({"pin_valid": False}, "official archive identity differs"),
+                ({"vcs": "0" * 40}, "archive VCS origin differs"),
+                ({"path": "wrong/path"}, "archive VCS origin differs"),
+                ({"label": "Apache-2.0"}, "external license identity differs"),
+                ({"repository": "https://example.invalid/dlopen2"},
+                 "external license identity differs"),
+                ({"license_text": b""}, "vendored committed notice differs"),
+                ({"license_text": b"changed"}, "vendored committed notice differs"),
+            )
+            for change, reason in cases:
+                with self.subTest(name=name, change=change):
+                    with self.assertRaisesRegex(notices.NoticeError, reason):
+                        self.cargo_case(name, version, vcs_path, **change)
+
+    def test_each_notice_collect_verify_and_tamper_refusal(self) -> None:
+        for name, version, vcs_path in self.CASES:
+            with self.subTest(name=name):
+                package = self.cargo_case(name, version, vcs_path)
+                workspace = self.scratch / f"distribution-{name}"
+                workspace.mkdir()
+                output = self.scratch / f"notices-{name}"
+                source_names = [
+                    "Cargo.lock", "pnpm-lock.yaml", "package.json", "Cargo.toml",
+                    "third_party/cc-switch/LICENSE", "PROVENANCE.md",
+                    "DEPENDENCY-LICENSES.md", *sorted(notices.VENDORED_FILES),
+                ]
+                committed = {item: (item + "\n").encode() for item in source_names}
+                vendored = notices.VENDORED_CARGO[(name, version, "LICENSE")]
+                committed[vendored] = MIT_DLOPEN2_BYTES
+                cargo = {(name, version): package["integrity"].removeprefix("sha256-")}
+
+                def fake_git(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+                    self.assertEqual(argv[0], "git")
+                    if argv[-1] == "--show-toplevel":
+                        value = str(workspace)
+                    elif argv[-1] == "HEAD":
+                        value = "a" * 40
+                    elif "status" in argv:
+                        value = ""
+                    else:
+                        self.fail("unexpected synthetic Git operation")
+                    return SimpleNamespace(returncode=0, stdout=value, stderr="")
+
+                with patch.object(notices.subprocess, "run", side_effect=fake_git), \
+                     patch.object(notices, "git_blob",
+                                  side_effect=lambda _w, item: committed[item]), \
+                     patch.object(notices, "cargo_lock", return_value=cargo), \
+                     patch.object(notices, "pnpm_lock", return_value={}), \
+                     patch.object(notices, "pnpm_graph", return_value=([], {})), \
+                     patch.object(notices, "bundle_packages", return_value=set()), \
+                     patch.object(notices, "pnpm_packages", return_value=([], [])), \
+                     patch.object(notices, "cargo_packages", return_value=[package]):
+                    notices.collect(workspace, output, workspace / "synthetic-bundle")
+                    manifest_bytes = (output / "manifest.json").read_bytes()
+                    prefix = f"cargo/{name}@{version}/EXTERNAL_ORIGIN/"
+                    license_file = output / (prefix + "LICENSE")
+                    self.assertEqual(license_file.read_bytes(), MIT_DLOPEN2_BYTES)
+                    notices.verify(output, workspace, notices.sha(manifest_bytes),
+                                   workspace / "synthetic-bundle")
+                    license_file.write_bytes(b"tampered")
+                    with self.assertRaisesRegex(notices.NoticeError,
+                                                "notice hash/size mismatch"):
+                        notices.verify(output, workspace, notices.sha(manifest_bytes),
+                                       workspace / "synthetic-bundle")
+                    license_file.write_bytes(MIT_DLOPEN2_BYTES)
+                    committed[vendored] = b"changed"
+                    with self.assertRaisesRegex(notices.NoticeError,
+                                                "committed source file changed"):
+                        notices.verify(output, workspace, notices.sha(manifest_bytes),
+                                       workspace / "synthetic-bundle")
 
 
 class Cesu8LegacyTests(unittest.TestCase):

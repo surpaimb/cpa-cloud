@@ -52,6 +52,7 @@ RELEASE_SOURCE_FILES = {
     "desktop/employee-config-switcher/third_party/notice-fallbacks/cesu8-1.1.0-LICENSE-MIT.txt",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/defmt-parser-1.0.0-LICENSE-APACHE.txt",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/defmt-parser-1.0.0-LICENSE-MIT.txt",
+    "desktop/employee-config-switcher/third_party/notice-fallbacks/dlopen2-rs-LICENSE.txt",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/selectors-0.38.0-MPL-2.0.txt",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/selectors-0.38.0-STYLO-README.md",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/webview2-rs-LICENSE.txt",

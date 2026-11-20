@@ -33,6 +33,26 @@ FIRST_PARTY_CARGO = {
     ("employee-config-core", "0.1.0"),
 }
 EXTERNAL_CARGO = {
+    ("dlopen2", "0.8.2"): {
+        "repository": "https://github.com/OpenByteDev/dlopen2",
+        "vcs": "cc80e4a0a90d499b677fdf7743699b4b3a43a989",
+        "path": "dlopen2", "license": "MIT",
+        "files": [("LICENSE",
+            "https://raw.githubusercontent.com/OpenByteDev/dlopen2/"
+            "cc80e4a0a90d499b677fdf7743699b4b3a43a989/LICENSE",
+            "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2",
+            1184)],
+    },
+    ("dlopen2_derive", "0.4.3"): {
+        "repository": "https://github.com/OpenByteDev/dlopen2",
+        "vcs": "cc80e4a0a90d499b677fdf7743699b4b3a43a989",
+        "path": "dlopen2-derive", "license": "MIT",
+        "files": [("LICENSE",
+            "https://raw.githubusercontent.com/OpenByteDev/dlopen2/"
+            "cc80e4a0a90d499b677fdf7743699b4b3a43a989/LICENSE",
+            "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2",
+            1184)],
+    },
     ("cesu8", "1.1.0"): {
         "repository": "https://github.com/emk/cesu8-rs",
         "license": "Apache-2.0/MIT",
@@ -53,6 +73,16 @@ EXTERNAL_CARGO = {
         "repository": "https://github.com/madsmtm/objc2",
         "vcs": "b4167b582b2f75f9a1be75495c41b765344fd03c",
         "path": "crates/block2", "license": "MIT",
+        "files": [("LICENSE-MIT.txt",
+            "https://raw.githubusercontent.com/spdx/license-list-data/"
+            "ab9b0904b43db6f4b67431efd8821feb821f1c8b/text/MIT.txt",
+            "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+            1078)],
+    },
+    ("dispatch2", "0.3.1"): {
+        "repository": "https://github.com/madsmtm/objc2",
+        "vcs": "8852b424193ca41602281b3d7540d7c8ed51e49a",
+        "path": "crates/dispatch2", "license": "Zlib OR Apache-2.0 OR MIT",
         "files": [("LICENSE-MIT.txt",
             "https://raw.githubusercontent.com/spdx/license-list-data/"
             "ab9b0904b43db6f4b67431efd8821feb821f1c8b/text/MIT.txt",
@@ -127,11 +157,17 @@ EXTERNAL_CARGO = {
     },
 }
 VENDORED_CARGO = {
+    ("dlopen2", "0.8.2", "LICENSE"):
+        "third_party/notice-fallbacks/dlopen2-rs-LICENSE.txt",
+    ("dlopen2_derive", "0.4.3", "LICENSE"):
+        "third_party/notice-fallbacks/dlopen2-rs-LICENSE.txt",
     ("cesu8", "1.1.0", "LICENSE-APACHE"):
         "third_party/notice-fallbacks/cesu8-1.1.0-LICENSE-APACHE.txt",
     ("cesu8", "1.1.0", "LICENSE-MIT"):
         "third_party/notice-fallbacks/cesu8-1.1.0-LICENSE-MIT.txt",
     ("block2", "0.6.2", "LICENSE-MIT.txt"):
+        "third_party/notice-fallbacks/block2-0.6.2-LICENSE-MIT.txt",
+    ("dispatch2", "0.3.1", "LICENSE-MIT.txt"):
         "third_party/notice-fallbacks/block2-0.6.2-LICENSE-MIT.txt",
     ("alloc-stdlib", "0.3.0", "LICENSE"):
         "third_party/notice-fallbacks/alloc-stdlib-0.3.0-LICENSE.txt",
@@ -155,10 +191,18 @@ EXTERNAL_OUTPUT_NAMES = {
 }
 STYLO_DECLARATION = "third_party/notice-fallbacks/selectors-0.38.0-STYLO-README.md"
 BLOCK2_DECLARATION = "third_party/notice-fallbacks/block2-0.6.2-UPSTREAM-LICENSE.md"
+DISPATCH2_ARCHIVE_SHA256 = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
+DISPATCH2_ARCHIVE_BYTES = 55299
+DLOPEN2_ARCHIVES = {
+    ("dlopen2", "0.8.2"):
+        ("5e2c5bd4158e66d1e215c49b837e11d62f3267b30c92f1d171c4d3105e3dc4d4", 27695),
+    ("dlopen2_derive", "0.4.3"):
+        ("0fbbb781877580993a8707ec48672673ec7b81eeba04cfd2310bd28c08e47c8f", 7032),
+}
 VENDORED_FILES = set(VENDORED_CARGO.values()) | {STYLO_DECLARATION, BLOCK2_DECLARATION}
-require_vendor_count = 10
+require_vendor_count = 11
 if len(VENDORED_FILES) != require_vendor_count:
-    raise RuntimeError("vendored notice source map does not cover ten files")
+    raise RuntimeError("vendored notice source map does not cover eleven files")
 CESU8_ARCHIVE_SHA256 = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 CESU8_ARCHIVE_BYTES = 10555
 CESU8_RELEASE = "f18962a9de5189f21600b7ff2898845157df4447"
@@ -762,6 +806,19 @@ def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[
                     str(meta.get("repository", "")).rstrip("/") ==
                     fallback["repository"],
                     f"Cargo external license identity differs: {name}@{version}")
+            if (name, version) in DLOPEN2_ARCHIVES:
+                pinned_checksum, pinned_bytes = DLOPEN2_ARCHIVES[(name, version)]
+                require(checksum == pinned_checksum and
+                        len(archive_data) == pinned_bytes,
+                        f"dlopen2 official archive identity differs: {name}@{version}")
+            if (name, version) == ("dispatch2", "0.3.1"):
+                require(len(archive_data) == DISPATCH2_ARCHIVE_BYTES and
+                        checksum == DISPATCH2_ARCHIVE_SHA256,
+                        "dispatch2 official archive identity differs")
+                with tarfile.open(fileobj=io.BytesIO(archive_data), mode="r:gz") as official:
+                    members = official.getmembers()
+                require(len(members) == 26 and all(member.isfile() for member in members),
+                        "dispatch2 official archive member shape differs")
             if (name, version) == ("cesu8", "1.1.0"):
                 cesu8_legacy_origin(archive_data)
                 external_sources.append({
@@ -779,19 +836,25 @@ def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[
                 require(vcs.get("git", {}).get("sha1") == fallback["vcs"]
                         and vcs.get("path_in_vcs") == fallback["path"],
                         f"Cargo archive VCS origin differs: {name}@{version}")
-            if (name, version) == ("block2", "0.6.2"):
+            if (name, version) in (("block2", "0.6.2"),
+                                   ("dispatch2", "0.3.1")):
+                is_dispatch2 = name == "dispatch2"
                 declaration_url = (
-                    "https://raw.githubusercontent.com/madsmtm/objc2/"
-                    "b4167b582b2f75f9a1be75495c41b765344fd03c/LICENSE.md"
+                    "https://raw.githubusercontent.com/madsmtm/objc2/" +
+                    ("8852b424193ca41602281b3d7540d7c8ed51e49a" if is_dispatch2
+                     else "b4167b582b2f75f9a1be75495c41b765344fd03c")
+                    + "/LICENSE.md"
                 )
                 declaration = vendored_text(
                     workspace, BLOCK2_DECLARATION,
                     "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
                     1339,
                 )
-                require(b"`block2`" in declaration and
-                        b"licensed under [the MIT license][MIT]" in declaration,
-                        "block2 upstream MIT declaration absent")
+                require((b"All other crates are trio-licensed" in declaration
+                         and b"[MIT]" in declaration) if is_dispatch2 else
+                        (b"`block2`" in declaration and
+                         b"licensed under [the MIT license][MIT]" in declaration),
+                        "objc2 upstream MIT declaration absent")
                 declaration_output = "EXTERNAL_ORIGIN/UPSTREAM_DECLARATION.md"
                 texts[declaration_output] = declaration
                 external_sources.append({
@@ -1474,18 +1537,20 @@ def verify(root: Path, workspace: Path, expected_manifest_sha256: str,
             item = expected.get(prefix + relative)
             require(item is not None and item["sha256"] == sha(data),
                     f"built dependency notice differs: {prefix}{relative}")
-        if key == ("cargo", "block2", "0.6.2") and (
+        if key in (("cargo", "block2", "0.6.2"),
+                   ("cargo", "dispatch2", "0.3.1")) and (
                 package["notice_status"] == "vendored_external"):
+            name, version = key[1], key[2]
             for relative, vendored in (
                 ("EXTERNAL_ORIGIN/UPSTREAM_DECLARATION.md", BLOCK2_DECLARATION),
                 ("EXTERNAL_ORIGIN/LICENSE-MIT.txt",
-                 VENDORED_CARGO[("block2", "0.6.2", "LICENSE-MIT.txt")]),
+                 VENDORED_CARGO[(name, version, "LICENSE-MIT.txt")]),
             ):
                 output_bytes = verified_texts.get(prefix + relative)
                 source_bytes = git_blob(workspace, vendored)
                 require(output_bytes == source_bytes and
                         manifest["source_files"].get(vendored) == sha(source_bytes),
-                        f"block2 external notice differs from committed source: {relative}")
+                        f"objc2 external notice differs from committed source: {relative}")
         if key == ("cargo", "cesu8", "1.1.0") and (
                 package["notice_status"] == "vendored_external"):
             for filename in ("LICENSE-APACHE", "LICENSE-MIT"):
@@ -1496,6 +1561,17 @@ def verify(root: Path, workspace: Path, expected_manifest_sha256: str,
                 require(output_bytes == source_bytes and
                         manifest["source_files"].get(vendored) == sha(source_bytes),
                         f"cesu8 external notice differs from committed source: {relative}")
+        if key in (("cargo", "dlopen2", "0.8.2"),
+                   ("cargo", "dlopen2_derive", "0.4.3")) and (
+                package["notice_status"] == "vendored_external"):
+            name, version = key[1], key[2]
+            relative = "EXTERNAL_ORIGIN/LICENSE"
+            vendored = VENDORED_CARGO[(name, version, "LICENSE")]
+            output_bytes = verified_texts.get(prefix + relative)
+            source_bytes = git_blob(workspace, vendored)
+            require(output_bytes == source_bytes and
+                    manifest["source_files"].get(vendored) == sha(source_bytes),
+                    f"dlopen2 external notice differs from committed source: {name}@{version}")
     print(f"verified {len(manifest['packages'])} packages and "
           f"{len(expected)} full notice files")
 
