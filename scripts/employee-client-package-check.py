@@ -46,6 +46,8 @@ RELEASE_SOURCE_FILES = {
     "desktop/employee-config-switcher/scripts/employee-bundle-modules.mjs",
     "desktop/employee-config-switcher/scripts/native-evidence/openclaw-probe.test.mjs",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/alloc-stdlib-0.3.0-LICENSE.txt",
+    "desktop/employee-config-switcher/third_party/notice-fallbacks/block2-0.6.2-LICENSE-MIT.txt",
+    "desktop/employee-config-switcher/third_party/notice-fallbacks/block2-0.6.2-UPSTREAM-LICENSE.md",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/defmt-parser-1.0.0-LICENSE-APACHE.txt",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/defmt-parser-1.0.0-LICENSE-MIT.txt",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/selectors-0.38.0-MPL-2.0.txt",

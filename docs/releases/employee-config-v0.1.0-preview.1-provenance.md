@@ -73,7 +73,7 @@ The repository's locked Cargo and pnpm dependencies retain their own licenses.
 The distribution process must obtain the relevant full license and notice texts
 from integrity-verified archives or independently verified upstream sources,
 record each text's source and digest, and embed them in both installers. The
-six plain-text source supplements in
+eight plain-text source supplements in
 `desktop/employee-config-switcher/third_party/notice-fallbacks/` preserve
 verified upstream license or source declarations for archives that omit those
 texts. The notice collector binds their Git blobs, origin commits and hashes;
@@ -85,6 +85,19 @@ their recorded provenance and license
 in `desktop/employee-config-switcher/PROVENANCE.md` and
 `third_party/cc-switch/LICENSE`. A missing or unverified required notice
 prevents publication.
+
+For `block2@0.6.2`, the fixed upstream
+[objc2 `LICENSE.md` at `b4167b582b2f75f9a1be75495c41b765344fd03c`](https://github.com/madsmtm/objc2/blob/b4167b582b2f75f9a1be75495c41b765344fd03c/LICENSE.md)
+declares that `block2` is currently MIT licensed, but does not contain the
+full MIT terms. The separate
+[SPDX MIT text at `ab9b0904b43db6f4b67431efd8821feb821f1c8b`](https://github.com/spdx/license-list-data/blob/ab9b0904b43db6f4b67431efd8821feb821f1c8b/text/MIT.txt)
+supplies the standard full-text template. Its literal `<year>` and
+`<copyright holders>` placeholders remain unchanged: the project has not
+identified a copyright holder and does not attribute one to upstream. The
+collector requires both pinned files, records the upstream declaration as
+`EXTERNAL_ORIGIN/UPSTREAM_DECLARATION.md` outside the authorization-name
+check, and records the separate template as `EXTERNAL_ORIGIN/LICENSE-MIT.txt`.
+Both outputs are checked against the committed source bytes during verification.
 
 The [first native package run](https://github.com/surpaimb/cpa-cloud/actions/runs/44748163357)
 stopped at the Python pin on both platforms. The
@@ -122,10 +135,30 @@ untracked entry and refused notice collection. Its path is unknown; a Python
 bytecode cache is only a hypothesis. This candidate clears inherited
 package-manager configuration names before each pnpm/helper step, restores
 the two pinned config references, suppresses bytecode writes for the two
-Python test invocations, and adds a fixed-category cache count. A new natural
-Mac/Windows package run is needed to establish whether those changes close
-either failure. A prior isolated v25 attempt timed out in a controlled local
-260-name sanitation test; it was never integrated or run in CI.
+Python test invocations, and adds a fixed-category cache count. The next
+natural run reached different failures; it did not produce installers.
+
+The [ninth](https://github.com/surpaimb/cpa-cloud/actions/runs/44781497533)
+stopped on Windows at `phase=source_inputs category=lockfile` and on macOS
+during the second complete-notice block. Publishing was skipped and neither
+installer was accepted. The physical Windows runner lockfile bytes were not
+captured; CRLF line endings are a hypothesis, not an established cause. The
+lockfile candidate accepts only the exact pinned version-line prefix with LF
+or CRLF, while requiring source and reference files to match byte for byte.
+The macOS notice failure was `Cargo package lacks full license text:
+block2@0.6.2`. This candidate supplies separately pinned upstream declaration
+and standard MIT template bytes; native macOS collection has not yet validated
+the change.
+
+Local evidence also retains the v25 sanitizer stress timeout, the first v26
+allowlist-verifier error, the v27 empty-stderr summary error, and the v28
+Windows-newline oracle harness error. Those were local tool or evidence stops,
+not additional natural package runs or accepted product tests.
+The later v31 source sealing attempt stopped on truncated patch-tool output;
+v32 stopped on a JavaScript/PowerShell template parsing error before copying;
+v33 stopped on a document patch context mismatch. The two official source
+files were independently rechecked, but those stopped batches are not claimed
+as completed seals or product tests.
 
 The packages deliberately do not enable `apply_configuration`. Installation
 and static package inspection do not prove that an employee can apply settings,

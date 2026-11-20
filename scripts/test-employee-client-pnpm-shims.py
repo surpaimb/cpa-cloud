@@ -69,6 +69,65 @@ def refused(call, code: str):
         raise AssertionError("invalid shim tree was accepted")
 
 
+def lockfile_crlf_source_case(root: Path) -> None:
+    workspace = root / "workspace"
+    project(workspace)
+    (workspace / "pnpm-lock.yaml").write_bytes(b"lockfileVersion: '9.0'\r\n")
+    assert MODULE.check_source_inputs(workspace) is None
+
+
+def lockfile_crlf_reference_case(root: Path) -> None:
+    actual, reference, a_bin, _ = paired(root)
+    for workspace in (actual, reference):
+        (workspace / "pnpm-lock.yaml").write_bytes(b"lockfileVersion: '9.0'\r\n")
+    assert MODULE.check_inputs(actual, reference) is None
+    assert (a_bin / "fake").exists()
+
+
+def lockfile_rejection_cases(root: Path) -> None:
+    prefix = b"lockfileVersion: '9.0'\n"
+    invalid = {
+        "bom": b"\xef\xbb\xbf" + prefix,
+        "bare_cr": b"lockfileVersion: '9.0'\r",
+        "double_cr": b"lockfileVersion: '9.0'\r\r\n",
+        "wrong_version": b"lockfileVersion: '8.0'\n",
+        "wrong_quotes": b'lockfileVersion: "9.0"\n',
+        "missing_newline": b"lockfileVersion: '9.0'",
+    }
+    for label, data in invalid.items():
+        actual, reference, a_bin, _ = paired(root / label)
+        for workspace in (actual, reference):
+            (workspace / "pnpm-lock.yaml").write_bytes(data)
+        refused(lambda: MODULE.check_source_inputs(actual),
+                "lockfile format differs")
+        refused(lambda: MODULE.check_inputs(actual, reference),
+                "lockfile format differs")
+        assert (a_bin / "fake").exists()
+
+    actual, reference, a_bin, _ = paired(root / "newline_mismatch")
+    (reference / "pnpm-lock.yaml").write_bytes(b"lockfileVersion: '9.0'\r\n")
+    refused(lambda: MODULE.check_inputs(actual, reference),
+            "reference input differs")
+    assert (a_bin / "fake").exists()
+
+    actual, reference, a_bin, _ = paired(root / "tail_mismatch")
+    (actual / "pnpm-lock.yaml").write_bytes(prefix + b"source")
+    (reference / "pnpm-lock.yaml").write_bytes(prefix + b"reference")
+    refused(lambda: MODULE.check_inputs(actual, reference),
+            "reference input differs")
+    assert (a_bin / "fake").exists()
+
+    actual, reference, a_bin, _ = paired(root / "oversized")
+    too_large = prefix + b"x" * (2 * 1024 * 1024)
+    for workspace in (actual, reference):
+        (workspace / "pnpm-lock.yaml").write_bytes(too_large)
+    refused(lambda: MODULE.check_source_inputs(actual),
+            "file size budget exceeded")
+    refused(lambda: MODULE.check_inputs(actual, reference),
+            "file size budget exceeded")
+    assert (a_bin / "fake").exists()
+
+
 def tiny_archive(extra_link: bool = False,
                  extra_member: str | None = None) -> bytes:
     buffer = io.BytesIO()
@@ -107,6 +166,13 @@ def main():
         assert not a_bin.parent.exists()
         assert not MODULE.scan_store(actual).nested
         names.append("matched_reference_removed_only_verified_shim")
+
+        lockfile_crlf_source_case(temp / "crlf_source")
+        names.append("source_lockfile_crlf_exact_prefix")
+        lockfile_crlf_reference_case(temp / "crlf_reference")
+        names.append("reference_lockfile_crlf_exact_bytes")
+        lockfile_rejection_cases(temp / "lockfile_refusals")
+        names.append("lockfile_prefix_mismatch_size_and_shim_refusals")
 
         config = temp / "employee-pnpm-config"
         config.mkdir()

@@ -287,6 +287,12 @@ def check_config(workspace: Path, runner_temp: Path, version: str) -> None:
             - allowed, "pnpm environment configuration not pinned")
 
 
+def lockfile_header_valid(content: bytes) -> bool:
+    """Accept only the locked version line with LF or CRLF bytes."""
+    return content.startswith((b"lockfileVersion: '9.0'\n",
+                               b"lockfileVersion: '9.0'\r\n"))
+
+
 def check_inputs(workspace: Path, reference: Path) -> None:
     require(reference != workspace
             and not reference.is_relative_to(workspace)
@@ -306,7 +312,7 @@ def check_inputs(workspace: Path, reference: Path) -> None:
                     and package.get("packageManager") == "pnpm@" + PNPM_VERSION,
                     "package manager identity differs")
         else:
-            require(source.startswith(b"lockfileVersion: '9.0'\n"),
+            require(lockfile_header_valid(source),
                     "lockfile format differs")
 
 
@@ -315,8 +321,8 @@ def check_source_inputs(workspace: Path) -> None:
     require(isinstance(package, dict)
             and package.get("packageManager") == "pnpm@" + PNPM_VERSION,
             "package manager identity differs")
-    require(read_regular(workspace / "pnpm-lock.yaml", 2 * 1024 * 1024)[0]
-            .startswith(b"lockfileVersion: '9.0'\n"),
+    require(lockfile_header_valid(
+        read_regular(workspace / "pnpm-lock.yaml", 2 * 1024 * 1024)[0]),
             "lockfile format differs")
 
 

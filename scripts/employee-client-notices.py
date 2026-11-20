@@ -33,6 +33,16 @@ FIRST_PARTY_CARGO = {
     ("employee-config-core", "0.1.0"),
 }
 EXTERNAL_CARGO = {
+    ("block2", "0.6.2"): {
+        "repository": "https://github.com/madsmtm/objc2",
+        "vcs": "b4167b582b2f75f9a1be75495c41b765344fd03c",
+        "path": "crates/block2", "license": "MIT",
+        "files": [("LICENSE-MIT.txt",
+            "https://raw.githubusercontent.com/spdx/license-list-data/"
+            "ab9b0904b43db6f4b67431efd8821feb821f1c8b/text/MIT.txt",
+            "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+            1078)],
+    },
     ("alloc-stdlib", "0.3.0"): {
         "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
         "vcs": "0a81fd6928ea3b33c8cd484aa4575d50ffb98012",
@@ -101,6 +111,8 @@ EXTERNAL_CARGO = {
     },
 }
 VENDORED_CARGO = {
+    ("block2", "0.6.2", "LICENSE-MIT.txt"):
+        "third_party/notice-fallbacks/block2-0.6.2-LICENSE-MIT.txt",
     ("alloc-stdlib", "0.3.0", "LICENSE"):
         "third_party/notice-fallbacks/alloc-stdlib-0.3.0-LICENSE.txt",
     ("defmt-parser", "1.0.0", "LICENSE-MIT"):
@@ -122,10 +134,11 @@ EXTERNAL_OUTPUT_NAMES = {
     ("selectors", "0.38.0", "MPL-2.0.txt"): "LICENSE-MPL-2.0.txt",
 }
 STYLO_DECLARATION = "third_party/notice-fallbacks/selectors-0.38.0-STYLO-README.md"
-VENDORED_FILES = set(VENDORED_CARGO.values()) | {STYLO_DECLARATION}
-require_vendor_count = 6
+BLOCK2_DECLARATION = "third_party/notice-fallbacks/block2-0.6.2-UPSTREAM-LICENSE.md"
+VENDORED_FILES = set(VENDORED_CARGO.values()) | {STYLO_DECLARATION, BLOCK2_DECLARATION}
+require_vendor_count = 8
 if len(VENDORED_FILES) != require_vendor_count:
-    raise RuntimeError("vendored notice source map does not cover six files")
+    raise RuntimeError("vendored notice source map does not cover eight files")
 MAX_TEXT = 16 * 1024 * 1024
 MAX_TOTAL = 256 * 1024 * 1024
 MAX_ARCHIVE = 64 * 1024 * 1024
@@ -672,6 +685,28 @@ def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[
             require(vcs.get("git", {}).get("sha1") == fallback["vcs"]
                     and vcs.get("path_in_vcs") == fallback["path"],
                     f"Cargo archive VCS origin differs: {name}@{version}")
+            if (name, version) == ("block2", "0.6.2"):
+                declaration_url = (
+                    "https://raw.githubusercontent.com/madsmtm/objc2/"
+                    "b4167b582b2f75f9a1be75495c41b765344fd03c/LICENSE.md"
+                )
+                declaration = vendored_text(
+                    workspace, BLOCK2_DECLARATION,
+                    "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+                    1339,
+                )
+                require(b"`block2`" in declaration and
+                        b"licensed under [the MIT license][MIT]" in declaration,
+                        "block2 upstream MIT declaration absent")
+                declaration_output = "EXTERNAL_ORIGIN/UPSTREAM_DECLARATION.md"
+                texts[declaration_output] = declaration
+                external_sources.append({
+                    "role": "upstream-license-declaration",
+                    "path": declaration_output,
+                    "vendored_source": BLOCK2_DECLARATION,
+                    "url": declaration_url, "sha256": sha(declaration),
+                    "bytes": len(declaration),
+                })
             if name == "selectors":
                 readme_url = ("https://raw.githubusercontent.com/servo/stylo/"
                               "572ecba2d1600e7c3d490586692a209faf703baa/"
@@ -1345,6 +1380,18 @@ def verify(root: Path, workspace: Path, expected_manifest_sha256: str,
             item = expected.get(prefix + relative)
             require(item is not None and item["sha256"] == sha(data),
                     f"built dependency notice differs: {prefix}{relative}")
+        if key == ("cargo", "block2", "0.6.2") and (
+                package["notice_status"] == "vendored_external"):
+            for relative, vendored in (
+                ("EXTERNAL_ORIGIN/UPSTREAM_DECLARATION.md", BLOCK2_DECLARATION),
+                ("EXTERNAL_ORIGIN/LICENSE-MIT.txt",
+                 VENDORED_CARGO[("block2", "0.6.2", "LICENSE-MIT.txt")]),
+            ):
+                output_bytes = verified_texts.get(prefix + relative)
+                source_bytes = git_blob(workspace, vendored)
+                require(output_bytes == source_bytes and
+                        manifest["source_files"].get(vendored) == sha(source_bytes),
+                        f"block2 external notice differs from committed source: {relative}")
     print(f"verified {len(manifest['packages'])} packages and "
           f"{len(expected)} full notice files")
 
