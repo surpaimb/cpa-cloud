@@ -228,6 +228,63 @@ def has_authorization_text(texts: dict[str, bytes]) -> bool:
                and bool(content.strip()) for name, content in texts.items())
 
 
+def report_nested_node_modules(installed_root: Path, current: str,
+                               archived_paths: set[str],
+                               archived_files: set[str]) -> None:
+    """Emit fixed-size structural counts without naming installed children."""
+    limit = 64
+    count_limit = 65535
+    nested = Path(current) / "node_modules"
+    try:
+        relative = nested.relative_to(installed_root).as_posix()
+        prefix = relative + "/"
+        members = sum(path == relative or path.startswith(prefix)
+                      for path in archived_paths)
+        files = sum(path == relative or path.startswith(prefix)
+                    for path in archived_files)
+        mode = nested.lstat().st_mode
+        junction = nested.is_junction()
+        symlink = stat.S_ISLNK(mode)
+        ordinary_dir = stat.S_ISDIR(mode) and not junction and not symlink
+        children = {"regular": 0, "directory": 0, "symlink": 0,
+                    "junction": 0, "other": 0}
+        overflow = 0
+        if ordinary_dir:
+            with os.scandir(nested) as entries:
+                for index, entry in enumerate(entries):
+                    if index == limit:
+                        overflow = 1
+                        break
+                    child = Path(entry.path)
+                    if child.is_junction():
+                        kind = "junction"
+                    elif entry.is_symlink():
+                        kind = "symlink"
+                    else:
+                        child_mode = entry.stat(follow_symlinks=False).st_mode
+                        if stat.S_ISREG(child_mode):
+                            kind = "regular"
+                        elif stat.S_ISDIR(child_mode):
+                            kind = "directory"
+                        else:
+                            kind = "other"
+                    children[kind] += 1
+    except (OSError, ValueError):
+        raise NoticeError("nested node_modules diagnostic failed") from None
+    print("nested_node_modules_diagnostic "
+          f"archive_members={min(members, count_limit)} "
+          f"archive_files={min(files, count_limit)} "
+          f"archive_overflow={int(members > count_limit or files > count_limit)} "
+          f"ordinary_dir={int(ordinary_dir)} symlink={int(symlink)} "
+          f"junction={int(junction)} "
+          f"child_regular={children['regular']} "
+          f"child_directory={children['directory']} "
+          f"child_symlink={children['symlink']} "
+          f"child_junction={children['junction']} "
+          f"child_other={children['other']} child_overflow={overflow}",
+          file=sys.stderr)
+
+
 def archive_files(data: bytes, prefix: str, explicit: set[str] | None = None,
                   installed_root: Path | None = None,
                   cargo_source: bool = False,
@@ -317,8 +374,11 @@ def archive_files(data: bytes, prefix: str, explicit: set[str] | None = None,
         actual_paths: set[str] = set()
         for current, dirs, files in os.walk(installed_root, followlinks=False):
             if not cargo_source:
+                if "node_modules" in dirs:
+                    report_nested_node_modules(installed_root, current,
+                                               archived_paths, archived_files)
                 require("node_modules" not in dirs,
-                        f"nested node_modules in installed package: {current}")
+                        "nested node_modules in installed package")
             for directory in dirs:
                 require(not (Path(current) / directory).is_symlink(),
                         f"symlink directory in installed package: {directory}")
