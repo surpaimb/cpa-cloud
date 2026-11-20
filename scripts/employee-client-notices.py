@@ -33,6 +33,22 @@ FIRST_PARTY_CARGO = {
     ("employee-config-core", "0.1.0"),
 }
 EXTERNAL_CARGO = {
+    ("cesu8", "1.1.0"): {
+        "repository": "https://github.com/emk/cesu8-rs",
+        "license": "Apache-2.0/MIT",
+        "files": [
+            ("LICENSE-APACHE",
+             "https://raw.githubusercontent.com/rust-lang/rust/"
+             "db2939409db26ab4904372c82492cd3488e4c44e/LICENSE-APACHE",
+             "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+             10847),
+            ("LICENSE-MIT",
+             "https://raw.githubusercontent.com/rust-lang/rust/"
+             "db2939409db26ab4904372c82492cd3488e4c44e/LICENSE-MIT",
+             "0621878e61f0d0fda054bcbe02df75192c28bde1ecc8289cbd86aeba2dd72720",
+             1071),
+        ],
+    },
     ("block2", "0.6.2"): {
         "repository": "https://github.com/madsmtm/objc2",
         "vcs": "b4167b582b2f75f9a1be75495c41b765344fd03c",
@@ -111,6 +127,10 @@ EXTERNAL_CARGO = {
     },
 }
 VENDORED_CARGO = {
+    ("cesu8", "1.1.0", "LICENSE-APACHE"):
+        "third_party/notice-fallbacks/cesu8-1.1.0-LICENSE-APACHE.txt",
+    ("cesu8", "1.1.0", "LICENSE-MIT"):
+        "third_party/notice-fallbacks/cesu8-1.1.0-LICENSE-MIT.txt",
     ("block2", "0.6.2", "LICENSE-MIT.txt"):
         "third_party/notice-fallbacks/block2-0.6.2-LICENSE-MIT.txt",
     ("alloc-stdlib", "0.3.0", "LICENSE"):
@@ -136,9 +156,21 @@ EXTERNAL_OUTPUT_NAMES = {
 STYLO_DECLARATION = "third_party/notice-fallbacks/selectors-0.38.0-STYLO-README.md"
 BLOCK2_DECLARATION = "third_party/notice-fallbacks/block2-0.6.2-UPSTREAM-LICENSE.md"
 VENDORED_FILES = set(VENDORED_CARGO.values()) | {STYLO_DECLARATION, BLOCK2_DECLARATION}
-require_vendor_count = 8
+require_vendor_count = 10
 if len(VENDORED_FILES) != require_vendor_count:
-    raise RuntimeError("vendored notice source map does not cover eight files")
+    raise RuntimeError("vendored notice source map does not cover ten files")
+CESU8_ARCHIVE_SHA256 = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
+CESU8_ARCHIVE_BYTES = 10555
+CESU8_RELEASE = "f18962a9de5189f21600b7ff2898845157df4447"
+CESU8_MEMBERS = {
+    ".gitignore": "4fffb2f89cbd8f2169ce9914bd16bd43785bb368",
+    ".travis.yml": "0ea001b616879a4339ed8ebe4c2f89d7472830d3",
+    "COPYRIGHT-RUST.txt": "52039ea7e5734462f2989ef7f30ebbaf80fef949",
+    "Cargo.toml": "0d8bd9a572fc68998df4709fce2db857e77239bc",
+    "README.md": "161f8652a254442a595af73d1563bcfde2579193",
+    "src/lib.rs": "7fac5ffbe9a60c9604e8e3d990cc86b8bfbee249",
+    "src/unicode.rs": "a236d310d247939111a5df2f8a8e83f002a4b9bc",
+}
 MAX_TEXT = 16 * 1024 * 1024
 MAX_TOTAL = 256 * 1024 * 1024
 MAX_ARCHIVE = 64 * 1024 * 1024
@@ -494,6 +526,57 @@ def archive_member(data: bytes, member_name: str) -> bytes:
         return content
 
 
+def exact_regular_git_members(data: bytes, root: str,
+                              expected: dict[str, str]) -> dict[str, bytes]:
+    """Bind every member of one legacy crate to reviewed Git blob identities."""
+    found: dict[str, bytes] = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            members = archive.getmembers()
+            require(len(members) == len(expected),
+                    "legacy Cargo archive member count differs")
+            for member in members:
+                prefix = root + "/"
+                require(member.isfile() and member.name.startswith(prefix),
+                        "legacy Cargo archive member type or root differs")
+                relative = member.name[len(prefix):]
+                require(relative in expected and relative not in found and
+                        0 < member.size <= MAX_METADATA,
+                        "legacy Cargo archive member identity differs")
+                stream = archive.extractfile(member)
+                require(stream is not None, "legacy Cargo archive member unreadable")
+                content = stream.read(member.size + 1)
+                require(len(content) == member.size,
+                        "legacy Cargo archive member length differs")
+                git_blob_sha = hashlib.sha1(
+                    b"blob " + str(len(content)).encode("ascii") + bytes([0]) +
+                    content, usedforsecurity=False,
+                ).hexdigest()
+                require(git_blob_sha == expected[relative],
+                        "legacy Cargo archive member Git blob differs")
+                found[relative] = content
+    except (tarfile.TarError, OSError) as exc:
+        raise NoticeError("legacy Cargo archive unreadable") from exc
+    require(set(found) == set(expected), "legacy Cargo archive inventory differs")
+    return found
+
+
+def cesu8_legacy_origin(data: bytes) -> dict[str, bytes]:
+    require(len(data) == CESU8_ARCHIVE_BYTES and
+            sha(data) == CESU8_ARCHIVE_SHA256,
+            "cesu8 legacy archive checksum or size differs")
+    members = exact_regular_git_members(data, "cesu8-1.1.0", CESU8_MEMBERS)
+    require(b'license = "Apache-2.0/MIT"' in members["Cargo.toml"] and
+            b'repository = "https://github.com/emk/cesu8-rs"' in
+            members["Cargo.toml"] and
+            b"## License" in members["README.md"] and
+            b"LICENSE-RUST.txt" in members["README.md"] and
+            b"dual-licensed under Apache 2.0 and MIT" in
+            members["COPYRIGHT-RUST.txt"],
+            "cesu8 legacy source license declaration differs")
+    return members
+
+
 def vendored_text(workspace: Path, name: str, digest: str,
                   length: int) -> bytes:
     require(name in VENDORED_FILES, f"unapproved vendored notice path: {name}")
@@ -679,12 +762,23 @@ def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[
                     str(meta.get("repository", "")).rstrip("/") ==
                     fallback["repository"],
                     f"Cargo external license identity differs: {name}@{version}")
-            vcs = json.loads(archive_member(
-                archive_data, f"{name}-{version}/.cargo_vcs_info.json"
-            ))
-            require(vcs.get("git", {}).get("sha1") == fallback["vcs"]
-                    and vcs.get("path_in_vcs") == fallback["path"],
-                    f"Cargo archive VCS origin differs: {name}@{version}")
+            if (name, version) == ("cesu8", "1.1.0"):
+                cesu8_legacy_origin(archive_data)
+                external_sources.append({
+                    "role": "legacy-crate-archive-origin",
+                    "url": "https://static.crates.io/crates/cesu8/cesu8-1.1.0.crate",
+                    "upstream_release": CESU8_RELEASE,
+                    "sha256": CESU8_ARCHIVE_SHA256,
+                    "bytes": CESU8_ARCHIVE_BYTES,
+                    "member_git_blobs": CESU8_MEMBERS,
+                })
+            else:
+                vcs = json.loads(archive_member(
+                    archive_data, f"{name}-{version}/.cargo_vcs_info.json"
+                ))
+                require(vcs.get("git", {}).get("sha1") == fallback["vcs"]
+                        and vcs.get("path_in_vcs") == fallback["path"],
+                        f"Cargo archive VCS origin differs: {name}@{version}")
             if (name, version) == ("block2", "0.6.2"):
                 declaration_url = (
                     "https://raw.githubusercontent.com/madsmtm/objc2/"
@@ -1392,6 +1486,16 @@ def verify(root: Path, workspace: Path, expected_manifest_sha256: str,
                 require(output_bytes == source_bytes and
                         manifest["source_files"].get(vendored) == sha(source_bytes),
                         f"block2 external notice differs from committed source: {relative}")
+        if key == ("cargo", "cesu8", "1.1.0") and (
+                package["notice_status"] == "vendored_external"):
+            for filename in ("LICENSE-APACHE", "LICENSE-MIT"):
+                relative = "EXTERNAL_ORIGIN/" + filename
+                vendored = VENDORED_CARGO[("cesu8", "1.1.0", filename)]
+                output_bytes = verified_texts.get(prefix + relative)
+                source_bytes = git_blob(workspace, vendored)
+                require(output_bytes == source_bytes and
+                        manifest["source_files"].get(vendored) == sha(source_bytes),
+                        f"cesu8 external notice differs from committed source: {relative}")
     print(f"verified {len(manifest['packages'])} packages and "
           f"{len(expected)} full notice files")
 

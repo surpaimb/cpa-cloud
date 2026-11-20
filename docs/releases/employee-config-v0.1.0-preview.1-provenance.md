@@ -73,7 +73,7 @@ The repository's locked Cargo and pnpm dependencies retain their own licenses.
 The distribution process must obtain the relevant full license and notice texts
 from integrity-verified archives or independently verified upstream sources,
 record each text's source and digest, and embed them in both installers. The
-eight plain-text source supplements in
+ten plain-text source supplements in
 `desktop/employee-config-switcher/third_party/notice-fallbacks/` preserve
 verified upstream license or source declarations for archives that omit those
 texts. The notice collector binds their Git blobs, origin commits and hashes;
@@ -98,6 +98,22 @@ collector requires both pinned files, records the upstream declaration as
 `EXTERNAL_ORIGIN/UPSTREAM_DECLARATION.md` outside the authorization-name
 check, and records the separate template as `EXTERNAL_ORIGIN/LICENSE-MIT.txt`.
 Both outputs are checked against the committed source bytes during verification.
+
+For `cesu8@1.1.0`, the
+[official crate archive](https://static.crates.io/crates/cesu8/cesu8-1.1.0.crate)
+is pinned by its complete SHA-256 and exact seven regular members. Those seven
+members match Git blobs at the
+[upstream `cesu8-rs` release commit `f18962a9de5189f21600b7ff2898845157df4447`](https://github.com/emk/cesu8-rs/commit/f18962a9de5189f21600b7ff2898845157df4447).
+The archive has no `.cargo_vcs_info.json` and no complete license text; the
+legacy fallback does not invent either. The archive's Cargo metadata, README,
+and COPYRIGHT declare Apache-2.0/MIT. Separate complete
+[Apache](https://github.com/rust-lang/rust/blob/db2939409db26ab4904372c82492cd3488e4c44e/LICENSE-APACHE)
+and [MIT](https://github.com/rust-lang/rust/blob/db2939409db26ab4904372c82492cd3488e4c44e/LICENSE-MIT)
+texts are pinned byte for byte from Rust commit
+`db2939409db26ab4904372c82492cd3488e4c44e`. That commit is a source
+for the referenced standard terms, not a commit designated by the `cesu8`
+author. The collector requires both complete texts and the exact archive
+evidence before a notice can pass.
 
 The [first native package run](https://github.com/surpaimb/cpa-cloud/actions/runs/44748163357)
 stopped at the Python pin on both platforms. The
@@ -146,9 +162,19 @@ captured; CRLF line endings are a hypothesis, not an established cause. The
 lockfile candidate accepts only the exact pinned version-line prefix with LF
 or CRLF, while requiring source and reference files to match byte for byte.
 The macOS notice failure was `Cargo package lacks full license text:
-block2@0.6.2`. This candidate supplies separately pinned upstream declaration
-and standard MIT template bytes; native macOS collection has not yet validated
-the change.
+block2@0.6.2`. The separately pinned upstream declaration and standard MIT
+template let the next natural macOS run reach a later missing-notice failure;
+that run did not complete collection or accept an installer.
+
+The [tenth](https://github.com/surpaimb/cpa-cloud/actions/runs/44789221309)
+stopped on macOS at `Cargo package lacks full license text: cesu8@1.1.0`.
+Windows failed two synthetic block2 declaration checks while reading the
+physical checkout bytes. The production source pin remained a Git blob with
+LF endings; the Windows physical line endings were not captured, so CRLF is
+only a hypothesis. The isolated test fixture accepts either wholly LF or
+wholly CRLF input only after canonical LF bytes pass the fixed length and
+SHA-256 pin; production notice source checks are unchanged. Both jobs failed,
+publication was skipped, and neither installer was accepted.
 
 Local evidence also retains the v25 sanitizer stress timeout, the first v26
 allowlist-verifier error, the v27 empty-stderr summary error, and the v28
@@ -158,7 +184,11 @@ The later v31 source sealing attempt stopped on truncated patch-tool output;
 v32 stopped on a JavaScript/PowerShell template parsing error before copying;
 v33 stopped on a document patch context mismatch. The two official source
 files were independently rechecked, but those stopped batches are not claimed
-as completed seals or product tests.
+as completed seals or product tests. The v34 static-seal command stopped on
+a Git line-ending warning; v37 stopped on truncated patch-tool output after
+partial isolated edits. Neither stopped batch is retroactively accepted.
+This v38 copy has only a static source seal; its new `cesu8` fallback has not
+run a collector test or native Mac/Windows package workflow.
 
 The packages deliberately do not enable `apply_configuration`. Installation
 and static package inspection do not prove that an employee can apply settings,
