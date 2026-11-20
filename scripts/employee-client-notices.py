@@ -159,9 +159,42 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def raw(path: Path) -> bytes:
-    require(not path.is_symlink(), f"symlink refused: {path}")
+def no_reparse(path: Path) -> os.stat_result:
+    """Inspect the directory entry itself, including Windows reparse attributes."""
     info = path.lstat()
+    require(not stat.S_ISLNK(info.st_mode) and not path.is_symlink()
+            and not path.is_junction()
+            and not (getattr(info, "st_file_attributes", 0)
+                     & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)),
+            "reparse path refused")
+    return info
+
+
+def checked_descendant(root: Path, relative: Path | str,
+                       directory: bool) -> tuple[Path, os.stat_result]:
+    """Check each component below an allowed canonical root before use."""
+    root = root.resolve(strict=True)
+    relative = Path(relative)
+    require(relative.parts and not relative.is_absolute() and not relative.drive
+            and all(part not in ("", ".", "..") for part in relative.parts),
+            "unsafe descendant path")
+    path = root
+    for index, part in enumerate(relative.parts):
+        path = path / part
+        info = no_reparse(path)
+        if index + 1 < len(relative.parts):
+            require(stat.S_ISDIR(info.st_mode), "non-directory path component")
+    require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode),
+            "installed path has wrong type")
+    return path, info
+
+
+def walk_error(exc: OSError) -> None:
+    raise NoticeError("directory inventory traversal failed") from exc
+
+
+def raw(path: Path) -> bytes:
+    info = no_reparse(path)
     require(stat.S_ISREG(info.st_mode), f"not a regular file: {path}")
     require(0 < info.st_size <= MAX_TEXT, f"empty or oversized text: {path}")
     data = path.read_bytes()
@@ -175,9 +208,12 @@ def raw(path: Path) -> bytes:
 
 
 def source_file(path: Path, root: Path) -> bytes:
-    require(path.resolve(strict=True).is_relative_to(root.resolve(strict=True)),
-            f"path escapes package: {path}")
-    return raw(path)
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise NoticeError("path escapes package") from exc
+    checked, _ = checked_descendant(root, relative, directory=False)
+    return raw(checked)
 
 
 def json_bytes(value: object) -> bytes:
@@ -348,10 +384,7 @@ def archive_files(data: bytes, prefix: str, explicit: set[str] | None = None,
             if member.isdir():
                 require(not is_notice, f"notice is a directory: {member.name}")
                 if installed_root is not None:
-                    installed_dir = installed_root / relative
-                    require(not installed_dir.is_symlink() and
-                            installed_dir.is_dir(),
-                            f"installed archive directory differs: {relative}")
+                    checked_descendant(installed_root, relative, directory=True)
                 continue
             require(member.isfile(),
                     f"unsupported archive member type: {member.name}")
@@ -367,13 +400,9 @@ def archive_files(data: bytes, prefix: str, explicit: set[str] | None = None,
             require(len(content) == member.size,
                     f"archive member size mismatch: {member.name}")
             if installed_root is not None:
-                installed_path = installed_root / relative
-                require(installed_path.resolve(strict=True).is_relative_to(
-                    installed_root), f"installed package path escapes root: {relative}")
-                require(not installed_path.is_symlink(),
-                        f"installed package file is symlink: {relative}")
-                info = installed_path.lstat()
-                require(stat.S_ISREG(info.st_mode) and info.st_size == member.size,
+                installed_path, info = checked_descendant(
+                    installed_root, relative, directory=False)
+                require(info.st_size == member.size,
                         f"installed package file size differs: {relative}")
                 require(sha(installed_path.read_bytes()) == sha(content),
                         f"installed package file differs from archive: {relative}")
@@ -395,7 +424,13 @@ def archive_files(data: bytes, prefix: str, explicit: set[str] | None = None,
     require(explicit.issubset(found), f"declared license_file absent: {prefix}")
     if installed_root is not None:
         actual_paths: set[str] = set()
-        for current, dirs, files in os.walk(installed_root, followlinks=False):
+        for current, dirs, files in os.walk(
+                installed_root, topdown=True, onerror=walk_error,
+                followlinks=False):
+            current_relative = Path(current).relative_to(installed_root)
+            if current_relative.parts:
+                checked_descendant(installed_root, current_relative,
+                                   directory=True)
             if not cargo_source:
                 if "node_modules" in dirs:
                     report_nested_node_modules(installed_root, current,
@@ -403,13 +438,12 @@ def archive_files(data: bytes, prefix: str, explicit: set[str] | None = None,
                 require("node_modules" not in dirs,
                         "nested node_modules in installed package")
             for directory in dirs:
-                require(not (Path(current) / directory).is_symlink(),
-                        f"symlink directory in installed package: {directory}")
+                relative = (Path(current) / directory).relative_to(installed_root)
+                checked_descendant(installed_root, relative, directory=True)
             for file in files:
-                path = Path(current) / file
-                require(not path.is_symlink(),
-                        f"symlink file in installed package: {path}")
-                actual_paths.add(path.relative_to(installed_root).as_posix())
+                relative = (Path(current) / file).relative_to(installed_root)
+                checked_descendant(installed_root, relative, directory=False)
+                actual_paths.add(relative.as_posix())
         extras = actual_paths - archived_files
         if cargo_source:
             extras -= {".cargo-ok", ".cargo-checksum.json"}
@@ -883,8 +917,13 @@ def bundle_packages(workspace: Path, evidence_path: Path,
         current = file.parent
         while current.is_relative_to(modules_root):
             manifest = current / "package.json"
-            if manifest.is_file():
-                pkg = read_json(manifest)
+            try:
+                checked, _ = checked_descendant(
+                    current, "package.json", directory=False)
+            except FileNotFoundError:
+                checked = None
+            if checked is not None:
+                pkg = json.loads(raw(checked).decode("utf-8"))
                 key = (pkg.get("name"), pkg.get("version"))
                 require(key in locked, f"Vite bundled unlocked package: {key}")
                 installed.add(key)
@@ -900,17 +939,22 @@ def bundle_packages(workspace: Path, evidence_path: Path,
     require(isinstance(expected_files, list) and bool(expected_files),
             "Vite dist evidence absent")
     dist = workspace / "dist"
-    require(dist.is_dir() and not dist.is_symlink(), "Vite dist directory absent")
+    require(stat.S_ISDIR(no_reparse(dist).st_mode), "Vite dist directory absent")
+    dist = dist.resolve(strict=True)
     actual_files: dict[str, tuple[int, str]] = {}
-    for current, dirs, files in os.walk(dist, followlinks=False):
+    for current, dirs, files in os.walk(
+            dist, topdown=True, onerror=walk_error, followlinks=False):
+        current_relative = Path(current).relative_to(dist)
+        if current_relative.parts:
+            checked_descendant(dist, current_relative, directory=True)
         for directory in dirs:
-            require(not (Path(current) / directory).is_symlink(),
-                    "Vite dist symlink directory")
+            relative = (Path(current) / directory).relative_to(dist)
+            checked_descendant(dist, relative, directory=True)
         for name in files:
-            path = Path(current) / name
-            require(not path.is_symlink(), "Vite dist symlink file")
+            relative = (Path(current) / name).relative_to(dist)
+            path, _ = checked_descendant(dist, relative, directory=False)
             data = path.read_bytes()
-            actual_files[path.relative_to(dist).as_posix()] = (len(data), sha(data))
+            actual_files[relative.as_posix()] = (len(data), sha(data))
     provided: dict[str, tuple[int, str]] = {}
     for item in expected_files:
         require(isinstance(item, dict) and isinstance(item.get("path"), str),
@@ -958,10 +1002,9 @@ def pnpm_packages(workspace: Path, locked: dict[tuple[str, str], str],
                 continue
             candidates = sorted(entry.iterdir()) if entry.name.startswith("@") else [entry]
             for candidate in candidates:
-                manifest = candidate / "package.json"
-                require(manifest.is_file(),
-                        f"pnpm package candidate has no package.json: {candidate}")
-                pkg = read_json(manifest)
+                manifest, _ = checked_descendant(
+                    candidate, "package.json", directory=False)
+                pkg = json.loads(raw(manifest).decode("utf-8"))
                 require(isinstance(pkg, dict), f"invalid package.json: {manifest}")
                 name, version = pkg.get("name"), pkg.get("version")
                 require(isinstance(name, str) and isinstance(version, str),
@@ -985,10 +1028,9 @@ def pnpm_packages(workspace: Path, locked: dict[tuple[str, str], str],
                 continue
             candidates = sorted(entry.iterdir()) if entry.name.startswith("@") else [entry]
             for candidate in candidates:
-                manifest = candidate / "package.json"
-                require(manifest.is_file(),
-                        f"pnpm hoist candidate has no package.json: {candidate}")
-                pkg = read_json(manifest)
+                manifest, _ = checked_descendant(
+                    candidate, "package.json", directory=False)
+                pkg = json.loads(raw(manifest).decode("utf-8"))
                 key = (pkg.get("name"), pkg.get("version"))
                 require(key in roots and candidate.resolve(strict=True) == roots[key],
                         f"pnpm hoist package is not attested: {candidate}")
@@ -1003,7 +1045,7 @@ def pnpm_packages(workspace: Path, locked: dict[tuple[str, str], str],
         actual = top.resolve(strict=True)
         require(actual.is_relative_to(store.resolve(strict=True)),
                 f"top-level npm dependency outside pnpm store: {name}")
-        pkg = read_json(actual / "package.json")
+        pkg = json.loads(source_file(actual / "package.json", actual).decode("utf-8"))
         require((pkg.get("name"), pkg.get("version")) == (name, version),
                 f"top-level npm dependency version mismatch: {name}@{version}")
         require(roots.get((name, version)) == actual,
@@ -1145,9 +1187,10 @@ def verify(root: Path, workspace: Path, expected_manifest_sha256: str,
            bundle_path: Path) -> None:
     require(bool(HEX64.fullmatch(expected_manifest_sha256)),
             "external manifest SHA-256 missing or malformed")
-    require(not root.is_symlink(), "notice root is a symlink")
+    require(stat.S_ISDIR(no_reparse(root).st_mode),
+            "notice root is not an ordinary directory")
     root = root.resolve(strict=True)
-    manifest_data = raw(root / "manifest.json")
+    manifest_data = source_file(root / "manifest.json", root)
     require(sha(manifest_data) == expected_manifest_sha256,
             "notice manifest differs from external build-time hash")
     manifest = json.loads(manifest_data)
@@ -1212,14 +1255,18 @@ def verify(root: Path, workspace: Path, expected_manifest_sha256: str,
         expected[name] = item
     require(bool(expected), "notice manifest has no texts")
     actual: set[str] = set()
-    for current, dirs, files in os.walk(root, followlinks=False):
+    for current, dirs, files in os.walk(
+            root, topdown=True, onerror=walk_error, followlinks=False):
+        current_relative = Path(current).relative_to(root)
+        if current_relative.parts:
+            checked_descendant(root, current_relative, directory=True)
         for directory in dirs:
-            require(not (Path(current) / directory).is_symlink(),
-                    f"symlink in notice bundle: {directory}")
+            relative = (Path(current) / directory).relative_to(root)
+            checked_descendant(root, relative, directory=True)
         for file in files:
-            path = Path(current) / file
-            require(not path.is_symlink(), f"symlink in notice bundle: {path}")
-            actual.add(path.relative_to(root).as_posix())
+            relative = (Path(current) / file).relative_to(root)
+            checked_descendant(root, relative, directory=False)
+            actual.add(relative.as_posix())
     require(actual == set(expected) | {"manifest.json"},
             f"notice file set mismatch: missing={sorted(set(expected)-actual)[:3]}, "
             f"extra={sorted(actual-set(expected)-{'manifest.json'})[:3]}")

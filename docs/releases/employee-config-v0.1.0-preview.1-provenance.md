@@ -1,7 +1,8 @@
 # Employee client preview package provenance
 
-The new release workflow, package checker, notice collector, Vite module
-evidence script, Tauri release overlay, and release notes are independently
+The new release workflow, package checker, notice collector, pnpm shim
+verifier and its synthetic tests, junction path tests, Vite module evidence
+script, Tauri release overlay, and release notes are independently
 authored CPA Cloud distribution work. They do not import or adapt archived CPA
 implementation code.
 
@@ -28,6 +29,27 @@ Public interface sources used for packaging decisions:
 - [Node.js native realpath](https://nodejs.org/api/fs.html#fsrealpathsyncnativepath-options)
   for canonicalizing only a newly created OpenClaw test fixture root before
   the path guard inspects it. The guard and full `pnpm test` suite remain.
+- [pnpm install options](https://pnpm.io/cli/install),
+  [symlinked node_modules layout](https://pnpm.io/symlinked-node-modules-structure),
+  [configuration locations](https://pnpm.io/configuring), and the
+  [pnpm 11.25.0 registry manifest](https://registry.npmjs.org/pnpm/11.25.0)
+  for a same-runner,
+  same-platform offline reference install using the exact package manifest and
+  lockfile. The reference disables lifecycle scripts. The verifier requires
+  identical physical package roots, complete nested entry sets, and complete
+  generated-shim bytes after replacing the canonical workspace root on macOS
+  or the three observed root spellings on Windows. It removes only individually
+  rechecked regular shim files and then empty generated directories; the notice collector still
+  rejects every remaining nested node_modules and every unexplained extra.
+  The workflow downloads the exact registry tarball
+  `pnpm-11.25.0.tgz`, checks its fixed SHA-512 integrity
+  `XN6SW08HX3Jetx+64YpC/+eEUkeJ8ZthxzHLhyHsKKruFg4BqNWvT+2ypCzb8wDv4j2zVrDUoXtNY+EfirfJVg==`
+  before extraction, rejects unsafe archive members, and checks the extracted
+  entry set and every file against that archive before each pnpm invocation.
+  The direct Node entry `bin/pnpm.mjs` and bundle `dist/pnpm.mjs` also have
+  fixed SHA-256 pins. Node 24.11.0 and its resolved executable bytes are
+  checked within each job. These checks do not establish a race-free
+  filesystem snapshot or employee-device behavior.
 - [Tauri configuration](https://v2.tauri.app/reference/config/) for the
   relative `frontendDist` and release-only empty `beforeBuildCommand`. The
   package job checks the same `dist` bytes again after Tauri bundling.
@@ -64,13 +86,21 @@ in `desktop/employee-config-switcher/PROVENANCE.md` and
 `third_party/cc-switch/LICENSE`. A missing or unverified required notice
 prevents publication.
 
-The first [native package run](https://github.com/surpaimb/cpa-cloud/actions/runs/44748163357)
-stopped on both platforms at an unavailable Python 3.12.12 runner pin. After
-pinning 3.12.10, the [next run](https://github.com/surpaimb/cpa-cloud/actions/runs/44752206438)
-stopped before native packaging: the macOS OpenClaw fixture inherited a
-symlinked temporary-root ancestor, while Windows emitted the exact Rolldown
-virtual ID above. These candidate fixes need a new natural native run;
-neither failed run produced installer assets.
+The [first native package run](https://github.com/surpaimb/cpa-cloud/actions/runs/44748163357)
+stopped at the Python pin on both platforms. The
+[second](https://github.com/surpaimb/cpa-cloud/actions/runs/44752206438)
+stopped at the macOS OpenClaw fixture and Windows Rolldown virtual ID above.
+The [third](https://github.com/surpaimb/cpa-cloud/actions/runs/44756426281)
+stopped at the clean-worktree gate on both platforms. The
+[fourth](https://github.com/surpaimb/cpa-cloud/actions/runs/44759255265)
+had a macOS Rust nonblocking-lock WouldBlock failure and a Windows nested
+node_modules refusal. The [fifth](https://github.com/surpaimb/cpa-cloud/actions/runs/44762314834)
+stopped at nested node_modules on both platforms. The
+[sixth](https://github.com/surpaimb/cpa-cloud/actions/runs/44764990004)
+also failed in notice collection on both platforms; no installer build or
+accepted asset followed. The lock holder and cause of the fourth-run Rust failure remain unknown;
+its later passing instances do not erase the failure, and no manual rerun was
+used.
 
 The packages deliberately do not enable `apply_configuration`. Installation
 and static package inspection do not prove that an employee can apply settings,
