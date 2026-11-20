@@ -102,6 +102,16 @@ accepted asset followed. The lock holder and cause of the fourth-run Rust failur
 its later passing instances do not erase the failure, and no manual rerun was
 used.
 
+The [seventh](https://github.com/surpaimb/cpa-cloud/actions/runs/44774713254)
+failed before either installer was inspected. Windows step 6, frontend graph
+installation, ended with the helper's generic `pnpm generated-shim verification
+refused` message; the specific check is unknown. macOS step 8, generated-shim
+reconciliation, stopped when two synthetic notice-path mocks did not raise the
+expected refusal. A macOS temporary-root alias is a hypothesis, not an
+established cause. Publication was skipped and no accepted package asset was
+produced. The bounded phase/category diagnostic and fixture control in this
+candidate seek better evidence without relaxing either gate.
+
 The packages deliberately do not enable `apply_configuration`. Installation
 and static package inspection do not prove that an employee can apply settings,
 that the app launches on every machine, or that it is production ready.

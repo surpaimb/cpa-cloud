@@ -61,7 +61,8 @@ def junction(alias: Path, target: Path) -> None:
 class NoticeJunctionTests(unittest.TestCase):
     def setUp(self) -> None:
         # Keep each isolated fixture for inspection; never remove a computed tree.
-        self.scratch = Path(tempfile.mkdtemp(prefix="cpa-notice-junction-"))
+        self.scratch = Path(tempfile.mkdtemp(
+            prefix="cpa-notice-junction-")).resolve(strict=True)
         self.root = self.scratch / "package"
         self.root.mkdir()
 
@@ -118,33 +119,55 @@ class NoticeJunctionTests(unittest.TestCase):
 
     def test_synthetic_symlink_to_same_license_is_refused(self) -> None:
         data = self.basic()
-        target = self.root / "LICENSE"
+        target = self.scratch / "unvisited-symlink-target"
+        hits = 0
         original = Path.is_symlink
 
         def is_symlink(path: Path) -> bool:
-            return path == target or original(path)
+            nonlocal hits
+            if path == target:
+                hits += 1
+                return True
+            return original(path)
 
         with patch.object(Path, "is_symlink", is_symlink):
+            texts, manifest = notices.archive_files(
+                data, "package", installed_root=self.root)
+            self.assertEqual(texts, {"LICENSE": LICENSE})
+            self.assertEqual(manifest, MANIFEST)
+            self.assertEqual(hits, 0)
+            target = self.root / "LICENSE"
             with self.assertRaisesRegex(notices.NoticeError,
                                         "reparse path refused"):
                 notices.archive_files(data, "package", installed_root=self.root)
+            self.assertGreater(hits, 0, "synthetic symlink target was not visited")
 
     def test_synthetic_windows_reparse_attribute_is_refused(self) -> None:
         data = self.basic()
-        target = self.root / "LICENSE"
+        target = self.scratch / "unvisited-reparse-target"
+        hits = 0
         original = Path.lstat
 
         def lstat(path: Path, *args: object, **kwargs: object) -> object:
+            nonlocal hits
             info = original(path, *args, **kwargs)
             if path != target:
                 return info
+            hits += 1
             return SimpleNamespace(st_mode=info.st_mode, st_size=info.st_size,
                                    st_file_attributes=0x400)
 
         with patch.object(Path, "lstat", lstat):
+            texts, manifest = notices.archive_files(
+                data, "package", installed_root=self.root)
+            self.assertEqual(texts, {"LICENSE": LICENSE})
+            self.assertEqual(manifest, MANIFEST)
+            self.assertEqual(hits, 0)
+            target = self.root / "LICENSE"
             with self.assertRaisesRegex(notices.NoticeError,
                                         "reparse path refused"):
                 notices.archive_files(data, "package", installed_root=self.root)
+            self.assertGreater(hits, 0, "synthetic reparse target was not visited")
 
     def test_walk_error_is_not_silently_ignored(self) -> None:
         data = self.basic()

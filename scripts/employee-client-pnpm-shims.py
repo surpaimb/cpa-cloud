@@ -47,6 +47,48 @@ class ShimError(Exception):
     """A fixed-message refusal; caller must not print untrusted paths."""
 
 
+REFUSAL_CATEGORIES = {
+    "linked or reparse path refused": "reparse",
+    "unexpected path kind": "path_kind",
+    "root alias refused": "root_alias",
+    "directory entry budget exceeded": "entry_budget",
+    "file size budget exceeded": "file_budget",
+    "file changed during read": "file_identity",
+    "pnpm version not pinned": "version",
+    "project pnpm configuration not pinned": "project_config",
+    "pnpm config directory not pinned": "config_root",
+    "pnpm rc configuration not pinned": "config_rc",
+    "pnpm config directory changed": "config_entries",
+    "pnpm rc is not empty": "config_nonempty",
+    "pnpm environment configuration not pinned": "environment_config",
+    "package manager identity differs": "package_manager",
+    "lockfile format differs": "lockfile",
+    "pnpm tool directory already exists": "tool_exists",
+    "pnpm archive size invalid": "archive_size",
+    "pnpm archive integrity differs": "archive_integrity",
+    "pnpm archive member count differs": "archive_members",
+    "pnpm archive member path or type invalid": "archive_member",
+    "pnpm executable bytes differ": "tool_payload",
+    "generated nested directory regrew": "shim_regrowth",
+}
+
+
+def refusal_category(error: Exception) -> str:
+    """Return only reviewed fixed categories, never exception text or values."""
+    if isinstance(error, ShimError):
+        return REFUSAL_CATEGORIES.get(error.args[0]
+                                      if error.args else None, "other_refusal")
+    if isinstance(error, OSError):
+        return "filesystem_error"
+    if isinstance(error, (UnicodeError, ValueError)):
+        return "data_error"
+    if isinstance(error, tarfile.TarError):
+        return "archive_error"
+    if isinstance(error, EOFError):
+        return "end_of_input"
+    return "internal_error"
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ShimError(message)
@@ -459,39 +501,50 @@ def main() -> int:
     parser.add_argument("--runner-temp", type=Path, required=True)
     parser.add_argument("--pnpm-version", required=True)
     args = parser.parse_args()
+    phase = "runner_root"
     try:
         runner_temp = absolute_plain(args.runner_temp)
+        phase = "workspace_root"
         workspace = absolute_plain(args.workspace)
+        phase = "config"
         check_config(workspace, runner_temp, args.pnpm_version)
+        phase = "source_inputs"
         check_source_inputs(workspace)
+        phase = "command_contract"
         if args.command == "preflight":
             require(args.reference is None, "unexpected reference")
             print("pnpm configuration preflight accepted")
         elif args.command == "pin-tool":
             require(args.reference is None, "unexpected reference")
+            phase = "pin_tool"
             pin_tool(runner_temp)
             print("verified pnpm 11.25.0 tool archive and extracted payload")
         elif args.command == "verify-tool":
             require(args.reference is None, "unexpected reference")
+            phase = "verify_tool"
             verify_tool(runner_temp)
             print("verified pnpm 11.25.0 tool payload")
         elif args.command == "reconcile":
             require(args.reference is not None, "reference absent")
+            phase = "reference_root"
             reference = absolute_plain(args.reference)
             require(reference.parent == runner_temp
                     and reference.name == "employee-pnpm-reference",
                     "reference location not pinned")
+            phase = "reconcile"
             directories, leaves = reconcile(workspace, reference)
             print(f"verified generated nested dirs={directories} shims={leaves}")
         else:
             require(args.reference is None, "unexpected reference")
+            phase = "check_clean"
             snapshot = scan_store(workspace)
             require(not snapshot.nested and not snapshot.shims,
                     "generated nested directory regrew")
             print("verified generated nested dirs=0 shims=0")
-    except (ShimError, OSError, UnicodeError, ValueError, tarfile.TarError,
-            EOFError):
-        print("pnpm generated-shim verification refused", file=sys.stderr)
+    except Exception as error:
+        print("pnpm generated-shim verification refused "
+              f"phase={phase} category={refusal_category(error)}",
+              file=sys.stderr)
         return 1
     return 0
 
