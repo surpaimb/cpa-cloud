@@ -304,11 +304,12 @@ def reconcile_diagnostic_cases(temp: Path) -> None:
         "pnpm generated-shim verification refused phase=reconcile "
         "category=other_refusal stage=byte_compare reason=shim_bytes_mismatch "
         "mutation_possible=false\n")
-    if actual != expected:
+    if actual != expected or reconcile_mock.call_count != 1:
         print("synthetic reconcile stderr mismatch " +
               safe_reconcile_stderr_summary(actual, reconcile_mock.call_count),
               file=sys.stderr)
     assert actual == expected
+    assert reconcile_mock.call_count == 1
     assert safe_reconcile_stderr_summary(expected, 1) == (
         "phase=reconcile category=other_refusal stage=byte_compare "
         "reason=shim_bytes_mismatch mutation_possible=false "
@@ -317,10 +318,33 @@ def reconcile_diagnostic_cases(temp: Path) -> None:
     assert unknown == "shape=unrecognized length=25 mock_calls=0"
 
 
+def root_guard_mock_cases(temp: Path) -> None:
+    root = temp / "root_guard"
+    root.mkdir()
+    assert MODULE.absolute_plain(root) == root
+
+    real_junction = Path.is_junction
+    def injected_junction(path: Path) -> bool:
+        return path == root or real_junction(path)
+    with mock.patch.object(Path, "is_junction", injected_junction):
+        refused(lambda: MODULE.absolute_plain(root),
+                "linked or reparse path refused")
+
+    real_resolve = Path.resolve
+    def injected_alias(path: Path, strict: bool = False) -> Path:
+        return root.parent if path == root else real_resolve(path, strict=strict)
+    with mock.patch.object(Path, "resolve", injected_alias):
+        refused(lambda: MODULE.absolute_plain(root), "root alias refused")
+    assert MODULE.absolute_plain(root) == root
+
+
 def main():
     names = []
     with tempfile.TemporaryDirectory(prefix="employee-pnpm-shim-test-") as tempdir:
-        temp = Path(tempdir)
+        temp = Path(tempdir).resolve(strict=True)
+        root_guard_mock_cases(temp)
+        names.extend(("mocked_junction_root_refused",
+                      "mocked_root_alias_refused"))
 
         actual, reference, a_bin, _ = paired(temp / "positive")
         assert MODULE.check_source_inputs(actual) is None

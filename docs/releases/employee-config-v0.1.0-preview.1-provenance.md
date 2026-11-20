@@ -230,6 +230,16 @@ cause remain unknown. Real reconciliation, notice collection, and installer
 build were not reached. This candidate preserves the strict assertion and
 adds only bounded, fixed-field diagnostics for a future natural run.
 
+The [thirteenth](https://github.com/surpaimb/cpa-cloud/actions/runs/44809859743)
+again failed in that synthetic test on both platforms. The fixed diagnostic
+was `phase=runner_root category=reparse length=76 mock_calls=0` on macOS and
+`phase=runner_root category=root_alias length=79 mock_calls=0` on Windows.
+Neither run recorded the physical path or reached the injected reconciliation
+mock, real reconciliation, notice collection, or installer build. The exact
+runner-path causes remain unknown. This candidate canonicalizes only the
+synthetic temporary root and tests mocked junction and alias refusals; it
+does not loosen the production root guard or erase the old failures.
+
 Local evidence also retains the v25 sanitizer stress timeout, the first v26
 allowlist-verifier error, the v27 empty-stderr summary error, and the v28
 Windows-newline oracle harness error. Those were local tool or evidence stops,
