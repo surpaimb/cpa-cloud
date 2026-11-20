@@ -222,6 +222,14 @@ whether a shim unlink began were not recorded. This candidate adds only fixed
 stage, reason, and `mutation_possible` diagnostics to that fail-closed path;
 it does not change the comparison, removal, or exit order.
 
+The [twelfth](https://github.com/surpaimb/cpa-cloud/actions/runs/44806498260)
+failed on both macOS and Windows at the generated-shim step. The old-head
+synthetic test's exact captured-stderr assertion at line 260 failed on both;
+the StringIO value was not printed, so the actual refusal fields and common
+cause remain unknown. Real reconciliation, notice collection, and installer
+build were not reached. This candidate preserves the strict assertion and
+adds only bounded, fixed-field diagnostics for a future natural run.
+
 Local evidence also retains the v25 sanitizer stress timeout, the first v26
 allowlist-verifier error, the v27 empty-stderr summary error, and the v28
 Windows-newline oracle harness error. Those were local tool or evidence stops,

@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tarfile
 import tempfile
@@ -22,6 +23,46 @@ SPEC = importlib.util.spec_from_file_location("employee_pnpm_shims", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+
+
+def safe_reconcile_stderr_summary(actual: str, calls: int) -> str:
+    """Report only fixed refusal codes; never echo captured stderr."""
+    length = str(len(actual)) if len(actual) <= 512 else "over_512"
+    count = str(calls) if 0 <= calls <= 9 else "over_9"
+    base = f"length={length} mock_calls={count}"
+    if (len(actual) > 512 or actual.count("\n") != 1
+            or not actual.endswith("\n") or "\r" in actual):
+        return f"shape=unrecognized {base}"
+    match = re.fullmatch(
+        r"pnpm generated-shim verification refused "
+        r"phase=([a-z_]{1,32}) category=([a-z_]{1,32})"
+        r"(?: stage=([a-z_]{1,32}) reason=([a-z_]{1,32}) "
+        r"mutation_possible=(true|false))?\n", actual)
+    if match is None:
+        return f"shape=unrecognized {base}"
+    phase, category, stage, reason, mutation = match.groups()
+    phases = {"runner_root", "workspace_root", "config", "source_inputs",
+              "command_contract", "pin_tool", "verify_tool", "reference_root",
+              "reconcile", "check_clean"}
+    categories = set(MODULE.REFUSAL_CATEGORIES.values()) | {
+        "other_refusal", "filesystem_error", "data_error", "archive_error",
+        "end_of_input", "internal_error"}
+    stages = {"reference_inputs", "source_scan", "reference_scan", "graph",
+              "shape", "byte_compare", "pre_unlink", "unlink",
+              "remove_dirs", "post_scan"}
+    reasons = (set(MODULE.RECONCILE_REASONS.values())
+               | set(MODULE.REFUSAL_CATEGORIES.values())
+               | {"unmapped_refusal", "non_refusal_exception"})
+    if phase not in phases or category not in categories:
+        return f"shape=unrecognized {base}"
+    if phase == "reconcile":
+        if stage not in stages or reason not in reasons or mutation is None:
+            return f"shape=unrecognized {base}"
+        return (f"phase={phase} category={category} stage={stage} "
+                f"reason={reason} mutation_possible={mutation} {base}")
+    if stage is not None or reason is not None or mutation is not None:
+        return f"shape=unrecognized {base}"
+    return f"phase={phase} category={category} {base}"
 
 
 def project(root: Path, *, shim: bytes | None = None) -> Path:
@@ -255,12 +296,25 @@ def reconcile_diagnostic_cases(temp: Path) -> None:
          mock.patch.object(sys, "stderr", stderr), \
          mock.patch.object(MODULE, "check_config"), \
          mock.patch.object(MODULE, "check_source_inputs"), \
-         mock.patch.object(MODULE, "reconcile", side_effect=fixed_refusal):
+         mock.patch.object(MODULE, "reconcile",
+                           side_effect=fixed_refusal) as reconcile_mock:
         assert MODULE.main() == 1
-    assert stderr.getvalue() == (
+    actual = stderr.getvalue()
+    expected = (
         "pnpm generated-shim verification refused phase=reconcile "
         "category=other_refusal stage=byte_compare reason=shim_bytes_mismatch "
         "mutation_possible=false\n")
+    if actual != expected:
+        print("synthetic reconcile stderr mismatch " +
+              safe_reconcile_stderr_summary(actual, reconcile_mock.call_count),
+              file=sys.stderr)
+    assert actual == expected
+    assert safe_reconcile_stderr_summary(expected, 1) == (
+        "phase=reconcile category=other_refusal stage=byte_compare "
+        "reason=shim_bytes_mismatch mutation_possible=false "
+        f"length={len(expected)} mock_calls=1")
+    unknown = safe_reconcile_stderr_summary("secret=/private/var/fake\n", 0)
+    assert unknown == "shape=unrecognized length=25 mock_calls=0"
 
 
 def main():
