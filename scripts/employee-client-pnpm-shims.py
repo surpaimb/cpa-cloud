@@ -412,6 +412,7 @@ class Snapshot:
 class ReconcileTrace:
     stage: str = "reference_inputs"
     mutation_possible: bool = False
+    byte_difference: str = "none"
 
 
 def scan_store(workspace: Path) -> Snapshot:
@@ -499,11 +500,57 @@ def normalized(content: bytes, root: Path) -> bytes:
     return result
 
 
+BYTE_DIFFERENCE_CLASSES = (
+    "line_endings_only", "terminal_eol_only",
+    "extra_root_spelling_only", "other",
+)
+
+
+def _strict_crlf_variant(crlf: bytes, lf: bytes) -> bool:
+    if b"\r\n" not in crlf or b"\r" in lf:
+        return False
+    without_pairs = crlf.replace(b"\r\n", b"")
+    return (b"\r" not in without_pairs and b"\n" not in without_pairs
+            and crlf.replace(b"\r\n", b"\n") == lf)
+
+
+def _extra_windows_root(root: Path) -> bytes | None:
+    drive = root.drive
+    if (len(drive) != 2 or drive[1] != ":"
+            or drive[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"):
+        return None
+    forward = str(root).replace("\\", "/")
+    if not forward.startswith(drive + "/"):
+        return None
+    return ("/" + drive[0].lower() + forward[2:]).encode("utf-8")
+
+
+def byte_difference_class(left: bytes, right: bytes,
+                          workspace: Path, reference: Path) -> str:
+    """Classify only already-read unequal bytes; never authorize a mutation."""
+    if (_strict_crlf_variant(left, right)
+            or _strict_crlf_variant(right, left)):
+        return "line_endings_only"
+    if any(left == right + suffix or right == left + suffix
+           for suffix in (b"\n", b"\r\n")):
+        return "terminal_eol_only"
+    workspace_extra = _extra_windows_root(workspace)
+    reference_extra = _extra_windows_root(reference)
+    if workspace_extra is not None and reference_extra is not None:
+        marker = b"@CPA_PNPM_WORKSPACE_ROOT@"
+        if (workspace_extra in left or reference_extra in right) and (
+                left.replace(workspace_extra, marker)
+                == right.replace(reference_extra, marker)):
+            return "extra_root_spelling_only"
+    return "other"
+
+
 def reconcile(workspace: Path, reference: Path,
               trace: ReconcileTrace | None = None) -> tuple[int, int]:
     trace = trace if trace is not None else ReconcileTrace()
     trace.stage = "reference_inputs"
     trace.mutation_possible = False
+    trace.byte_difference = "none"
     check_inputs(workspace, reference)
     trace.stage = "source_scan"
     actual = scan_store(workspace)
@@ -517,9 +564,15 @@ def reconcile(workspace: Path, reference: Path,
             "pnpm nested entry set differs")
     trace.stage = "byte_compare"
     for key in sorted(actual.shims):
-        require(normalized(actual.shims[key], workspace)
-                == normalized(expected.shims[key], reference),
-                "generated shim bytes differ")
+        left = normalized(actual.shims[key], workspace)
+        right = normalized(expected.shims[key], reference)
+        if left != right:
+            try:
+                trace.byte_difference = byte_difference_class(
+                    left, right, workspace, reference)
+            except Exception:
+                trace.byte_difference = "other"
+        require(left == right, "generated shim bytes differ")
 
     store = workspace / "node_modules" / ".pnpm"
     # All graph and byte comparisons above complete before the first unlink.
@@ -606,8 +659,14 @@ def main() -> int:
                     "generated nested directory regrew")
             print("verified generated nested dirs=0 shims=0")
     except Exception as error:
+        difference = (
+            f" byte_difference={trace.byte_difference}"
+            if phase == "reconcile" and trace.stage == "byte_compare"
+            and refusal_reason(error) == "shim_bytes_mismatch"
+            and trace.byte_difference in BYTE_DIFFERENCE_CLASSES else "")
         detail = (f" stage={trace.stage} reason={refusal_reason(error)}"
                   f" mutation_possible={str(trace.mutation_possible).lower()}"
+                  f"{difference}"
                   if phase == "reconcile" else "")
         print("pnpm generated-shim verification refused "
               f"phase={phase} category={refusal_category(error)}{detail}",

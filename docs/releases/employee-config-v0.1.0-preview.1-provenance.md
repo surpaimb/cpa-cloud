@@ -265,6 +265,30 @@ isolated edits. Neither stopped batch is promoted into a completed source
 seal or native package result. The real Mac and Windows installers remain
 unverified by this candidate.
 
+The [fourteenth](https://github.com/surpaimb/cpa-cloud/actions/runs/44811694164)
+also produced no installer. macOS passed the shim step, then notice collection
+stopped at Cargo package lacks full license text: jni-sys-macros@0.4.1.
+Windows passed the synthetic shim tests but real reconciliation refused at
+stage=byte_compare reason=shim_bytes_mismatch mutation_possible=false after
+graph, shape, and shim-key checks. No shim unlink began. The normalized byte
+difference remains unknown; the isolated diagnostic classifier only labels
+already-read unequal bytes and never changes the comparison or refusal.
+
+The jni-sys-macros@0.4.1 official crate archive is 3301 bytes with SHA-256
+38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264.
+Its .cargo_vcs_info.json binds commit
+64d77b7a5f119d7b55b4e2c169a4668067ff59e6 and path jni-sys-macros;
+the Cargo metadata declares MIT OR Apache-2.0 and the jni-rs/jni-sys repository.
+The two full-text fallback files come from the repository root at that fixed
+commit: LICENSE-MIT Git blob 2008402b8a1299cf118ea38e02116bfcc72e53c3
+(1071 bytes) and LICENSE-APACHE Git blob
+8f71f43fee3f78649d238238cbde51e6d7055c82 (11358 bytes).
+Each package notice and readback requires both pinned sources; the crate's
+license label alone is not treated as full text. This isolated candidate and
+its local tests do not establish a successful native macOS or Windows package.
+The earlier isolated Windows diagnostic and evidence batches stopped on tool
+or verifier failures; their partial results are not accepted as package CI.
+
 The packages deliberately do not enable `apply_configuration`. Installation
 and static package inspection do not prove that an employee can apply settings,
 that the app launches on every machine, or that it is production ready.

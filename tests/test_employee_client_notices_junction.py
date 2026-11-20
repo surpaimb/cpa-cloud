@@ -56,6 +56,16 @@ MIT_TEMPLATE_BYTES = committed_fixture(
     (FALLBACKS / "block2-0.6.2-LICENSE-MIT.txt").read_bytes(), 1078,
     "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
 )
+JNI_MIT_BYTES = committed_fixture(
+    (FALLBACKS / "jni-sys-macros-0.4.1-LICENSE-MIT.txt").read_bytes(), 1071,
+    "1d85bd754b04ceec93e98e890edd1fa3c6a22e81bcb32135806beeccefa51cd1",
+)
+JNI_APACHE_BYTES = committed_fixture(
+    (FALLBACKS / "jni-sys-macros-0.4.1-LICENSE-APACHE.txt").read_bytes(), 11358,
+    "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
+)
+
+
 MIT_DLOPEN2_BYTES = committed_fixture(
     (FALLBACKS / "dlopen2-rs-LICENSE.txt").read_bytes(), 1184,
     "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2",
@@ -779,6 +789,178 @@ class Dlopen2SharedLicenseTests(unittest.TestCase):
                                                 "committed source file changed"):
                         notices.verify(output, workspace, notices.sha(manifest_bytes),
                                        workspace / "synthetic-bundle")
+
+
+class JniSysMacrosFallbackTests(unittest.TestCase):
+    """Synthetic Cargo identity refusals; official archive is verified separately."""
+
+    VCS = "64d77b7a5f119d7b55b4e2c169a4668067ff59e6"
+    REPO = "https://github.com/jni-rs/jni-sys"
+
+    def setUp(self) -> None:
+        self.scratch = Path(tempfile.mkdtemp(prefix="cpa-jni-macros-notice-")).resolve(strict=True)
+        self.case_number = 0
+
+    def cargo_case(self, *, checksum_valid: bool = True,
+                   pin_valid: bool = True, vcs: str = VCS,
+                   vcs_path: str = "jni-sys-macros",
+                   label: str = "MIT OR Apache-2.0",
+                   repository: str = REPO,
+                   mit: bytes | None = None,
+                   apache: bytes | None = None) -> dict:
+        self.case_number += 1
+        case = self.scratch / str(self.case_number)
+        home = case / "cargo-home"
+        source = home / "registry" / "src" / "index" / "jni-sys-macros-0.4.1"
+        cache = home / "registry" / "cache" / "index"
+        workspace = case / "workspace"
+        for directory in (source, cache, workspace):
+            directory.mkdir(parents=True)
+        cargo_manifest = (
+            b'[package]\nname="jni-sys-macros"\nversion="0.4.1"\n'
+            b'license="MIT OR Apache-2.0"\n'
+            b'repository="https://github.com/jni-rs/jni-sys"\n')
+        vcs_bytes = json.dumps({"git": {"sha1": vcs},
+                                "path_in_vcs": vcs_path}).encode()
+        (source / "Cargo.toml").write_bytes(cargo_manifest)
+        (source / ".cargo_vcs_info.json").write_bytes(vcs_bytes)
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            for relative, content in (("Cargo.toml", cargo_manifest),
+                                      (".cargo_vcs_info.json", vcs_bytes)):
+                item = tarfile.TarInfo("jni-sys-macros-0.4.1/" + relative)
+                item.size = len(content)
+                tar.addfile(item, io.BytesIO(content))
+        data = buffer.getvalue()
+        (cache / "jni-sys-macros-0.4.1.crate").write_bytes(data)
+        local = []
+        for local_name, local_version in sorted(notices.FIRST_PARTY_CARGO):
+            local_manifest = workspace / local_name / "Cargo.toml"
+            local_manifest.parent.mkdir()
+            local_manifest.write_text("[package]\nname='synthetic'\nversion='0.1.0'\n")
+            local.append({"name": local_name, "version": local_version,
+                          "source": None, "manifest_path": str(local_manifest)})
+        metadata = {"packages": local + [{
+            "name": "jni-sys-macros", "version": "0.4.1",
+            "source": notices.CRATES_IO,
+            "manifest_path": str(source / "Cargo.toml"),
+            "license": label, "repository": repository,
+        }]}
+        checksum = notices.sha(data) if checksum_valid else "0" * 64
+        committed = {
+            notices.VENDORED_CARGO[("jni-sys-macros", "0.4.1", "LICENSE-MIT")]:
+                JNI_MIT_BYTES if mit is None else mit,
+            notices.VENDORED_CARGO[("jni-sys-macros", "0.4.1", "LICENSE-APACHE")]:
+                JNI_APACHE_BYTES if apache is None else apache,
+        }
+
+        def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            self.assertEqual(argv[:2], ["cargo", "metadata"])
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+
+        with patch.dict(os.environ, {"CARGO_HOME": str(home)}), \
+             patch.object(notices.subprocess, "run", side_effect=cargo_metadata), \
+             patch.object(notices, "git_blob",
+                          side_effect=lambda _workspace, item: committed.get(item, b"")), \
+             patch.object(notices, "JNI_SYS_MACROS_ARCHIVE_SHA256",
+                          notices.sha(data) if pin_valid else "0" * 64), \
+             patch.object(notices, "JNI_SYS_MACROS_ARCHIVE_BYTES", len(data)):
+            return notices.cargo_packages(
+                workspace, {("jni-sys-macros", "0.4.1"): checksum})[0]
+
+    def test_exact_identity_needs_both_full_texts(self) -> None:
+        package = self.cargo_case()
+        self.assertEqual(package["license"], "MIT OR Apache-2.0")
+        self.assertEqual(package["notice_status"], "vendored_external")
+        self.assertEqual(package["texts"], {
+            "EXTERNAL_ORIGIN/LICENSE-MIT": JNI_MIT_BYTES,
+            "EXTERNAL_ORIGIN/LICENSE-APACHE": JNI_APACHE_BYTES,
+        })
+        self.assertEqual(len(package["external_sources"]), 2)
+        self.assertTrue(all(item["role"] == "full-license-text"
+                            for item in package["external_sources"]))
+
+    def test_checksum_vcs_path_metadata_and_both_texts_refuse(self) -> None:
+        cases = (
+            ({"checksum_valid": False}, "archive checksum mismatch"),
+            ({"pin_valid": False}, "official archive identity differs"),
+            ({"vcs": "0" * 40}, "archive VCS origin differs"),
+            ({"vcs_path": "wrong/path"}, "archive VCS origin differs"),
+            ({"label": "MIT"}, "external license identity differs"),
+            ({"repository": "https://example.invalid/jni"},
+             "external license identity differs"),
+            ({"mit": b""}, "vendored committed notice differs"),
+            ({"mit": b"tampered"}, "vendored committed notice differs"),
+            ({"apache": b""}, "vendored committed notice differs"),
+            ({"apache": b"tampered"}, "vendored committed notice differs"),
+        )
+        for change, reason in cases:
+            with self.subTest(change=change):
+                with self.assertRaisesRegex(notices.NoticeError, reason):
+                    self.cargo_case(**change)
+
+    def test_collect_verify_and_both_tamper_paths(self) -> None:
+        package = self.cargo_case()
+        workspace = self.scratch / "distribution"
+        workspace.mkdir()
+        output = self.scratch / "notices"
+        names = [
+            "Cargo.lock", "pnpm-lock.yaml", "package.json", "Cargo.toml",
+            "third_party/cc-switch/LICENSE", "PROVENANCE.md",
+            "DEPENDENCY-LICENSES.md", *sorted(notices.VENDORED_FILES),
+        ]
+        committed = {item: (item + "\n").encode() for item in names}
+        for filename, content in (("LICENSE-MIT", JNI_MIT_BYTES),
+                                  ("LICENSE-APACHE", JNI_APACHE_BYTES)):
+            committed[notices.VENDORED_CARGO[
+                ("jni-sys-macros", "0.4.1", filename)]] = content
+        cargo = {("jni-sys-macros", "0.4.1"):
+                 package["integrity"].removeprefix("sha256-")}
+
+        def fake_git(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            self.assertEqual(argv[0], "git")
+            if argv[-1] == "--show-toplevel":
+                value = str(workspace)
+            elif argv[-1] == "HEAD":
+                value = "a" * 40
+            elif "status" in argv:
+                value = ""
+            else:
+                self.fail("unexpected synthetic Git operation")
+            return SimpleNamespace(returncode=0, stdout=value, stderr="")
+
+        with patch.object(notices.subprocess, "run", side_effect=fake_git), \
+             patch.object(notices, "git_blob",
+                          side_effect=lambda _w, item: committed[item]), \
+             patch.object(notices, "cargo_lock", return_value=cargo), \
+             patch.object(notices, "pnpm_lock", return_value={}), \
+             patch.object(notices, "pnpm_graph", return_value=([], {})), \
+             patch.object(notices, "bundle_packages", return_value=set()), \
+             patch.object(notices, "pnpm_packages", return_value=([], [])), \
+             patch.object(notices, "cargo_packages", return_value=[package]):
+            notices.collect(workspace, output, workspace / "synthetic-bundle")
+            manifest_bytes = (output / "manifest.json").read_bytes()
+            prefix = "cargo/jni-sys-macros@0.4.1/EXTERNAL_ORIGIN/"
+            notices.verify(output, workspace, notices.sha(manifest_bytes),
+                           workspace / "synthetic-bundle")
+            for filename, original in (("LICENSE-MIT", JNI_MIT_BYTES),
+                                       ("LICENSE-APACHE", JNI_APACHE_BYTES)):
+                target = output / (prefix + filename)
+                self.assertEqual(target.read_bytes(), original)
+                target.write_bytes(b"tampered")
+                with self.assertRaisesRegex(notices.NoticeError,
+                                            "notice hash/size mismatch"):
+                    notices.verify(output, workspace, notices.sha(manifest_bytes),
+                                   workspace / "synthetic-bundle")
+                target.write_bytes(original)
+                vendored = notices.VENDORED_CARGO[
+                    ("jni-sys-macros", "0.4.1", filename)]
+                committed[vendored] = b"changed"
+                with self.assertRaisesRegex(notices.NoticeError,
+                                            "committed source file changed"):
+                    notices.verify(output, workspace, notices.sha(manifest_bytes),
+                                   workspace / "synthetic-bundle")
+                committed[vendored] = original
 
 
 class Cesu8LegacyTests(unittest.TestCase):

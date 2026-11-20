@@ -53,6 +53,8 @@ RELEASE_SOURCE_FILES = {
     "desktop/employee-config-switcher/third_party/notice-fallbacks/defmt-parser-1.0.0-LICENSE-APACHE.txt",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/defmt-parser-1.0.0-LICENSE-MIT.txt",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/dlopen2-rs-LICENSE.txt",
+    "desktop/employee-config-switcher/third_party/notice-fallbacks/jni-sys-macros-0.4.1-LICENSE-APACHE.txt",
+    "desktop/employee-config-switcher/third_party/notice-fallbacks/jni-sys-macros-0.4.1-LICENSE-MIT.txt",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/selectors-0.38.0-MPL-2.0.txt",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/selectors-0.38.0-STYLO-README.md",
     "desktop/employee-config-switcher/third_party/notice-fallbacks/webview2-rs-LICENSE.txt",

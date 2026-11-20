@@ -1,6 +1,6 @@
 # CPA Cloud 员工配置客户端 0.1.0 开发预览
 
-本次仅提供员工桌面客户端的两个安装包：macOS Universal DMG（Intel 与 Apple Silicon）和 Windows x64 NSIS Setup。它们不是 CPA Cloud Go 服务端安装包。每个安装包附独立 SHA-256 校验文件；GitHub Release 会注明精确源码提交。自动验收仅挂载或静默安装并检查包内文件与身份，未启动客户端，也未在员工电脑上验收实际使用。
+本开发预览涵盖员工桌面客户端的两个安装包：macOS Universal DMG（Intel 与 Apple Silicon）和 Windows x64 NSIS Setup。它们不是 CPA Cloud Go 服务端安装包。每个安装包附独立 SHA-256 校验文件；GitHub Release 会注明精确源码提交。发行自动验收仅挂载或静默安装并检查包内文件与身份，不会启动客户端，也不会在员工电脑上验收实际使用。
 
 ## 当前可用范围
 
@@ -17,8 +17,13 @@
 - 已知 Code validation 中 Go 离线缓存校验失败，机制尚未查明；现有证据不能将其归因于本次桌面打包改动，预览包检查也不能覆盖这个失败。
 - 原生打包第 4 次自然 CI 的 macOS Rust 单测 `oversized_journal_fields_are_rejected_and_preserved` 曾因非阻塞锁返回 OS 35 WouldBlock 而失败；该测试在后续第 5、6 次运行通过，但锁持有者与根因未知，失败工作流未手动重跑。
 
+- 第 10 至 13 次自然打包失败的记录仍保留。第 14 次自然打包在 macOS 因 jni-sys-macros@0.4.1 缺完整许可证文本而失败；Windows 的 pnpm shim 与独立参考安装字节不一致，校验在删除 shim 前拒绝，具体差异原因未知。第14次运行未产生可发布的双平台安装包。
+- 两个预览安装包及各自的 SHA-256 文件，仅在拟发布的精确源码提交经后续自然 CI 的 macOS 与 Windows 打包及校验均通过后发布。即使包内文件检查通过，也不能证明客户端已在员工设备上实际可用。
+
 请先核对同名 .sha256 文件，再安装。此版本仅供开发预览与反馈。
 
 ## English summary
 
-This prerelease contains one macOS Universal DMG and one Windows x64 NSIS installer for the employee desktop client. Configuration application is disabled and fails closed; the app can only detect clients and preview configuration. The macOS app is ad-hoc signed but not Apple Developer signed or notarized; Windows is unsigned and may need internet access to install WebView2. Automated checks mount or silently install the packages and inspect identity and bundled notices; they do not launch the app or verify use on an employee device. This is not a production-ready client or server release. Full dependency notices are bundled and checked before publication. The Go offline cache verification in Code validation is known to fail; its mechanism remains unknown, and current evidence does not attribute it to these desktop packaging changes. Package checks do not cover that failure. In the fourth natural package run, the macOS Rust test `oversized_journal_fields_are_rejected_and_preserved` failed with a nonblocking lock OS 35 WouldBlock; it passed in the fifth and sixth runs, but the lock holder and cause are unknown. The failed run was not manually rerun.
+This prerelease covers one macOS Universal DMG and one Windows x64 NSIS installer for the employee desktop client. Configuration application is disabled and fails closed; the app can only detect clients and preview configuration. The macOS app is ad-hoc signed but not Apple Developer signed or notarized; Windows is unsigned and may need internet access to install WebView2. Automated release checks mount or silently install the packages and inspect identity and bundled notices; they do not launch the app or verify use on an employee device. This is not a production-ready client or server release. Full dependency notices must be bundled and checked before publication. The Go offline cache verification in Code validation is known to fail; its mechanism remains unknown, and current evidence does not attribute it to these desktop packaging changes. Package checks do not cover that failure. In the fourth natural package run, the macOS Rust test `oversized_journal_fields_are_rejected_and_preserved` failed with a nonblocking lock OS 35 WouldBlock; it passed in the fifth and sixth runs, but the lock holder and cause are unknown. The failed run was not manually rerun.
+
+Failures in natural package runs 10 through 13 remain documented. Natural run 14 failed on macOS because complete license text for jni-sys-macros@0.4.1 was missing; on Windows, pnpm shim bytes differed from an independent reference installation, and verification refused before unlinking any shim. The cause of the Windows byte difference remains unknown. That run produced no publishable pair of installers. Publication of the two preview installers and their SHA-256 files requires a later naturally triggered CI run for the exact release source commit to pass macOS and Windows packaging and validation. Inspection of mounted or installed package files does not establish actual use on an employee device.

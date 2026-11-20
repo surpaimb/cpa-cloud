@@ -13,7 +13,7 @@ import re
 import sys
 import tarfile
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 sys.dont_write_bytecode = True
@@ -318,6 +318,54 @@ def reconcile_diagnostic_cases(temp: Path) -> None:
     assert unknown == "shape=unrecognized length=25 mock_calls=0"
 
 
+def byte_difference_diagnostic_cases(temp: Path) -> tuple[str, ...]:
+    """All mismatches refuse before unlink; diagnostic values are fixed codes."""
+    def verify(label, actual_bytes, reference_bytes, category):
+        actual, reference, a_bin, _ = paired(temp / label)
+        before = (a_bin / "fake").read_bytes()
+        left, right = MODULE.scan_store(actual), MODULE.scan_store(reference)
+        key = next(iter(left.shims))
+        left.shims[key] = (actual_bytes(actual)
+                           if callable(actual_bytes) else actual_bytes)
+        right.shims[key] = (reference_bytes(reference)
+                            if callable(reference_bytes) else reference_bytes)
+        trace = MODULE.ReconcileTrace()
+        with mock.patch.object(MODULE, "scan_store",
+                               side_effect=[left, right]):
+            refused(lambda: MODULE.reconcile(actual, reference, trace),
+                    "generated shim bytes differ")
+        assert trace.stage == "byte_compare" and not trace.mutation_possible
+        assert trace.byte_difference == category, label
+        assert (a_bin / "fake").read_bytes() == before, label
+
+    verify("crlf", b"first\r\nsecond\r\n",
+           b"first\nsecond\n", "line_endings_only")
+    verify("terminal", b"same\n", b"same", "terminal_eol_only")
+    verify("unknown", b"CANARY-UNTRUSTED-CONTENT", b"same", "other")
+    with mock.patch.object(MODULE, "byte_difference_class",
+                           side_effect=ValueError("PRIVATE-DIAGNOSTIC-ERROR")):
+        verify("classifier_fault", b"untrusted", b"same", "other")
+
+    win_actual = PureWindowsPath(r"C:\synthetic\actual")
+    win_reference = PureWindowsPath(r"C:\synthetic\reference")
+    assert MODULE.byte_difference_class(
+        b"/c/synthetic/actual", b"/c/synthetic/reference",
+        win_actual, win_reference) == "extra_root_spelling_only"
+    assert MODULE.byte_difference_class(
+        b"/c/unrelated/actual", b"/c/unrelated/reference",
+        win_actual, win_reference) == "other"
+    if os.name == "nt":
+        def extra(root):
+            return ("/" + root.drive[0].lower()
+                    + str(root).replace("\\", "/")[2:]).encode()
+        verify("extra_root", extra, extra, "extra_root_spelling_only")
+    return ("crlf_byte_difference_refused",
+            "terminal_eol_byte_difference_refused",
+            "unknown_byte_difference_refused",
+            "classifier_error_still_refused",
+            "extra_windows_root_exact_derivation")
+
+
 def root_guard_mock_cases(temp: Path) -> None:
     root = temp / "root_guard"
     root.mkdir()
@@ -557,6 +605,7 @@ def main():
 
         reconcile_diagnostic_cases(temp / "diagnostics")
         names.append("fixed_reconcile_stages_reasons_and_mutation_boundary")
+        names.extend(byte_difference_diagnostic_cases(temp / "byte_diagnostics"))
 
     print(json.dumps({"passed": names, "count": len(names)}, sort_keys=True))
 

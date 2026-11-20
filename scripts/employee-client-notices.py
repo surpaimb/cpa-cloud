@@ -33,6 +33,23 @@ FIRST_PARTY_CARGO = {
     ("employee-config-core", "0.1.0"),
 }
 EXTERNAL_CARGO = {
+    ("jni-sys-macros", "0.4.1"): {
+        "repository": "https://github.com/jni-rs/jni-sys",
+        "vcs": "64d77b7a5f119d7b55b4e2c169a4668067ff59e6",
+        "path": "jni-sys-macros", "license": "MIT OR Apache-2.0",
+        "files": [
+            ("LICENSE-MIT",
+             "https://raw.githubusercontent.com/jni-rs/jni-sys/"
+             "64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-MIT",
+             "1d85bd754b04ceec93e98e890edd1fa3c6a22e81bcb32135806beeccefa51cd1",
+             1071),
+            ("LICENSE-APACHE",
+             "https://raw.githubusercontent.com/jni-rs/jni-sys/"
+             "64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-APACHE",
+             "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
+             11358),
+        ],
+    },
     ("dlopen2", "0.8.2"): {
         "repository": "https://github.com/OpenByteDev/dlopen2",
         "vcs": "cc80e4a0a90d499b677fdf7743699b4b3a43a989",
@@ -157,6 +174,10 @@ EXTERNAL_CARGO = {
     },
 }
 VENDORED_CARGO = {
+    ("jni-sys-macros", "0.4.1", "LICENSE-MIT"):
+        "third_party/notice-fallbacks/jni-sys-macros-0.4.1-LICENSE-MIT.txt",
+    ("jni-sys-macros", "0.4.1", "LICENSE-APACHE"):
+        "third_party/notice-fallbacks/jni-sys-macros-0.4.1-LICENSE-APACHE.txt",
     ("dlopen2", "0.8.2", "LICENSE"):
         "third_party/notice-fallbacks/dlopen2-rs-LICENSE.txt",
     ("dlopen2_derive", "0.4.3", "LICENSE"):
@@ -199,10 +220,12 @@ DLOPEN2_ARCHIVES = {
     ("dlopen2_derive", "0.4.3"):
         ("0fbbb781877580993a8707ec48672673ec7b81eeba04cfd2310bd28c08e47c8f", 7032),
 }
+JNI_SYS_MACROS_ARCHIVE_SHA256 = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
+JNI_SYS_MACROS_ARCHIVE_BYTES = 3301
 VENDORED_FILES = set(VENDORED_CARGO.values()) | {STYLO_DECLARATION, BLOCK2_DECLARATION}
-require_vendor_count = 11
+require_vendor_count = 13
 if len(VENDORED_FILES) != require_vendor_count:
-    raise RuntimeError("vendored notice source map does not cover eleven files")
+    raise RuntimeError("vendored notice source map does not cover thirteen files")
 CESU8_ARCHIVE_SHA256 = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 CESU8_ARCHIVE_BYTES = 10555
 CESU8_RELEASE = "f18962a9de5189f21600b7ff2898845157df4447"
@@ -806,6 +829,10 @@ def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[
                     str(meta.get("repository", "")).rstrip("/") ==
                     fallback["repository"],
                     f"Cargo external license identity differs: {name}@{version}")
+            if (name, version) == ("jni-sys-macros", "0.4.1"):
+                require(checksum == JNI_SYS_MACROS_ARCHIVE_SHA256 and
+                        len(archive_data) == JNI_SYS_MACROS_ARCHIVE_BYTES,
+                        "jni-sys-macros official archive identity differs")
             if (name, version) in DLOPEN2_ARCHIVES:
                 pinned_checksum, pinned_bytes = DLOPEN2_ARCHIVES[(name, version)]
                 require(checksum == pinned_checksum and
@@ -1561,6 +1588,16 @@ def verify(root: Path, workspace: Path, expected_manifest_sha256: str,
                 require(output_bytes == source_bytes and
                         manifest["source_files"].get(vendored) == sha(source_bytes),
                         f"cesu8 external notice differs from committed source: {relative}")
+        if key == ("cargo", "jni-sys-macros", "0.4.1") and (
+                package["notice_status"] == "vendored_external"):
+            for filename in ("LICENSE-MIT", "LICENSE-APACHE"):
+                relative = "EXTERNAL_ORIGIN/" + filename
+                vendored = VENDORED_CARGO[("jni-sys-macros", "0.4.1", filename)]
+                output_bytes = verified_texts.get(prefix + relative)
+                source_bytes = git_blob(workspace, vendored)
+                require(output_bytes == source_bytes and
+                        manifest["source_files"].get(vendored) == sha(source_bytes),
+                        f"jni-sys-macros external notice differs from committed source: {relative}")
         if key in (("cargo", "dlopen2", "0.8.2"),
                    ("cargo", "dlopen2_derive", "0.4.3")) and (
                 package["notice_status"] == "vendored_external"):
