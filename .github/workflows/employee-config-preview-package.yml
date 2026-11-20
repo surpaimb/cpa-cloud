@@ -102,12 +102,66 @@ jobs:
         run: |
           set -euo pipefail
           cargo fetch --locked
-          cargo test --locked -p employee-config-core
+          test ! -e "$RUNNER_TEMP/employee-config-core-test-target"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/employee-config-core-test-target" cargo test --locked -p employee-config-core
 
       - name: Collect complete third-party notices or fail
         shell: bash
         run: |
           set -euo pipefail
+          python - <<'PY'
+          import subprocess
+          import sys
+
+          try:
+              result = subprocess.run(
+                  ["git", "status", "--porcelain=v1", "-z",
+                   "--untracked-files=all"],
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+              )
+          except OSError:
+              print("pre-notice git status: exit=-1 stderr_bytes=0 parse_ok=0 "
+                    "tracked=0 workspace_target_untracked=0 other_untracked=0")
+              sys.exit(1)
+          tracked = target = other = 0
+          parse_ok = result.returncode == 0 and not result.stderr
+          if parse_ok:
+              records = result.stdout.split(b"\x00")
+              if records[-1] != b"":
+                  parse_ok = False
+              else:
+                  index = 0
+                  records = records[:-1]
+                  while index < len(records):
+                      record = records[index]
+                      if len(record) < 4 or record[2:3] != b" " or not record[3:]:
+                          parse_ok = False
+                          break
+                      if record[:2] == b"??":
+                          if record[3:].startswith(
+                              b"desktop/employee-config-switcher/target/"
+                          ):
+                              target += 1
+                          else:
+                              other += 1
+                      else:
+                          tracked += 1
+                          if b"R" in record[:2] or b"C" in record[:2]:
+                              index += 1
+                              if index >= len(records) or not records[index]:
+                                  parse_ok = False
+                                  break
+                      index += 1
+          print(
+              "pre-notice git status: exit={0} stderr_bytes={1} parse_ok={2} "
+              "tracked={3} workspace_target_untracked={4} other_untracked={5}".format(
+                  result.returncode, len(result.stderr), int(parse_ok),
+                  tracked, target, other,
+              )
+          )
+          if not parse_ok:
+              sys.exit(1)
+          PY
           test -f scripts/employee-client-notices.py
           python scripts/employee-client-notices.py collect \
             --workspace desktop/employee-config-switcher \

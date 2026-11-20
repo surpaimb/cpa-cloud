@@ -14,9 +14,10 @@
 - Windows Setup 未签名。未安装 WebView2 Runtime 的机器需要联网获取默认 bootstrapper；离线安装未验收。Windows SmartScreen 可能提示风险。
 - 完整第三方许可证文本及通知必须随安装包保留在应用资源的 release-notices 目录；发行工作流会解包或安装后逐文件回读并校验。不满足时不发布。
 - 这两个预览包不代表服务端生产部署、真实 M1→M2 轮换、跨旧备份撤销防复活或员工端实际应用已完成。
+- 已知 Code validation 中 Go 离线缓存校验失败，机制尚未查明；现有证据不能将其归因于本次桌面打包改动，预览包检查也不能覆盖这个失败。
 
 请先核对同名 .sha256 文件，再安装。此版本仅供开发预览与反馈。
 
 ## English summary
 
-This prerelease contains one macOS Universal DMG and one Windows x64 NSIS installer for the employee desktop client. Configuration application is disabled and fails closed; the app can only detect clients and preview configuration. The macOS app is ad-hoc signed but not Apple Developer signed or notarized; Windows is unsigned and may need internet access to install WebView2. Automated checks mount or silently install the packages and inspect identity and bundled notices; they do not launch the app or verify use on an employee device. This is not a production-ready client or server release. Full dependency notices are bundled and checked before publication.
+This prerelease contains one macOS Universal DMG and one Windows x64 NSIS installer for the employee desktop client. Configuration application is disabled and fails closed; the app can only detect clients and preview configuration. The macOS app is ad-hoc signed but not Apple Developer signed or notarized; Windows is unsigned and may need internet access to install WebView2. Automated checks mount or silently install the packages and inspect identity and bundled notices; they do not launch the app or verify use on an employee device. This is not a production-ready client or server release. Full dependency notices are bundled and checked before publication. The Go offline cache verification in Code validation is known to fail; its mechanism remains unknown, and current evidence does not attribute it to these desktop packaging changes. Package checks do not cover that failure.
