@@ -1,0 +1,250 @@
+# Provenance: docs/releases/employee-config-v0.1.0-preview.1-provenance.md
+name: Employee desktop preview packages
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/employee-config-preview-package.yml
+      - desktop/employee-config-switcher/**
+      - docs/releases/employee-config-v0.1.0-preview.1.md
+      - docs/releases/employee-config-v0.1.0-preview.1-provenance.md
+      - scripts/employee-client-notices.py
+      - scripts/employee-client-package-check.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/employee-config-preview-package.yml
+      - desktop/employee-config-switcher/**
+      - docs/releases/employee-config-v0.1.0-preview.1.md
+      - docs/releases/employee-config-v0.1.0-preview.1-provenance.md
+      - scripts/employee-client-notices.py
+      - scripts/employee-client-package-check.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: employee-config-preview-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  EMPLOYEE_TAG: employee-config-v0.1.0-preview.1
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  build:
+    name: Build and inspect ${{ matrix.platform }} employee installer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            runner: macos-15
+            target: universal-apple-darwin
+            bundle: dmg
+            bundle_dir: desktop/employee-config-switcher/target/universal-apple-darwin/release/bundle/dmg
+          - platform: windows
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+            bundle_dir: desktop/employee-config-switcher/target/x86_64-pc-windows-msvc/release/bundle/nsis
+    steps:
+      - name: Check out the exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Pin Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.11.0
+
+      - name: Pin Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.12
+
+      - name: Pin Rust and platform targets
+        shell: bash
+        working-directory: desktop/employee-config-switcher
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+          if [ "${{ matrix.platform }}" = macos ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          else
+            rustup target add x86_64-pc-windows-msvc
+          fi
+          test "$(rustc --version)" = 'rustc 1.90.0 (1159e78c4 2025-09-14)'
+
+      - name: Install exact frontend dependency graph
+        shell: bash
+        working-directory: desktop/employee-config-switcher
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare pnpm@11.25.0 --activate
+          test "$(pnpm --version)" = 11.25.0
+          pnpm install --frozen-lockfile
+          pnpm test
+          pnpm exec tsc -b --pretty false
+          test ! -e "$RUNNER_TEMP/employee-bundle-modules.json"
+          node scripts/employee-bundle-modules.mjs "$RUNNER_TEMP/employee-bundle-modules.json"
+          test -s "$RUNNER_TEMP/employee-bundle-modules.json"
+
+      - name: Test and fetch locked Rust graph
+        shell: bash
+        working-directory: desktop/employee-config-switcher
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo test --locked -p employee-config-core
+
+      - name: Collect complete third-party notices or fail
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/employee-client-notices.py
+          python scripts/employee-client-notices.py collect \
+            --workspace desktop/employee-config-switcher \
+            --bundle-modules "$RUNNER_TEMP/employee-bundle-modules.json" \
+            --output desktop/employee-config-switcher/src-tauri/release-notices
+          test -s desktop/employee-config-switcher/src-tauri/release-notices/manifest.json
+          python scripts/employee-client-package-check.py verify-notices-source \
+            --notices-root desktop/employee-config-switcher/src-tauri/release-notices \
+            --bundle-modules "$RUNNER_TEMP/employee-bundle-modules.json"
+
+      - name: Build only the selected native installer
+        shell: bash
+        working-directory: desktop/employee-config-switcher
+        run: |
+          set -euo pipefail
+          pnpm tauri build --ci \
+            --config src-tauri/tauri.release.conf.json \
+            --bundles '${{ matrix.bundle }}' \
+            --target '${{ matrix.target }}'
+          cd ../..
+          python scripts/employee-client-package-check.py verify-notices-source \
+            --notices-root desktop/employee-config-switcher/src-tauri/release-notices \
+            --bundle-modules "$RUNNER_TEMP/employee-bundle-modules.json"
+          git diff --exit-code -- desktop/employee-config-switcher/Cargo.lock \
+            desktop/employee-config-switcher/pnpm-lock.yaml \
+            desktop/employee-config-switcher/src-tauri/tauri.conf.json
+
+      - name: Install or mount installer and read back bundled notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/employee-client-package-check.py verify-package \
+            --platform '${{ matrix.platform }}' \
+            --bundle-dir '${{ matrix.bundle_dir }}' \
+            --notices-root desktop/employee-config-switcher/src-tauri/release-notices \
+            --bundle-modules "$RUNNER_TEMP/employee-bundle-modules.json" \
+            --output 'employee-release-out-${{ matrix.platform }}' \
+            --source-sha "$SOURCE_SHA" \
+            --tag "$EMPLOYEE_TAG"
+
+      - name: Store inspected package, checksum, and source evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: employee-config-package-${{ matrix.platform }}
+          path: employee-release-out-${{ matrix.platform }}/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish two inspected employee preview packages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out the same main commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Pin Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.12
+
+      - name: Download only this run's inspected packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: employee-config-package-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify source, package, sidecars, and absent tag/Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/employee-client-package-check.py verify-release-set \
+            --assets-dir release-assets --source-sha "$GITHUB_SHA" --with-evidence
+          python scripts/employee-client-package-check.py release-guard \
+            --stage pre --source-sha "$GITHUB_SHA" --tag "$EMPLOYEE_TAG"
+          mkdir publish-assets
+          cp release-assets/*.dmg release-assets/*.dmg.sha256 \
+            release-assets/*_Setup.exe release-assets/*_Setup.exe.sha256 publish-assets/
+          python scripts/employee-client-package-check.py verify-release-set \
+            --assets-dir publish-assets
+
+      - name: Create absent exact-source draft prerelease and upload four assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/employee-client-package-check.py release-guard \
+            --stage pre --source-sha "$GITHUB_SHA" --tag "$EMPLOYEE_TAG"
+          cp docs/releases/employee-config-v0.1.0-preview.1.md release-notes.md
+          printf '\nSource commit: %s\n' "$GITHUB_SHA" >> release-notes.md
+          gh release create "$EMPLOYEE_TAG" publish-assets/* \
+            --target "$GITHUB_SHA" --draft --prerelease --latest=false \
+            --title "CPA Cloud employee config $EMPLOYEE_TAG" \
+            --notes-file release-notes.md
+
+      - name: Read back all four GitHub assets before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/employee-client-package-check.py release-guard \
+            --stage draft --source-sha "$GITHUB_SHA" --tag "$EMPLOYEE_TAG" \
+            --freeze-assets release-asset-proof.json
+          mkdir release-readback
+          gh release download "$EMPLOYEE_TAG" --dir release-readback
+          python scripts/employee-client-package-check.py verify-release-set \
+            --assets-dir release-readback
+          for asset in publish-assets/*; do
+            cmp "$asset" "release-readback/${asset##*/}"
+          done
+
+      - name: Publish verified prerelease and recheck identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/employee-client-package-check.py release-guard \
+            --stage draft --source-sha "$GITHUB_SHA" --tag "$EMPLOYEE_TAG" \
+            --expected-assets release-asset-proof.json
+          gh release edit "$EMPLOYEE_TAG" --draft=false --prerelease --latest=false
+          python scripts/employee-client-package-check.py release-guard \
+            --stage published --source-sha "$GITHUB_SHA" --tag "$EMPLOYEE_TAG" \
+            --expected-assets release-asset-proof.json
+          mkdir published-readback
+          gh release download "$EMPLOYEE_TAG" --dir published-readback
+          python scripts/employee-client-package-check.py verify-release-set \
+            --assets-dir published-readback
+          for asset in publish-assets/*; do
+            cmp "$asset" "published-readback/${asset##*/}"
+          done
