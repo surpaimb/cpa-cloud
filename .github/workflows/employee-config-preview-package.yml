@@ -111,8 +111,29 @@ jobs:
           else
             export XDG_CONFIG_HOME="$RUNNER_TEMP_SHELL/employee-pnpm-config"
           fi
+          config_seen=0
+          config_cleared=0
+          while IFS= read -r config_name; do
+            config_seen=$((config_seen + 1))
+            if [ "$config_seen" -gt 256 ] ||
+               ! [[ "$config_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo 'package-manager config sanitation refused' >&2
+              exit 1
+            fi
+            case "$config_name" in
+              [Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*|[Pp][Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*)
+                config_cleared=$((config_cleared + 1))
+                if [ "$config_cleared" -gt 128 ] ||
+                   ! unset -v "$config_name" 2>/dev/null; then
+                  echo 'package-manager config sanitation refused' >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done < <(compgen -e)
           export NPM_CONFIG_USERCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
           export NPM_CONFIG_GLOBALCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          printf 'package-manager config names cleared=%d\n' "$config_cleared"
           python ../../scripts/employee-client-pnpm-shims.py preflight \
             --workspace . --runner-temp "$RUNNER_TEMP_NATIVE" --pnpm-version 11.25.0
           NODE_COMMAND="$(command -v node)"
@@ -161,6 +182,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          : "${XDG_CONFIG_HOME:?}"
+          config_seen=0
+          config_cleared=0
+          while IFS= read -r config_name; do
+            config_seen=$((config_seen + 1))
+            if [ "$config_seen" -gt 256 ] ||
+               ! [[ "$config_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo 'package-manager config sanitation refused' >&2
+              exit 1
+            fi
+            case "$config_name" in
+              [Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*|[Pp][Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*)
+                config_cleared=$((config_cleared + 1))
+                if [ "$config_cleared" -gt 128 ] ||
+                   ! unset -v "$config_name" 2>/dev/null; then
+                  echo 'package-manager config sanitation refused' >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done < <(compgen -e)
+          export NPM_CONFIG_USERCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          printf 'package-manager config names cleared=%d\n' "$config_cleared"
           test "$(command -v node)" = "$EMPLOYEE_NODE_COMMAND"
           test "$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "$EMPLOYEE_NODE_NATIVE")" = "$EMPLOYEE_NODE_RESOLVED"
           test "$(python -c 'from pathlib import Path; import hashlib,sys; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())' "$EMPLOYEE_NODE_RESOLVED")" = "$EMPLOYEE_NODE_SHA"
@@ -172,8 +217,8 @@ jobs:
           python scripts/employee-client-pnpm-shims.py preflight \
             --workspace desktop/employee-config-switcher \
             --runner-temp "$EMPLOYEE_RUNNER_TEMP_NATIVE" --pnpm-version 11.25.0
-          python scripts/test-employee-client-pnpm-shims.py
-          python tests/test_employee_client_notices_junction.py
+          python -B scripts/test-employee-client-pnpm-shims.py
+          python -B tests/test_employee_client_notices_junction.py
           reference_shell="$RUNNER_TEMP"
           if [ "$RUNNER_OS" = Windows ]; then
             command -v cygpath >/dev/null
@@ -216,9 +261,10 @@ jobs:
               )
           except OSError:
               print("pre-notice git status: exit=-1 stderr_bytes=0 parse_ok=0 "
-                    "tracked=0 workspace_target_untracked=0 other_untracked=0")
+               "tracked=0 workspace_target_untracked=0 other_untracked=0 "
+               "pycache_untracked=0")
               sys.exit(1)
-          tracked = target = other = 0
+          tracked = target = other = pycache = 0
           parse_ok = result.returncode == 0 and not result.stderr
           if parse_ok:
               records = result.stdout.split(b"\x00")
@@ -239,6 +285,10 @@ jobs:
                               target += 1
                           else:
                               other += 1
+                              if b"/__pycache__/" in record[3:] or record[3:].startswith(
+                                  b"__pycache__/"
+                              ):
+                                  pycache += 1
                       else:
                           tracked += 1
                           if b"R" in record[:2] or b"C" in record[:2]:
@@ -249,9 +299,10 @@ jobs:
                       index += 1
           print(
               "pre-notice git status: exit={0} stderr_bytes={1} parse_ok={2} "
-              "tracked={3} workspace_target_untracked={4} other_untracked={5}".format(
+              "tracked={3} workspace_target_untracked={4} other_untracked={5} "
+              "pycache_untracked={6}".format(
                   result.returncode, len(result.stderr), int(parse_ok),
-                  tracked, target, other,
+                  tracked, target, other, pycache,
               )
           )
           if not parse_ok:
@@ -272,6 +323,30 @@ jobs:
         working-directory: desktop/employee-config-switcher
         run: |
           set -euo pipefail
+          : "${XDG_CONFIG_HOME:?}"
+          config_seen=0
+          config_cleared=0
+          while IFS= read -r config_name; do
+            config_seen=$((config_seen + 1))
+            if [ "$config_seen" -gt 256 ] ||
+               ! [[ "$config_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo 'package-manager config sanitation refused' >&2
+              exit 1
+            fi
+            case "$config_name" in
+              [Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*|[Pp][Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*)
+                config_cleared=$((config_cleared + 1))
+                if [ "$config_cleared" -gt 128 ] ||
+                   ! unset -v "$config_name" 2>/dev/null; then
+                  echo 'package-manager config sanitation refused' >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done < <(compgen -e)
+          export NPM_CONFIG_USERCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          printf 'package-manager config names cleared=%d\n' "$config_cleared"
           test "$(command -v node)" = "$EMPLOYEE_NODE_COMMAND"
           test "$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "$EMPLOYEE_NODE_NATIVE")" = "$EMPLOYEE_NODE_RESOLVED"
           test "$(python -c 'from pathlib import Path; import hashlib,sys; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())' "$EMPLOYEE_NODE_RESOLVED")" = "$EMPLOYEE_NODE_SHA"

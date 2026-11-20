@@ -112,6 +112,21 @@ established cause. Publication was skipped and no accepted package asset was
 produced. The bounded phase/category diagnostic and fixture control in this
 candidate seek better evidence without relaxing either gate.
 
+The [eighth](https://github.com/surpaimb/cpa-cloud/actions/runs/44777377555)
+also produced no accepted installer. Windows stopped at the helper's
+`phase=config category=environment_config` preflight; an extra exported
+`npm_config_` or `pnpm_config_` name was present, but its exact name and source
+are unknown. macOS verified nine generated nested directories and ten shims,
+then their removal, but the unchanged clean-worktree gate found one other
+untracked entry and refused notice collection. Its path is unknown; a Python
+bytecode cache is only a hypothesis. This candidate clears inherited
+package-manager configuration names before each pnpm/helper step, restores
+the two pinned config references, suppresses bytecode writes for the two
+Python test invocations, and adds a fixed-category cache count. A new natural
+Mac/Windows package run is needed to establish whether those changes close
+either failure. A prior isolated v25 attempt timed out in a controlled local
+260-name sanitation test; it was never integrated or run in CI.
+
 The packages deliberately do not enable `apply_configuration`. Installation
 and static package inspection do not prove that an employee can apply settings,
 that the app launches on every machine, or that it is production ready.
