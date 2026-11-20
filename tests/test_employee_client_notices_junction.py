@@ -66,6 +66,16 @@ JNI_APACHE_BYTES = committed_fixture(
 )
 
 
+NDK_MIT_BYTES = committed_fixture(
+    (FALLBACKS / "ndk-rs-LICENSE-MIT.txt").read_bytes(), 1036,
+    "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1",
+)
+NDK_APACHE_BYTES = committed_fixture(
+    (FALLBACKS / "ndk-rs-LICENSE-APACHE.txt").read_bytes(), 11357,
+    "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+)
+
+
 MIT_DLOPEN2_BYTES = committed_fixture(
     (FALLBACKS / "dlopen2-rs-LICENSE.txt").read_bytes(), 1184,
     "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2",
@@ -1537,6 +1547,264 @@ class NoticeJunctionTests(unittest.TestCase):
         with self.assertRaisesRegex(notices.NoticeError,
                                     "nested node_modules in installed package"):
             notices.archive_files(data, "package", installed_root=self.root)
+
+
+class NdkSharedLicenseTests(unittest.TestCase):
+    """Synthetic identity and tamper cases; real pinned archives are checked separately."""
+
+    CASES = (
+        ("ndk", "0.9.0", "49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25",
+         "ndk", "https://github.com/rust-mobile/ndk"),
+        ("ndk-sys", "0.6.0+11769913", "49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25",
+         "ndk-sys", "https://github.com/rust-mobile/ndk"),
+        ("ndk-context", "0.1.1", "10f2ba388fca20f7349996ebae26ccda7a6fda5c",
+         "ndk-context", "https://github.com/rust-windowing/android-ndk-rs"),
+    )
+
+    def setUp(self) -> None:
+        self.scratch = Path(tempfile.mkdtemp(prefix="cpa-ndk-notice-")).resolve(strict=True)
+        self.number = 0
+
+    def cargo_case(self, identity: tuple[str, str, str, str, str], *,
+                   bad_checksum: bool = False, bad_pin: bool = False,
+                   bad_member_count: bool = False, bad_vcs: bool = False,
+                   bad_path: bool = False, bad_repo: bool = False,
+                   bad_label: bool = False, bad_mit: bool = False,
+                   bad_apache: bool = False) -> dict:
+        name, version, vcs, vcs_path, repository = identity
+        self.number += 1
+        case = self.scratch / str(self.number)
+        home = case / "cargo-home"
+        source = home / "registry" / "src" / "index" / f"{name}-{version}"
+        cache = home / "registry" / "cache" / "index"
+        workspace = case / "workspace"
+        for directory in (source, cache, workspace):
+            directory.mkdir(parents=True)
+        manifest = (f'[package]\nname="{name}"\nversion="{version}"\n'
+                    f'license="MIT OR Apache-2.0"\nrepository="{repository}"\n').encode()
+        vcs_content = json.dumps({
+            "git": {"sha1": "0" * 40 if bad_vcs else vcs},
+            "path_in_vcs": "wrong/path" if bad_path else vcs_path,
+        }).encode()
+        (source / "Cargo.toml").write_bytes(manifest)
+        (source / ".cargo_vcs_info.json").write_bytes(vcs_content)
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for relative, content in (("Cargo.toml", manifest),
+                                      (".cargo_vcs_info.json", vcs_content)):
+                member = tarfile.TarInfo(f"{name}-{version}/{relative}")
+                member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+        data = buffer.getvalue()
+        (cache / f"{name}-{version}.crate").write_bytes(data)
+        local = []
+        for local_name, local_version in sorted(notices.FIRST_PARTY_CARGO):
+            local_manifest = workspace / local_name / "Cargo.toml"
+            local_manifest.parent.mkdir()
+            local_manifest.write_text("[package]\nname='synthetic'\nversion='0.1.0'\n")
+            local.append({"name": local_name, "version": local_version,
+                          "source": None, "manifest_path": str(local_manifest)})
+        metadata = {"packages": local + [{
+            "name": name, "version": version, "source": notices.CRATES_IO,
+            "manifest_path": str(source / "Cargo.toml"),
+            "license": "MIT" if bad_label else "MIT OR Apache-2.0",
+            "repository": "https://example.invalid/ndk" if bad_repo else repository,
+        }]}
+        original_pin = notices.NDK_ARCHIVES[(name, version)]
+        pin = ("0" * 64 if bad_pin else notices.sha(data), len(data),
+               3 if bad_member_count else 2)
+        committed = {
+            notices.VENDORED_CARGO[(name, version, "LICENSE-MIT")]:
+                b"changed" if bad_mit else NDK_MIT_BYTES,
+            notices.VENDORED_CARGO[(name, version, "LICENSE-APACHE")]:
+                b"changed" if bad_apache else NDK_APACHE_BYTES,
+        }
+
+        def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            self.assertEqual(argv[:2], ["cargo", "metadata"])
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+
+        checksum = "0" * 64 if bad_checksum else notices.sha(data)
+        with patch.dict(os.environ, {"CARGO_HOME": str(home)}), \
+             patch.object(notices.subprocess, "run", side_effect=cargo_metadata), \
+             patch.object(notices, "git_blob",
+                          side_effect=lambda _workspace, item: committed.get(item, b"")), \
+             patch.dict(notices.NDK_ARCHIVES, {(name, version): pin}):
+            package = notices.cargo_packages(workspace, {(name, version): checksum})[0]
+        self.assertEqual(original_pin, notices.NDK_ARCHIVES[(name, version)])
+        return package
+
+    def test_each_exact_identity_requires_both_full_texts(self) -> None:
+        for identity in self.CASES:
+            with self.subTest(name=identity[0]):
+                package = self.cargo_case(identity)
+                self.assertEqual(package["notice_status"], "vendored_external")
+                self.assertEqual(package["texts"], {
+                    "EXTERNAL_ORIGIN/LICENSE-MIT": NDK_MIT_BYTES,
+                    "EXTERNAL_ORIGIN/LICENSE-APACHE": NDK_APACHE_BYTES,
+                })
+                self.assertEqual(len(package["external_sources"]), 2)
+
+    def test_each_checksum_vcs_path_metadata_and_text_tamper_refuses(self) -> None:
+        negatives = (
+            ("bad_checksum", "archive checksum mismatch"),
+            ("bad_pin", "official archive identity differs"),
+            ("bad_member_count", "official archive member shape differs"),
+            ("bad_vcs", "archive VCS origin differs"),
+            ("bad_path", "archive VCS origin differs"),
+            ("bad_repo", "external license identity differs"),
+            ("bad_label", "external license identity differs"),
+            ("bad_mit", "vendored committed notice differs"),
+            ("bad_apache", "vendored committed notice differs"),
+        )
+        for identity in self.CASES:
+            for argument, reason in negatives:
+                with self.subTest(name=identity[0], argument=argument):
+                    with self.assertRaisesRegex(notices.NoticeError, reason):
+                        self.cargo_case(identity, **{argument: True})
+
+
+class FullGraphFallbackTests(unittest.TestCase):
+    """Hermetic identities for the 16 objc2, two r-efi, and two legacy winapi cases."""
+
+    def setUp(self) -> None:
+        self.scratch = Path(tempfile.mkdtemp(prefix="cpa-full-graph-notice-")).resolve(strict=True)
+        self.serial = 0
+
+    def cargo_case(self, key: tuple[str, str], fault: str = "") -> dict:
+        name, version = key
+        self.serial += 1
+        case = self.scratch / str(self.serial)
+        home = case / "cargo-home"
+        source = home / "registry" / "src" / "index" / f"{name}-{version}"
+        cache = home / "registry" / "cache" / "index"
+        workspace = case / "workspace"
+        for directory in (source, cache, workspace):
+            directory.mkdir(parents=True)
+        fallback = notices.EXTERNAL_CARGO[key]
+        label = "bad-label" if fault == "label" else fallback["license"]
+        repository = "https://example.invalid/wrong" if fault == "repository" else fallback["repository"]
+        manifest = (f'[package]\nname="{name}"\nversion="{version}"\n'
+                    f'license="{label}"\nrepository="{repository}"\n').encode()
+        members = {"Cargo.toml": manifest}
+        if key in notices.WINAPI_GNU_ARCHIVES:
+            original = (f'[package]\nname = "{name}"\nversion = "0.4.0"\n'
+                        'license = "MIT/Apache-2.0"\n'
+                        'repository = "https://github.com/retep998/winapi-rs"\n'
+                        'include = ["src/*", "lib/*", "Cargo.toml", "build.rs"]\n').encode()
+            members["Cargo.toml.orig"] = original
+            if fault == "forged-vcs":
+                members[".cargo_vcs_info.json"] = b"{}"
+        else:
+            vcs = fallback["vcs"]
+            members[".cargo_vcs_info.json"] = json.dumps({
+                "git": {"sha1": "0" * 40 if fault == "vcs" else vcs},
+                "path_in_vcs": "wrong/path" if fault == "path" else fallback["path"],
+            }).encode()
+            if key in notices.R_EFI_ARCHIVES:
+                digest, length = notices.R_EFI_ARCHIVES[key][-2:]
+                members["AUTHORS"] = committed_fixture(
+                    (FALLBACKS / f"r-efi-{version}-AUTHORS-LICENSE-MIT.txt").read_bytes(),
+                    length, digest)
+        if fault == "extra-member":
+            members["unexpected"] = b"extra"
+        for relative, content in members.items():
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for relative, content in members.items():
+                member = tarfile.TarInfo(f"{name}-{version}/{relative}")
+                member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+        data = buffer.getvalue()
+        (cache / f"{name}-{version}.crate").write_bytes(data)
+        local = []
+        for local_name, local_version in sorted(notices.FIRST_PARTY_CARGO):
+            local_manifest = workspace / local_name / "Cargo.toml"
+            local_manifest.parent.mkdir()
+            local_manifest.write_text("[package]\nname='synthetic'\nversion='0.1.0'\n")
+            local.append({"name": local_name, "version": local_version,
+                          "source": None, "manifest_path": str(local_manifest)})
+        metadata = {"packages": local + [{
+            "name": name, "version": version, "source": notices.CRATES_IO,
+            "manifest_path": str(source / "Cargo.toml"),
+            "license": label, "repository": repository,
+        }]}
+        committed: dict[str, bytes] = {}
+        for filename, _, digest, length in fallback["files"]:
+            vendored = notices.VENDORED_CARGO[(name, version, filename)]
+            committed[vendored] = committed_fixture(
+                (FALLBACKS / Path(vendored).name).read_bytes(), length, digest)
+        if key in notices.OBJC2_ARCHIVES:
+            committed[notices.BLOCK2_DECLARATION] = BLOCK2_DECLARATION_BYTES
+            readme_source, readme_sha, readme_bytes = (
+                notices.OBJC2_README_SOURCES[fallback["vcs"]])
+            committed[readme_source] = committed_fixture(
+                (FALLBACKS / Path(readme_source).name).read_bytes(),
+                readme_bytes, readme_sha)
+        if fault == "vendor":
+            first = notices.VENDORED_CARGO[(name, version, fallback["files"][0][0])]
+            committed[first] = b"tampered"
+        if fault == "declaration" and key in notices.OBJC2_ARCHIVES:
+            committed[notices.BLOCK2_DECLARATION] = b"tampered"
+
+        def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            self.assertEqual(argv[:2], ["cargo", "metadata"])
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+
+        pinned = (notices.sha(data), len(data),
+                  len(members) - 1 if fault == "extra-member" else len(members))
+        if fault == "pin":
+            pinned = "0" * 64, pinned[1], pinned[2]
+        if key in notices.OBJC2_ARCHIVES:
+            old = notices.OBJC2_ARCHIVES[key]
+            mapping, value = notices.OBJC2_ARCHIVES, pinned + old[3:]
+        elif key in notices.R_EFI_ARCHIVES:
+            old = notices.R_EFI_ARCHIVES[key]
+            mapping, value = notices.R_EFI_ARCHIVES, pinned + old[3:]
+        else:
+            old = notices.WINAPI_GNU_ARCHIVES[key]
+            original = members["Cargo.toml.orig"]
+            mapping = notices.WINAPI_GNU_ARCHIVES
+            value = pinned + (old[3], len(original), notices.sha(original))
+        checksum = "0" * 64 if fault == "lock" else notices.sha(data)
+        with patch.dict(os.environ, {"CARGO_HOME": str(home)}), \
+             patch.object(notices.subprocess, "run", side_effect=cargo_metadata), \
+             patch.object(notices, "git_blob",
+                          side_effect=lambda _workspace, item: committed.get(item, b"")), \
+             patch.dict(mapping, {key: value}):
+            return notices.cargo_packages(workspace, {key: checksum})[0]
+
+    def test_all_twenty_exact_bindings_and_texts(self) -> None:
+        keys = (tuple(notices.OBJC2_ARCHIVES) + tuple(notices.R_EFI_ARCHIVES) +
+                tuple(notices.WINAPI_GNU_ARCHIVES))
+        self.assertEqual(len(keys), 20)
+        for key in keys:
+            with self.subTest(key=key):
+                package = self.cargo_case(key)
+                self.assertEqual(package["notice_status"], "vendored_external")
+                self.assertTrue(notices.has_authorization_text(package["texts"]))
+                self.assertEqual(len(package["external_sources"]),
+                                 (3 if key in notices.OBJC2_ARCHIVES else
+                                  3 if key in notices.WINAPI_GNU_ARCHIVES else 1))
+
+    def test_family_identity_and_source_tamper_refuse(self) -> None:
+        representatives = (("objc2", "0.6.5"), ("r-efi", "5.3.0"),
+                           ("winapi-i686-pc-windows-gnu", "0.4.0"))
+        for key in representatives:
+            faults = ["lock", "pin", "extra-member", "repository", "label", "vendor"]
+            if key in notices.WINAPI_GNU_ARCHIVES:
+                faults.append("forged-vcs")
+            else:
+                faults.extend(["vcs", "path"])
+            if key in notices.OBJC2_ARCHIVES:
+                faults.append("declaration")
+            for fault in faults:
+                with self.subTest(key=key, fault=fault):
+                    with self.assertRaises(notices.NoticeError):
+                        self.cargo_case(key, fault)
 
 
 if __name__ == "__main__":

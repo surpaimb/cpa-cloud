@@ -73,7 +73,8 @@ The repository's locked Cargo and pnpm dependencies retain their own licenses.
 The distribution process must obtain the relevant full license and notice texts
 from integrity-verified archives or independently verified upstream sources,
 record each text's source and digest, and embed them in both installers. The
-thirteen full license texts and two source declarations in
+nineteen full license texts, two source declarations, and two upstream README
+attribution-context files in
 `desktop/employee-config-switcher/third_party/notice-fallbacks/` preserve
 verified upstream license or source declarations for archives that omit those
 texts. The notice collector binds their Git blobs, origin commits and hashes;
@@ -317,3 +318,69 @@ natural macOS and Windows packaging and installer inspection run.
 The packages deliberately do not enable `apply_configuration`. Installation
 and static package inspection do not prove that an employee can apply settings,
 that the app launches on every machine, or that it is production ready.
+
+The [sixteenth natural package run](https://github.com/surpaimb/cpa-cloud/actions/runs/44826423267)
+also failed before publication. macOS notice collection refused locked
+`ndk@0.9.0` because its archive omitted complete license text. Windows
+refused at `stage=byte_compare reason=root_normalization` before unlinking a
+generated pnpm shim; that diagnostic did not disclose the runner's actual
+bytes or path. Both jobs failed and produced no installers. A private pinned
+Node 24.11.0 / pnpm 11.25.0 Git Bash reconstruction found exact derived
+`/proc/cygdrive/<drive>/<workspace-root>` segments in fixed generated
+`NODE_PATH` assignments on both sides. The candidate parses only those
+fixed shell/PowerShell assignment forms and three ordered root-derived path
+segments before the unchanged full-byte comparison. Generic colon-prefixed
+fields, wrong drives, URLs, and near-root spellings still refuse. The
+sixteenth runner's raw shim bytes are unavailable, so this local result does
+not prove that run's root cause or establish a native package.
+The [same-head Code validation run](https://github.com/surpaimb/cpa-cloud/actions/runs/44826423198)
+also failed inherited Go offline dependency checks and two server self-logout
+race jobs reporting `SLOG21_UNEXPECTED_SNAPSHOT_QUERY`. These server failures
+remain open and are outside the desktop package inspection gate.
+
+The locked [ndk](https://static.crates.io/crates/ndk/ndk-0.9.0.crate),
+[ndk-sys](https://static.crates.io/crates/ndk-sys/ndk-sys-0.6.0+11769913.crate),
+and [ndk-context](https://static.crates.io/crates/ndk-context/ndk-context-0.1.1.crate)
+archives identify fixed VCS commits and paths, but lack full license files.
+Each fallback requires its own exact lock checksum, archive size and member
+count, Cargo label/repository, and VCS path. Both complete MIT and Apache
+texts are byte-pinned to the fixed upstream sources, carried once, and
+individually checked for each package. The ndk-context metadata uses its
+older repository spelling; its source URLs use today's rust-mobile location.
+
+Sixteen locked `objc2` family archives likewise lack complete authorization
+text. Each fallback pins its own checksum, size, member count, VCS commit and
+path, repository, and published license label. The fixed
+[upstream declaration](https://github.com/madsmtm/objc2/blob/d7d2fa23ceaa5e6096c923b081040e5d81b3b9df/LICENSE.md)
+distinguishes MIT-only crates from crates that offer MIT among three options;
+the declaration is not itself the full license. The separate complete
+[SPDX MIT template](https://github.com/spdx/license-list-data/blob/ab9b0904b43db6f4b67431efd8821feb821f1c8b/text/MIT.txt)
+is carried unchanged, including literal `<year>` and `<copyright holders>`
+placeholders. It is not an upstream filled-in copyright notice. Two fixed
+upstream README variants are also carried as attribution context, retaining
+the project's acknowledgements and license pointer. The upstream workspace
+author field and acknowledgements do not identify a copyright holder for
+that template. The notice records distinguish standard terms, upstream
+declaration, and README context; Apple SDK derivative terms remain in the
+unmodified upstream declaration.
+
+Locked `r-efi@5.3.0` and `r-efi@6.0.0` have different `AUTHORS` files.
+Each archive's `AUTHORS` is byte-identical to its own fixed VCS source and
+contains complete MIT terms with copyright and author notices. The candidate
+carries the two files separately and selects MIT from each published
+`MIT OR Apache-2.0 OR LGPL-2.1-or-later` label. It does not claim to ship
+complete Apache or LGPL terms for those unselected options.
+
+The two locked winapi GNU import-library archives have no
+`.cargo_vcs_info.json` or full license file. Their exact official archive
+checksums, sizes, regular member counts, original Cargo manifests,
+repository, and `MIT/Apache-2.0` labels are bound by an explicit legacy
+archive branch. A
+[later source tree](https://github.com/retep998/winapi-rs/commit/9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa)
+matches their non-generated source members; it is not claimed as either
+archive's publication VCS. An even
+[later commit](https://github.com/retep998/winapi-rs/commit/fa4e2c5a6dc495c71e6031bdde2e52870ebf6fdf)
+added complete MIT and Apache texts to both import-library directories.
+The candidate carries those two later texts with exact Git blob, length,
+and SHA-256 identities and records that chronology without inventing an
+archive VCS record.

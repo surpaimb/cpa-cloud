@@ -406,6 +406,116 @@ def windows_extra_root_cases(temp: Path) -> None:
         assert (a_bin / "fake").read_bytes() == before
 
 
+def windows_cygdrive_cases(temp: Path) -> None:
+    """Accept only the exact root-derived pnpm Cygwin spelling."""
+    if os.name != "nt":
+        return
+
+    def spelling(root: Path) -> bytes:
+        value = MODULE._cygdrive_windows_root(root)
+        assert value is not None and value in MODULE.root_literals(root)
+        return value
+
+    def shims(label: str, actual_value, reference_value):
+        actual, reference, a_bin, r_bin = paired(temp / label)
+        for root, bin_dir, supplied in (
+                (actual, a_bin, actual_value),
+                (reference, r_bin, reference_value)):
+            value = supplied(spelling(root))
+            (bin_dir / "fake").write_bytes(
+                b"#!/bin/sh\n" + value +
+                b"/node_modules/.pnpm/fake@1.0.0\n")
+        return actual, reference, a_bin
+
+    actual, reference, a_bin = shims("exact", lambda x: x, lambda x: x)
+    assert MODULE.reconcile(actual, reference) == (1, 1)
+    assert not (a_bin / "fake").exists()
+
+    for label, actual_value, reference_value, reason in (
+        ("wrong_drive", lambda x: x.replace(b"/cygdrive/c/", b"/cygdrive/z/"),
+         lambda x: x, "generated shim bytes differ"),
+        ("wrong_drive_prefix", lambda x: b"X:" + x, lambda x: b"X:" + x,
+         "workspace root remained in shim"),
+        ("url_prefix", lambda x: b"file:" + x, lambda x: b"file:" + x,
+         "workspace root remained in shim"),
+        ("near_prefix", lambda x: x + b"-shadow", lambda x: x + b"-shadow",
+         "workspace root remained in shim"),
+        ("unknown_prefix", lambda x: b"X" + x, lambda x: b"X" + x,
+         "workspace root remained in shim"),
+        ("forged_field", lambda x: b"FAKE_FIELD=" + x,
+         lambda x: x, "generated shim bytes differ"),
+    ):
+        actual, reference, a_bin = shims(label, actual_value, reference_value)
+        before = (a_bin / "fake").read_bytes()
+        refused(lambda: MODULE.reconcile(actual, reference), reason)
+        assert (a_bin / "fake").read_bytes() == before
+
+
+def windows_proc_node_path_cases(temp: Path) -> tuple[str, ...]:
+    """Recognize only the fixed cmd-shim NODE_PATH assignment grammar."""
+    if os.name != "nt":
+        return ()
+
+    def proc(root: Path) -> bytes:
+        cygdrive = MODULE._cygdrive_windows_root(root)
+        assert cygdrive is not None
+        return b"/proc" + cygdrive
+
+    def content(root: Path, kind: str) -> bytes:
+        prefix = proc(root)
+        parts = [prefix + b"/node_modules/.pnpm/" + name + b"/node_modules"
+                 for name in (b"a@1.0.0", b"b@1.0.0", b"c@1.0.0")]
+        paths = b":".join(parts)
+        if kind == "ps1":
+            return b'  $new_node_path="' + paths + b'"\n'
+        return (b'  export NODE_PATH="' + paths + b'"\n'
+                + b'  export NODE_PATH="' + paths + b':$NODE_PATH"\n')
+
+    def run(label: str, kind: str, transform, reason: str | None) -> None:
+        actual, reference, a_bin, r_bin = paired(temp / label)
+        left = transform(content(actual, kind), proc(actual))
+        right = content(reference, kind)
+        (a_bin / "fake").write_bytes(left)
+        (r_bin / "fake").write_bytes(right)
+        before = (a_bin / "fake").read_bytes()
+        trace = MODULE.ReconcileTrace()
+        if reason is None:
+            assert MODULE.reconcile(actual, reference, trace) == (1, 1)
+            assert not (a_bin / "fake").exists()
+        else:
+            refused(lambda: MODULE.reconcile(actual, reference, trace), reason)
+            assert trace.stage == "byte_compare" and not trace.mutation_possible
+            assert (a_bin / "fake").read_bytes() == before
+
+    run("shell_exact", "shell", lambda value, _: value, None)
+    run("ps1_exact", "ps1", lambda value, _: value, None)
+    refused_form = "unsupported NODE_PATH shim form"
+    for label, transform, reason in (
+        ("wrong_drive", lambda value, root: value.replace(
+            root, root.replace(b"/cygdrive/c/", b"/cygdrive/z/")),
+         "generated shim bytes differ"),
+        ("colon_drive", lambda value, root: value.replace(root, b"X:" + root),
+         refused_form),
+        ("url", lambda value, root: value.replace(root, b"file:" + root),
+         refused_form),
+        ("near_suffix", lambda value, root: value.replace(
+            root, root + b"-shadow"), refused_form),
+        ("bad_left", lambda value, root: value.replace(root, b"X" + root),
+         refused_form),
+        ("forged_field", lambda value, _: value.replace(
+            b"  export NODE_PATH=", b"  export FAKE_PATH="), refused_form),
+        ("duplicate", lambda value, _: value + value.splitlines(keepends=True)[0],
+         refused_form),
+        ("empty_segment", lambda value, root: value.replace(
+            b":" + root, b"::" + root, 1), refused_form),
+        ("relative_tamper", lambda value, _: value.replace(
+            b"a@1.0.0", b"z@1.0.0"), "generated shim bytes differ"),
+    ):
+        run(label, "shell", transform, reason)
+    return ("proc_cygdrive_fixed_shell_and_ps1_reconciled",
+            "proc_cygdrive_wrong_drive_url_colon_near_forged_duplicate_refused")
+
+
 def root_guard_mock_cases(temp: Path) -> None:
     root = temp / "root_guard"
     root.mkdir()
@@ -647,8 +757,11 @@ def main():
         names.append("fixed_reconcile_stages_reasons_and_mutation_boundary")
         names.extend(byte_difference_diagnostic_cases(temp / "byte_diagnostics"))
         windows_extra_root_cases(temp / "extra_root_cases")
+        windows_cygdrive_cases(temp / "cygdrive_cases")
+        names.extend(windows_proc_node_path_cases(temp / "proc_cases"))
         if os.name == "nt":
             names.append("exact_git_bash_root_reconciles_near_prefix_and_unknown_refuse")
+            names.append("exact_cygdrive_root_reconciles_wrong_drive_url_near_prefix_forged_refuse")
 
     print(json.dumps({"passed": names, "count": len(names)}, sort_keys=True))
 

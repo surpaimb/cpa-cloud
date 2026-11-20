@@ -33,6 +33,51 @@ FIRST_PARTY_CARGO = {
     ("employee-config-core", "0.1.0"),
 }
 EXTERNAL_CARGO = {
+    ("ndk", "0.9.0"): {
+        "repository": "https://github.com/rust-mobile/ndk",
+        "vcs": "49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25", "path": "ndk",
+        "license": "MIT OR Apache-2.0",
+        "files": [
+            ("LICENSE-MIT",
+             "https://raw.githubusercontent.com/rust-mobile/ndk/"
+             "49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25/LICENSE-MIT",
+             "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1", 1036),
+            ("LICENSE-APACHE",
+             "https://raw.githubusercontent.com/rust-mobile/ndk/"
+             "49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25/LICENSE-APACHE",
+             "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4", 11357),
+        ],
+    },
+    ("ndk-sys", "0.6.0+11769913"): {
+        "repository": "https://github.com/rust-mobile/ndk",
+        "vcs": "49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25", "path": "ndk-sys",
+        "license": "MIT OR Apache-2.0",
+        "files": [
+            ("LICENSE-MIT",
+             "https://raw.githubusercontent.com/rust-mobile/ndk/"
+             "49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25/LICENSE-MIT",
+             "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1", 1036),
+            ("LICENSE-APACHE",
+             "https://raw.githubusercontent.com/rust-mobile/ndk/"
+             "49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25/LICENSE-APACHE",
+             "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4", 11357),
+        ],
+    },
+    ("ndk-context", "0.1.1"): {
+        "repository": "https://github.com/rust-windowing/android-ndk-rs",
+        "vcs": "10f2ba388fca20f7349996ebae26ccda7a6fda5c", "path": "ndk-context",
+        "license": "MIT OR Apache-2.0",
+        "files": [
+            ("LICENSE-MIT",
+             "https://raw.githubusercontent.com/rust-mobile/ndk/"
+             "10f2ba388fca20f7349996ebae26ccda7a6fda5c/LICENSE-MIT",
+             "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1", 1036),
+            ("LICENSE-APACHE",
+             "https://raw.githubusercontent.com/rust-mobile/ndk/"
+             "10f2ba388fca20f7349996ebae26ccda7a6fda5c/LICENSE-APACHE",
+             "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4", 11357),
+        ],
+    },
     ("libappindicator-sys", "0.9.0"): {
         "repository": "https://github.com/tauri-apps/libappindicator-rs",
         "vcs": "eafd1e3682a1247f595410266091e9684021cb6f",
@@ -190,7 +235,124 @@ EXTERNAL_CARGO = {
             1067)],
     },
 }
+OBJC2_ARCHIVES = {
+    ("objc2", "0.6.5"):
+        ("08849bbd4767dfae9457696856ae1c84fe4e0281bbe4a7abff2d0e06fb7981f8", 276781, 120, "d7d2fa23ceaa5e6096c923b081040e5d81b3b9df",
+         "crates/objc2", "MIT"),
+    ("objc2-app-kit", "0.3.2"):
+        ("d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c", 531744, 309, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-app-kit", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-cloud-kit", "0.3.2"):
+        ("73ad74d880bb43877038da939b7427bba67e9dd42004a18b809ba7d87cee241c", 68818, 61, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-cloud-kit", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-core-data", "0.3.2"):
+        ("0b402a653efbb5e82ce4df10683b6b28027616a2715e90009947d50b8dd298fa", 39186, 65, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-core-data", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-core-foundation", "0.3.2"):
+        ("2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536", 180804, 76, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-core-foundation", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-core-graphics", "0.3.2"):
+        ("e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807", 84981, 61, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-core-graphics", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-core-image", "0.3.2"):
+        ("e5d563b38d2b97209f8e861173de434bd0214cf020e3423a52624cd1d989f006", 95862, 33, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-core-image", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-core-location", "0.3.2"):
+        ("ca347214e24bc973fc025fd0d36ebb179ff30536ed1f80252706db19ee452009", 17032, 37, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-core-location", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-core-text", "0.3.2"):
+        ("0cde0dfb48d25d2b4862161a4d5fcc0e3c24367869ad306b0c9ec0073bfed92d", 96485, 30, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-core-text", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-io-surface", "0.3.2"):
+        ("180788110936d59bab6bd83b6060ffdfffb3b922ba1396b312ae795e1de9d81d", 11722, 16, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-io-surface", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-quartz-core", "0.3.2"):
+        ("96c1358452b371bf9f104e21ec536d37a650eb10f7ee379fff67d2e08d537f1f", 30036, 38, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-quartz-core", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-ui-kit", "0.3.2"):
+        ("d87d638e33c06f577498cbcc50491496a3ed4246998a7fbba7ccb98b1e7eab22", 551453, 459, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-ui-kit", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-user-notifications", "0.3.2"):
+        ("9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e", 12257, 24, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-user-notifications", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-web-kit", "0.3.2"):
+        ("b2e5aaab980c433cf470df9d7af96a7b46a9d892d521a2cbbb2f8a4c16751e7f", 153073, 222, "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+         "framework-crates/objc2-web-kit", "Zlib OR Apache-2.0 OR MIT"),
+    ("objc2-encode", "4.1.0"):
+        ("ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33", 21004, 12, "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+         "crates/objc2-encode", "MIT"),
+    ("objc2-exception-helper", "0.1.1"):
+        ("c7a1c5fbb72d7735b076bb47b578523aedc40f3c439bea6dfd595c089d79d98a", 5199, 9, "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+         "crates/objc2-exception-helper", "Zlib OR Apache-2.0 OR MIT"),
+}
+R_EFI_ARCHIVES = {
+    ("r-efi", "5.3.0"):
+        ("69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f",
+         64532, 69, "97b55bed1c2c91dcbf787674849f05337ff80b33",
+         "ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7", 3693),
+    ("r-efi", "6.0.0"):
+        ("f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf",
+         65303, 69, "7e1b0322d31d625f81a5656096330934f9cd835d",
+         "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111", 3733),
+}
+WINAPI_GNU_ARCHIVES = {
+    ("winapi-i686-pc-windows-gnu", "0.4.0"):
+        ("ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6",
+         2918815, 1391, "i686", 424,
+         "5257d6f5283ab052b6af51f578a8c74e14c31deb53a7c6cd9e6fa16135d57eb3"),
+    ("winapi-x86_64-pc-windows-gnu", "0.4.0"):
+        ("712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f",
+         2947998, 1420, "x86_64", 428,
+         "d158846cdb1259d606bfbeb050e386484cb18f14db41478568114eddb76ec43e"),
+}
+WINAPI_LATER_LICENSE_COMMIT = "fa4e2c5a6dc495c71e6031bdde2e52870ebf6fdf"
+for (name, version), (_, _, _, vcs, path, license_label) in OBJC2_ARCHIVES.items():
+    EXTERNAL_CARGO[(name, version)] = {
+        "repository": "https://github.com/madsmtm/objc2",
+        "vcs": vcs, "path": path, "license": license_label,
+        "files": [("LICENSE-MIT.txt",
+            "https://raw.githubusercontent.com/spdx/license-list-data/"
+            "ab9b0904b43db6f4b67431efd8821feb821f1c8b/text/MIT.txt",
+            "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+            1078)],
+    }
+for (name, version), (_, _, _, vcs, digest, length) in R_EFI_ARCHIVES.items():
+    EXTERNAL_CARGO[(name, version)] = {
+        "repository": "https://github.com/r-efi/r-efi",
+        "vcs": vcs, "path": "", "license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+        "files": [("AUTHORS",
+            "https://raw.githubusercontent.com/r-efi/r-efi/" + vcs + "/AUTHORS",
+            digest, length)],
+    }
+for (name, version), (_, _, _, architecture, _, _) in WINAPI_GNU_ARCHIVES.items():
+    EXTERNAL_CARGO[(name, version)] = {
+        "repository": "https://github.com/retep998/winapi-rs",
+        "license": "MIT/Apache-2.0",
+        "files": [
+            ("LICENSE-MIT",
+             "https://raw.githubusercontent.com/retep998/winapi-rs/" +
+             WINAPI_LATER_LICENSE_COMMIT + "/" + architecture + "/LICENSE-MIT",
+             "ce7bc3499fee93d5022ef430d5e4201e79a6d9154f3974e42f41349f0569e09b", 1073),
+            ("LICENSE-APACHE",
+             "https://raw.githubusercontent.com/retep998/winapi-rs/" +
+             WINAPI_LATER_LICENSE_COMMIT + "/" + architecture + "/LICENSE-APACHE",
+             "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1", 11357),
+        ],
+    }
+
 VENDORED_CARGO = {
+    ("ndk", "0.9.0", "LICENSE-MIT"):
+        "third_party/notice-fallbacks/ndk-rs-LICENSE-MIT.txt",
+    ("ndk", "0.9.0", "LICENSE-APACHE"):
+        "third_party/notice-fallbacks/ndk-rs-LICENSE-APACHE.txt",
+    ("ndk-sys", "0.6.0+11769913", "LICENSE-MIT"):
+        "third_party/notice-fallbacks/ndk-rs-LICENSE-MIT.txt",
+    ("ndk-sys", "0.6.0+11769913", "LICENSE-APACHE"):
+        "third_party/notice-fallbacks/ndk-rs-LICENSE-APACHE.txt",
+    ("ndk-context", "0.1.1", "LICENSE-MIT"):
+        "third_party/notice-fallbacks/ndk-rs-LICENSE-MIT.txt",
+    ("ndk-context", "0.1.1", "LICENSE-APACHE"):
+        "third_party/notice-fallbacks/ndk-rs-LICENSE-APACHE.txt",
     ("libappindicator-sys", "0.9.0", "LICENSE-MIT"):
         "third_party/notice-fallbacks/libappindicator-sys-0.9.0-LICENSE-MIT.txt",
     ("libappindicator-sys", "0.9.0", "LICENSE-APACHE"):
@@ -226,15 +388,47 @@ VENDORED_CARGO = {
     ("webview2-com-sys", "0.39.1", "LICENSE"):
         "third_party/notice-fallbacks/webview2-rs-LICENSE.txt",
 }
+for name, version in OBJC2_ARCHIVES:
+    VENDORED_CARGO[(name, version, "LICENSE-MIT.txt")] = (
+        "third_party/notice-fallbacks/block2-0.6.2-LICENSE-MIT.txt")
+for name, version in R_EFI_ARCHIVES:
+    VENDORED_CARGO[(name, version, "AUTHORS")] = (
+        f"third_party/notice-fallbacks/r-efi-{version}-AUTHORS-LICENSE-MIT.txt")
+for name, version in WINAPI_GNU_ARCHIVES:
+    VENDORED_CARGO[(name, version, "LICENSE-MIT")] = (
+        "third_party/notice-fallbacks/winapi-gnu-LICENSE-MIT.txt")
+    VENDORED_CARGO[(name, version, "LICENSE-APACHE")] = (
+        "third_party/notice-fallbacks/winapi-gnu-LICENSE-APACHE.txt")
 EXTERNAL_OUTPUT_NAMES = {
     # The URL's MPL-2.0.txt is the full license text for this exact crate.
     # Give its bundled copy a license basename without changing its origin.
     ("selectors", "0.38.0", "MPL-2.0.txt"): "LICENSE-MPL-2.0.txt",
+    ("r-efi", "5.3.0", "AUTHORS"): "LICENSE-MIT.txt",
+    ("r-efi", "6.0.0", "AUTHORS"): "LICENSE-MIT.txt",
 }
 STYLO_DECLARATION = "third_party/notice-fallbacks/selectors-0.38.0-STYLO-README.md"
 BLOCK2_DECLARATION = "third_party/notice-fallbacks/block2-0.6.2-UPSTREAM-LICENSE.md"
+OBJC2_README_SOURCES = {
+    "d7d2fa23ceaa5e6096c923b081040e5d81b3b9df":
+        ("third_party/notice-fallbacks/objc2-README-source.md",
+         "84a32b17c487d0c6413b3401ec7ce5db3d2c591852d3987ee426878ca9c5b77f", 5147),
+    "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b":
+        ("third_party/notice-fallbacks/objc2-README-source.md",
+         "84a32b17c487d0c6413b3401ec7ce5db3d2c591852d3987ee426878ca9c5b77f", 5147),
+    "8d214f5477365ffcbcbb7de058c86ed9a518efb7":
+        ("third_party/notice-fallbacks/objc2-README-encode-source.md",
+         "68208d19a19fa77b52003ee614309659f2470f47188e5ca4e840fc1e7d6aeb9c", 5123),
+}
 DISPATCH2_ARCHIVE_SHA256 = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 DISPATCH2_ARCHIVE_BYTES = 55299
+NDK_ARCHIVES = {
+    ("ndk", "0.9.0"):
+        ("c3f42e7bbe13d351b6bead8286a43aac9534b82bd3cc43e47037f012ebfd62d4", 84865, 30),
+    ("ndk-sys", "0.6.0+11769913"):
+        ("ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873", 329984, 13),
+    ("ndk-context", "0.1.1"):
+        ("27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b", 2205, 6),
+}
 DLOPEN2_ARCHIVES = {
     ("dlopen2", "0.8.2"):
         ("5e2c5bd4158e66d1e215c49b837e11d62f3267b30c92f1d171c4d3105e3dc4d4", 27695),
@@ -252,10 +446,12 @@ LIBAPPINDICATOR_MEMBERS = {
     "libappindicator-sys-0.9.0/Cargo.toml.orig": 356,
     "libappindicator-sys-0.9.0/src/lib.rs": 37038,
 }
-VENDORED_FILES = set(VENDORED_CARGO.values()) | {STYLO_DECLARATION, BLOCK2_DECLARATION}
-require_vendor_count = 15
+VENDORED_FILES = (set(VENDORED_CARGO.values()) |
+                  {STYLO_DECLARATION, BLOCK2_DECLARATION} |
+                  {source for source, _, _ in OBJC2_README_SOURCES.values()})
+require_vendor_count = 23
 if len(VENDORED_FILES) != require_vendor_count:
-    raise RuntimeError("vendored notice source map does not cover fifteen files")
+    raise RuntimeError("vendored notice source map does not cover twenty-three files")
 CESU8_ARCHIVE_SHA256 = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 CESU8_ARCHIVE_BYTES = 10555
 CESU8_RELEASE = "f18962a9de5189f21600b7ff2898845157df4447"
@@ -878,6 +1074,64 @@ def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[
                 require(checksum == JNI_SYS_MACROS_ARCHIVE_SHA256 and
                         len(archive_data) == JNI_SYS_MACROS_ARCHIVE_BYTES,
                         "jni-sys-macros official archive identity differs")
+            if (name, version) in OBJC2_ARCHIVES:
+                pinned_checksum, pinned_bytes, pinned_members, _, _, _ = (
+                    OBJC2_ARCHIVES[(name, version)])
+                require(checksum == pinned_checksum and
+                        len(archive_data) == pinned_bytes,
+                        f"objc2 official archive identity differs: {name}@{version}")
+                with tarfile.open(fileobj=io.BytesIO(archive_data), mode="r:gz") as official:
+                    members = official.getmembers()
+                require(len(members) == pinned_members and
+                        all(member.isfile() for member in members),
+                        f"objc2 official archive member shape differs: {name}@{version}")
+            if (name, version) in R_EFI_ARCHIVES:
+                pinned_checksum, pinned_bytes, pinned_members, _, authors_sha, authors_bytes = (
+                    R_EFI_ARCHIVES[(name, version)])
+                require(checksum == pinned_checksum and len(archive_data) == pinned_bytes,
+                        f"r-efi official archive identity differs: {name}@{version}")
+                with tarfile.open(fileobj=io.BytesIO(archive_data), mode="r:gz") as official:
+                    members = official.getmembers()
+                require(len(members) == pinned_members and
+                        all(member.isfile() for member in members),
+                        f"r-efi official archive member shape differs: {name}@{version}")
+                authors = archive_member(archive_data, f"{name}-{version}/AUTHORS")
+                require(len(authors) == authors_bytes and sha(authors) == authors_sha and
+                        b"Permission is hereby granted" in authors,
+                        f"r-efi archive AUTHORS full MIT source differs: {name}@{version}")
+            if (name, version) in WINAPI_GNU_ARCHIVES:
+                pinned_checksum, pinned_bytes, pinned_members, _, manifest_bytes, manifest_sha = (
+                    WINAPI_GNU_ARCHIVES[(name, version)])
+                require(checksum == pinned_checksum and len(archive_data) == pinned_bytes,
+                        f"winapi GNU legacy archive identity differs: {name}@{version}")
+                with tarfile.open(fileobj=io.BytesIO(archive_data), mode="r:gz") as official:
+                    members = official.getmembers()
+                names = [member.name for member in members]
+                require(len(members) == pinned_members and
+                        len(set(names)) == pinned_members and
+                        all(member.isfile() and
+                            member.name.startswith(f"{name}-{version}/") for member in members) and
+                        f"{name}-{version}/.cargo_vcs_info.json" not in names,
+                        f"winapi GNU legacy archive member shape differs: {name}@{version}")
+                original = archive_member(archive_data,
+                                          f"{name}-{version}/Cargo.toml.orig")
+                require(len(original) == manifest_bytes and sha(original) == manifest_sha and
+                        f'name = "{name}"'.encode() in original and
+                        b'version = "0.4.0"' in original and
+                        b'license = "MIT/Apache-2.0"' in original and
+                        b'repository = "https://github.com/retep998/winapi-rs"' in original and
+                        b'include = ["src/*", "lib/*", "Cargo.toml", "build.rs"]' in original,
+                        f"winapi GNU legacy manifest differs: {name}@{version}")
+            if (name, version) in NDK_ARCHIVES:
+                pinned_checksum, pinned_bytes, pinned_members = NDK_ARCHIVES[(name, version)]
+                require(checksum == pinned_checksum and
+                        len(archive_data) == pinned_bytes,
+                        f"ndk official archive identity differs: {name}@{version}")
+                with tarfile.open(fileobj=io.BytesIO(archive_data), mode="r:gz") as official:
+                    members = official.getmembers()
+                require(len(members) == pinned_members and
+                        all(member.isfile() for member in members),
+                        f"ndk official archive member shape differs: {name}@{version}")
             if (name, version) in DLOPEN2_ARCHIVES:
                 pinned_checksum, pinned_bytes = DLOPEN2_ARCHIVES[(name, version)]
                 require(checksum == pinned_checksum and
@@ -901,6 +1155,17 @@ def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[
                     "bytes": CESU8_ARCHIVE_BYTES,
                     "member_git_blobs": CESU8_MEMBERS,
                 })
+            elif (name, version) in WINAPI_GNU_ARCHIVES:
+                pinned_checksum, pinned_bytes, pinned_members, _, _, manifest_sha = (
+                    WINAPI_GNU_ARCHIVES[(name, version)])
+                external_sources.append({
+                    "role": "legacy-crate-archive-origin",
+                    "url": f"https://static.crates.io/crates/{name}/{name}-{version}.crate",
+                    "sha256": pinned_checksum, "bytes": pinned_bytes,
+                    "member_count": pinned_members,
+                    "original_manifest_sha256": manifest_sha,
+                    "vcs_metadata_absent": True,
+                })
             else:
                 vcs = json.loads(archive_member(
                     archive_data, f"{name}-{version}/.cargo_vcs_info.json"
@@ -908,22 +1173,31 @@ def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[
                 require(vcs.get("git", {}).get("sha1") == fallback["vcs"]
                         and vcs.get("path_in_vcs") == fallback["path"],
                         f"Cargo archive VCS origin differs: {name}@{version}")
-            if (name, version) in (("block2", "0.6.2"),
-                                   ("dispatch2", "0.3.1")):
+            if ((name, version) in (("block2", "0.6.2"),
+                                    ("dispatch2", "0.3.1"))
+                    or (name, version) in OBJC2_ARCHIVES):
                 is_dispatch2 = name == "dispatch2"
+                is_objc2 = (name, version) in OBJC2_ARCHIVES
+                declaration_commit = (
+                    fallback["vcs"] if is_objc2 else
+                    "8852b424193ca41602281b3d7540d7c8ed51e49a" if is_dispatch2 else
+                    "b4167b582b2f75f9a1be75495c41b765344fd03c")
                 declaration_url = (
                     "https://raw.githubusercontent.com/madsmtm/objc2/" +
-                    ("8852b424193ca41602281b3d7540d7c8ed51e49a" if is_dispatch2
-                     else "b4167b582b2f75f9a1be75495c41b765344fd03c")
-                    + "/LICENSE.md"
-                )
+                    declaration_commit + "/LICENSE.md")
                 declaration = vendored_text(
                     workspace, BLOCK2_DECLARATION,
                     "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
                     1339,
                 )
+                mit_only = name in ("objc2", "objc2-encode")
                 require((b"All other crates are trio-licensed" in declaration
-                         and b"[MIT]" in declaration) if is_dispatch2 else
+                         and b"[MIT]" in declaration) if (is_dispatch2 or
+                             (is_objc2 and not mit_only)) else
+                        ((b"`objc2`" in declaration if name == "objc2" else
+                          b"`objc2-encode`" in declaration) and
+                         b"licensed under [the MIT license][MIT]" in declaration)
+                        if is_objc2 else
                         (b"`block2`" in declaration and
                          b"licensed under [the MIT license][MIT]" in declaration),
                         "objc2 upstream MIT declaration absent")
@@ -936,6 +1210,23 @@ def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[
                     "url": declaration_url, "sha256": sha(declaration),
                     "bytes": len(declaration),
                 })
+                if is_objc2:
+                    readme_source, readme_sha, readme_bytes = (
+                        OBJC2_README_SOURCES[fallback["vcs"]])
+                    readme = vendored_text(workspace, readme_source,
+                                            readme_sha, readme_bytes)
+                    require(b"License" in readme and b"Acknowledgements" in readme,
+                            "objc2 attribution context absent")
+                    readme_output = "EXTERNAL_ORIGIN/UPSTREAM_README.md"
+                    texts[readme_output] = readme
+                    external_sources.append({
+                        "role": "upstream-attribution-context",
+                        "path": readme_output,
+                        "vendored_source": readme_source,
+                        "url": "https://raw.githubusercontent.com/madsmtm/objc2/" +
+                               fallback["vcs"] + "/README.md",
+                        "sha256": sha(readme), "bytes": len(readme),
+                    })
             if name == "selectors":
                 readme_url = ("https://raw.githubusercontent.com/servo/stylo/"
                               "572ecba2d1600e7c3d490586692a209faf703baa/"

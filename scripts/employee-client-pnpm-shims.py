@@ -486,16 +486,18 @@ def root_literals(root: Path) -> tuple[bytes, ...]:
         forward = text.replace("\\", "/")
         wsl = "/mnt/" + root.drive[0].lower() + forward[2:]
         extra = _extra_windows_root(root)
-        require(extra is not None, "unsupported Windows root form")
+        cygdrive = _cygdrive_windows_root(root)
+        require(extra is not None and cygdrive is not None,
+                "unsupported Windows root form")
         values = (text.encode("utf-8"), forward.encode("utf-8"),
-                  wsl.encode("utf-8"), extra)
+                  wsl.encode("utf-8"), cygdrive, extra)
     else:
         values = (text.encode("utf-8"),)
     return values
 
 
 def _replace_exact_extra_root(content: bytes, literal: bytes, marker: bytes) -> bytes:
-    """Replace only a complete, root-derived Git Bash spelling."""
+    """Replace only a complete, root-derived POSIX drive spelling."""
     left_boundary = b"='\" \t\r\n([{"
     right_boundary = b"/\\'\" \t\r\n)]};"
     result = bytearray()
@@ -515,11 +517,72 @@ def _replace_exact_extra_root(content: bytes, literal: bytes, marker: bytes) -> 
         position = end
 
 
+def _normalize_proc_node_paths(content: bytes, root: Path) -> bytes:
+    """Normalize only pinned pnpm cmd-shim NODE_PATH assignment forms."""
+    cygdrive = _cygdrive_windows_root(root)
+    require(cygdrive is not None, "unsupported Windows root form")
+    literal = b"/proc" + cygdrive
+    if literal not in content:
+        return content
+    marker = b"@CPA_PNPM_WORKSPACE_ROOT@"
+    ps_head = b'  $new_node_path="'
+    sh_head = b'  export NODE_PATH="'
+    lines = content.split(b"\n")
+    records: list[tuple[str, bool, tuple[bytes, ...]]] = []
+    for index, line in enumerate(lines):
+        if literal not in line:
+            continue
+        ending = b"\r" if line.endswith(b"\r") else b""
+        core = line[:-1] if ending else line
+        if core.startswith(ps_head):
+            kind, head = "powershell", ps_head
+        elif core.startswith(sh_head):
+            kind, head = "shell", sh_head
+        else:
+            raise ShimError("unsupported NODE_PATH shim form")
+        require(core.endswith(b'"'), "unsupported NODE_PATH shim form")
+        values = core[len(head):-1].split(b":")
+        inherited = kind == "shell" and len(values) == 4
+        require(len(values) == (4 if inherited else 3),
+                "unsupported NODE_PATH shim form")
+        if inherited:
+            require(values[-1] == b"$NODE_PATH",
+                    "unsupported NODE_PATH shim form")
+            values = values[:-1]
+        relative: list[bytes] = []
+        for value in values:
+            require(value.startswith(literal + b"/node_modules/.pnpm/"),
+                    "unsupported NODE_PATH shim form")
+            suffix = value[len(literal):]
+            require(all(part not in (b"", b".", b"..")
+                        for part in suffix.split(b"/")[1:])
+                    and not any(byte in suffix for byte in (b"\\", b'"', b"\r", b"\0")),
+                    "unsupported NODE_PATH shim form")
+            relative.append(suffix)
+        records.append((kind, inherited, tuple(relative)))
+        mapped = [marker + suffix for suffix in relative]
+        if inherited:
+            mapped.append(b"$NODE_PATH")
+        lines[index] = head + b":".join(mapped) + b'"' + ending
+    if records[0][0] == "powershell":
+        require(len(records) == 1 and records[0][1] is False,
+                "unsupported NODE_PATH shim form")
+    else:
+        require(len(records) == 2
+                and records[0][0] == records[1][0] == "shell"
+                and {records[0][1], records[1][1]} == {False, True}
+                and records[0][2] == records[1][2],
+                "unsupported NODE_PATH shim form")
+    return b"\n".join(lines)
+
+
 def normalized(content: bytes, root: Path) -> bytes:
-    result = content
-    extra = _extra_windows_root(root) if os.name == "nt" else None
+    result = (_normalize_proc_node_paths(content, root)
+              if os.name == "nt" else content)
+    bounded = ({_extra_windows_root(root), _cygdrive_windows_root(root)}
+               if os.name == "nt" else set())
     for literal in sorted(root_literals(root), key=len, reverse=True):
-        if literal == extra:
+        if literal in bounded:
             result = _replace_exact_extra_root(
                 result, literal, b"@CPA_PNPM_WORKSPACE_ROOT@")
         else:
@@ -552,6 +615,11 @@ def _extra_windows_root(root: Path) -> bytes | None:
     if not forward.startswith(drive + "/"):
         return None
     return ("/" + drive[0].lower() + forward[2:]).encode("utf-8")
+
+
+def _cygdrive_windows_root(root: Path) -> bytes | None:
+    extra = _extra_windows_root(root)
+    return b"/cygdrive" + extra if extra is not None else None
 
 
 def byte_difference_class(left: bytes, right: bytes,
