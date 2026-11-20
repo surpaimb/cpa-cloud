@@ -73,7 +73,7 @@ The repository's locked Cargo and pnpm dependencies retain their own licenses.
 The distribution process must obtain the relevant full license and notice texts
 from integrity-verified archives or independently verified upstream sources,
 record each text's source and digest, and embed them in both installers. The
-eleven unique plain-text source supplements in
+thirteen full license texts and two source declarations in
 `desktop/employee-config-switcher/third_party/notice-fallbacks/` preserve
 verified upstream license or source declarations for archives that omit those
 texts. The notice collector binds their Git blobs, origin commits and hashes;
@@ -288,6 +288,31 @@ license label alone is not treated as full text. This isolated candidate and
 its local tests do not establish a successful native macOS or Windows package.
 The earlier isolated Windows diagnostic and evidence batches stopped on tool
 or verifier failures; their partial results are not accepted as package CI.
+
+The [fifteenth natural package run](https://github.com/surpaimb/cpa-cloud/actions/runs/44821766043)
+again produced no installers. macOS notice collection refused because
+`libappindicator-sys@0.9.0` lacked a complete license text in its crate.
+Windows reached real generated-shim byte comparison and refused before unlink:
+`stage=byte_compare reason=shim_bytes_mismatch mutation_possible=false
+byte_difference=extra_root_spelling_only`. This fixed category detects an exact
+additional Git Bash root spelling in already-read unequal normalized bytes; it
+is diagnostic evidence, not a successful full comparison or a disclosure of
+the runner shim contents. The native jobs failed and publication was skipped.
+
+The [official libappindicator-sys archive](https://static.crates.io/crates/libappindicator-sys/libappindicator-sys-0.9.0.crate)
+is 7,370 bytes with locked SHA-256
+`6e9ec52138abedcc58dc17a7c6c0c00a2bdb4f3427c7f63fa97fd0d859155caf`.
+Its five members are ordinary files, with no full license text; its VCS record
+binds [`tauri-apps/libappindicator-rs` commit `eafd1e3682a1247f595410266091e9684021cb6f`](https://github.com/tauri-apps/libappindicator-rs/commit/eafd1e3682a1247f595410266091e9684021cb6f)
+and `sys` path. Cargo declares `Apache-2.0 OR MIT` but does not provide a
+repository field; only this exact archive, label, missing repository, VCS,
+path, and regular-member inventory may use the fallback. The repository root
+at that commit provides the complete [MIT license](https://github.com/tauri-apps/libappindicator-rs/blob/eafd1e3682a1247f595410266091e9684021cb6f/LICENSE-MIT)
+with qDot and Tauri copyright notices, and the complete
+[Apache license](https://github.com/tauri-apps/libappindicator-rs/blob/eafd1e3682a1247f595410266091e9684021cb6f/LICENSE-APACHE).
+Both are pinned byte for byte and individually required in collection and
+installed-notice readback. A local source-only check cannot replace a later
+natural macOS and Windows packaging and installer inspection run.
 
 The packages deliberately do not enable `apply_configuration`. Installation
 and static package inspection do not prove that an employee can apply settings,

@@ -485,16 +485,45 @@ def root_literals(root: Path) -> tuple[bytes, ...]:
                 "unsupported Windows root form")
         forward = text.replace("\\", "/")
         wsl = "/mnt/" + root.drive[0].lower() + forward[2:]
-        values = (text, forward, wsl)
+        extra = _extra_windows_root(root)
+        require(extra is not None, "unsupported Windows root form")
+        values = (text.encode("utf-8"), forward.encode("utf-8"),
+                  wsl.encode("utf-8"), extra)
     else:
-        values = (text,)
-    return tuple(value.encode("utf-8") for value in values)
+        values = (text.encode("utf-8"),)
+    return values
+
+
+def _replace_exact_extra_root(content: bytes, literal: bytes, marker: bytes) -> bytes:
+    """Replace only a complete, root-derived Git Bash spelling."""
+    left_boundary = b"='\" \t\r\n([{"
+    right_boundary = b"/\\'\" \t\r\n)]};"
+    result = bytearray()
+    position = 0
+    while True:
+        found = content.find(literal, position)
+        if found < 0:
+            result.extend(content[position:])
+            return bytes(result)
+        end = found + len(literal)
+        result.extend(content[position:found])
+        if ((found == 0 or content[found - 1] in left_boundary)
+                and (end == len(content) or content[end] in right_boundary)):
+            result.extend(marker)
+        else:
+            result.extend(literal)
+        position = end
 
 
 def normalized(content: bytes, root: Path) -> bytes:
     result = content
+    extra = _extra_windows_root(root) if os.name == "nt" else None
     for literal in sorted(root_literals(root), key=len, reverse=True):
-        result = result.replace(literal, b"@CPA_PNPM_WORKSPACE_ROOT@")
+        if literal == extra:
+            result = _replace_exact_extra_root(
+                result, literal, b"@CPA_PNPM_WORKSPACE_ROOT@")
+        else:
+            result = result.replace(literal, b"@CPA_PNPM_WORKSPACE_ROOT@")
     require(all(literal not in result for literal in root_literals(root)),
             "workspace root remained in shim")
     return result

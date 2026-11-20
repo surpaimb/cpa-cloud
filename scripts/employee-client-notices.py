@@ -33,6 +33,23 @@ FIRST_PARTY_CARGO = {
     ("employee-config-core", "0.1.0"),
 }
 EXTERNAL_CARGO = {
+    ("libappindicator-sys", "0.9.0"): {
+        "repository": "https://github.com/tauri-apps/libappindicator-rs",
+        "vcs": "eafd1e3682a1247f595410266091e9684021cb6f",
+        "path": "sys", "license": "Apache-2.0 OR MIT",
+        "files": [
+            ("LICENSE-MIT",
+             "https://raw.githubusercontent.com/tauri-apps/libappindicator-rs/"
+             "eafd1e3682a1247f595410266091e9684021cb6f/LICENSE-MIT",
+             "eb227437252b2a7a9c1fc342c93ade1f3d7ce38cc6dd754f613db07d53ceff0b",
+             1109),
+            ("LICENSE-APACHE",
+             "https://raw.githubusercontent.com/tauri-apps/libappindicator-rs/"
+             "eafd1e3682a1247f595410266091e9684021cb6f/LICENSE-APACHE",
+             "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+             10847),
+        ],
+    },
     ("jni-sys-macros", "0.4.1"): {
         "repository": "https://github.com/jni-rs/jni-sys",
         "vcs": "64d77b7a5f119d7b55b4e2c169a4668067ff59e6",
@@ -174,6 +191,10 @@ EXTERNAL_CARGO = {
     },
 }
 VENDORED_CARGO = {
+    ("libappindicator-sys", "0.9.0", "LICENSE-MIT"):
+        "third_party/notice-fallbacks/libappindicator-sys-0.9.0-LICENSE-MIT.txt",
+    ("libappindicator-sys", "0.9.0", "LICENSE-APACHE"):
+        "third_party/notice-fallbacks/libappindicator-sys-0.9.0-LICENSE-APACHE.txt",
     ("jni-sys-macros", "0.4.1", "LICENSE-MIT"):
         "third_party/notice-fallbacks/jni-sys-macros-0.4.1-LICENSE-MIT.txt",
     ("jni-sys-macros", "0.4.1", "LICENSE-APACHE"):
@@ -222,10 +243,19 @@ DLOPEN2_ARCHIVES = {
 }
 JNI_SYS_MACROS_ARCHIVE_SHA256 = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
 JNI_SYS_MACROS_ARCHIVE_BYTES = 3301
+LIBAPPINDICATOR_ARCHIVE_SHA256 = "6e9ec52138abedcc58dc17a7c6c0c00a2bdb4f3427c7f63fa97fd0d859155caf"
+LIBAPPINDICATOR_ARCHIVE_BYTES = 7370
+LIBAPPINDICATOR_MEMBERS = {
+    "libappindicator-sys-0.9.0/.cargo_vcs_info.json": 97,
+    "libappindicator-sys-0.9.0/CHANGELOG.md": 2502,
+    "libappindicator-sys-0.9.0/Cargo.toml": 883,
+    "libappindicator-sys-0.9.0/Cargo.toml.orig": 356,
+    "libappindicator-sys-0.9.0/src/lib.rs": 37038,
+}
 VENDORED_FILES = set(VENDORED_CARGO.values()) | {STYLO_DECLARATION, BLOCK2_DECLARATION}
-require_vendor_count = 13
+require_vendor_count = 15
 if len(VENDORED_FILES) != require_vendor_count:
-    raise RuntimeError("vendored notice source map does not cover thirteen files")
+    raise RuntimeError("vendored notice source map does not cover fifteen files")
 CESU8_ARCHIVE_SHA256 = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 CESU8_ARCHIVE_BYTES = 10555
 CESU8_RELEASE = "f18962a9de5189f21600b7ff2898845157df4447"
@@ -825,10 +855,25 @@ def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[
             fallback = EXTERNAL_CARGO.get((name, version))
             require(fallback is not None,
                     f"Cargo package lacks full license text: {name}@{version}")
-            require(label == fallback["license"] and
-                    str(meta.get("repository", "")).rstrip("/") ==
-                    fallback["repository"],
+            repository = meta.get("repository")
+            repository_ok = (
+                repository in (None, "")
+                if (name, version) == ("libappindicator-sys", "0.9.0")
+                else str(repository or "").rstrip("/") == fallback["repository"]
+            )
+            require(label == fallback["license"] and repository_ok,
                     f"Cargo external license identity differs: {name}@{version}")
+            if (name, version) == ("libappindicator-sys", "0.9.0"):
+                require(checksum == LIBAPPINDICATOR_ARCHIVE_SHA256 and
+                        len(archive_data) == LIBAPPINDICATOR_ARCHIVE_BYTES,
+                        "libappindicator-sys official archive identity differs")
+                with tarfile.open(fileobj=io.BytesIO(archive_data), mode="r:gz") as official:
+                    members = official.getmembers()
+                require(len(members) == len(LIBAPPINDICATOR_MEMBERS)
+                        and all(member.isfile() for member in members)
+                        and {member.name: member.size for member in members}
+                        == LIBAPPINDICATOR_MEMBERS,
+                        "libappindicator-sys official archive member shape differs")
             if (name, version) == ("jni-sys-macros", "0.4.1"):
                 require(checksum == JNI_SYS_MACROS_ARCHIVE_SHA256 and
                         len(archive_data) == JNI_SYS_MACROS_ARCHIVE_BYTES,
@@ -1598,6 +1643,16 @@ def verify(root: Path, workspace: Path, expected_manifest_sha256: str,
                 require(output_bytes == source_bytes and
                         manifest["source_files"].get(vendored) == sha(source_bytes),
                         f"jni-sys-macros external notice differs from committed source: {relative}")
+        if key == ("cargo", "libappindicator-sys", "0.9.0") and (
+                package["notice_status"] == "vendored_external"):
+            for filename in ("LICENSE-MIT", "LICENSE-APACHE"):
+                relative = "EXTERNAL_ORIGIN/" + filename
+                vendored = VENDORED_CARGO[("libappindicator-sys", "0.9.0", filename)]
+                output_bytes = verified_texts.get(prefix + relative)
+                source_bytes = git_blob(workspace, vendored)
+                require(output_bytes == source_bytes and
+                        manifest["source_files"].get(vendored) == sha(source_bytes),
+                        f"libappindicator-sys external notice differs from committed source: {relative}")
         if key in (("cargo", "dlopen2", "0.8.2"),
                    ("cargo", "dlopen2_derive", "0.4.3")) and (
                 package["notice_status"] == "vendored_external"):

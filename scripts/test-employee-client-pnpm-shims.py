@@ -354,16 +354,56 @@ def byte_difference_diagnostic_cases(temp: Path) -> tuple[str, ...]:
     assert MODULE.byte_difference_class(
         b"/c/unrelated/actual", b"/c/unrelated/reference",
         win_actual, win_reference) == "other"
-    if os.name == "nt":
-        def extra(root):
-            return ("/" + root.drive[0].lower()
-                    + str(root).replace("\\", "/")[2:]).encode()
-        verify("extra_root", extra, extra, "extra_root_spelling_only")
     return ("crlf_byte_difference_refused",
             "terminal_eol_byte_difference_refused",
             "unknown_byte_difference_refused",
             "classifier_error_still_refused",
             "extra_windows_root_exact_derivation")
+
+
+def windows_extra_root_cases(temp: Path) -> None:
+    """Only an exact root-derived Git Bash spelling may reconcile."""
+    if os.name != "nt":
+        return
+
+    def spelling(root: Path) -> bytes:
+        value = MODULE._extra_windows_root(root)
+        assert value is not None and value in MODULE.root_literals(root)
+        return value
+
+    def shims(label: str, actual_value, reference_value):
+        actual, reference, a_bin, r_bin = paired(temp / label)
+        for root, bin_dir, supplied in (
+                (actual, a_bin, actual_value),
+                (reference, r_bin, reference_value)):
+            value = supplied(spelling(root))
+            (bin_dir / "fake").write_bytes(
+                b"#!/bin/sh\n" + value +
+                b"/node_modules/.pnpm/fake@1.0.0\n")
+        return actual, reference, a_bin
+
+    actual, reference, a_bin = shims("exact", lambda x: x, lambda x: x)
+    assert MODULE.reconcile(actual, reference) == (1, 1)
+    assert not (a_bin / "fake").exists()
+
+    for label, actual_value, reference_value, reason in (
+        ("wrong_drive", lambda x: b"/z" + x[2:], lambda x: x,
+         "generated shim bytes differ"),
+        ("wrong_path", lambda x: x.replace(b"/actual", b"/else"),
+         lambda x: x, "generated shim bytes differ"),
+        ("wrong_drive_prefix", lambda x: b"X:" + x, lambda x: b"X:" + x,
+         "workspace root remained in shim"),
+        ("url_prefix", lambda x: b"file:" + x, lambda x: b"file:" + x,
+         "workspace root remained in shim"),
+        ("near_prefix", lambda x: x + b"-shadow", lambda x: x + b"-shadow",
+         "workspace root remained in shim"),
+        ("unknown_prefix", lambda x: b"X" + x, lambda x: b"X" + x,
+         "workspace root remained in shim"),
+    ):
+        actual, reference, a_bin = shims(label, actual_value, reference_value)
+        before = (a_bin / "fake").read_bytes()
+        refused(lambda: MODULE.reconcile(actual, reference), reason)
+        assert (a_bin / "fake").read_bytes() == before
 
 
 def root_guard_mock_cases(temp: Path) -> None:
@@ -606,6 +646,9 @@ def main():
         reconcile_diagnostic_cases(temp / "diagnostics")
         names.append("fixed_reconcile_stages_reasons_and_mutation_boundary")
         names.extend(byte_difference_diagnostic_cases(temp / "byte_diagnostics"))
+        windows_extra_root_cases(temp / "extra_root_cases")
+        if os.name == "nt":
+            names.append("exact_git_bash_root_reconciles_near_prefix_and_unknown_refuse")
 
     print(json.dumps({"passed": names, "count": len(names)}, sort_keys=True))
 
