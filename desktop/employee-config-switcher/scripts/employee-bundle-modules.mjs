@@ -34,6 +34,7 @@ function within(child, parent) {
   return child === parent || child.startsWith(parent + sep);
 }
 function packageForModule(rawId) {
+  if (rawId === "\0rolldown/runtime.js") return "rolldown@1.2.13";
   const id = rawId.split("?")[0];
   if (id.startsWith("\0")) {
     if (id === "\0vite/modulepreload-polyfill.js" ||

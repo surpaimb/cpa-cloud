@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -29,7 +30,9 @@ function digest(value) {
 }
 
 function createFixture() {
-  const container = mkdtempSync(path.join(os.tmpdir(), "cpa-openclaw-probe-test-"));
+  const container = realpathSync.native(
+    mkdtempSync(path.join(os.tmpdir(), "cpa-openclaw-probe-test-")),
+  );
   roots.push(container);
   const evidenceRoot = path.join(container, "evidence");
   const realProfile = path.join(container, "real-profile");

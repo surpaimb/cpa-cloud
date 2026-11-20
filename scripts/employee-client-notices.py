@@ -768,6 +768,12 @@ def bundle_packages(workspace: Path, evidence_path: Path,
     for raw_id in module_ids:
         require(isinstance(raw_id, str) and bool(raw_id),
                 "invalid Vite module ID")
+        if raw_id == "\x00rolldown/runtime.js":
+            rolldown_key = ("rolldown", "1.2.13")
+            require(rolldown_key in locked,
+                    "Vite bundled unlocked package: rolldown@1.2.13")
+            installed.add(rolldown_key)
+            continue
         module_id = raw_id.split("?", 1)[0]
         if module_id.startswith("\x00"):
             require(module_id in ("\x00vite/modulepreload-polyfill.js",

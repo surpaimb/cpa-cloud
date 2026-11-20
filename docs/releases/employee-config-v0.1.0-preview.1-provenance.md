@@ -20,6 +20,14 @@ Public interface sources used for packaging decisions:
   [Rolldown output chunks](https://rolldown.rs/reference/Interface.OutputChunk)
   for the one-build `chunk.modules` input ledger. This records JavaScript
   inputs and all `dist` file hashes; it is not a binary asset readback.
+- [Rolldown virtual module convention](https://rolldown.rs/apis/plugin-api)
+  for the NUL-prefixed module ID format. The observed exact
+  `\0rolldown/runtime.js` input is attributed only to the locked
+  `rolldown@1.2.13` package and requires its full license text. Query
+  variants and unknown virtual IDs remain rejected.
+- [Node.js native realpath](https://nodejs.org/api/fs.html#fsrealpathsyncnativepath-options)
+  for canonicalizing only a newly created OpenClaw test fixture root before
+  the path guard inspects it. The guard and full `pnpm test` suite remain.
 - [Tauri configuration](https://v2.tauri.app/reference/config/) for the
   relative `frontendDist` and release-only empty `beforeBuildCommand`. The
   package job checks the same `dist` bytes again after Tauri bundling.
@@ -55,6 +63,14 @@ their recorded provenance and license
 in `desktop/employee-config-switcher/PROVENANCE.md` and
 `third_party/cc-switch/LICENSE`. A missing or unverified required notice
 prevents publication.
+
+The first [native package run](https://github.com/surpaimb/cpa-cloud/actions/runs/44748163357)
+stopped on both platforms at an unavailable Python 3.12.12 runner pin. After
+pinning 3.12.10, the [next run](https://github.com/surpaimb/cpa-cloud/actions/runs/44752206438)
+stopped before native packaging: the macOS OpenClaw fixture inherited a
+symlinked temporary-root ancestor, while Windows emitted the exact Rolldown
+virtual ID above. These candidate fixes need a new natural native run;
+neither failed run produced installer assets.
 
 The packages deliberately do not enable `apply_configuration`. Installation
 and static package inspection do not prove that an employee can apply settings,
