@@ -232,7 +232,8 @@ def report_nested_node_modules(installed_root: Path, current: str,
                                archived_paths: set[str],
                                archived_files: set[str]) -> None:
     """Emit fixed-size structural counts without naming installed children."""
-    limit = 64
+    item_limit = 128
+    depth_limit = 4
     count_limit = 65535
     nested = Path(current) / "node_modules"
     try:
@@ -242,46 +243,68 @@ def report_nested_node_modules(installed_root: Path, current: str,
                       for path in archived_paths)
         files = sum(path == relative or path.startswith(prefix)
                     for path in archived_files)
-        mode = nested.lstat().st_mode
+        root_info = nested.lstat()
+        mode = root_info.st_mode
         junction = nested.is_junction()
         symlink = stat.S_ISLNK(mode)
         ordinary_dir = stat.S_ISDIR(mode) and not junction and not symlink
-        children = {"regular": 0, "directory": 0, "symlink": 0,
-                    "junction": 0, "other": 0}
-        overflow = 0
+        layers = [{"regular": 0, "directory": 0, "symlink": 0,
+                   "junction": 0, "other": 0, "overflow": 0}
+                  for _ in range(depth_limit)]
+        scanned = 0
+        budget_overflow = 0
         if ordinary_dir:
-            with os.scandir(nested) as entries:
-                for index, entry in enumerate(entries):
-                    if index == limit:
-                        overflow = 1
-                        break
-                    child = Path(entry.path)
-                    if child.is_junction():
-                        kind = "junction"
-                    elif entry.is_symlink():
-                        kind = "symlink"
-                    else:
-                        child_mode = entry.stat(follow_symlinks=False).st_mode
-                        if stat.S_ISREG(child_mode):
-                            kind = "regular"
-                        elif stat.S_ISDIR(child_mode):
-                            kind = "directory"
+            pending = [(nested, 0, (root_info.st_dev, root_info.st_ino))]
+            offset = 0
+            while offset < len(pending) and not budget_overflow:
+                directory, level, identity = pending[offset]
+                offset += 1
+                check = directory.lstat()
+                if (not stat.S_ISDIR(check.st_mode)
+                        or directory.is_junction()
+                        or (check.st_dev, check.st_ino) != identity):
+                    raise NoticeError("nested node_modules diagnostic changed")
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if scanned == item_limit:
+                            layers[level]["overflow"] = 1
+                            budget_overflow = 1
+                            break
+                        scanned += 1
+                        child = Path(entry.path)
+                        if child.is_junction():
+                            kind = "junction"
+                        elif entry.is_symlink():
+                            kind = "symlink"
                         else:
-                            kind = "other"
-                    children[kind] += 1
+                            info = child.lstat()
+                            if stat.S_ISREG(info.st_mode):
+                                kind = "regular"
+                            elif stat.S_ISDIR(info.st_mode):
+                                kind = "directory"
+                            else:
+                                kind = "other"
+                        layers[level][kind] += 1
+                        if kind == "directory":
+                            if level + 1 < depth_limit:
+                                pending.append((child, level + 1,
+                                                (info.st_dev, info.st_ino)))
+                            else:
+                                layers[level]["overflow"] = 1
     except (OSError, ValueError):
         raise NoticeError("nested node_modules diagnostic failed") from None
-    print("nested_node_modules_diagnostic "
-          f"archive_members={min(members, count_limit)} "
-          f"archive_files={min(files, count_limit)} "
-          f"archive_overflow={int(members > count_limit or files > count_limit)} "
-          f"ordinary_dir={int(ordinary_dir)} symlink={int(symlink)} "
-          f"junction={int(junction)} "
-          f"child_regular={children['regular']} "
-          f"child_directory={children['directory']} "
-          f"child_symlink={children['symlink']} "
-          f"child_junction={children['junction']} "
-          f"child_other={children['other']} child_overflow={overflow}",
+    fields = [f"archive_members={min(members, count_limit)}",
+              f"archive_files={min(files, count_limit)}",
+              f"archive_overflow={int(members > count_limit or files > count_limit)}",
+              f"ordinary_dir={int(ordinary_dir)}",
+              f"symlink={int(symlink)}", f"junction={int(junction)}",
+              f"entry_limit={item_limit}", f"depth_limit={depth_limit}",
+              f"scanned={scanned}", f"budget_overflow={budget_overflow}"]
+    for depth, counts in enumerate(layers, 1):
+        for kind in ("regular", "directory", "symlink", "junction",
+                     "other", "overflow"):
+            fields.append(f"d{depth}_{kind}={counts[kind]}")
+    print("nested_node_modules_diagnostic " + " ".join(fields),
           file=sys.stderr)
 
 
