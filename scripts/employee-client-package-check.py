@@ -86,6 +86,57 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+WINDOWS_PACKAGE_PHASES = frozenset({
+    "source_reverify", "bundle_select", "temp_prepare", "registry_before",
+    "installer_launch", "embedded_notice", "installed_payload",
+    "registry_after", "uninstall_launch", "cleanup", "artifact_write",
+    "unexpected_phase",
+})
+
+
+def windows_error_category(error: Exception) -> str:
+    """Map an exception to a fixed public diagnostic without formatting it."""
+    winerror = getattr(error, "winerror", None)
+    if isinstance(error, FileNotFoundError) or winerror in (2, 3):
+        return "not_found"
+    if isinstance(error, PermissionError) or winerror == 5:
+        return "access_denied"
+    if isinstance(error, FileExistsError) or winerror == 183:
+        return "already_exists"
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "timeout"
+    if isinstance(error, OSError):
+        return "other_os_error"
+    if isinstance(error, (RuntimeError, ValueError)):
+        return "validation_error"
+    return "unexpected_error"
+
+
+class WindowsPackageFailure(RuntimeError):
+    """Keep primary and cleanup failures separate; expose only fixed fields."""
+
+    def __init__(self, primary: tuple[str, Exception] | None = None,
+                 cleanup: tuple[tuple[str, Exception], ...] = ()) -> None:
+        points = ((primary,) if primary else ()) + cleanup
+        if not points or any(phase not in WINDOWS_PACKAGE_PHASES for phase, _ in points):
+            raise ValueError("Invalid Windows package diagnostic phase")
+        self.primary = primary
+        self.cleanup = cleanup
+        phase, error = primary if primary else cleanup[0]
+        cleanup_phase, cleanup_error = cleanup[0] if cleanup else ("none", None)
+        super().__init__(
+            f"phase={phase} category={windows_error_category(error)} "
+            f"primary_error={'true' if primary else 'false'} "
+            f"cleanup_error={'true' if cleanup else 'false'} "
+            f"cleanup_phase={cleanup_phase} "
+            f"cleanup_category={windows_error_category(cleanup_error) if cleanup_error else 'none'} "
+            f"additional_cleanup_error={'true' if len(cleanup) > 1 else 'false'}"
+        )
+
+    def with_cleanup(self, phase: str, error: Exception) -> WindowsPackageFailure:
+        return WindowsPackageFailure(self.primary, self.cleanup + ((phase, error),))
+
+
 def verify_source_identity() -> None:
     config = json.loads(SOURCE_CONFIG.read_text(encoding="utf-8"))
     cargo = tomllib.loads((WORKSPACE / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
@@ -221,26 +272,36 @@ def require_nsis_install_location(value: str | None, expected: Path) -> None:
 
 def check_windows(asset: Path, source: dict[str, str], bundle_modules: Path) -> None:
     runner_temp = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
-    temp_context = tempfile.TemporaryDirectory(prefix="cpa-employee-nsis-", dir=runner_temp)
+    try:
+        temp_context = tempfile.TemporaryDirectory(prefix="cpa-employee-nsis-", dir=runner_temp)
+    except Exception as error:
+        raise WindowsPackageFailure(("temp_prepare", error)) from None
     operation_error: Exception | None = None
+    phase = "temp_prepare"
     try:
         temp = temp_context.name
         require(Path(temp).resolve().is_relative_to(runner_temp.resolve()), "Installer test escaped runner temp")
         install_dir = Path(temp) / "installed"
         require(not any(char.isspace() for char in str(install_dir)), "NSIS test path must have no spaces")
+        phase = "registry_before"
         before = windows_uninstall_records()
         registration: str | None = None
         install_succeeded = False
         primary_error: Exception | None = None
+        primary_phase: str | None = None
         try:
+            phase = "installer_launch"
             result = subprocess.run([str(asset), "/S", f"/D={install_dir}"], capture_output=True, timeout=300, check=False)
             require(result.returncode == 0, f"NSIS installation failed: {result.returncode}")
             install_succeeded = True
+            phase = "embedded_notice"
             check_embedded(source, install_dir / "release-notices", bundle_modules)
+            phase = "installed_payload"
             binaries = [path for path in install_dir.iterdir()
                         if path.is_file() and path.suffix.lower() == ".exe" and path.name.lower() != "uninstall.exe"]
             require(len(binaries) == 1 and binaries[0].name == f"{APP_EXECUTABLE}.exe",
                     "Installed app executable does not match source identity")
+            phase = "registry_after"
             after = windows_uninstall_records()
             created = {name: values for name, values in after.items() if name not in before}
             matching = {name: values for name, values in created.items()
@@ -251,6 +312,7 @@ def check_windows(asset: Path, source: dict[str, str], bundle_modules: Path) -> 
             require_nsis_install_location(matching[registration].get("InstallLocation"), install_dir)
             uninstall_command = matching[registration].get("UninstallString", "")
             require("uninstall.exe" in uninstall_command.lower(), "NSIS registration lacks its uninstaller")
+            phase = "installed_payload"
             with binaries[0].open("rb") as binary:
                 header = binary.read(64)
                 require(header[:2] == b"MZ" and len(header) == 64, "Installed app is not PE")
@@ -262,14 +324,18 @@ def check_windows(asset: Path, source: dict[str, str], bundle_modules: Path) -> 
             require(struct.unpack_from("<H", coff, 4)[0] == 0x8664, "Installed app is not Windows x64")
         except Exception as error:
             primary_error = error
+            primary_phase = phase
         cleanup_error: Exception | None = None
+        cleanup_phase: str | None = None
         try:
+            phase = "uninstall_launch"
             uninstaller = install_dir / "uninstall.exe"
             if uninstaller.is_file():
                 result = subprocess.run([str(uninstaller), "/S"], capture_output=True, timeout=180, check=False)
                 require(result.returncode == 0, f"NSIS uninstall failed: {result.returncode}")
             else:
                 require(not install_succeeded, "NSIS uninstaller is missing")
+            phase = "cleanup"
             for _ in range(40):
                 after_cleanup = windows_uninstall_records()
                 remaining = {name: values for name, values in after_cleanup.items()
@@ -287,60 +353,82 @@ def check_windows(asset: Path, source: dict[str, str], bundle_modules: Path) -> 
             require(not (install_dir / "release-notices").exists(), "NSIS uninstall left packaged notices")
         except Exception as error:
             cleanup_error = error
-        if primary_error is not None:
-            if cleanup_error is not None:
-                raise RuntimeError(f"{primary_error}; cleanup also failed: {cleanup_error}") from primary_error
-            raise primary_error
-        if cleanup_error is not None:
-            raise cleanup_error
+            cleanup_phase = phase
+        if primary_error is not None or cleanup_error is not None:
+            raise WindowsPackageFailure(
+                (primary_phase, primary_error) if primary_error is not None else None,
+                ((cleanup_phase, cleanup_error),) if cleanup_error is not None else (),
+            )
     except Exception as error:
-        operation_error = error
+        operation_error = (error if isinstance(error, WindowsPackageFailure) else
+                           WindowsPackageFailure((phase, error)))
     try:
         temp_context.cleanup()
     except Exception as temp_error:
         if operation_error is not None:
-            raise RuntimeError(f"{operation_error}; temporary directory cleanup also failed: {temp_error}") from operation_error
-        raise
+            operation_error = operation_error.with_cleanup("cleanup", temp_error)
+        else:
+            operation_error = WindowsPackageFailure(cleanup=(("cleanup", temp_error),))
     if operation_error is not None:
         raise operation_error
 
 
 def verify_package(args: argparse.Namespace) -> None:
-    require(args.tag == TAG, "Unexpected employee preview tag")
-    require(re.fullmatch(r"[0-9a-f]{40}", args.source_sha) is not None, "Invalid source SHA")
-    verify_source_identity()
-    source_root = Path(args.notices_root)
-    bundle_modules = Path(args.bundle_modules)
-    source = verify_notices(source_root, sha256(source_root / "manifest.json"),
-                            bundle_modules)
+    try:
+        require(args.tag == TAG, "Unexpected employee preview tag")
+        require(re.fullmatch(r"[0-9a-f]{40}", args.source_sha) is not None, "Invalid source SHA")
+        verify_source_identity()
+        source_root = Path(args.notices_root)
+        bundle_modules = Path(args.bundle_modules)
+        source = verify_notices(source_root, sha256(source_root / "manifest.json"),
+                                bundle_modules)
+    except Exception as error:
+        if args.platform == "windows":
+            raise WindowsPackageFailure(("source_reverify", error)) from None
+        raise
     platform = args.platform
-    asset = exactly_one(Path(args.bundle_dir), ".dmg" if platform == "macos" else "-setup.exe")
+    try:
+        asset = exactly_one(Path(args.bundle_dir), ".dmg" if platform == "macos" else "-setup.exe")
+    except Exception as error:
+        if platform == "windows":
+            raise WindowsPackageFailure(("bundle_select", error)) from None
+        raise
     if platform == "macos":
         check_macos(asset, source, bundle_modules)
     else:
-        check_windows(asset, source, bundle_modules)
-    output = Path(args.output)
-    output.mkdir(parents=True, exist_ok=False)
-    output_asset = output / ASSET_NAMES[platform]
-    shutil.copyfile(asset, output_asset)
-    bundle_output = output / f"{platform}.bundle-modules.json"
-    shutil.copyfile(bundle_modules, bundle_output)
-    digest = sha256(output_asset)
-    (output / f"{output_asset.name}.sha256").write_text(f"{digest}  {output_asset.name}\n", encoding="ascii")
-    evidence = {
-        "asset": output_asset.name,
-        "asset_sha256": digest,
-        "notice_manifest_sha256": source["manifest.json"],
-        "notice_files": len(source),
-        "bundle_modules_sha256": sha256(bundle_output),
-        "app_identifier": APP_IDENTIFIER,
-        "app_product": APP_PRODUCT,
-        "app_version": APP_VERSION,
-        "platform": platform,
-        "source_sha": args.source_sha,
-        "tag": args.tag,
-    }
-    (output / f"{platform}.evidence.json").write_text(json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        try:
+            check_windows(asset, source, bundle_modules)
+        except WindowsPackageFailure:
+            raise
+        except Exception as error:
+            raise WindowsPackageFailure(("unexpected_phase", error)) from None
+    try:
+        output = Path(args.output)
+        output.mkdir(parents=True, exist_ok=False)
+        output_asset = output / ASSET_NAMES[platform]
+        shutil.copyfile(asset, output_asset)
+        bundle_output = output / f"{platform}.bundle-modules.json"
+        shutil.copyfile(bundle_modules, bundle_output)
+        digest = sha256(output_asset)
+        (output / f"{output_asset.name}.sha256").write_text(f"{digest}  {output_asset.name}\n", encoding="ascii")
+        evidence = {
+            "asset": output_asset.name,
+            "asset_sha256": digest,
+            "notice_manifest_sha256": source["manifest.json"],
+            "notice_files": len(source),
+            "bundle_modules_sha256": sha256(bundle_output),
+            "app_identifier": APP_IDENTIFIER,
+            "app_product": APP_PRODUCT,
+            "app_version": APP_VERSION,
+            "platform": platform,
+            "source_sha": args.source_sha,
+            "tag": args.tag,
+        }
+        (output / f"{platform}.evidence.json").write_text(json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    except Exception as error:
+        if platform == "windows":
+            raise WindowsPackageFailure(("artifact_write", error)) from None
+        raise
 
 
 def verify_release_set(args: argparse.Namespace) -> None:
@@ -579,7 +667,14 @@ def main() -> None:
     guard.add_argument("--expected-assets")
     args = parser.parse_args()
     if args.command == "verify-package":
-        verify_package(args)
+        try:
+            verify_package(args)
+        except WindowsPackageFailure:
+            raise
+        except Exception as error:
+            if args.platform == "windows":
+                raise WindowsPackageFailure(("unexpected_phase", error)) from None
+            raise
     elif args.command == "verify-release-set":
         verify_release_set(args)
     elif args.command == "verify-notices-source":

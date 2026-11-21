@@ -1,7 +1,8 @@
 """Synthetic path-boundary checks for the employee notice collector.
 
 Provenance: independently authored CPA Cloud fixtures using Python's standard
-library. No package script, registry access, or product binary is involved.
+library. Package checks use synthetic mocks; no real installer, registry, or
+product binary is involved.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import json
 import os
 import stat
 import subprocess
+import struct
 import sys
 import tarfile
 import tempfile
@@ -28,6 +30,11 @@ SPEC = importlib.util.spec_from_file_location("employee_client_notices", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 notices = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(notices)
+PACKAGE_SCRIPT = SCRIPT.parent / "employee-client-package-check.py"
+PACKAGE_SPEC = importlib.util.spec_from_file_location("employee_client_package_check", PACKAGE_SCRIPT)
+assert PACKAGE_SPEC is not None and PACKAGE_SPEC.loader is not None
+package_check = importlib.util.module_from_spec(PACKAGE_SPEC)
+PACKAGE_SPEC.loader.exec_module(package_check)
 
 MANIFEST = json.dumps({"name": "synthetic-notice", "version": "1.0.0",
                        "license": "MIT"}, separators=(",", ":")).encode()
@@ -1856,6 +1863,226 @@ class FullGraphFallbackTests(unittest.TestCase):
                 with self.subTest(key=key, fault=fault):
                     with self.assertRaises(notices.NoticeError):
                         self.cargo_case(key, fault)
+
+
+class WindowsPackagePhaseTests(unittest.TestCase):
+    """Synthetic Windows installer failures; no registry or installer is used."""
+
+    def test_source_reverify_missing_is_fixed_category(self) -> None:
+        args = SimpleNamespace(tag=package_check.TAG, source_sha="a" * 40,
+                               notices_root="unused", bundle_modules="unused",
+                               platform="windows", bundle_dir="unused", output="unused")
+        with patch.object(package_check, "verify_source_identity",
+                          side_effect=FileNotFoundError("CANARY-SOURCE")):
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.verify_package(args)
+        self.assertIn("phase=source_reverify category=not_found", str(caught.exception))
+        self.assertNotIn("CANARY", str(caught.exception))
+
+    def test_registry_before_missing_is_fixed_category(self) -> None:
+        with patch.object(package_check, "windows_uninstall_records",
+                          side_effect=FileNotFoundError("CANARY-REGISTRY")):
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.check_windows(Path("相对-setup.exe"), {}, Path("unused"))
+        self.assertIn("phase=registry_before category=not_found", str(caught.exception))
+        self.assertIn("primary_error=true cleanup_error=false", str(caught.exception))
+        self.assertNotIn("CANARY", str(caught.exception))
+
+    def test_unicode_relative_installer_launch_missing_is_fixed_category(self) -> None:
+        asset = Path("相对-setup.exe")
+        with patch.object(package_check, "windows_uninstall_records", return_value={}), \
+             patch.object(package_check.subprocess, "run",
+                          side_effect=FileNotFoundError("CANARY-INSTALLER")) as launch:
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.check_windows(asset, {}, Path("unused"))
+        self.assertEqual(launch.call_args.args[0][0], str(asset))
+        self.assertIn("phase=installer_launch category=not_found", str(caught.exception))
+        self.assertIn("primary_error=true cleanup_error=false", str(caught.exception))
+        self.assertNotIn("CANARY", str(caught.exception))
+
+    def test_primary_and_cleanup_categories_remain_separate(self) -> None:
+        with patch.object(package_check, "windows_uninstall_records",
+                          side_effect=[{}, PermissionError("CANARY-CLEANUP")]), \
+             patch.object(package_check.subprocess, "run",
+                          side_effect=FileNotFoundError("CANARY-PRIMARY")):
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.check_windows(Path("相对-setup.exe"), {}, Path("unused"))
+        message = str(caught.exception)
+        self.assertIn("phase=installer_launch category=not_found", message)
+        self.assertIn("primary_error=true cleanup_error=true", message)
+        self.assertIn("cleanup_phase=cleanup cleanup_category=access_denied", message)
+        self.assertNotIn("CANARY", message)
+
+    def test_unicode_relative_asset_success_still_checks_and_uninstalls(self) -> None:
+        asset = Path("相对-setup.exe")
+        state: dict[str, object] = {"installed": False, "directory": None}
+        calls: list[list[str]] = []
+
+        def registry() -> dict[str, dict[str, str]]:
+            if not state["installed"]:
+                return {}
+            directory = state["directory"]
+            assert isinstance(directory, Path)
+            return {"synthetic": {
+                "DisplayName": package_check.APP_PRODUCT,
+                "DisplayVersion": package_check.APP_VERSION,
+                "InstallLocation": f'"{directory}"',
+                "UninstallString": str(directory / "uninstall.exe"),
+            }}
+
+        def launch(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[0] == str(asset):
+                directory = Path(argv[2][3:])
+                directory.mkdir()
+                binary = bytearray(134)
+                binary[:2] = b"MZ"
+                struct.pack_into("<I", binary, 0x3C, 128)
+                binary[128:132] = b"PE\0\0"
+                struct.pack_into("<H", binary, 132, 0x8664)
+                (directory / f"{package_check.APP_EXECUTABLE}.exe").write_bytes(binary)
+                (directory / "uninstall.exe").write_bytes(b"MZ")
+                state["directory"] = directory
+                state["installed"] = True
+            else:
+                directory = state["directory"]
+                assert isinstance(directory, Path)
+                (directory / f"{package_check.APP_EXECUTABLE}.exe").unlink()
+                state["installed"] = False
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(package_check, "windows_uninstall_records", side_effect=registry), \
+             patch.object(package_check, "check_embedded") as embedded, \
+             patch.object(package_check.subprocess, "run", side_effect=launch):
+            package_check.check_windows(asset, {}, Path("unused"))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], str(asset))
+        self.assertEqual(Path(calls[1][0]).name, "uninstall.exe")
+        embedded.assert_called_once()
+
+    def test_temp_constructor_failure_has_its_own_phase(self) -> None:
+        with patch.object(package_check.tempfile, "TemporaryDirectory",
+                          side_effect=FileNotFoundError("CANARY-TEMP")):
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.check_windows(Path("相对-setup.exe"), {}, Path("unused"))
+        self.assertIn("phase=temp_prepare category=not_found", str(caught.exception))
+        self.assertNotIn("CANARY", str(caught.exception))
+
+    def test_temp_preparation_failure_has_its_own_phase(self) -> None:
+        original = package_check.require
+
+        def refuse_preparation(condition: bool, message: str) -> None:
+            if message == "Installer test escaped runner temp":
+                raise FileNotFoundError("CANARY-TEMP-PREP")
+            original(condition, message)
+
+        with patch.object(package_check, "require", side_effect=refuse_preparation):
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.check_windows(Path("相对-setup.exe"), {}, Path("unused"))
+        self.assertIn("phase=temp_prepare category=not_found", str(caught.exception))
+        self.assertNotIn("CANARY", str(caught.exception))
+
+    def test_installed_payload_failure_is_not_registry_after(self) -> None:
+        def launch(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[0] == "相对-setup.exe":
+                directory = Path(argv[2][3:])
+                directory.mkdir()
+                (directory / "uninstall.exe").write_bytes(b"MZ")
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(package_check, "windows_uninstall_records", return_value={}), \
+             patch.object(package_check, "check_embedded"), \
+             patch.object(package_check.subprocess, "run", side_effect=launch):
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.check_windows(Path("相对-setup.exe"), {}, Path("unused"))
+        self.assertIn("phase=installed_payload category=validation_error", str(caught.exception))
+        self.assertNotIn("CANARY", str(caught.exception))
+
+    def test_registry_after_association_failure_retains_registry_phase(self) -> None:
+        def launch(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[0] == "相对-setup.exe":
+                directory = Path(argv[2][3:])
+                directory.mkdir()
+                binary = bytearray(134)
+                binary[:2] = b"MZ"
+                struct.pack_into("<I", binary, 0x3C, 128)
+                binary[128:132] = b"PE\0\0"
+                struct.pack_into("<H", binary, 132, 0x8664)
+                (directory / f"{package_check.APP_EXECUTABLE}.exe").write_bytes(binary)
+                (directory / "uninstall.exe").write_bytes(b"MZ")
+            else:
+                Path(argv[0]).with_name(f"{package_check.APP_EXECUTABLE}.exe").unlink()
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(package_check, "windows_uninstall_records", return_value={}), \
+             patch.object(package_check, "check_embedded"), \
+             patch.object(package_check.subprocess, "run", side_effect=launch):
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.check_windows(Path("相对-setup.exe"), {}, Path("unused"))
+        self.assertIn("phase=registry_after category=validation_error", str(caught.exception))
+
+    def package_fixture(self, root: Path) -> tuple[SimpleNamespace, Path]:
+        notices = root / "notices"
+        notices.mkdir()
+        (notices / "manifest.json").write_bytes(b"{}")
+        bundle = root / "bundle.json"
+        bundle.write_bytes(b"{}")
+        asset = root / "相对-setup.exe"
+        asset.write_bytes(b"MZ")
+        args = SimpleNamespace(tag=package_check.TAG, source_sha="a" * 40,
+                               notices_root=str(notices), bundle_modules=str(bundle),
+                               platform="windows", bundle_dir=str(root),
+                               output=str(root / "output"))
+        return args, asset
+
+    def test_artifact_copy_failure_has_its_own_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args, asset = self.package_fixture(Path(temporary))
+            with patch.object(package_check, "verify_source_identity"), \
+                 patch.object(package_check, "verify_notices",
+                              return_value={"manifest.json": "0" * 64}), \
+                 patch.object(package_check, "exactly_one", return_value=asset), \
+                 patch.object(package_check, "check_windows"), \
+                 patch.object(package_check.shutil, "copyfile",
+                              side_effect=FileNotFoundError("CANARY-COPY")):
+                with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                    package_check.verify_package(args)
+        self.assertIn("phase=artifact_write category=not_found", str(caught.exception))
+        self.assertNotIn("CANARY", str(caught.exception))
+
+    def test_sidecar_write_failure_has_artifact_phase(self) -> None:
+        original = Path.write_text
+
+        def refuse_sidecar(path: Path, text: str, **kwargs: object) -> int:
+            if path.name.endswith(".sha256"):
+                raise FileNotFoundError("CANARY-SIDECAR")
+            return original(path, text, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            args, asset = self.package_fixture(Path(temporary))
+            with patch.object(package_check, "verify_source_identity"), \
+                 patch.object(package_check, "verify_notices",
+                              return_value={"manifest.json": "0" * 64}), \
+                 patch.object(package_check, "exactly_one", return_value=asset), \
+                 patch.object(package_check, "check_windows"), \
+                 patch.object(Path, "write_text", refuse_sidecar):
+                with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                    package_check.verify_package(args)
+        self.assertIn("phase=artifact_write category=not_found", str(caught.exception))
+        self.assertNotIn("CANARY", str(caught.exception))
+
+    def test_unexpected_unmapped_failure_is_not_bundle_select(self) -> None:
+        argv = ["package-check", "verify-package", "--platform", "windows",
+                "--bundle-dir", "unused", "--notices-root", "unused",
+                "--bundle-modules", "unused", "--output", "unused",
+                "--source-sha", "a" * 40, "--tag", package_check.TAG]
+        with patch.object(sys, "argv", argv), \
+             patch.object(package_check, "verify_package",
+                          side_effect=FileNotFoundError("CANARY-UNMAPPED")):
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.main()
+        self.assertIn("phase=unexpected_phase category=not_found", str(caught.exception))
+        self.assertNotIn("CANARY", str(caught.exception))
 
 
 if __name__ == "__main__":
