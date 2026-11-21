@@ -28,6 +28,8 @@
 - 第 18 次自然打包（run 44845339414）中，macOS 构建、挂载、包内通知回读及 artifact 上传成功。Windows 的 NSIS 构建成功，但安装或回读校验步骤仅报裸 `WinError 2`；日志没有失败阶段和缺失路径，不能确认安装器是否启动。Windows 验收失败，上传和发布步骤跳过，双平台包仍未发布。
 - 第 19 次自然打包（run 44850209739）中，macOS 安装包检查及 artifact 上传成功；Windows 在安装器启动前的注册表基线枚举报固定诊断 `phase=registry_before category=not_found`。该诊断不能证明缺失的是 HKCU Uninstall 父键；Windows 验收失败，上传和发布步骤跳过，双平台包仍未发布。
 
+- 第 20 次 PR 自然打包（run 44853202609）在精确源码头上完成 macOS、Windows 构建、安装包通知回读及 artifact 上传；PR 的发布步骤按规则跳过。PR 138 合并后的 main push 打包（run 44855614406）也完成两平台包检查，但发布 job 136702377191 被旧守卫拒绝：GitHub 对该成功 PR run 返回空的 `pull_requests` 数组。未创建 tag 或 Release；后续守卫修订仍须在新源码头经自然 CI 验证，不能借用旧头成功结果。
+
 请先核对同名 .sha256 文件，再安装。此版本仅供开发预览与反馈。
 
 ## English summary
@@ -41,3 +43,5 @@ Natural package run 17 (run 44839859734) succeeded on macOS through DMG build, m
 Natural package run 18 (run 44845339414) succeeded on macOS through build, mount, bundled-notice readback, and artifact upload. The Windows NSIS build succeeded, but installation or package readback verification reported only bare `WinError 2`. The log gives neither the failing phase nor the missing path, and does not establish whether the installer started. Windows acceptance failed; upload and publication were skipped, so the pair of packages remains unpublished.
 
 Natural package run 19 (run 44850209739) succeeded on macOS through package inspection and artifact upload. Windows reported the fixed diagnostic `phase=registry_before category=not_found` while enumerating its pre-install registry baseline, before launching the installer. This does not establish that the missing object was the HKCU Uninstall parent key. Windows acceptance failed; upload and publication were skipped, and the package pair remains unpublished.
+
+Natural PR package run 20 (run 44853202609) completed the macOS and Windows builds, bundled-notice readback, and artifact uploads at its exact source head; its PR publish job was skipped as designed. The main-push package run after PR 138 was merged (run 44855614406) also passed both platform package checks, but publish job 136702377191 was refused by the old release guard because GitHub returned an empty `pull_requests` array for that successful PR run. No tag or Release was created. The follow-up guard change still requires a naturally triggered run at its new source head; earlier success cannot stand in for that check.

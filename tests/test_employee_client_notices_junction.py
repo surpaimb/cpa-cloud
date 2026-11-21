@@ -8,6 +8,7 @@ product binary is involved.
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 from contextlib import nullcontext
 import importlib.util
 import hashlib
@@ -2221,6 +2222,267 @@ class WindowsUninstallRootTests(unittest.TestCase):
                       str(caught.exception))
         self.assertIn("primary_error=false cleanup_error=true",
                       str(caught.exception))
+
+
+class ReleaseGuardSourceTests(unittest.TestCase):
+    """Synthetic GitHub API graph; no token, network, tag, or Release is used."""
+
+    REPOSITORY = "surpaimb/cpa-cloud"
+    REPOSITORY_ID = 1381169504
+    BASE = "86537f674d4d018ddcdc3b744288fc05274b412e"
+    ORIGINAL_SOURCE = "f110cf5dea7dd06d45158fe0b271f03fa9e77c0e"
+    ORIGINAL_HEAD = "b33131170f74afca411f8a28b7fdc7120eff9a3b"
+    ORIGINAL_TREE = "a8766ab860ecac5f363c3bb445af7c4d7ccce966"
+    FOLLOWUP_SOURCE = "c" * 40
+    FOLLOWUP_HEAD = "d" * 40
+    FOLLOWUP_TREE = "e" * 40
+    FOLLOWUP_FILES = {
+        "scripts/employee-client-package-check.py",
+        "tests/test_employee_client_notices_junction.py",
+        "docs/releases/employee-config-v0.1.0-preview.1.md",
+    }
+
+    def fixture(self) -> dict[str, object]:
+        original = {
+            "number": 138, "state": "closed", "merged_at": "2026-11-21T02:23:18Z",
+            "created_at": "2026-11-20T13:52:29Z",
+            "merge_commit_sha": self.ORIGINAL_SOURCE, "changed_files": 34,
+            "base": {"ref": "main", "sha": self.BASE,
+                     "repo": {"full_name": self.REPOSITORY, "id": self.REPOSITORY_ID}},
+            "head": {"sha": self.ORIGINAL_HEAD, "ref": "codex/employee-config-preview-package",
+                     "repo": {"full_name": self.REPOSITORY, "id": self.REPOSITORY_ID}},
+        }
+        followup = {
+            "number": 139, "state": "closed", "merged_at": "2026-11-21T03:20:00Z",
+            "created_at": "2026-11-21T03:00:00Z",
+            "merge_commit_sha": self.FOLLOWUP_SOURCE, "changed_files": 3,
+            "base": {"ref": "main", "sha": self.ORIGINAL_SOURCE,
+                     "repo": {"full_name": self.REPOSITORY, "id": self.REPOSITORY_ID}},
+            "head": {"sha": self.FOLLOWUP_HEAD, "ref": "codex/employee-preview-release-guard",
+                     "repo": {"full_name": self.REPOSITORY, "id": self.REPOSITORY_ID}},
+        }
+        original_files = sorted(package_check.RELEASE_SOURCE_FILES)
+        followup_files = sorted(self.FOLLOWUP_FILES)
+
+        def run(pr: dict[str, object], run_id: int, created: str) -> dict[str, object]:
+            head = pr["head"]
+            assert isinstance(head, dict)
+            return {
+                "id": run_id, "head_sha": head["sha"], "head_branch": head["ref"],
+                "name": package_check.PACKAGE_WORKFLOW_NAME,
+                "repository": {"id": self.REPOSITORY_ID,
+                               "full_name": self.REPOSITORY},
+                "head_repository": {"id": self.REPOSITORY_ID,
+                                    "full_name": self.REPOSITORY},
+                "path": package_check.WORKFLOW_PATH, "event": "pull_request",
+                "status": "completed", "conclusion": "success", "run_attempt": 1,
+                "created_at": created, "pull_requests": [],
+            }
+
+        original_run = run(original, 44853202609, "2026-11-21T01:58:00Z")
+        followup_run = run(followup, 44860000000, "2026-11-21T03:10:00Z")
+        source = self.ORIGINAL_SOURCE
+        final = self.FOLLOWUP_SOURCE
+        return {
+            f"commits/{source}/pulls?per_page=100": [original],
+            f"commits/{final}/pulls?per_page=100": [followup],
+            f"commits/{self.ORIGINAL_HEAD}/pulls?per_page=100": [original],
+            f"commits/{self.FOLLOWUP_HEAD}/pulls?per_page=100": [followup],
+            "pulls/138": original, "pulls/139": followup,
+            "pulls/138/files?per_page=100":
+                [{"filename": path, "status": "modified"} for path in original_files],
+            "pulls/139/files?per_page=100":
+                [{"filename": path, "status": "modified"} for path in followup_files],
+            f"actions/runs?event=pull_request&head_sha={self.ORIGINAL_HEAD}&per_page=100":
+                {"total_count": 1, "workflow_runs": [original_run]},
+            f"actions/runs?event=pull_request&head_sha={self.FOLLOWUP_HEAD}&per_page=100":
+                {"total_count": 1, "workflow_runs": [followup_run]},
+            f"git/commits/{source}": {
+                "sha": source, "parents": [{"sha": self.BASE}],
+                "tree": {"sha": self.ORIGINAL_TREE},
+            },
+            f"git/commits/{self.ORIGINAL_HEAD}": {
+                "sha": self.ORIGINAL_HEAD, "parents": [],
+                "tree": {"sha": self.ORIGINAL_TREE},
+            },
+            f"git/commits/{final}": {
+                "sha": final, "parents": [{"sha": source}],
+                "tree": {"sha": self.FOLLOWUP_TREE},
+            },
+            f"git/commits/{self.FOLLOWUP_HEAD}": {
+                "sha": self.FOLLOWUP_HEAD, "parents": [],
+                "tree": {"sha": self.FOLLOWUP_TREE},
+            },
+            f"commits/{final}": {
+                "sha": final, "parents": [{"sha": source}],
+                "files": [{"filename": path, "status": "modified"} for path in followup_files],
+            },
+            f"compare/{self.BASE}...{source}": {
+                "status": "ahead", "ahead_by": 1, "behind_by": 0,
+                "total_commits": 1, "base_commit": {"sha": self.BASE},
+                "merge_base_commit": {"sha": self.BASE},
+                "commits": [{"sha": source}],
+                "files": [{"filename": path} for path in original_files],
+            },
+            f"compare/{self.BASE}...{final}": {
+                "status": "ahead", "ahead_by": 2, "behind_by": 0,
+                "total_commits": 2, "base_commit": {"sha": self.BASE},
+                "merge_base_commit": {"sha": self.BASE},
+                "commits": [{"sha": source}, {"sha": final}],
+                "files": [{"filename": path} for path in original_files],
+            },
+            "git/ref/heads/main": {"object": {"sha": final}},
+            f"git/ref/tags/{package_check.TAG}": None,
+            "releases?per_page=100&page=1": [],
+        }
+
+    def exercise(self, source: str, data: dict[str, object] | None = None) -> None:
+        replies = self.fixture() if data is None else data
+
+        def lookup(path: str) -> object:
+            if path not in replies:
+                raise AssertionError("Unexpected synthetic GitHub API request")
+            return replies[path]
+
+        with patch.object(package_check, "api_get", side_effect=lookup):
+            package_check.require_merged_release_source(source, self.REPOSITORY)
+
+    def test_original_merged_pr_accepts_empty_run_pull_requests(self) -> None:
+        self.exercise(self.ORIGINAL_SOURCE)
+
+    def test_one_exact_followup_accepts_three_file_delta(self) -> None:
+        self.exercise(self.FOLLOWUP_SOURCE)
+
+    def test_correct_nonempty_run_pr_binding_still_passes(self) -> None:
+        replies = self.fixture()
+        key = (f"actions/runs?event=pull_request&head_sha="
+               f"{self.ORIGINAL_HEAD}&per_page=100")
+        replies[key]["workflow_runs"][0]["pull_requests"] = [{"number": 138}]
+        self.exercise(self.ORIGINAL_SOURCE, replies)
+
+    def test_unrelated_failed_workflow_does_not_replace_package_run(self) -> None:
+        replies = self.fixture()
+        key = (f"actions/runs?event=pull_request&head_sha="
+               f"{self.ORIGINAL_HEAD}&per_page=100")
+        other = deepcopy(replies[key]["workflow_runs"][0])
+        other.update(id=44853202520, name="Code validation",
+                     path=".github/workflows/ci.yml", conclusion="failure")
+        replies[key]["workflow_runs"].append(other)
+        replies[key]["total_count"] = 2
+        self.exercise(self.ORIGINAL_SOURCE, replies)
+
+    def assert_refused(self, replies: dict[str, object], source: str) -> None:
+        with self.assertRaises(RuntimeError):
+            self.exercise(source, replies)
+
+    def test_original_run_rejects_wrong_identity_or_result(self) -> None:
+        run_key = (f"actions/runs?event=pull_request&head_sha="
+                   f"{self.ORIGINAL_HEAD}&per_page=100")
+        changes = (
+            ("wrong PR", lambda run: run.update(pull_requests=[{"number": 139}])),
+            ("wrong branch", lambda run: run.update(head_branch="wrong")),
+            ("wrong repository", lambda run: run["repository"].update(id=3)),
+            ("wrong head repository", lambda run: run["head_repository"].update(id=3)),
+            ("wrong head", lambda run: run.update(head_sha="0" * 40)),
+            ("wrong workflow", lambda run: run.update(path=".github/workflows/wrong.yml")),
+            ("wrong name", lambda run: run.update(name="Wrong workflow")),
+            ("second attempt", lambda run: run.update(run_attempt=2)),
+            ("failed", lambda run: run.update(conclusion="failure")),
+            ("before PR", lambda run: run.update(created_at="2026-11-20T01:00:00Z")),
+            ("after merge", lambda run: run.update(created_at="2026-11-21T03:00:00Z")),
+        )
+        for name, change in changes:
+            with self.subTest(name=name):
+                replies = self.fixture()
+                run = replies[run_key]["workflow_runs"][0]
+                change(run)
+                self.assert_refused(replies, self.ORIGINAL_SOURCE)
+
+    def test_original_run_rejects_multiple_or_incomplete_package_runs(self) -> None:
+        key = (f"actions/runs?event=pull_request&head_sha="
+               f"{self.ORIGINAL_HEAD}&per_page=100")
+        replies = self.fixture()
+        runs = replies[key]
+        duplicate = deepcopy(runs["workflow_runs"][0])
+        duplicate["id"] += 1
+        runs["workflow_runs"].append(duplicate)
+        runs["total_count"] = 2
+        self.assert_refused(replies, self.ORIGINAL_SOURCE)
+        replies = self.fixture()
+        replies[key]["total_count"] = 2
+        self.assert_refused(replies, self.ORIGINAL_SOURCE)
+
+    def test_empty_run_pr_array_requires_unique_commit_association(self) -> None:
+        for sha, source in ((self.ORIGINAL_HEAD, self.ORIGINAL_SOURCE),
+                            (self.FOLLOWUP_HEAD, self.FOLLOWUP_SOURCE)):
+            with self.subTest(source=source):
+                replies = self.fixture()
+                replies[f"commits/{sha}/pulls?per_page=100"] = []
+                self.assert_refused(replies, source)
+        replies = self.fixture()
+        replies[f"commits/{self.ORIGINAL_HEAD}/pulls?per_page=100"].append(
+            {"number": 999})
+        self.assert_refused(replies, self.ORIGINAL_SOURCE)
+
+    def test_followup_run_failure_refuses_release(self) -> None:
+        replies = self.fixture()
+        key = (f"actions/runs?event=pull_request&head_sha="
+               f"{self.FOLLOWUP_HEAD}&per_page=100")
+        replies[key]["workflow_runs"][0]["conclusion"] = "failure"
+        self.assert_refused(replies, self.FOLLOWUP_SOURCE)
+
+    def test_followup_chain_rejects_parent_tree_and_file_changes(self) -> None:
+        cases = (
+            ("wrong parent", lambda data: data[f"git/commits/{self.FOLLOWUP_SOURCE}"]
+             ["parents"][0].update(sha="0" * 40)),
+            ("follow-up predates original merge", lambda data: data["pulls/139"]
+             .update(created_at="2026-11-21T02:00:00Z")),
+            ("wrong head tree", lambda data: data[f"git/commits/{self.FOLLOWUP_HEAD}"]
+             ["tree"].update(sha="0" * 40)),
+            ("wrong base", lambda data: data["pulls/139"]["base"].update(sha=self.BASE)),
+            ("extra PR file", lambda data: data["pulls/139/files?per_page=100"]
+             .append({"filename": "unreviewed.txt", "status": "modified"})),
+            ("missing PR file", lambda data: data["pulls/139/files?per_page=100"].pop()),
+            ("renamed PR file", lambda data: data["pulls/139/files?per_page=100"][0]
+             .update(status="renamed")),
+            ("extra commit file", lambda data: data[f"commits/{self.FOLLOWUP_SOURCE}"]
+             ["files"].append({"filename": "unreviewed.txt", "status": "modified"})),
+            ("extra cumulative file", lambda data: data[f"compare/{self.BASE}...{self.FOLLOWUP_SOURCE}"]
+             ["files"].append({"filename": "unreviewed.txt"})),
+            ("missing cumulative file", lambda data: data[f"compare/{self.BASE}...{self.FOLLOWUP_SOURCE}"]
+             ["files"].pop()),
+            ("wrong commit count", lambda data: data[f"compare/{self.BASE}...{self.FOLLOWUP_SOURCE}"]
+             .update(total_commits=3)),
+        )
+        for name, change in cases:
+            with self.subTest(name=name):
+                replies = self.fixture()
+                change(replies)
+                self.assert_refused(replies, self.FOLLOWUP_SOURCE)
+
+    def test_existing_tag_refuses_prepublication(self) -> None:
+        replies = self.fixture()
+        replies[f"git/ref/tags/{package_check.TAG}"] = {
+            "ref": f"refs/tags/{package_check.TAG}",
+            "object": {"sha": self.ORIGINAL_SOURCE, "type": "commit"},
+        }
+        args = SimpleNamespace(tag=package_check.TAG, source_sha=self.FOLLOWUP_SOURCE,
+                               stage="pre", freeze_assets=None, expected_assets=None)
+        with patch.object(package_check, "api_get", side_effect=lambda path: replies[path]), \
+             patch.dict(os.environ, {"GH_REPO": self.REPOSITORY}):
+            with self.assertRaisesRegex(RuntimeError, "Tag or Release already exists"):
+                package_check.release_guard(args)
+
+    def test_prepublication_requires_exact_current_main(self) -> None:
+        replies = self.fixture()
+        args = SimpleNamespace(tag=package_check.TAG, source_sha=self.FOLLOWUP_SOURCE,
+                               stage="pre", freeze_assets=None, expected_assets=None)
+        with patch.object(package_check, "api_get", side_effect=lambda path: replies[path]), \
+             patch.dict(os.environ, {"GH_REPO": self.REPOSITORY}):
+            package_check.release_guard(args)
+            replies["git/ref/heads/main"]["object"]["sha"] = self.ORIGINAL_SOURCE
+            with self.assertRaisesRegex(RuntimeError, "Main HEAD moved"):
+                package_check.release_guard(args)
 
 
 if __name__ == "__main__":

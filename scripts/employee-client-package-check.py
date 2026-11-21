@@ -9,6 +9,7 @@ installed application.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -33,6 +34,18 @@ APP_IDENTIFIER = "com.cpa-cloud.employee-config"
 APP_PRODUCT = "CPA 云端配置"
 APP_EXECUTABLE = "cpa-cloud-employee-config"
 WORKFLOW_PATH = ".github/workflows/employee-config-preview-package.yml"
+PACKAGE_WORKFLOW_NAME = "Employee desktop preview packages"
+RELEASE_BASE_SHA = "86537f674d4d018ddcdc3b744288fc05274b412e"
+ORIGINAL_RELEASE_SOURCE = "f110cf5dea7dd06d45158fe0b271f03fa9e77c0e"
+ORIGINAL_RELEASE_HEAD = "b33131170f74afca411f8a28b7fdc7120eff9a3b"
+ORIGINAL_RELEASE_TREE = "a8766ab860ecac5f363c3bb445af7c4d7ccce966"
+ORIGINAL_RELEASE_PR = 138
+ORIGINAL_PACKAGE_RUN = 44853202609
+RELEASE_GUARD_FOLLOWUP_FILES = {
+    "scripts/employee-client-package-check.py",
+    "tests/test_employee_client_notices_junction.py",
+    "docs/releases/employee-config-v0.1.0-preview.1.md",
+}
 RELEASE_SOURCE_FILES = {
     WORKFLOW_PATH,
     "desktop/employee-config-switcher/src-tauri/tauri.release.conf.json",
@@ -510,37 +523,201 @@ def api_get(path: str) -> dict | list | None:
             return None
         raise
 
+def release_object(value: object, label: str) -> dict:
+    require(isinstance(value, dict), f"Invalid release source {label}")
+    return value
+
+
+def release_list(value: object, label: str) -> list:
+    require(isinstance(value, list) and len(value) < 100,
+            f"Incomplete release source {label}")
+    return value
+
+
+def release_time(value: object) -> datetime:
+    require(isinstance(value, str), "Invalid release source timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RuntimeError("Invalid release source timestamp") from error
+    require(parsed.tzinfo is not None, "Unzoned release source timestamp")
+    return parsed.astimezone(timezone.utc)
+
+
+def release_files(value: object, expected: set[str], label: str,
+                  modified_only: bool = False) -> None:
+    files = release_list(value, label)
+    require(len(files) == len(expected) and
+            all(isinstance(item, dict) and isinstance(item.get("filename"), str)
+                for item in files), f"Invalid release source {label}")
+    names = [item["filename"] for item in files]
+    require(len(set(names)) == len(names) and set(names) == expected,
+            f"Incorrect release source {label}")
+    if modified_only:
+        require(all(item.get("status") == "modified" for item in files),
+                f"Non-modified release source {label}")
+
+
+def release_pr(source_sha: str, repository: str, expected_number: int,
+               expected_base: str) -> dict:
+    associated = release_list(api_get(f"commits/{source_sha}/pulls?per_page=100"),
+                              "associated PRs")
+    require(len(associated) == 1 and isinstance(associated[0], dict) and
+            associated[0].get("number") == expected_number and
+            associated[0].get("merge_commit_sha") == source_sha,
+            "Release source has no unique merged PR")
+    pr = release_object(api_get(f"pulls/{expected_number}"), "PR details")
+    require(pr.get("number") == expected_number and pr.get("state") == "closed" and
+            pr.get("merge_commit_sha") == source_sha and
+            type(pr.get("changed_files")) is int and pr["changed_files"] > 0,
+            "Merged release PR details changed")
+    base = release_object(pr.get("base"), "PR base")
+    head = release_object(pr.get("head"), "PR head")
+    base_repo = release_object(base.get("repo"), "PR base repository")
+    head_repo = release_object(head.get("repo"), "PR head repository")
+    require(base.get("ref") == "main" and base.get("sha") == expected_base and
+            base_repo.get("full_name") == repository and
+            head_repo.get("full_name") == repository and
+            type(base_repo.get("id")) is int and base_repo["id"] > 0 and
+            head_repo.get("id") == base_repo["id"] and
+            isinstance(head.get("ref"), str) and bool(head["ref"]) and
+            isinstance(head.get("sha"), str) and
+            re.fullmatch(r"[0-9a-f]{40}", head["sha"]) is not None,
+            "Merged release PR repository, base, or head changed")
+    require(release_time(pr.get("created_at")) <= release_time(pr.get("merged_at")),
+            "Invalid merged release PR lifetime")
+    head_associated = release_list(api_get(f"commits/{head['sha']}/pulls?per_page=100"),
+                                   "head-associated PRs")
+    require(len(head_associated) == 1 and isinstance(head_associated[0], dict) and
+            head_associated[0].get("number") == expected_number,
+            "Release head is not uniquely associated with its PR")
+    return pr
+
+
+def release_commit(sha: str, expected_parent: str | None = None) -> str:
+    commit = release_object(api_get(f"git/commits/{sha}"), "Git commit")
+    tree = release_object(commit.get("tree"), "Git tree")
+    require(commit.get("sha") == sha and isinstance(tree.get("sha"), str) and
+            re.fullmatch(r"[0-9a-f]{40}", tree["sha"]) is not None,
+            "Release Git commit or tree differs")
+    if expected_parent is not None:
+        parents = commit.get("parents")
+        require(isinstance(parents, list) and len(parents) == 1 and
+                isinstance(parents[0], dict) and
+                parents[0].get("sha") == expected_parent,
+                "Release Git commit has an unexpected parent")
+    return tree["sha"]
+
+
+def release_compare(source_sha: str, commits: list[str]) -> None:
+    compared = release_object(api_get(f"compare/{RELEASE_BASE_SHA}...{source_sha}"),
+                              "base comparison")
+    actual_commits = compared.get("commits")
+    require(compared.get("status") == "ahead" and
+            type(compared.get("ahead_by")) is int and
+            compared["ahead_by"] == len(commits) and
+            type(compared.get("behind_by")) is int and
+            compared["behind_by"] == 0 and
+            type(compared.get("total_commits")) is int and
+            compared["total_commits"] == len(commits) and
+            release_object(compared.get("base_commit"), "comparison base").get("sha") == RELEASE_BASE_SHA and
+            release_object(compared.get("merge_base_commit"), "merge base").get("sha") == RELEASE_BASE_SHA and
+            isinstance(actual_commits, list) and
+            [item.get("sha") if isinstance(item, dict) else None
+             for item in actual_commits] == commits,
+            "Release source commit chain differs from reviewed chain")
+    release_files(compared.get("files"), RELEASE_SOURCE_FILES, "cumulative files")
+
+
+def release_run(pr: dict, repository: str, exact_run: int | None = None) -> None:
+    head = pr["head"]
+    head_sha = head["sha"]
+    number = pr["number"]
+    runs = release_object(api_get(
+        f"actions/runs?event=pull_request&head_sha={head_sha}&per_page=100"),
+        "package workflow runs")
+    all_runs = release_list(runs.get("workflow_runs"), "package workflow runs")
+    require(type(runs.get("total_count")) is int and
+            runs["total_count"] == len(all_runs) and
+            all(isinstance(run, dict) for run in all_runs),
+            "Incomplete release package workflow runs")
+    package_runs = [run for run in all_runs if isinstance(run, dict) and
+                    run.get("path") == WORKFLOW_PATH]
+    require(len(package_runs) == 1, "Release head lacks one unique package workflow run")
+    run = package_runs[0]
+    run_repo = release_object(run.get("repository"), "workflow repository")
+    head_repo = release_object(run.get("head_repository"), "workflow head repository")
+    pr_repo_id = head["repo"]["id"]
+    require(type(run.get("id")) is int and run["id"] > 0 and
+            (exact_run is None or run["id"] == exact_run) and
+            run.get("name") == PACKAGE_WORKFLOW_NAME and
+            run.get("head_sha") == head_sha and
+            run.get("head_branch") == head["ref"] and
+            all(repo.get("full_name") == repository and
+                type(repo.get("id")) is int and repo["id"] == pr_repo_id
+                for repo in (run_repo, head_repo)) and
+            run.get("event") == "pull_request" and
+            run.get("status") == "completed" and
+            run.get("conclusion") == "success" and
+            type(run.get("run_attempt")) is int and run["run_attempt"] == 1 and
+            release_time(pr["created_at"]) <= release_time(run.get("created_at")) <=
+            release_time(pr["merged_at"]),
+            "Release PR lacks one exact-head successful first-attempt package workflow")
+    linked = run.get("pull_requests")
+    require(isinstance(linked, list) and len(linked) <= 1 and
+            (not linked or (isinstance(linked[0], dict) and
+                            linked[0].get("number") == number)),
+            "Package workflow PR association contradicts commit association")
+
 
 def require_merged_release_source(source_sha: str, repository: str) -> None:
-    associated = api_get(f"commits/{source_sha}/pulls?per_page=100")
-    require(isinstance(associated, list) and len(associated) < 100, "Cannot enumerate source-associated PRs")
-    merged = [pr for pr in associated if pr.get("merged_at") and
-              pr.get("merge_commit_sha") == source_sha and
-              pr.get("base", {}).get("ref") == "main" and
-              pr.get("base", {}).get("repo", {}).get("full_name") == repository and
-              pr.get("head", {}).get("repo", {}).get("full_name") == repository]
-    require(len(merged) == 1, "Main source is not exactly one merged repository PR")
-    number = merged[0]["number"]
-    pr = api_get(f"pulls/{number}")
-    require(isinstance(pr, dict) and pr.get("merged_at") and
-            pr.get("merge_commit_sha") == source_sha and pr.get("state") == "closed",
-            "Merged PR details changed")
-    head_sha = pr["head"]["sha"]
-    require(re.fullmatch(r"[0-9a-f]{40}", head_sha) is not None, "Invalid merged PR head")
-    changed = api_get(f"pulls/{number}/files?per_page=100")
-    require(isinstance(changed, list) and len(changed) < 100 and
-            len(changed) == pr["changed_files"], "Cannot enumerate complete merged PR file set")
-    require({item["filename"] for item in changed} == RELEASE_SOURCE_FILES,
-            "Merged PR does not contain exactly the reviewed package source set")
-    runs = api_get(f"actions/runs?event=pull_request&head_sha={head_sha}&per_page=100")
-    require(isinstance(runs, dict) and type(runs.get("total_count")) is int and
-            runs["total_count"] < 100, "Cannot enumerate complete source PR checks")
-    passed = [run for run in runs.get("workflow_runs", []) if
-              run.get("path") == WORKFLOW_PATH and run.get("head_sha") == head_sha and
-              run.get("event") == "pull_request" and run.get("status") == "completed" and
-              run.get("conclusion") == "success" and run.get("run_attempt") == 1 and
-              any(item.get("number") == number for item in run.get("pull_requests", []))]
-    require(len(passed) == 1, "Merged release PR lacks one exact-head successful first-attempt package workflow")
+    require(isinstance(source_sha, str) and
+            re.fullmatch(r"[0-9a-f]{40}", source_sha) is not None and
+            isinstance(repository, str) and
+            re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None,
+            "Invalid release source identity")
+    original = release_pr(ORIGINAL_RELEASE_SOURCE, repository, ORIGINAL_RELEASE_PR,
+                          RELEASE_BASE_SHA)
+    require(original["head"]["sha"] == ORIGINAL_RELEASE_HEAD and
+            original["changed_files"] == len(RELEASE_SOURCE_FILES),
+            "Original reviewed package PR changed")
+    release_files(api_get(f"pulls/{ORIGINAL_RELEASE_PR}/files?per_page=100"),
+                  RELEASE_SOURCE_FILES, "original PR files")
+    require(release_commit(ORIGINAL_RELEASE_SOURCE, RELEASE_BASE_SHA) == ORIGINAL_RELEASE_TREE and
+            release_commit(ORIGINAL_RELEASE_HEAD) == ORIGINAL_RELEASE_TREE,
+            "Original reviewed package tree changed")
+    release_compare(ORIGINAL_RELEASE_SOURCE, [ORIGINAL_RELEASE_SOURCE])
+    release_run(original, repository, ORIGINAL_PACKAGE_RUN)
+    if source_sha == ORIGINAL_RELEASE_SOURCE:
+        return
+
+    final_tree = release_commit(source_sha, ORIGINAL_RELEASE_SOURCE)
+    associated = release_list(api_get(f"commits/{source_sha}/pulls?per_page=100"),
+                              "follow-up PR association")
+    require(len(associated) == 1 and isinstance(associated[0], dict) and
+            type(associated[0].get("number")) is int and
+            associated[0]["number"] != ORIGINAL_RELEASE_PR,
+            "Release follow-up has no unique PR")
+    number = associated[0]["number"]
+    followup = release_pr(source_sha, repository, number, ORIGINAL_RELEASE_SOURCE)
+    require(release_time(followup["created_at"]) >= release_time(original["merged_at"]),
+            "Release follow-up predates the original merge")
+    require(followup["changed_files"] == len(RELEASE_GUARD_FOLLOWUP_FILES) and
+            release_commit(followup["head"]["sha"]) == final_tree,
+            "Release follow-up tree or changed count differs")
+    release_files(api_get(f"pulls/{number}/files?per_page=100"),
+                  RELEASE_GUARD_FOLLOWUP_FILES, "follow-up PR files", True)
+    commit = release_object(api_get(f"commits/{source_sha}"), "follow-up commit")
+    parents = commit.get("parents")
+    require(commit.get("sha") == source_sha and
+            isinstance(parents, list) and len(parents) == 1 and
+            isinstance(parents[0], dict) and
+            parents[0].get("sha") == ORIGINAL_RELEASE_SOURCE,
+            "Release follow-up commit parent differs")
+    release_files(commit.get("files"), RELEASE_GUARD_FOLLOWUP_FILES,
+                  "follow-up commit files", True)
+    release_compare(source_sha, [ORIGINAL_RELEASE_SOURCE, source_sha])
+    release_run(followup, repository)
 
 
 def release_assets_identity(release: dict) -> dict[str, dict[str, int | str | None]]:
