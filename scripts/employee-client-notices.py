@@ -991,14 +991,35 @@ def pnpm_lock(path: Path) -> dict[tuple[str, str], str]:
     return result
 
 
+def _load_cargo_metadata(workspace: Path) -> dict:
+    """Decode Cargo's UTF-8 JSON independently of the host's text code page."""
+    try:
+        proc = subprocess.run(
+            ["cargo", "metadata", "--locked", "--offline", "--format-version", "1",
+             "--manifest-path", str(workspace / "Cargo.toml")],
+            cwd=workspace, capture_output=True, check=False,
+        )
+    except OSError:
+        raise NoticeError("cargo metadata invocation failed") from None
+    require(type(proc.returncode) is int and proc.returncode == 0,
+            "cargo metadata failed")
+    require(type(proc.stdout) is bytes, "cargo metadata output is not bytes")
+    try:
+        decoded = proc.stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise NoticeError("cargo metadata output is not UTF-8") from None
+    try:
+        metadata = json.loads(decoded)
+    except (ValueError, TypeError):
+        raise NoticeError("cargo metadata JSON invalid") from None
+    require(isinstance(metadata, dict) and isinstance(metadata.get("packages"), list)
+            and all(isinstance(package, dict) for package in metadata["packages"]),
+            "cargo metadata JSON shape invalid")
+    return metadata
+
+
 def cargo_packages(workspace: Path, locked: dict[tuple[str, str], str]) -> list[dict]:
-    proc = subprocess.run(
-        ["cargo", "metadata", "--locked", "--offline", "--format-version", "1",
-         "--manifest-path", str(workspace / "Cargo.toml")],
-        cwd=workspace, capture_output=True, text=True, check=False,
-    )
-    require(proc.returncode == 0, f"cargo metadata failed: {proc.stderr[-2000:]}")
-    metadata = json.loads(proc.stdout)
+    metadata = _load_cargo_metadata(workspace)
     packages = {
         (p["name"], p["version"]): p for p in metadata["packages"]
         if p.get("source") == CRATES_IO

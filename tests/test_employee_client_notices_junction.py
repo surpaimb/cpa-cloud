@@ -119,6 +119,53 @@ def junction(alias: Path, target: Path) -> None:
         raise AssertionError("junction fixture lacks reparse attribute")
 
 
+class CargoMetadataDecodeTests(unittest.TestCase):
+    """Cargo's UTF-8 JSON is captured as bytes on every host code page."""
+
+    def test_ascii_and_large_utf8_metadata(self) -> None:
+        for label in ("plain", "ā" * 600_000):
+            with self.subTest(size=len(label)):
+                raw = json.dumps({"packages": [], "label": label},
+                                 ensure_ascii=False).encode("utf-8")
+                if label != "plain":
+                    self.assertGreater(len(raw), 1_000_000)
+                    self.assertIn(b"\xc4\x81", raw)
+                with patch.object(notices.subprocess, "run") as runner:
+                    runner.return_value = SimpleNamespace(returncode=0,
+                                                          stdout=raw, stderr=b"")
+                    result = notices._load_cargo_metadata(Path("."))
+                self.assertEqual(result["label"], label)
+                self.assertEqual(runner.call_args.kwargs["capture_output"], True)
+                self.assertIsNot(runner.call_args.kwargs.get("text"), True)
+                self.assertNotIn("encoding", runner.call_args.kwargs)
+
+    def test_binary_capture_rejects_bad_results_without_echo(self) -> None:
+        cases = (
+            (1, b"{}", b"SECRET-CANARY", "cargo metadata failed"),
+            (0, None, b"", "cargo metadata output is not bytes"),
+            (0, b"\x81", b"", "cargo metadata output is not UTF-8"),
+            (0, b"{", b"", "cargo metadata JSON invalid"),
+            (0, b"[]", b"", "cargo metadata JSON shape invalid"),
+            (0, b"{}", b"", "cargo metadata JSON shape invalid"),
+        )
+        for code, output, error, expected in cases:
+            with self.subTest(expected=expected, output=output):
+                with patch.object(notices.subprocess, "run") as runner:
+                    runner.return_value = SimpleNamespace(returncode=code,
+                                                          stdout=output, stderr=error)
+                    with self.assertRaises(notices.NoticeError) as caught:
+                        notices._load_cargo_metadata(Path("."))
+                self.assertEqual(str(caught.exception), expected)
+                self.assertNotIn("SECRET-CANARY", str(caught.exception))
+
+    def test_process_start_error_is_generic(self) -> None:
+        with patch.object(notices.subprocess, "run",
+                          side_effect=OSError("SECRET-CANARY")):
+            with self.assertRaises(notices.NoticeError) as caught:
+                notices._load_cargo_metadata(Path("."))
+        self.assertEqual(str(caught.exception), "cargo metadata invocation failed")
+
+
 class Block2FallbackTests(unittest.TestCase):
     def setUp(self) -> None:
         self.scratch = Path(tempfile.mkdtemp(prefix="cpa-block2-notice-")).resolve(strict=True)
@@ -175,9 +222,12 @@ class Block2FallbackTests(unittest.TestCase):
         }]}
         locked = notices.sha(data) if checksum_valid else "0" * 64
 
-        def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        def cargo_metadata(argv: list[str], **kwargs: object) -> SimpleNamespace:
             self.assertEqual(argv[:2], ["cargo", "metadata"])
-            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+            self.assertIsNot(kwargs.get("text"), True)
+            return SimpleNamespace(returncode=0,
+                                   stdout=json.dumps(metadata).encode("utf-8"),
+                                   stderr=b"")
 
         committed = {
             notices.BLOCK2_DECLARATION: declaration,
@@ -522,7 +572,7 @@ class Dispatch2FallbackTests(unittest.TestCase):
 
         def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             self.assertEqual(argv[:2], ["cargo", "metadata"])
-            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata).encode("utf-8"), stderr=b"")
 
         # The fixed official checksum is independently pinned. Overriding it here
         # covers the fallback branch with a small synthetic 26-member archive.
@@ -703,7 +753,7 @@ class Dlopen2SharedLicenseTests(unittest.TestCase):
 
         def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             self.assertEqual(argv[:2], ["cargo", "metadata"])
-            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata).encode("utf-8"), stderr=b"")
 
         with patch.dict(os.environ, {"CARGO_HOME": str(home)}), \
              patch.object(notices.subprocess, "run", side_effect=cargo_metadata), \
@@ -889,7 +939,7 @@ class LibAppindicatorFallbackTests(unittest.TestCase):
 
         def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             self.assertEqual(argv[:2], ["cargo", "metadata"])
-            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata).encode("utf-8"), stderr=b"")
 
         with patch.dict(os.environ, {"CARGO_HOME": str(home)}), \
              patch.object(notices.subprocess, "run", side_effect=cargo_metadata), \
@@ -1062,7 +1112,7 @@ class JniSysMacrosFallbackTests(unittest.TestCase):
 
         def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             self.assertEqual(argv[:2], ["cargo", "metadata"])
-            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata).encode("utf-8"), stderr=b"")
 
         with patch.dict(os.environ, {"CARGO_HOME": str(home)}), \
              patch.object(notices.subprocess, "run", side_effect=cargo_metadata), \
@@ -1236,8 +1286,9 @@ class Cesu8LegacyTests(unittest.TestCase):
 
         def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             self.assertEqual(argv[:2], ["cargo", "metadata"])
-            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata),
-                                   stderr="")
+            return SimpleNamespace(returncode=0,
+                                   stdout=json.dumps(metadata).encode("utf-8"),
+                                   stderr=b"")
 
         with patch.dict(os.environ, {"CARGO_HOME": str(home)}), \
              patch.object(notices.subprocess, "run", side_effect=cargo_metadata), \
@@ -1622,7 +1673,7 @@ class NdkSharedLicenseTests(unittest.TestCase):
 
         def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             self.assertEqual(argv[:2], ["cargo", "metadata"])
-            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata).encode("utf-8"), stderr=b"")
 
         checksum = "0" * 64 if bad_checksum else notices.sha(data)
         with patch.dict(os.environ, {"CARGO_HOME": str(home)}), \
@@ -1752,7 +1803,7 @@ class FullGraphFallbackTests(unittest.TestCase):
 
         def cargo_metadata(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             self.assertEqual(argv[:2], ["cargo", "metadata"])
-            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(metadata).encode("utf-8"), stderr=b"")
 
         pinned = (notices.sha(data), len(data),
                   len(members) - 1 if fault == "extra-member" else len(members))
