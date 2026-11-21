@@ -1,0 +1,23 @@
+{
+  "build": {
+    "beforeBuildCommand": "",
+    "frontendDist": "../dist"
+  },
+  "bundle": {
+    "active": true,
+    "macOS": {
+      "signingIdentity": "-"
+    },
+    "resources": {
+      "release-notices/": "release-notices/"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

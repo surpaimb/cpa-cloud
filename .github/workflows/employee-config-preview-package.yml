@@ -1,0 +1,485 @@
+# Provenance: docs/releases/employee-config-v0.1.0-preview.1-provenance.md
+name: Employee desktop preview packages
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/employee-config-preview-package.yml
+      - desktop/employee-config-switcher/**
+      - docs/releases/employee-config-v0.1.0-preview.1.md
+      - docs/releases/employee-config-v0.1.0-preview.1-provenance.md
+      - scripts/employee-client-notices.py
+      - scripts/employee-client-package-check.py
+      - scripts/employee-client-pnpm-shims.py
+      - scripts/test-employee-client-pnpm-shims.py
+      - tests/test_employee_client_notices_junction.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/employee-config-preview-package.yml
+      - desktop/employee-config-switcher/**
+      - docs/releases/employee-config-v0.1.0-preview.1.md
+      - docs/releases/employee-config-v0.1.0-preview.1-provenance.md
+      - scripts/employee-client-notices.py
+      - scripts/employee-client-package-check.py
+      - scripts/employee-client-pnpm-shims.py
+      - scripts/test-employee-client-pnpm-shims.py
+      - tests/test_employee_client_notices_junction.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: employee-config-preview-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  EMPLOYEE_TAG: employee-config-v0.1.0-preview.1
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  build:
+    name: Build and inspect ${{ matrix.platform }} employee installer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            runner: macos-15
+            target: universal-apple-darwin
+            bundle: dmg
+            bundle_dir: desktop/employee-config-switcher/target/universal-apple-darwin/release/bundle/dmg
+          - platform: windows
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+            bundle_dir: desktop/employee-config-switcher/target/x86_64-pc-windows-msvc/release/bundle/nsis
+    steps:
+      - name: Check out the exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Pin Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.11.0
+
+      - name: Pin Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.10
+
+      - name: Pin Rust and platform targets
+        shell: bash
+        working-directory: desktop/employee-config-switcher
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+          if [ "${{ matrix.platform }}" = macos ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          else
+            rustup target add x86_64-pc-windows-msvc
+          fi
+          test "$(rustc --version)" = 'rustc 1.90.0 (1159e78c4 2025-09-14)'
+
+      - name: Install exact frontend dependency graph
+        shell: bash
+        working-directory: desktop/employee-config-switcher
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.11.0
+          RUNNER_TEMP_SHELL="$RUNNER_TEMP"
+          GITHUB_ENV_SHELL="$GITHUB_ENV"
+          if [ "$RUNNER_OS" = Windows ]; then
+            command -v cygpath >/dev/null
+            RUNNER_TEMP_SHELL="$(cygpath -u "$RUNNER_TEMP")"
+            GITHUB_ENV_SHELL="$(cygpath -u "$GITHUB_ENV")"
+            RUNNER_TEMP_NATIVE="$(cygpath -w "$RUNNER_TEMP_SHELL")"
+          else
+            RUNNER_TEMP_NATIVE="$RUNNER_TEMP_SHELL"
+          fi
+          test ! -e "$RUNNER_TEMP_SHELL/employee-pnpm-config"
+          mkdir "$RUNNER_TEMP_SHELL/employee-pnpm-config"
+          : > "$RUNNER_TEMP_SHELL/employee-pnpm-config/empty.npmrc"
+          if [ "$RUNNER_OS" = Windows ]; then
+            export XDG_CONFIG_HOME="$(cygpath -w "$RUNNER_TEMP_SHELL/employee-pnpm-config")"
+          else
+            export XDG_CONFIG_HOME="$RUNNER_TEMP_SHELL/employee-pnpm-config"
+          fi
+          config_seen=0
+          config_cleared=0
+          while IFS= read -r config_name; do
+            config_seen=$((config_seen + 1))
+            if [ "$config_seen" -gt 256 ] ||
+               ! [[ "$config_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo 'package-manager config sanitation refused' >&2
+              exit 1
+            fi
+            case "$config_name" in
+              [Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*|[Pp][Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*)
+                config_cleared=$((config_cleared + 1))
+                if [ "$config_cleared" -gt 128 ] ||
+                   ! unset -v "$config_name" 2>/dev/null; then
+                  echo 'package-manager config sanitation refused' >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done < <(compgen -e)
+          export NPM_CONFIG_USERCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          printf 'package-manager config names cleared=%d\n' "$config_cleared"
+          python ../../scripts/employee-client-pnpm-shims.py preflight \
+            --workspace . --runner-temp "$RUNNER_TEMP_NATIVE" --pnpm-version 11.25.0
+          NODE_COMMAND="$(command -v node)"
+          test -f "$NODE_COMMAND"
+          if [ "$RUNNER_OS" = Windows ]; then
+            NODE_NATIVE="$(cygpath -w "$NODE_COMMAND")"
+          else
+            NODE_NATIVE="$NODE_COMMAND"
+          fi
+          NODE_RESOLVED="$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "$NODE_NATIVE")"
+          NODE_SHA="$(python -c 'from pathlib import Path; import hashlib,sys; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())' "$NODE_RESOLVED")"
+          PNPM_ENTRY_NATIVE="$RUNNER_TEMP_NATIVE/employee-pnpm-tool/package/bin/pnpm.mjs"
+          python ../../scripts/employee-client-pnpm-shims.py pin-tool \
+            --workspace . --runner-temp "$RUNNER_TEMP_NATIVE" --pnpm-version 11.25.0
+          pnpm_checked() {
+            test "$(command -v node)" = "$NODE_COMMAND"
+            test "$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "$NODE_NATIVE")" = "$NODE_RESOLVED"
+            test "$(python -c 'from pathlib import Path; import hashlib,sys; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())' "$NODE_RESOLVED")" = "$NODE_SHA"
+            test "$("$NODE_COMMAND" --version)" = v24.11.0
+            python ../../scripts/employee-client-pnpm-shims.py verify-tool \
+              --workspace . --runner-temp "$RUNNER_TEMP_NATIVE" --pnpm-version 11.25.0
+            "$NODE_COMMAND" "$PNPM_ENTRY_NATIVE" "$@"
+          }
+          test "$(pnpm_checked --version | tail -n 1)" = 11.25.0
+          printf 'XDG_CONFIG_HOME=%s\nNPM_CONFIG_USERCONFIG=%s\nNPM_CONFIG_GLOBALCONFIG=%s\nEMPLOYEE_RUNNER_TEMP_NATIVE=%s\nEMPLOYEE_NODE_COMMAND=%s\nEMPLOYEE_NODE_NATIVE=%s\nEMPLOYEE_NODE_RESOLVED=%s\nEMPLOYEE_NODE_SHA=%s\nEMPLOYEE_PNPM_ENTRY_NATIVE=%s\n' \
+            "$XDG_CONFIG_HOME" "$NPM_CONFIG_USERCONFIG" "$NPM_CONFIG_GLOBALCONFIG" \
+            "$RUNNER_TEMP_NATIVE" "$NODE_COMMAND" "$NODE_NATIVE" "$NODE_RESOLVED" \
+            "$NODE_SHA" "$PNPM_ENTRY_NATIVE" >> "$GITHUB_ENV_SHELL"
+          pnpm_checked install --frozen-lockfile
+          pnpm_checked test
+          pnpm_checked exec tsc -b --pretty false
+          test ! -e "$RUNNER_TEMP/employee-bundle-modules.json"
+          "$NODE_COMMAND" scripts/employee-bundle-modules.mjs "$RUNNER_TEMP/employee-bundle-modules.json"
+          test -s "$RUNNER_TEMP/employee-bundle-modules.json"
+
+      - name: Test and fetch locked Rust graph
+        shell: bash
+        working-directory: desktop/employee-config-switcher
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          test ! -e "$RUNNER_TEMP/employee-config-core-test-target"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/employee-config-core-test-target" cargo test --locked -p employee-config-core
+
+      - name: Verify and remove only reference-matched generated pnpm shims
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${XDG_CONFIG_HOME:?}"
+          config_seen=0
+          config_cleared=0
+          while IFS= read -r config_name; do
+            config_seen=$((config_seen + 1))
+            if [ "$config_seen" -gt 256 ] ||
+               ! [[ "$config_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo 'package-manager config sanitation refused' >&2
+              exit 1
+            fi
+            case "$config_name" in
+              [Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*|[Pp][Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*)
+                config_cleared=$((config_cleared + 1))
+                if [ "$config_cleared" -gt 128 ] ||
+                   ! unset -v "$config_name" 2>/dev/null; then
+                  echo 'package-manager config sanitation refused' >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done < <(compgen -e)
+          export NPM_CONFIG_USERCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          printf 'package-manager config names cleared=%d\n' "$config_cleared"
+          test "$(command -v node)" = "$EMPLOYEE_NODE_COMMAND"
+          test "$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "$EMPLOYEE_NODE_NATIVE")" = "$EMPLOYEE_NODE_RESOLVED"
+          test "$(python -c 'from pathlib import Path; import hashlib,sys; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())' "$EMPLOYEE_NODE_RESOLVED")" = "$EMPLOYEE_NODE_SHA"
+          test "$("$EMPLOYEE_NODE_COMMAND" --version)" = v24.11.0
+          python scripts/employee-client-pnpm-shims.py verify-tool \
+            --workspace desktop/employee-config-switcher \
+            --runner-temp "$EMPLOYEE_RUNNER_TEMP_NATIVE" --pnpm-version 11.25.0
+          test "$("$EMPLOYEE_NODE_COMMAND" "$EMPLOYEE_PNPM_ENTRY_NATIVE" --version)" = 11.25.0
+          python scripts/employee-client-pnpm-shims.py preflight \
+            --workspace desktop/employee-config-switcher \
+            --runner-temp "$EMPLOYEE_RUNNER_TEMP_NATIVE" --pnpm-version 11.25.0
+          python -B scripts/test-employee-client-pnpm-shims.py
+          python -B tests/test_employee_client_notices_junction.py
+          reference_shell="$RUNNER_TEMP"
+          if [ "$RUNNER_OS" = Windows ]; then
+            command -v cygpath >/dev/null
+            reference_shell="$(cygpath -u "$RUNNER_TEMP")"
+          fi
+          reference="$reference_shell/employee-pnpm-reference"
+          test ! -e "$reference"
+          mkdir "$reference"
+          cp desktop/employee-config-switcher/package.json "$reference/package.json"
+          cp desktop/employee-config-switcher/pnpm-lock.yaml "$reference/pnpm-lock.yaml"
+          python scripts/employee-client-pnpm-shims.py verify-tool \
+            --workspace desktop/employee-config-switcher \
+            --runner-temp "$EMPLOYEE_RUNNER_TEMP_NATIVE" --pnpm-version 11.25.0
+          (cd "$reference" && "$EMPLOYEE_NODE_COMMAND" "$EMPLOYEE_PNPM_ENTRY_NATIVE" install \
+            --offline --frozen-lockfile --ignore-scripts)
+          if [ "$RUNNER_OS" = Windows ]; then
+            reference="$(cygpath -w "$reference")"
+          fi
+          python scripts/employee-client-pnpm-shims.py reconcile \
+            --workspace desktop/employee-config-switcher \
+            --reference "$reference" --runner-temp "$EMPLOYEE_RUNNER_TEMP_NATIVE" \
+            --pnpm-version 11.25.0
+          python scripts/employee-client-pnpm-shims.py check-clean \
+            --workspace desktop/employee-config-switcher \
+            --runner-temp "$EMPLOYEE_RUNNER_TEMP_NATIVE" --pnpm-version 11.25.0
+
+      - name: Collect complete third-party notices or fail
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import subprocess
+          import sys
+
+          try:
+              result = subprocess.run(
+                  ["git", "status", "--porcelain=v1", "-z",
+                   "--untracked-files=all"],
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+              )
+          except OSError:
+              print("pre-notice git status: exit=-1 stderr_bytes=0 parse_ok=0 "
+               "tracked=0 workspace_target_untracked=0 other_untracked=0 "
+               "pycache_untracked=0")
+              sys.exit(1)
+          tracked = target = other = pycache = 0
+          parse_ok = result.returncode == 0 and not result.stderr
+          if parse_ok:
+              records = result.stdout.split(b"\x00")
+              if records[-1] != b"":
+                  parse_ok = False
+              else:
+                  index = 0
+                  records = records[:-1]
+                  while index < len(records):
+                      record = records[index]
+                      if len(record) < 4 or record[2:3] != b" " or not record[3:]:
+                          parse_ok = False
+                          break
+                      if record[:2] == b"??":
+                          if record[3:].startswith(
+                              b"desktop/employee-config-switcher/target/"
+                          ):
+                              target += 1
+                          else:
+                              other += 1
+                              if b"/__pycache__/" in record[3:] or record[3:].startswith(
+                                  b"__pycache__/"
+                              ):
+                                  pycache += 1
+                      else:
+                          tracked += 1
+                          if b"R" in record[:2] or b"C" in record[:2]:
+                              index += 1
+                              if index >= len(records) or not records[index]:
+                                  parse_ok = False
+                                  break
+                      index += 1
+          print(
+              "pre-notice git status: exit={0} stderr_bytes={1} parse_ok={2} "
+              "tracked={3} workspace_target_untracked={4} other_untracked={5} "
+              "pycache_untracked={6}".format(
+                  result.returncode, len(result.stderr), int(parse_ok),
+                  tracked, target, other, pycache,
+              )
+          )
+          if not parse_ok:
+              sys.exit(1)
+          PY
+          test -f scripts/employee-client-notices.py
+          python scripts/employee-client-notices.py collect \
+            --workspace desktop/employee-config-switcher \
+            --bundle-modules "$RUNNER_TEMP/employee-bundle-modules.json" \
+            --output desktop/employee-config-switcher/src-tauri/release-notices
+          test -s desktop/employee-config-switcher/src-tauri/release-notices/manifest.json
+          python scripts/employee-client-package-check.py verify-notices-source \
+            --notices-root desktop/employee-config-switcher/src-tauri/release-notices \
+            --bundle-modules "$RUNNER_TEMP/employee-bundle-modules.json"
+
+      - name: Build only the selected native installer
+        shell: bash
+        working-directory: desktop/employee-config-switcher
+        run: |
+          set -euo pipefail
+          : "${XDG_CONFIG_HOME:?}"
+          config_seen=0
+          config_cleared=0
+          while IFS= read -r config_name; do
+            config_seen=$((config_seen + 1))
+            if [ "$config_seen" -gt 256 ] ||
+               ! [[ "$config_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo 'package-manager config sanitation refused' >&2
+              exit 1
+            fi
+            case "$config_name" in
+              [Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*|[Pp][Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_*)
+                config_cleared=$((config_cleared + 1))
+                if [ "$config_cleared" -gt 128 ] ||
+                   ! unset -v "$config_name" 2>/dev/null; then
+                  echo 'package-manager config sanitation refused' >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done < <(compgen -e)
+          export NPM_CONFIG_USERCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$XDG_CONFIG_HOME/empty.npmrc"
+          printf 'package-manager config names cleared=%d\n' "$config_cleared"
+          test "$(command -v node)" = "$EMPLOYEE_NODE_COMMAND"
+          test "$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "$EMPLOYEE_NODE_NATIVE")" = "$EMPLOYEE_NODE_RESOLVED"
+          test "$(python -c 'from pathlib import Path; import hashlib,sys; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())' "$EMPLOYEE_NODE_RESOLVED")" = "$EMPLOYEE_NODE_SHA"
+          test "$("$EMPLOYEE_NODE_COMMAND" --version)" = v24.11.0
+          python ../../scripts/employee-client-pnpm-shims.py verify-tool \
+            --workspace . --runner-temp "$EMPLOYEE_RUNNER_TEMP_NATIVE" \
+            --pnpm-version 11.25.0
+          test "$("$EMPLOYEE_NODE_COMMAND" "$EMPLOYEE_PNPM_ENTRY_NATIVE" --version)" = 11.25.0
+          "$EMPLOYEE_NODE_COMMAND" "$EMPLOYEE_PNPM_ENTRY_NATIVE" tauri build --ci \
+            --config src-tauri/tauri.release.conf.json \
+            --bundles '${{ matrix.bundle }}' \
+            --target '${{ matrix.target }}'
+          cd ../..
+          python scripts/employee-client-pnpm-shims.py check-clean \
+            --workspace desktop/employee-config-switcher \
+            --runner-temp "$EMPLOYEE_RUNNER_TEMP_NATIVE" --pnpm-version 11.25.0
+          python scripts/employee-client-package-check.py verify-notices-source \
+            --notices-root desktop/employee-config-switcher/src-tauri/release-notices \
+            --bundle-modules "$RUNNER_TEMP/employee-bundle-modules.json"
+          git diff --exit-code -- desktop/employee-config-switcher/Cargo.lock \
+            desktop/employee-config-switcher/pnpm-lock.yaml \
+            desktop/employee-config-switcher/src-tauri/tauri.conf.json
+
+      - name: Install or mount installer and read back bundled notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/employee-client-package-check.py verify-package \
+            --platform '${{ matrix.platform }}' \
+            --bundle-dir '${{ matrix.bundle_dir }}' \
+            --notices-root desktop/employee-config-switcher/src-tauri/release-notices \
+            --bundle-modules "$RUNNER_TEMP/employee-bundle-modules.json" \
+            --output 'employee-release-out-${{ matrix.platform }}' \
+            --source-sha "$SOURCE_SHA" \
+            --tag "$EMPLOYEE_TAG"
+
+      - name: Store inspected package, checksum, and source evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: employee-config-package-${{ matrix.platform }}
+          path: employee-release-out-${{ matrix.platform }}/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish two inspected employee preview packages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out the same main commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Pin Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.10
+
+      - name: Download only this run's inspected packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: employee-config-package-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify source, package, sidecars, and absent tag/Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/employee-client-package-check.py verify-release-set \
+            --assets-dir release-assets --source-sha "$GITHUB_SHA" --with-evidence
+          python scripts/employee-client-package-check.py release-guard \
+            --stage pre --source-sha "$GITHUB_SHA" --tag "$EMPLOYEE_TAG"
+          mkdir publish-assets
+          cp release-assets/*.dmg release-assets/*.dmg.sha256 \
+            release-assets/*_Setup.exe release-assets/*_Setup.exe.sha256 publish-assets/
+          python scripts/employee-client-package-check.py verify-release-set \
+            --assets-dir publish-assets
+
+      - name: Create absent exact-source draft prerelease and upload four assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/employee-client-package-check.py release-guard \
+            --stage pre --source-sha "$GITHUB_SHA" --tag "$EMPLOYEE_TAG"
+          cp docs/releases/employee-config-v0.1.0-preview.1.md release-notes.md
+          printf '\nSource commit: %s\n' "$GITHUB_SHA" >> release-notes.md
+          gh release create "$EMPLOYEE_TAG" publish-assets/* \
+            --target "$GITHUB_SHA" --draft --prerelease --latest=false \
+            --title "CPA Cloud employee config $EMPLOYEE_TAG" \
+            --notes-file release-notes.md
+
+      - name: Read back all four GitHub assets before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/employee-client-package-check.py release-guard \
+            --stage draft --source-sha "$GITHUB_SHA" --tag "$EMPLOYEE_TAG" \
+            --freeze-assets release-asset-proof.json
+          mkdir release-readback
+          gh release download "$EMPLOYEE_TAG" --dir release-readback
+          python scripts/employee-client-package-check.py verify-release-set \
+            --assets-dir release-readback
+          for asset in publish-assets/*; do
+            cmp "$asset" "release-readback/${asset##*/}"
+          done
+
+      - name: Publish verified prerelease and recheck identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/employee-client-package-check.py release-guard \
+            --stage draft --source-sha "$GITHUB_SHA" --tag "$EMPLOYEE_TAG" \
+            --expected-assets release-asset-proof.json
+          gh release edit "$EMPLOYEE_TAG" --draft=false --prerelease --latest=false
+          python scripts/employee-client-package-check.py release-guard \
+            --stage published --source-sha "$GITHUB_SHA" --tag "$EMPLOYEE_TAG" \
+            --expected-assets release-asset-proof.json
+          mkdir published-readback
+          gh release download "$EMPLOYEE_TAG" --dir published-readback
+          python scripts/employee-client-package-check.py verify-release-set \
+            --assets-dir published-readback
+          for asset in publish-assets/*; do
+            cmp "$asset" "published-readback/${asset##*/}"
+          done
