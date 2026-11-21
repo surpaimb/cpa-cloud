@@ -8,6 +8,7 @@ product binary is involved.
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import importlib.util
 import hashlib
 import io
@@ -2083,6 +2084,143 @@ class WindowsPackagePhaseTests(unittest.TestCase):
                 package_check.main()
         self.assertIn("phase=unexpected_phase category=not_found", str(caught.exception))
         self.assertNotIn("CANARY", str(caught.exception))
+
+
+class WindowsUninstallRootTests(unittest.TestCase):
+    """Synthetic HKCU key shape and cleanup checks; never touch the real registry."""
+
+    @staticmethod
+    def installed_files(directory: Path) -> None:
+        directory.mkdir()
+        binary = bytearray(134)
+        binary[:2] = b"MZ"
+        struct.pack_into("<I", binary, 0x3C, 128)
+        binary[128:132] = b"PE\0\0"
+        struct.pack_into("<H", binary, 132, 0x8664)
+        (directory / f"{package_check.APP_EXECUTABLE}.exe").write_bytes(binary)
+        (directory / "uninstall.exe").write_bytes(b"MZ")
+
+    def test_absent_parent_key_is_empty_baseline(self) -> None:
+        def missing_parent(*_args: object) -> object:
+            raise FileNotFoundError("CANARY-PARENT")
+
+        fake = SimpleNamespace(HKEY_CURRENT_USER=object(), KEY_READ=1,
+                               OpenKey=missing_parent)
+        with patch.dict(sys.modules, {"winreg": fake}):
+            self.assertEqual(package_check.windows_uninstall_records(), {})
+
+    def test_missing_child_after_parent_open_still_refuses(self) -> None:
+        hive = object()
+
+        def open_key(handle: object, *_args: object) -> object:
+            if handle is hive:
+                return nullcontext("parent")
+            raise FileNotFoundError("CANARY-CHILD")
+
+        fake = SimpleNamespace(HKEY_CURRENT_USER=hive, KEY_READ=1,
+                               OpenKey=open_key, QueryInfoKey=lambda _parent: (1, 0, 0),
+                               EnumKey=lambda _parent, _index: "orphan")
+        with patch.dict(sys.modules, {"winreg": fake}):
+            with self.assertRaisesRegex(FileNotFoundError, "CANARY-CHILD"):
+                package_check.windows_uninstall_records()
+
+    def test_parent_permission_error_still_refuses(self) -> None:
+        def denied_parent(*_args: object) -> object:
+            raise PermissionError("CANARY-DENIED")
+
+        fake = SimpleNamespace(HKEY_CURRENT_USER=object(), KEY_READ=1,
+                               OpenKey=denied_parent)
+        with patch.dict(sys.modules, {"winreg": fake}):
+            with self.assertRaisesRegex(PermissionError, "CANARY-DENIED"):
+                package_check.windows_uninstall_records()
+
+    def test_existing_and_new_records_remain_distinct(self) -> None:
+        hive = object()
+        records = {"old": {"DisplayName": "old"},
+                   "new": {"DisplayName": package_check.APP_PRODUCT,
+                           "DisplayVersion": package_check.APP_VERSION}}
+
+        def open_key(handle: object, name: str, *_args: object) -> object:
+            if handle is hive:
+                return nullcontext("parent")
+            if handle == "parent" and name in records:
+                return nullcontext(name)
+            raise FileNotFoundError("CANARY-OTHER")
+
+        def query_value(entry: str, field: str) -> tuple[str, int]:
+            if field not in records[entry]:
+                raise FileNotFoundError("missing optional value")
+            return records[entry][field], 1
+
+        fake = SimpleNamespace(
+            HKEY_CURRENT_USER=hive, KEY_READ=1, OpenKey=open_key,
+            QueryInfoKey=lambda _parent: (len(records), 0, 0),
+            EnumKey=lambda _parent, index: list(records)[index],
+            QueryValueEx=query_value,
+        )
+        with patch.dict(sys.modules, {"winreg": fake}):
+            self.assertEqual(package_check.windows_uninstall_records(), records)
+
+    def test_absent_parent_after_install_cannot_replace_new_registration(self) -> None:
+        def missing_parent(*_args: object) -> object:
+            raise FileNotFoundError("CANARY-PARENT")
+
+        fake = SimpleNamespace(HKEY_CURRENT_USER=object(), KEY_READ=1,
+                               OpenKey=missing_parent)
+
+        def launch(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[0] == "相对-setup.exe":
+                self.installed_files(Path(argv[2][3:]))
+            else:
+                Path(argv[0]).with_name(f"{package_check.APP_EXECUTABLE}.exe").unlink()
+            return SimpleNamespace(returncode=0)
+
+        with patch.dict(sys.modules, {"winreg": fake}), \
+             patch.object(package_check, "check_embedded"), \
+             patch.object(package_check.subprocess, "run", side_effect=launch):
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.check_windows(Path("相对-setup.exe"), {}, Path("unused"))
+        self.assertIn("phase=registry_after category=validation_error",
+                      str(caught.exception))
+        self.assertIn("primary_error=true cleanup_error=false", str(caught.exception))
+
+    def test_parent_absent_at_cleanup_does_not_hide_installed_executable(self) -> None:
+        state: dict[str, object] = {"installed": False, "uninstalled": False,
+                                    "directory": None}
+
+        def registry() -> dict[str, dict[str, str]]:
+            if not state["installed"] or state["uninstalled"]:
+                return {}
+            directory = state["directory"]
+            assert isinstance(directory, Path)
+            return {"synthetic": {
+                "DisplayName": package_check.APP_PRODUCT,
+                "DisplayVersion": package_check.APP_VERSION,
+                "InstallLocation": f'"{directory}"',
+                "UninstallString": str(directory / "uninstall.exe"),
+            }}
+
+        def launch(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[0] == "相对-setup.exe":
+                directory = Path(argv[2][3:])
+                self.installed_files(directory)
+                state["directory"] = directory
+                state["installed"] = True
+            else:
+                state["uninstalled"] = True  # Simulate a broken uninstaller.
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(package_check, "windows_uninstall_records",
+                          side_effect=registry), \
+             patch.object(package_check, "check_embedded"), \
+             patch.object(package_check.subprocess, "run", side_effect=launch), \
+             patch.object(package_check.time, "sleep"):
+            with self.assertRaises(package_check.WindowsPackageFailure) as caught:
+                package_check.check_windows(Path("相对-setup.exe"), {}, Path("unused"))
+        self.assertIn("phase=cleanup category=validation_error",
+                      str(caught.exception))
+        self.assertIn("primary_error=false cleanup_error=true",
+                      str(caught.exception))
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@
 - 第 17 次自然打包（run 44839859734）中，macOS DMG 构建、挂载、包内通知回读及 artifact 上传成功；Windows 在通知收集阶段因本机 cp1252 解码 Cargo metadata 的 UTF-8 输出而失败，后续 Windows 安装包步骤未执行。发布步骤跳过，macOS artifact 尚未作为 Release 发布，仍没有可发布的双平台包。
 - 同源码头的 Code validation（run 44839859871）失败：core 的 `TestReleasePackagingDryRun` 与 `TestReleaseGoNoticeEnvironmentP2` 报离线依赖缓存校验失败，race-service(0) 的 `TestSelfLogout20261021Boundaries/pre-commit-refusal` 报 `SLOG21_UNEXPECTED_SNAPSHOT_QUERY`；race-service(1–3) 成功，三个平台 Code job 为 skipped（未执行）。这些失败与桌面打包改动的因果关系尚未证实。
 - 第 18 次自然打包（run 44845339414）中，macOS 构建、挂载、包内通知回读及 artifact 上传成功。Windows 的 NSIS 构建成功，但安装或回读校验步骤仅报裸 `WinError 2`；日志没有失败阶段和缺失路径，不能确认安装器是否启动。Windows 验收失败，上传和发布步骤跳过，双平台包仍未发布。
+- 第 19 次自然打包（run 44850209739）中，macOS 安装包检查及 artifact 上传成功；Windows 在安装器启动前的注册表基线枚举报固定诊断 `phase=registry_before category=not_found`。该诊断不能证明缺失的是 HKCU Uninstall 父键；Windows 验收失败，上传和发布步骤跳过，双平台包仍未发布。
 
 请先核对同名 .sha256 文件，再安装。此版本仅供开发预览与反馈。
 
@@ -38,3 +39,5 @@ Failures in natural package runs 10 through 13 remain documented. Natural run 14
 Natural package run 17 (run 44839859734) succeeded on macOS through DMG build, mount, bundled-notice readback, and artifact upload. Windows failed during notice collection when the host cp1252 code page decoded UTF-8 Cargo metadata; its later installer steps did not run. The publish job was skipped, and the macOS artifact has not been published as a Release. Code validation at the same head (run 44839859871) failed the Go release and notice tests TestReleasePackagingDryRun and TestReleaseGoNoticeEnvironmentP2 on offline dependency cache verification, and race-service(0) TestSelfLogout20261021Boundaries/pre-commit-refusal on SLOG21_UNEXPECTED_SNAPSHOT_QUERY. Race-service(1–3) passed; the three platform Code jobs were skipped and did not run. A causal link to the desktop packaging changes has not been established.
 
 Natural package run 18 (run 44845339414) succeeded on macOS through build, mount, bundled-notice readback, and artifact upload. The Windows NSIS build succeeded, but installation or package readback verification reported only bare `WinError 2`. The log gives neither the failing phase nor the missing path, and does not establish whether the installer started. Windows acceptance failed; upload and publication were skipped, so the pair of packages remains unpublished.
+
+Natural package run 19 (run 44850209739) succeeded on macOS through package inspection and artifact upload. Windows reported the fixed diagnostic `phase=registry_before category=not_found` while enumerating its pre-install registry baseline, before launching the installer. This does not establish that the missing object was the HKCU Uninstall parent key. Windows acceptance failed; upload and publication were skipped, and the package pair remains unpublished.

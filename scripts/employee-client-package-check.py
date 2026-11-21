@@ -244,7 +244,11 @@ def windows_uninstall_records() -> dict[str, dict[str, str]]:
 
     root = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
     records: dict[str, dict[str, str]] = {}
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, root, 0, winreg.KEY_READ) as parent:
+    try:
+        parent_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, root, 0, winreg.KEY_READ)
+    except FileNotFoundError:
+        return records
+    with parent_key as parent:
         for index in range(winreg.QueryInfoKey(parent)[0]):
             name = winreg.EnumKey(parent, index)
             with winreg.OpenKey(parent, name, 0, winreg.KEY_READ) as entry:
